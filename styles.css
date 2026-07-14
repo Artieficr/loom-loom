@@ -327,11 +327,19 @@
 	background: rgba(128, 128, 128, 0.08);
 }
 
+/* The whole bar is the open/collapse toggle; a centered chevron is its only hint. */
 .loom-drawer-bar {
+	position: relative;
 	display: flex;
 	align-items: center;
 	gap: var(--size-4-2);
 	padding: var(--size-4-2);
+	min-height: var(--size-4-8);
+	cursor: pointer;
+}
+
+.loom-drawer-bar:hover {
+	background-color: var(--background-modifier-hover);
 }
 
 /* The bar doubles as the resize edge while the drawer is open. */
@@ -340,13 +348,18 @@
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.loom-drawer-toggle {
-	display: inline-flex;
-	align-items: center;
-	gap: var(--size-2-2);
+.loom-drawer-chevron {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	display: flex;
+	color: var(--text-muted);
+	pointer-events: none;
 }
 
-.loom-drawer-toggle .loom-icon svg {
+.loom-drawer-chevron .loom-icon svg {
+	display: block;
 	width: var(--icon-s);
 	height: var(--icon-s);
 }

@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting, setIcon } from 'obsidian';
 import { ENTITY_META, ENTITY_TYPES, EntityType, GraphCamera } from './types';
 import { ConfirmModal } from './project';
+import { TimelineSettingsEditor } from './timeline-settings';
 import type LoomLoomPlugin from './main';
 
 export interface LoomLoomSettings {
@@ -108,6 +109,8 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 
 export class LoomLoomSettingTab extends PluginSettingTab {
 	private activeTab: SettingsTabId = 'entities';
+	/** Project whose timeline settings the Graph tab currently shows. */
+	private timelineProjectRoot: string | null = null;
 
 	constructor(app: App, private plugin: LoomLoomPlugin) {
 		super(app, plugin);
@@ -222,12 +225,46 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			});
 		}
 
+		this.renderTimeline(containerEl);
+
 		this.addRestoreDefaults(
 			containerEl,
 			'graph',
 			'Restore graph defaults',
-			'Reset all graph settings on this page to their defaults.'
+			'Reset all graph settings on this page to their defaults. Timeline settings belong to their project and are not affected.'
 		);
+	}
+
+	/** Per-project timeline settings (date format, in-game calendar), stored in the project's .loom file. */
+	private renderTimeline(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Timeline').setHeading();
+		containerEl.createEl('p', {
+			text: 'Date display and in-game calendar for the timeline. These are per project and saved in its .loom file.',
+			cls: 'setting-item-description',
+		});
+
+		const projects = this.plugin.indexer.getProjects();
+		if (projects.length === 0) {
+			containerEl.createEl('p', {
+				text: 'No Loom projects in this vault yet.',
+				cls: 'setting-item-description',
+			});
+			return;
+		}
+
+		const project = projects.find((p) => p.root === this.timelineProjectRoot) ?? projects[0];
+		if (projects.length > 1) {
+			new Setting(containerEl).setName('Project').addDropdown((dd) => {
+				for (const p of projects) dd.addOption(p.root, p.name);
+				dd.setValue(project.root).onChange((root) => {
+					this.timelineProjectRoot = root;
+					const next = projects.find((p) => p.root === root);
+					if (next) new TimelineSettingsEditor(this.plugin, next, editorEl).render();
+				});
+			});
+		}
+		const editorEl = containerEl.createDiv();
+		new TimelineSettingsEditor(this.plugin, project, editorEl).render();
 	}
 
 	private addRestoreDefaults(

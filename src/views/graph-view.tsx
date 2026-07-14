@@ -10,7 +10,6 @@ import {
 } from 'react';
 import { ENTITY_META, ENTITY_TYPES, GraphCamera, TimelineDef, VIEW_GRAPH } from '../types';
 import { CreateEntityModal } from '../project';
-import { TimelineSettingsModal } from '../timeline-settings';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { GraphSidePanel } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
@@ -133,6 +132,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const [drawerResizing, setDrawerResizing] = useState(false);
 	const [defPath, setDefPath] = useState('');
 	const drawerDrag = useRef<{ pointerId: number; startY: number; startH: number } | null>(null);
+	/** True once a bar drag resized the drawer — the click that follows must not toggle. */
+	const drawerBarMoved = useRef(false);
 
 	const wrapRef = useRef<HTMLDivElement>(null);
 	const cameraRef = useRef(camera);
@@ -429,8 +430,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const activeDef: TimelineDef | null = defs.find((d) => d.path === defPath) ?? defs[0] ?? null;
 
 	const onDrawerBarPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-		// Buttons/selects on the bar are clickable, not drag handles.
-		if (!drawerOpen || (e.target as HTMLElement).closest('button, select')) return;
+		drawerBarMoved.current = false;
+		// The timeline picker on the bar is clickable, not a drag handle.
+		// A closed drawer has no height to resize — its bar only toggles.
+		if (!drawerOpen || (e.target as HTMLElement).closest('select')) return;
 		e.currentTarget.setPointerCapture(e.pointerId);
 		drawerDrag.current = { pointerId: e.pointerId, startY: e.clientY, startH: drawerHeight };
 		// Height must follow the pointer 1:1 — suspend the slide transition.
@@ -440,6 +443,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const onDrawerBarPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
 		const drag = drawerDrag.current;
 		if (!drag || drag.pointerId !== e.pointerId) return;
+		if (!drawerBarMoved.current && Math.abs(e.clientY - drag.startY) < CLICK_SLOP) return;
+		drawerBarMoved.current = true;
 		setDrawerHeight(clamp(drag.startH + (drag.startY - e.clientY), DRAWER_MIN, DRAWER_MAX));
 	};
 
@@ -448,6 +453,13 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			drawerDrag.current = null;
 			setDrawerResizing(false);
 		}
+	};
+
+	const onDrawerBarClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+		if ((e.target as HTMLElement).closest('select')) return;
+		// A resize drag ends with a click on the bar too — swallow it.
+		if (drawerBarMoved.current) return;
+		setDrawerOpen(!drawerOpen);
 	};
 
 	if (!project) {
@@ -559,11 +571,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						onPointerDown={onDrawerBarPointerDown}
 						onPointerMove={onDrawerBarPointerMove}
 						onPointerUp={onDrawerBarPointerUp}
+						onClick={onDrawerBarClick}
 					>
-						<button className="loom-nav-btn loom-drawer-toggle" onClick={() => setDrawerOpen(!drawerOpen)}>
-							<Icon name={drawerOpen ? 'chevron-down' : 'chevron-up'} />
-							{drawerOpen ? 'Collapse timeline' : 'Open timeline'}
-						</button>
 						{drawerOpen && defs.length > 1 ? (
 							<select className="dropdown" value={activeDef?.path ?? ''} onChange={(e) => setDefPath(e.target.value)}>
 								{defs.map((d) => (
@@ -573,15 +582,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								))}
 							</select>
 						) : null}
-						<div className="loom-shell-spacer" />
-						{drawerOpen ? (
-							<button
-								className="loom-nav-btn"
-								onClick={() => new TimelineSettingsModal(plugin, project).open()}
-							>
-								Timeline settings
-							</button>
-						) : null}
+						<div className="loom-drawer-chevron">
+							<Icon name={drawerOpen ? 'chevron-down' : 'chevron-up'} />
+						</div>
 					</div>
 					<div
 						className={drawerResizing ? 'loom-drawer-body' : 'loom-drawer-body loom-drawer-anim'}

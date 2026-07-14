@@ -1,4 +1,4 @@
-import { Modal, Notice, Setting, debounce } from 'obsidian';
+import { Notice, Setting, debounce } from 'obsidian';
 import {
 	DateFormat,
 	ProjectConfig,
@@ -26,32 +26,31 @@ function sampleDate(config: ProjectConfig): LoomDate {
 /**
  * Per-project timeline settings, stored in the project's .loom file: date
  * display format and the optional custom in-game calendar. Sessions always
- * keep real-world dates; the calendar applies to events.
+ * keep real-world dates; the calendar applies to events. Rendered inside the
+ * plugin settings tab (Graph tab).
  */
-export class TimelineSettingsModal extends Modal {
+export class TimelineSettingsEditor {
 	private config: ProjectConfig;
 
-	constructor(private plugin: LoomLoomPlugin, private project: ProjectDef) {
-		super(plugin.app);
+	constructor(
+		private plugin: LoomLoomPlugin,
+		private project: ProjectDef,
+		private containerEl: HTMLElement
+	) {
 		// Deep copy so edits don't mutate the indexer's copy before saving.
 		this.config = JSON.parse(JSON.stringify(project.config)) as ProjectConfig;
-	}
-
-	onOpen(): void {
-		this.setTitle(`Timeline settings — ${this.project.name}`);
-		this.render();
 	}
 
 	private saveLater = debounce(() => void this.save(), 400, true);
 
 	private async save(): Promise<void> {
-		const file = this.app.vault.getFileByPath(this.project.loomPath);
+		const file = this.plugin.app.vault.getFileByPath(this.project.loomPath);
 		if (!file) {
 			new Notice('Project file not found.');
 			return;
 		}
 		try {
-			await this.app.vault.process(file, () => serializeProjectConfig(this.config));
+			await this.plugin.app.vault.process(file, () => serializeProjectConfig(this.config));
 		} catch (e) {
 			console.error('Loom Loom: failed to save project config', e);
 			new Notice('Could not save timeline settings.');
@@ -63,9 +62,9 @@ export class TimelineSettingsModal extends Modal {
 		if (rerender) this.render();
 	}
 
-	private render(): void {
-		const { contentEl } = this;
-		contentEl.empty();
+	render(): void {
+		const { containerEl } = this;
+		containerEl.empty();
 		const cal = this.config.customCalendar;
 
 		// Keep the chosen format valid for the current calendar setup.
@@ -74,7 +73,7 @@ export class TimelineSettingsModal extends Modal {
 			this.config.dateFormat = formats[0];
 		}
 
-		new Setting(contentEl)
+		new Setting(containerEl)
 			.setName('Date format')
 			.setDesc('How dates are displayed in the timeline and graph.')
 			.addDropdown((dd) => {
@@ -88,7 +87,7 @@ export class TimelineSettingsModal extends Modal {
 				});
 			});
 
-		new Setting(contentEl)
+		new Setting(containerEl)
 			.setName('Use in-game calendar')
 			.setDesc('Events use a custom fictional calendar. Sessions always track real-world dates.')
 			.addToggle((toggle) =>
@@ -100,7 +99,7 @@ export class TimelineSettingsModal extends Modal {
 
 		if (!cal.enabled) return;
 
-		new Setting(contentEl).setName('Months in a year').addText((text) => {
+		new Setting(containerEl).setName('Months in a year').addText((text) => {
 			text.inputEl.type = 'number';
 			text.setValue(String(cal.monthCount)).onChange((v) => {
 				const n = Math.floor(Number(v));
@@ -110,7 +109,7 @@ export class TimelineSettingsModal extends Modal {
 			});
 		});
 
-		new Setting(contentEl)
+		new Setting(containerEl)
 			.setName('Short names')
 			.setDesc('Define abbreviated month names to unlock the short date formats.')
 			.addToggle((toggle) =>
@@ -124,7 +123,7 @@ export class TimelineSettingsModal extends Modal {
 
 		for (let i = 0; i < cal.monthCount; i++) {
 			const month = cal.months[i];
-			const setting = new Setting(contentEl).setName(`Month ${i + 1}`).addText((text) =>
+			const setting = new Setting(containerEl).setName(`Month ${i + 1}`).addText((text) =>
 				text
 					.setPlaceholder(`Month ${i + 1}`)
 					.setValue(month.name)
@@ -145,10 +144,5 @@ export class TimelineSettingsModal extends Modal {
 				);
 			}
 		}
-	}
-
-	onClose(): void {
-		void this.save();
-		this.contentEl.empty();
 	}
 }
