@@ -22,6 +22,7 @@ export default class LoomLoomPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.applyTextSize();
 
 		this.indexer = this.addChild(new LoomIndexer(this.app, this));
 
@@ -134,5 +135,16 @@ export default class LoomLoomPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+		this.applyTextSize();
+	}
+
+	/** Reflects the text-size setting as a body class the stylesheet keys off. */
+	applyTextSize(): void {
+		document.body.classList.toggle('loom-text-compact', this.settings.textSize === 'compact');
+		document.body.classList.toggle('loom-text-large', this.settings.textSize === 'large');
+	}
+
+	onunload(): void {
+		document.body.classList.remove('loom-text-compact', 'loom-text-large');
 	}
 }

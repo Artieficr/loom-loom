@@ -4,9 +4,19 @@ import { ConfirmModal } from './project';
 import { TimelineSettingsEditor } from './timeline-settings';
 import type LoomLoomPlugin from './main';
 
+export type LoomTextSize = 'compact' | 'normal' | 'large';
+
+export const TEXT_SIZES: [LoomTextSize, string][] = [
+	['compact', 'Compact'],
+	['normal', 'Normal'],
+	['large', 'Large'],
+];
+
 export interface LoomLoomSettings {
 	/** Legacy single-project root (pre-.loom-files); migrated on load, kept for that migration only. */
 	projectRoot: string;
+	/** Base text size of all plugin views (applied as a body class). */
+	textSize: LoomTextSize;
 	/** Plugin-specific tag vocabulary per entity type (distinct from Obsidian #tags). */
 	tagVocabulary: Record<EntityType, string[]>;
 	/** Graph side panel: sections with more entries than this start collapsed. */
@@ -23,6 +33,7 @@ export interface LoomLoomSettings {
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	projectRoot: '',
+	textSize: 'normal',
 	tagVocabulary: {
 		character: ['PC', 'NPC', 'Cast'],
 		location: [],
@@ -55,6 +66,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
 	if (typeof data.projectRoot === 'string') base.projectRoot = data.projectRoot;
+	if (data.textSize === 'compact' || data.textSize === 'normal' || data.textSize === 'large') {
+		base.textSize = data.textSize;
+	}
 	if (typeof data.graphCollapseThreshold === 'number' && data.graphCollapseThreshold >= 1) {
 		base.graphCollapseThreshold = Math.floor(data.graphCollapseThreshold);
 	}
@@ -90,9 +104,10 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	return base;
 }
 
-type SettingsTabId = 'entities' | 'graph';
+type SettingsTabId = 'general' | 'entities' | 'graph';
 
 const SETTINGS_TABS: [SettingsTabId, string][] = [
+	['general', 'General'],
 	['entities', 'Entities'],
 	['graph', 'Graph'],
 ];
@@ -103,12 +118,13 @@ const SETTINGS_TABS: [SettingsTabId, string][] = [
  * its key to its tab's list here and the button covers it automatically.
  */
 const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
+	general: ['textSize'],
 	entities: ['tagVocabulary'],
 	graph: ['graphCollapseThreshold', 'graphEdgeCurve', 'graphFocusZoom', 'nodeColors'],
 };
 
 export class LoomLoomSettingTab extends PluginSettingTab {
-	private activeTab: SettingsTabId = 'entities';
+	private activeTab: SettingsTabId = 'general';
 	/** Project whose timeline settings the Graph tab currently shows. */
 	private timelineProjectRoot: string | null = null;
 
@@ -133,8 +149,32 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			});
 		}
 
-		if (this.activeTab === 'entities') this.renderEntities(body);
+		if (this.activeTab === 'general') this.renderGeneral(body);
+		else if (this.activeTab === 'entities') this.renderEntities(body);
 		else this.renderGraph(body);
+	}
+
+	private renderGeneral(containerEl: HTMLElement): void {
+		const setting = new Setting(containerEl)
+			.setName('Text size')
+			.setDesc('Base text size of all plugin views.')
+			.addDropdown((dd) => {
+				for (const [value, label] of TEXT_SIZES) dd.addOption(value, label);
+				dd.setValue(this.plugin.settings.textSize).onChange(async (value) => {
+					this.plugin.settings.textSize = value as LoomTextSize;
+					await this.plugin.saveSettings();
+				});
+			});
+		this.addReset(setting, () => {
+			this.plugin.settings.textSize = DEFAULT_SETTINGS.textSize;
+		});
+
+		this.addRestoreDefaults(
+			containerEl,
+			'general',
+			'Restore general defaults',
+			'Reset all general settings on this page to their defaults.'
+		);
 	}
 
 	/** Adds the circled-arrow restore-default button on a setting's right side. */
