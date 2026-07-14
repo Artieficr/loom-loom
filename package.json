@@ -1,0 +1,30 @@
+{
+	"name": "loom-loom",
+	"version": "0.1.0",
+	"description": "`Loom Loom!` weaves TTRPG campaigns into typed entities — characters, locations, factions, items, events and sessions — with relationship tracking, a session timeline, and a layered story graph.",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"build": "tsc --noEmit && node esbuild.config.mjs production",
+		"dev": "node esbuild.config.mjs",
+		"lint": "eslint .",
+		"deploy": "pnpm run build && node scripts/deploy.mjs"
+	},
+	"keywords": [],
+	"author": "Artie Tsoy",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^25.9.1",
+		"@types/react": "^18.3.12",
+		"@types/react-dom": "^18.3.1",
+		"esbuild": "^0.28.0",
+		"eslint": "^10.7.0",
+		"eslint-plugin-obsidianmd": "^0.4.1",
+		"obsidian": "^1.13.0",
+		"typescript": "^6.0.3"
+	},
+	"dependencies": {
+		"react": "^18.3.1",
+		"react-dom": "^18.3.1"
+	}
+}

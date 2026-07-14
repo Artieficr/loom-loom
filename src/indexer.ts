@@ -1,0 +1,411 @@
+import {
+	App,
+	Component,
+	Events,
+	FrontMatterCache,
+	TAbstractFile,
+	TFile,
+	TFolder,
+	Vault,
+	debounce,
+	normalizePath,
+} from 'obsidian';
+import {
+	Connection,
+	EntityRecord,
+	EntityType,
+	LOOM_EXTENSION,
+	RelationshipDecl,
+	TIMELINES_FOLDER,
+	TimelineDef,
+	isEntityType,
+} from './types';
+import { ProjectConfig, parseLoomDate, parseProjectConfig } from './calendar';
+import type LoomLoomPlugin from './main';
+
+/** A project = a folder containing a .loom home file. */
+export interface ProjectDef {
+	/** Path of the .loom file. */
+	loomPath: string;
+	/** Root folder path ('' = vault root). */
+	root: string;
+	/** Project display name = .loom file basename. */
+	name: string;
+	config: ProjectConfig;
+}
+
+/**
+ * Extracts the linkpath from a raw target value: "[[Sam|alias]]" -> "Sam".
+ * Plain names without brackets are accepted as-is.
+ */
+export function extractLinkpath(raw: string): string | null {
+	const wiki = /\[\[([^\]|#]+)/.exec(raw);
+	const path = (wiki ? wiki[1] : raw).trim();
+	return path.length > 0 ? path : null;
+}
+
+/**
+ * The index cache: entity records built from frontmatter across all projects
+ * (any folder holding a .loom file).
+ *
+ * Indexing has no rendering concerns — views subscribe to the `changed`
+ * event and query through the public getters; they never re-scan files.
+ * Records store *unresolved* linkpaths; resolution to concrete files happens
+ * at query time via metadataCache, so renames/creations elsewhere in the
+ * vault never leave stale resolved paths in the index.
+ */
+export class LoomIndexer extends Component {
+	readonly events = new Events();
+	version = 0;
+
+	private projects = new Map<string, ProjectDef>();
+	private records = new Map<string, EntityRecord>();
+	private timelines = new Map<string, TimelineDef>();
+	/** Lazily built reverse edges: target path -> incoming connections. */
+	private incoming: Map<string, Connection[]> | null = null;
+
+	private rebuilding = false;
+	private rebuildQueued = false;
+
+	constructor(private app: App, private plugin: LoomLoomPlugin) {
+		super();
+	}
+
+	onload(): void {
+		this.registerEvent(
+			this.app.metadataCache.on('changed', (file) => {
+				if (!this.projectForPath(file.path)) return;
+				this.indexFile(file);
+				this.bump();
+			})
+		);
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => {
+				if (file instanceof TFile && file.extension === LOOM_EXTENSION) this.rebuild();
+			})
+		);
+		this.registerEvent(
+			this.app.vault.on('create', (file) => {
+				if (file instanceof TFile && file.extension === LOOM_EXTENSION) this.rebuild();
+			})
+		);
+		this.registerEvent(
+			this.app.vault.on('delete', (file) => {
+				if (file instanceof TFile && file.extension === LOOM_EXTENSION) {
+					this.rebuild();
+					return;
+				}
+				if (this.records.delete(file.path) || this.timelines.delete(file.path)) this.bump();
+			})
+		);
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				// Renames can retarget link resolution or move project roots,
+				// so rebuild rather than patch. Renames are rare enough.
+				if (
+					(file instanceof TFile && file.extension === LOOM_EXTENSION) ||
+					this.projectForPath(oldPath) ||
+					this.projectForPath(file.path)
+				) {
+					this.rebuild();
+				}
+			})
+		);
+	}
+
+	// --- Rebuild -------------------------------------------------------------
+
+	rebuild(): void {
+		if (this.rebuilding) {
+			this.rebuildQueued = true;
+			return;
+		}
+		this.rebuilding = true;
+		void this.doRebuild().finally(() => {
+			this.rebuilding = false;
+			if (this.rebuildQueued) {
+				this.rebuildQueued = false;
+				this.rebuild();
+			}
+		});
+	}
+
+	private async doRebuild(): Promise<void> {
+		const loomFiles = this.app.vault.getFiles().filter((f) => f.extension === LOOM_EXTENSION);
+		const projects = new Map<string, ProjectDef>();
+		for (const file of loomFiles) {
+			let config = parseProjectConfig('');
+			try {
+				config = parseProjectConfig(await this.app.vault.cachedRead(file));
+			} catch (e) {
+				console.error('Loom Loom: could not read project file', file.path, e);
+			}
+			const parent = file.parent;
+			projects.set(file.path, {
+				loomPath: file.path,
+				root: parent && parent.path !== '/' ? parent.path : '',
+				name: file.basename,
+				config,
+			});
+		}
+		this.projects = projects;
+
+		this.records.clear();
+		this.timelines.clear();
+		for (const project of projects.values()) {
+			const folder =
+				project.root === '' ? this.app.vault.getRoot() : this.app.vault.getFolderByPath(project.root);
+			if (!(folder instanceof TFolder)) continue;
+			Vault.recurseChildren(folder, (file: TAbstractFile) => {
+				if (file instanceof TFile && file.extension === 'md') this.indexFile(file);
+			});
+		}
+		this.bump();
+	}
+
+	// --- Projects ------------------------------------------------------------
+
+	getProjects(): ProjectDef[] {
+		return [...this.projects.values()].sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	getProjectByLoomPath(path: string): ProjectDef | undefined {
+		return this.projects.get(path);
+	}
+
+	getProjectByRoot(root: string): ProjectDef | undefined {
+		for (const p of this.projects.values()) if (p.root === root) return p;
+		return undefined;
+	}
+
+	/** The deepest project whose root contains `path`, or undefined. */
+	projectForPath(path: string): ProjectDef | undefined {
+		let best: ProjectDef | undefined;
+		for (const p of this.projects.values()) {
+			if (p.root !== '' && path !== p.root && !path.startsWith(p.root + '/')) continue;
+			if (!best || p.root.length > best.root.length) best = p;
+		}
+		return best;
+	}
+
+	// --- Indexing one file -----------------------------------------------------
+
+	private indexFile(file: TFile): void {
+		const project = this.projectForPath(file.path);
+		if (!project) return;
+		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		if (this.isTimelineDefPath(file.path, project)) {
+			this.records.delete(file.path);
+			this.timelines.set(file.path, this.parseTimelineDef(file, project, fm));
+			return;
+		}
+		const record = fm ? this.parseEntity(file, project, fm) : null;
+		if (record) {
+			this.records.set(file.path, record);
+		} else {
+			this.records.delete(file.path);
+		}
+	}
+
+	private isTimelineDefPath(path: string, project: ProjectDef): boolean {
+		const prefix = project.root === '' ? TIMELINES_FOLDER : project.root + '/' + TIMELINES_FOLDER;
+		return path.startsWith(prefix + '/');
+	}
+
+	private parseTimelineDef(file: TFile, project: ProjectDef, fm: FrontMatterCache | undefined): TimelineDef {
+		const types: EntityType[] = [];
+		if (Array.isArray(fm?.types)) {
+			for (const t of fm.types) {
+				const lower = typeof t === 'string' ? t.toLowerCase() : '';
+				if (isEntityType(lower)) types.push(lower);
+			}
+		}
+		return {
+			path: file.path,
+			project: project.root,
+			name: typeof fm?.name === 'string' && fm.name.trim() !== '' ? fm.name : file.basename,
+			types: types.length > 0 ? types : ['session', 'event'],
+			tags: Array.isArray(fm?.tags) ? fm.tags.filter((t): t is string => typeof t === 'string') : [],
+		};
+	}
+
+	private parseEntity(file: TFile, project: ProjectDef, fm: FrontMatterCache): EntityRecord | null {
+		const type = typeof fm.type === 'string' ? fm.type.toLowerCase() : '';
+		if (!isEntityType(type)) return null;
+
+		const relationships: RelationshipDecl[] = [];
+		if (Array.isArray(fm.relationships)) {
+			for (const rel of fm.relationships) {
+				if (typeof rel !== 'object' || rel === null) continue;
+				const { type: relType, target } = rel as { type?: unknown; target?: unknown };
+				if (typeof target !== 'string') continue;
+				const linkpath = extractLinkpath(target);
+				if (!linkpath) continue;
+				relationships.push({
+					type: typeof relType === 'string' && relType.trim() !== '' ? relType : 'related',
+					targetRaw: target,
+					linkpath,
+				});
+			}
+		}
+
+		// Sessions always track real-world dates; everything else follows the
+		// project's calendar (custom in-game calendar when enabled).
+		const calendar =
+			type !== 'session' && project.config.customCalendar.enabled ? 'custom' : 'gregorian';
+		const linkedSessionRaw = typeof fm.linkedSession === 'string' ? fm.linkedSession : '';
+		return {
+			path: file.path,
+			name: file.basename,
+			type,
+			project: project.root,
+			pluginTags: Array.isArray(fm.pluginTags)
+				? fm.pluginTags.filter((t): t is string => typeof t === 'string')
+				: [],
+			description: typeof fm.description === 'string' ? fm.description : '',
+			relationships,
+			date: parseLoomDate(fm.date, calendar, project.config),
+			linkedSession: linkedSessionRaw === '' ? null : extractLinkpath(linkedSessionRaw),
+			role: typeof fm.role === 'string' ? fm.role : '',
+			created: file.stat.ctime,
+			modified: file.stat.mtime,
+		};
+	}
+
+	private bump(): void {
+		this.version++;
+		this.incoming = null;
+		this.persistLater();
+		this.events.trigger('changed');
+	}
+
+	// --- Queries -----------------------------------------------------------
+
+	get(path: string): EntityRecord | undefined {
+		return this.records.get(path);
+	}
+
+	getAll(type?: EntityType, projectRoot?: string): EntityRecord[] {
+		const all = [...this.records.values()];
+		return all.filter(
+			(r) => (type === undefined || r.type === type) && (projectRoot === undefined || r.project === projectRoot)
+		);
+	}
+
+	getTimelines(projectRoot?: string): TimelineDef[] {
+		return [...this.timelines.values()]
+			.filter((t) => projectRoot === undefined || t.project === projectRoot)
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	/** Resolves a linkpath declared in `sourcePath` to an indexed record, or null. */
+	resolve(linkpath: string, sourcePath: string): EntityRecord | null {
+		const file = this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
+		return file ? this.records.get(file.path) ?? null : null;
+	}
+
+	/** The session record an event links to, if any. */
+	resolveLinkedSession(record: EntityRecord): EntityRecord | null {
+		if (!record.linkedSession) return null;
+		const target = this.resolve(record.linkedSession, record.path);
+		return target?.type === 'session' ? target : null;
+	}
+
+	/**
+	 * Connections declared on the note: typed relationships, the linked
+	 * session, and plain [[wikilinks]] anywhere in the note (body or
+	 * frontmatter) that land on another indexed entity.
+	 */
+	getOutgoing(path: string): Connection[] {
+		const record = this.records.get(path);
+		if (!record) return [];
+		const out: Connection[] = [];
+		const linked = new Set<string>();
+		for (const rel of record.relationships) {
+			const target = this.resolve(rel.linkpath, record.path);
+			if (target) {
+				out.push({ record: target, relType: rel.type, direction: 'outgoing' });
+				linked.add(target.path);
+			}
+		}
+		const session = this.resolveLinkedSession(record);
+		if (session && !linked.has(session.path)) {
+			out.push({ record: session, relType: 'session', direction: 'outgoing' });
+			linked.add(session.path);
+		}
+		const file = this.app.vault.getFileByPath(path);
+		const cache = file ? this.app.metadataCache.getFileCache(file) : null;
+		for (const link of [...(cache?.links ?? []), ...(cache?.frontmatterLinks ?? [])]) {
+			const linkpath = extractLinkpath(link.link);
+			const target = linkpath ? this.resolve(linkpath, path) : null;
+			if (target && target.path !== path && !linked.has(target.path)) {
+				out.push({ record: target, relType: 'link', direction: 'outgoing' });
+				linked.add(target.path);
+			}
+		}
+		return out;
+	}
+
+	getIncoming(path: string): Connection[] {
+		if (!this.incoming) {
+			this.incoming = new Map();
+			for (const record of this.records.values()) {
+				for (const conn of this.getOutgoing(record.path)) {
+					let list = this.incoming.get(conn.record.path);
+					if (!list) {
+						list = [];
+						this.incoming.set(conn.record.path, list);
+					}
+					list.push({ record, relType: conn.relType, direction: 'incoming' });
+				}
+			}
+		}
+		return this.incoming.get(path) ?? [];
+	}
+
+	/**
+	 * All connections of a note, both declared on it and declared elsewhere
+	 * pointing at it — direction of declaration doesn't matter for visibility.
+	 */
+	getConnections(path: string): Connection[] {
+		const seen = new Set<string>();
+		const all: Connection[] = [];
+		for (const conn of [...this.getOutgoing(path), ...this.getIncoming(path)]) {
+			const key = conn.record.path + ' ' + conn.relType;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			all.push(conn);
+		}
+		return all;
+	}
+
+	// --- Persistence -------------------------------------------------------
+
+	/**
+	 * Snapshot of the index written next to the plugin for debugging and fast
+	 * cold starts. The in-memory index is authoritative; this file is never
+	 * read back as a source of truth within a session.
+	 */
+	private persistLater = debounce(() => void this.persist(), 2000, true);
+
+	private async persist(): Promise<void> {
+		const dir = this.plugin.manifest.dir;
+		if (!dir) return;
+		const payload = JSON.stringify(
+			{
+				schemaVersion: 2,
+				generatedAt: Date.now(),
+				projects: [...this.projects.values()],
+				records: [...this.records.values()],
+				timelines: [...this.timelines.values()],
+			},
+			null,
+			'\t'
+		);
+		try {
+			await this.app.vault.adapter.write(normalizePath(dir + '/index-cache.json'), payload);
+		} catch (e) {
+			console.error('Loom Loom: failed to write index cache', e);
+		}
+	}
+}
