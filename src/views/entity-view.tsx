@@ -16,11 +16,10 @@ import {
 	EntityType,
 	PC_TAG,
 	VIEW_ENTITY,
-	VIEW_LIST,
 } from '../types';
 import { CreateEntityModal, sanitizeFileName, sessionFileName } from '../project';
 import { LoomFileReactView } from './react-view';
-import { FRONTMATTER_RE, Icon, SearchableSelect, SuggestInput, recordLabel } from './common';
+import { FRONTMATTER_RE, Icon, NavRail, SearchableSelect, SuggestInput, recordLabel } from './common';
 import { ConnectedEntities } from './connected-entities';
 import { LinkTextarea } from './link-textarea';
 import { useIndexVersion } from './hooks';
@@ -405,17 +404,18 @@ function EntityPage({ view }: { view: EntityView }) {
 	);
 
 	return (
-		<div className="loom-entity">
+		<div className="loom-entity-row">
+			{project ? <NavRail navigator={view} project={project} /> : null}
+			<div className="loom-entity">
 			<div className="loom-entity-header">
+				{/* Greyed out when there is nowhere to return (e.g. the page
+				    was opened right after creating the entity). */}
 				<button
 					className="loom-nav-btn"
+					disabled={!view.origin}
 					onClick={() => {
-						// Return where this page was opened from (graph, list, …);
-						// fall back to the type's list when unknown (e.g. page
-						// opened right after creating the entity).
 						const origin = view.origin;
 						if (origin) view.navigateTo(origin.type, origin.state);
-						else view.navigateTo(VIEW_LIST, { entityType: record.type, project: record.project });
 					}}
 				>
 					← Back
@@ -650,6 +650,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			</div>
 
 			<ConnectedEntities navigator={view} record={record} project={project} />
+			</div>
 		</div>
 	);
 }

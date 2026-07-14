@@ -1,6 +1,6 @@
 import { setIcon, setTooltip } from 'obsidian';
 import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useRef, useState } from 'react';
-import { EntityRecord } from '../types';
+import { ENTITY_META, ENTITY_TYPES, EntityRecord, VIEW_GRAPH, VIEW_LIST } from '../types';
 import { formatLoomDate } from '../calendar';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
@@ -220,14 +220,81 @@ export function recordDate(record: EntityRecord, project: ProjectDef | null): st
 	return formatLoomDate(record.date, project.config);
 }
 
+function RailButton({
+	icon,
+	label,
+	active,
+	onClick,
+}: {
+	icon: string;
+	label: string;
+	active?: boolean;
+	onClick: () => void;
+}) {
+	const ref = useRef<HTMLButtonElement>(null);
+	useEffect(() => {
+		if (ref.current) setTooltip(ref.current, label, { placement: 'right' });
+	}, [label]);
+	return (
+		<button
+			ref={ref}
+			className={active ? 'loom-rail-btn loom-rail-btn-active' : 'loom-rail-btn'}
+			aria-label={label}
+			onClick={onClick}
+		>
+			<Icon name={icon} />
+		</button>
+	);
+}
+
 /**
- * Shared chrome for list/timeline/graph views: title row with navigation
- * back to the project home and across to the other top-level views.
+ * Icon-only navigation rail on the left of every page except home: home
+ * first, then the entity lists, then the graph — the home page's whole
+ * navigation. Sits in normal flow, so it never overlaps content.
+ * `active` marks the current page ('graph' or an entity type).
+ */
+export function NavRail({
+	navigator,
+	project,
+	active,
+}: {
+	navigator: LoomNavigator;
+	project: ProjectDef;
+	active?: string;
+}) {
+	return (
+		<nav className="loom-rail">
+			<RailButton icon="home" label="Home" onClick={() => navigator.openLoomFile(project.loomPath)} />
+			<div className="loom-rail-sep" />
+			{ENTITY_TYPES.map((t) => (
+				<RailButton
+					key={t}
+					icon={ENTITY_META[t].icon}
+					label={ENTITY_META[t].plural}
+					active={active === t}
+					onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: t })}
+				/>
+			))}
+			<div className="loom-rail-sep" />
+			<RailButton
+				icon="spool"
+				label="Loom"
+				active={active === 'graph'}
+				onClick={() => navigator.navigateTo(VIEW_GRAPH, { project: project.root })}
+			/>
+		</nav>
+	);
+}
+
+/**
+ * Shared chrome for list/graph views: the nav rail on the left plus a title
+ * row; `railActive` marks the current page in the rail.
  */
 export function ViewShell({
 	view,
 	project,
 	title,
+	railActive,
 	titleExtra,
 	toolbar,
 	children,
@@ -235,25 +302,24 @@ export function ViewShell({
 	view: LoomNavigator;
 	project: ProjectDef | null;
 	title: string;
+	railActive?: string;
 	/** Rendered on the right side of the title row (view-specific actions). */
 	titleExtra?: ReactNode;
 	toolbar?: ReactNode;
 	children: ReactNode;
 }) {
 	return (
-		<div className="loom-shell">
-			<div className="loom-shell-header">
-				{project ? (
-					<button className="loom-nav-btn" onClick={() => view.openLoomFile(project.loomPath)}>
-						Home
-					</button>
-				) : null}
-				<h2 className="loom-shell-title">{title}</h2>
-				<div className="loom-shell-spacer" />
-				{titleExtra}
+		<div className="loom-shell-row">
+			{project ? <NavRail navigator={view} project={project} active={railActive} /> : null}
+			<div className="loom-shell">
+				<div className="loom-shell-header">
+					<h2 className="loom-shell-title">{title}</h2>
+					<div className="loom-shell-spacer" />
+					{titleExtra}
+				</div>
+				{toolbar ? <div className="loom-toolbar">{toolbar}</div> : null}
+				<div className="loom-shell-body">{children}</div>
 			</div>
-			{toolbar ? <div className="loom-toolbar">{toolbar}</div> : null}
-			<div className="loom-shell-body">{children}</div>
 		</div>
 	);
 }

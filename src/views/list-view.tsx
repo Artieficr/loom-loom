@@ -141,7 +141,7 @@ function EntityList({
 	);
 
 	return (
-		<ViewShell view={view} project={project} title={ENTITY_META[type].plural} toolbar={toolbar}>
+		<ViewShell view={view} project={project} title={ENTITY_META[type].plural} railActive={type} toolbar={toolbar}>
 			{records.length === 0 ? (
 				<div className="loom-empty">Nothing here yet.</div>
 			) : (

@@ -29,6 +29,8 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 
 - [x] FileView over the project's .loom file: per-type buttons + counts, timeline/graph shortcuts — `src/views/home-view.tsx`
 
+- [x] Icon-only navigation rail on the left of every page except home (home, entity lists, graph); replaces the header Home button — Back alone stays in the header, greyed out when there's nowhere to return — `src/views/common.tsx`
+
 ## List views
 
 - [x] Per-type list with search, sort (name/created/modified/date), plugin-tag filter, click opens entity page, new-entity button — `src/views/list-view.tsx`
@@ -55,6 +57,8 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Side panel keeps the selected node visible (auto-pans when the panel would cover it) — `src/views/graph-view.tsx`
 - [ ] Visual polish: animations, edge styling/bundling, performance tuning for large graphs
 - [ ] Vertical virtualization of culling
+- [ ] Sticky globals while panning: a global node whose connected timeline nodes are on screen slides along with the pan (e.g. Frodo, linked to sessions 4–10, stays visible while scrolling within that range) — never let one endpoint of a visible connection sit off-screen so the user loses track of what connects to what
+- [ ] Orthogonal edge routing instead of bowed curves: edges run as vertical/horizontal segments (parallel lines add structure). Overlapping at the shared start point is fine, but each edge must branch at its own vertical turn axis so lines never run on top of each other after splitting; give branching-heavy nodes extra horizontal room by spreading neighbor columns — inconsistent date spacing is an acceptable price for readable connections
 
 ## Settings
 
