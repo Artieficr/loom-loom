@@ -5,6 +5,9 @@ import { formatLoomDate } from '../calendar';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
 
+/** Matches a note's leading frontmatter block (used to split it from the body). */
+export const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
+
 /** Renders a Lucide icon by name. */
 export function Icon({ name }: { name: string }) {
 	const ref = useRef<HTMLSpanElement>(null);

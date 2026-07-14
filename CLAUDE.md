@@ -15,13 +15,13 @@ and a custom layered graph view.
 | --- | --- |
 | `src/main.ts` | Plugin entry: view/command/settings registration, .loom extension, legacy migration, project resolution for commands |
 | `src/types.ts` | Entity types + metadata, record/connection/timeline/date shapes, view type IDs |
-| `src/settings.ts` | Global settings: tag vocabulary, graph node colors, collapse threshold; settings tab UI |
+| `src/settings.ts` | Global settings: text size, tag vocabulary, graph node colors, collapse threshold; tabbed settings UI (General/Entities/Graph, per-project timeline settings under Graph) |
 | `src/indexer.ts` | Index cache: project discovery (.loom files), frontmatter → in-memory records, vault event handling, connection queries (incl. native links), JSON snapshot persistence |
 | `src/calendar.ts` | Date model: parsing (Gregorian + custom in-game calendars), display formats, per-project `ProjectConfig` (de)serialization |
 | `src/columns.ts` | Chronological column layout shared by timeline and graph (sessions anchor columns, linked events stack beneath) |
 | `src/project.ts` | Project scaffolding (.loom + folders), entity creation (managed session file names), setup/create/pick modals |
 | `src/timeline-settings.ts` | Per-project timeline settings editor (date format + custom calendar), embedded in the settings tab's Graph tab, writes to the .loom file |
-| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`) |
+| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`). Entity pages embed collapsible connected-entity sections with in-place editing (`connected-entities.tsx`) |
 | `src/graph/` | Graph-only logic: layered layout computation, connections side panel |
 | `scripts/deploy.mjs` | Builds are copied to the test vault with `pnpm run deploy` |
 | `docs/ARCHITECTURE.md` | Data flow, relationship model, calendar abstraction, design tradeoffs |

@@ -10,12 +10,12 @@ import {
 import { ENTITY_META, ENTITY_TYPES, EntityOrigin, EntityType, VIEW_ENTITY, VIEW_LIST } from '../types';
 import { CreateEntityModal, sanitizeFileName, sessionFileName } from '../project';
 import { LoomFileReactView } from './react-view';
-import { Icon, SearchableSelect, SuggestInput, recordLabel } from './common';
+import { FRONTMATTER_RE, Icon, SearchableSelect, SuggestInput, recordLabel } from './common';
+import { ConnectedEntities } from './connected-entities';
 import { LinkTextarea } from './link-textarea';
 import { useIndexVersion } from './hooks';
 import type LoomLoomPlugin from '../main';
 
-const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
 
 /**
  * Entity page: a structured form over an entity's .md file, opened by every
@@ -495,6 +495,20 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+			<div className="loom-field loom-field-body">
+				<span className="loom-field-label">Notes</span>
+				<LinkTextarea
+					rows={10}
+					placeholder="Freeform notes. [[Wikilinks]] connect like in any other note."
+					value={body ?? ''}
+					names={linkNames}
+					onChange={(v) => {
+						setBody(v);
+						saveBody(v);
+					}}
+				/>
+			</div>
+
 			<div className="loom-field">
 				<span className="loom-field-label">Relationships</span>
 				{ENTITY_TYPES.filter((t) => relEntries.some((e) => e.entityType === t)).map((t) => (
@@ -516,19 +530,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				</button>
 			</div>
 
-			<div className="loom-field loom-field-body">
-				<span className="loom-field-label">Notes</span>
-				<LinkTextarea
-					rows={10}
-					placeholder="Freeform notes. [[Wikilinks]] connect like in any other note."
-					value={body ?? ''}
-					names={linkNames}
-					onChange={(v) => {
-						setBody(v);
-						saveBody(v);
-					}}
-				/>
-			</div>
+			<ConnectedEntities navigator={view} record={record} project={project} />
 		</div>
 	);
 }
