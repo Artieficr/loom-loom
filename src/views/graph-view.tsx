@@ -8,12 +8,14 @@ import {
 	useRef,
 	useState,
 } from 'react';
-import { ENTITY_META, ENTITY_TYPES, VIEW_GRAPH } from '../types';
+import { ENTITY_META, ENTITY_TYPES, TimelineDef, VIEW_GRAPH } from '../types';
 import { CreateEntityModal } from '../project';
+import { TimelineSettingsModal } from '../timeline-settings';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { GraphSidePanel } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
-import { ViewShell, noProjectMessage, recordLabel } from './common';
+import { Icon, ViewShell, noProjectMessage, recordLabel } from './common';
+import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
 
 export class GraphView extends LoomReactView {
@@ -89,6 +91,9 @@ interface PanState {
 	moved: boolean;
 }
 
+const DRAWER_MIN = 120;
+const DRAWER_MAX = 520;
+
 function clamp(v: number, min: number, max: number): number {
 	return Math.max(min, Math.min(max, v));
 }
@@ -107,6 +112,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const [camera, setCamera] = useState<Camera>({ tx: 0, ty: 0, k: 1 });
 	const [size, setSize] = useState({ w: 1200, h: 700 });
 	const [, setTick] = useState(0);
+	const [drawerOpen, setDrawerOpen] = useState(false);
+	const [drawerHeight, setDrawerHeight] = useState(240);
+	const [defPath, setDefPath] = useState('');
+	const drawerDrag = useRef<{ pointerId: number; startY: number; startH: number } | null>(null);
 
 	const wrapRef = useRef<HTMLDivElement>(null);
 	const cameraRef = useRef(camera);
@@ -381,6 +390,28 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		return { x: n.x + (d?.dx ?? 0), y: n.y + (d?.dy ?? 0) };
 	};
 
+	// --- Timeline drawer -------------------------------------------------------
+
+	const defs: TimelineDef[] = project ? plugin.indexer.getTimelines(project.root) : [];
+	const activeDef: TimelineDef | null = defs.find((d) => d.path === defPath) ?? defs[0] ?? null;
+
+	const onDrawerBarPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+		// Buttons/selects on the bar are clickable, not drag handles.
+		if (!drawerOpen || (e.target as HTMLElement).closest('button, select')) return;
+		e.currentTarget.setPointerCapture(e.pointerId);
+		drawerDrag.current = { pointerId: e.pointerId, startY: e.clientY, startH: drawerHeight };
+	};
+
+	const onDrawerBarPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+		const drag = drawerDrag.current;
+		if (!drag || drag.pointerId !== e.pointerId) return;
+		setDrawerHeight(clamp(drag.startH + (drag.startY - e.clientY), DRAWER_MIN, DRAWER_MAX));
+	};
+
+	const onDrawerBarPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+		if (drawerDrag.current?.pointerId === e.pointerId) drawerDrag.current = null;
+	};
+
 	if (!project) {
 		return (
 			<ViewShell view={view} project={null} title="Loom graph">
@@ -400,8 +431,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				</button>
 			}
 		>
-			<div className="loom-graph-wrap">
-				<div className="loom-graph-viewport" ref={wrapRef}>
+			<div className="loom-graph-stack">
+				<div className="loom-graph-wrap">
+					<div className="loom-graph-viewport" ref={wrapRef}>
 					<svg
 						className="loom-graph-svg"
 						onPointerDown={onSvgPointerDown}
@@ -482,6 +514,43 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					/>
 				) : null}
 				{layout.nodes.length === 0 ? <div className="loom-empty loom-graph-empty">No entities yet.</div> : null}
+				</div>
+				<div className="loom-drawer">
+					<div
+						className={drawerOpen ? 'loom-drawer-bar loom-drawer-bar-open' : 'loom-drawer-bar'}
+						onPointerDown={onDrawerBarPointerDown}
+						onPointerMove={onDrawerBarPointerMove}
+						onPointerUp={onDrawerBarPointerUp}
+					>
+						<button className="loom-nav-btn loom-drawer-toggle" onClick={() => setDrawerOpen(!drawerOpen)}>
+							<Icon name={drawerOpen ? 'chevron-down' : 'chevron-up'} />
+							{drawerOpen ? 'Collapse timeline' : 'Open timeline'}
+						</button>
+						{drawerOpen && defs.length > 1 ? (
+							<select className="dropdown" value={activeDef?.path ?? ''} onChange={(e) => setDefPath(e.target.value)}>
+								{defs.map((d) => (
+									<option key={d.path} value={d.path}>
+										{d.name}
+									</option>
+								))}
+							</select>
+						) : null}
+						<div className="loom-shell-spacer" />
+						{drawerOpen ? (
+							<button
+								className="loom-nav-btn"
+								onClick={() => new TimelineSettingsModal(plugin, project).open()}
+							>
+								Timeline settings
+							</button>
+						) : null}
+					</div>
+					{drawerOpen ? (
+						<div className="loom-drawer-body" style={{ height: drawerHeight }}>
+							<TimelineStrip navigator={view} project={project} def={activeDef} />
+						</div>
+					) : null}
+				</div>
 			</div>
 		</ViewShell>
 	);

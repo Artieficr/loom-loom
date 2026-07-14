@@ -7,14 +7,12 @@ import {
 	VIEW_GRAPH,
 	VIEW_HOME,
 	VIEW_LIST,
-	VIEW_TIMELINE,
 } from './types';
 import { DEFAULT_SETTINGS, LoomLoomSettingTab, LoomLoomSettings, mergeSettings } from './settings';
 import { LoomIndexer, ProjectDef } from './indexer';
 import { CreateEntityModal, ProjectSuggestModal, SetupProjectModal, scaffoldProject } from './project';
 import { HomeView } from './views/home-view';
 import { EntityListView } from './views/list-view';
-import { TimelineView } from './views/timeline-view';
 import { GraphView } from './views/graph-view';
 import { EntityView } from './views/entity-view';
 
@@ -29,7 +27,6 @@ export default class LoomLoomPlugin extends Plugin {
 
 		this.registerView(VIEW_HOME, (leaf) => new HomeView(leaf, this));
 		this.registerView(VIEW_LIST, (leaf) => new EntityListView(leaf, this));
-		this.registerView(VIEW_TIMELINE, (leaf) => new TimelineView(leaf, this));
 		this.registerView(VIEW_GRAPH, (leaf) => new GraphView(leaf, this));
 		this.registerView(VIEW_ENTITY, (leaf) => new EntityView(leaf, this));
 		// Project home files show up in the file explorer like .canvas/.base
@@ -42,11 +39,6 @@ export default class LoomLoomPlugin extends Plugin {
 			id: 'open-home',
 			name: 'Open home',
 			callback: () => this.openHome(),
-		});
-		this.addCommand({
-			id: 'open-timeline',
-			name: 'Open timeline',
-			callback: () => this.withProject((p) => void this.activateView(VIEW_TIMELINE, { project: p.root })),
 		});
 		this.addCommand({
 			id: 'open-graph',

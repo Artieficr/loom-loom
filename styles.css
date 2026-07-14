@@ -87,7 +87,7 @@
 }
 
 .loom-home-grid-wide {
-	grid-template-columns: repeat(2, 1fr);
+	grid-template-columns: 1fr;
 }
 
 .loom-card {
@@ -285,11 +285,58 @@
 
 /* ---- graph ---- */
 
-.loom-graph-wrap {
-	position: relative;
+.loom-graph-stack {
+	display: flex;
+	flex-direction: column;
 	height: 100%;
 	min-height: 0;
+}
+
+.loom-graph-wrap {
+	position: relative;
+	flex: 1;
+	min-height: 0;
 	display: flex;
+}
+
+/* ---- timeline drawer ---- */
+
+.loom-drawer {
+	border-top: 1px solid var(--background-modifier-border);
+	flex-shrink: 0;
+	/* Mid-grey at low alpha tints darker on light themes and lighter on dark
+	   themes, so the drawer separates from the graph without hardcoding a
+	   theme color. */
+	background: rgba(128, 128, 128, 0.08);
+}
+
+.loom-drawer-bar {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	padding: var(--size-2-1) var(--size-4-2);
+}
+
+/* The bar doubles as the resize edge while the drawer is open. */
+.loom-drawer-bar-open {
+	cursor: ns-resize;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.loom-drawer-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
+.loom-drawer-toggle .loom-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.loom-drawer-body {
+	overflow: auto;
+	padding: var(--size-4-3);
 }
 
 .loom-graph-viewport {

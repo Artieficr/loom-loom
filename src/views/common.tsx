@@ -1,6 +1,6 @@
 import { setIcon } from 'obsidian';
 import { ReactNode, useEffect, useRef } from 'react';
-import { EntityRecord, VIEW_GRAPH, VIEW_TIMELINE } from '../types';
+import { EntityRecord, VIEW_GRAPH } from '../types';
 import { formatLoomDate } from '../calendar';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
@@ -63,9 +63,6 @@ export function ViewShell({
 				<h2 className="loom-shell-title">{title}</h2>
 				{titleExtra}
 				<div className="loom-shell-spacer" />
-				<button className="loom-nav-btn" onClick={() => view.navigateTo(VIEW_TIMELINE, state)}>
-					Timeline
-				</button>
 				<button className="loom-nav-btn" onClick={() => view.navigateTo(VIEW_GRAPH, state)}>
 					Loom graph
 				</button>
