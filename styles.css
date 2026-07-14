@@ -27,11 +27,76 @@ body.loom-text-large {
 	font-size: inherit;
 }
 
+/* Rail + page content side by side; the rail is in flow, never an overlay. */
+.loom-shell-row,
+.loom-entity-row {
+	display: flex;
+	flex: 1;
+	height: 100%;
+	min-height: 0;
+}
+
+.loom-entity-row .loom-entity {
+	flex: 1;
+	min-width: 0;
+	overflow-y: auto;
+}
+
+/* ---- navigation rail ---- */
+
+.loom-rail {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: var(--size-2-2);
+	padding: var(--size-4-2) var(--size-2-2);
+	border-right: 1px solid var(--background-modifier-border);
+	flex-shrink: 0;
+	overflow-y: auto;
+}
+
+.loom-rail-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: none;
+	box-shadow: none;
+	cursor: pointer;
+	color: var(--text-muted);
+	padding: var(--size-2-3);
+	height: auto;
+	border-radius: var(--radius-s);
+}
+
+.loom-rail-btn:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.loom-rail-btn-active {
+	color: var(--text-accent);
+	background: var(--background-modifier-hover);
+}
+
+.loom-rail-btn .loom-icon svg {
+	display: block;
+	width: var(--icon-m, 18px);
+	height: var(--icon-m, 18px);
+}
+
+.loom-rail-sep {
+	width: 60%;
+	border-top: 1px solid var(--background-modifier-border);
+	margin: var(--size-2-1) 0;
+}
+
 .loom-shell {
 	display: flex;
 	flex-direction: column;
 	height: 100%;
 	min-height: 0;
+	flex: 1;
+	min-width: 0;
 }
 
 .loom-shell-header {
@@ -61,6 +126,16 @@ body.loom-text-large {
 
 .loom-nav-btn:hover {
 	color: var(--text-normal);
+}
+
+/* Back with nowhere to return: visible but inert. */
+.loom-nav-btn:disabled {
+	color: var(--text-faint);
+	cursor: default;
+}
+
+.loom-nav-btn:disabled:hover {
+	color: var(--text-faint);
 }
 
 .loom-toolbar {

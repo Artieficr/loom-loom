@@ -482,6 +482,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			view={view}
 			project={project}
 			title="Loom"
+			railActive="graph"
 			titleExtra={
 				<button className="loom-nav-btn" onClick={fitAll}>
 					Fit view
@@ -534,6 +535,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								const classes = ['loom-node', `loom-node-${node.kind}`];
 								if (dim) classes.push('loom-dim');
 								if (node.id === selected) classes.push('loom-node-selected');
+								const label = recordLabel(node.record, project);
+								const shortLabel = label.length > 24 ? label.slice(0, 23).trimEnd() + '…' : label;
 								return (
 									<g
 										key={node.id}
@@ -549,9 +552,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 											focusNode(node);
 										}}
 									>
+										{/* Native SVG tooltip carries the full name when truncated. */}
+										{shortLabel !== label ? <title>{label}</title> : null}
 										<circle r={RADII[node.kind]} fill={plugin.settings.nodeColors[node.record.type]} />
 										<text className="loom-node-label" y={RADII[node.kind] + 16} textAnchor="middle">
-											{recordLabel(node.record, project)}
+											{shortLabel}
 										</text>
 									</g>
 								);
