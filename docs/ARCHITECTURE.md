@@ -66,7 +66,8 @@ relationships:
   resolved paths in every record pointing at it; lazily resolving makes that class of
   bug impossible at negligible per-query cost.
 - `linkedSession` on events uses the same mechanism and contributes an edge of type
-  `session`.
+  `session`. It holds one link or a list of links — an event can belong to several
+  sessions (e.g. a festival spanning three games); the key keeps its singular name.
 - **Native links count too**: any plain `[[wikilink]]` in a note's body or frontmatter
   (from `metadataCache` `links`/`frontmatterLinks`) that lands on another indexed entity
   becomes a connection of type `link`. Users shouldn't need the typed syntax just to get
@@ -155,8 +156,9 @@ frontmatter block.
 
 ## Tags
 
-`pluginTags` frontmatter field, deliberately namespaced away from Obsidian's `#tags` so
-the two systems can't collide. The vocabulary per entity type lives in settings
-(defaults: characters get PC/NPC/Cast, everything else empty) because it will grow.
-`role` on characters is a separate freeform field per the brief — the creation modal
-fills `pluginTags` only.
+`loomTags` frontmatter field, deliberately namespaced away from Obsidian's `#tags` so
+the two systems can't collide (the pre-rename `pluginTags` spelling is still read, and
+migrated to `loomTags` the next time a note's tags are edited). The vocabulary per
+entity type lives in settings (defaults: characters get PC/NPC/Cast, everything else
+empty) because it will grow. `role` on characters is a separate freeform field per the
+brief — the creation modal fills `loomTags` only.

@@ -96,7 +96,7 @@ function EntityList({
 					recordLabel(r, project).toLowerCase().includes(q) ||
 					r.description.toLowerCase().includes(q)
 			)
-			.filter((r) => tagFilter === '' || r.pluginTags.includes(tagFilter))
+			.filter((r) => tagFilter === '' || r.loomTags.includes(tagFilter))
 			.sort((a, b) => compare(a, b, sort));
 	}, [plugin.indexer, version, project, type, query, sort, tagFilter]);
 
@@ -149,7 +149,7 @@ function EntityList({
 					{records.map((r) => (
 						<div key={r.path} className="loom-row" onClick={() => view.openEntity(r.path)}>
 							<span className="loom-row-name">{recordLabel(r, project)}</span>
-							{r.pluginTags.map((tag) => (
+							{r.loomTags.map((tag) => (
 								<span key={tag} className="loom-chip">
 									{tag}
 								</span>

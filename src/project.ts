@@ -1,5 +1,5 @@
 import { App, FuzzySuggestModal, Modal, Notice, Setting, TFile, normalizePath } from 'obsidian';
-import { ENTITY_META, ENTITY_TYPES, EntityType, LOOM_EXTENSION, TIMELINES_FOLDER } from './types';
+import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType, LOOM_EXTENSION, TIMELINES_FOLDER } from './types';
 import { defaultProjectConfig, serializeProjectConfig, todayRaw } from './calendar';
 import { ProjectDef } from './indexer';
 import type LoomLoomPlugin from './main';
@@ -75,19 +75,28 @@ export interface NewEntityFields {
 	name: string;
 	tag: string;
 	date: string;
+	/** When set, the new note declares this relationship in its frontmatter. */
+	relationship?: { type: string; target: string };
 }
 
 export function buildEntityContent(type: EntityType, fields: NewEntityFields): string {
+	const rel = fields.relationship;
 	const lines = [
 		'---',
 		`type: ${type}`,
-		`pluginTags: [${fields.tag === '' ? '' : yamlQuote(fields.tag)}]`,
+		`loomTags: [${fields.tag === '' ? '' : yamlQuote(fields.tag)}]`,
 		'description: ""',
-		'relationships: []',
+		...(rel
+			? [
+					'relationships:',
+					`  - type: ${yamlQuote(rel.type)}`,
+					`    target: ${yamlQuote(`[[${rel.target}]]`)}`,
+				]
+			: ['relationships: []']),
 	];
 	if (type === 'character') lines.push('role: ""');
 	if (type === 'event' || type === 'session') lines.push(`date: ${yamlQuote(fields.date)}`);
-	if (type === 'event') lines.push('linkedSession: ""');
+	if (type === 'event') lines.push('linkedSession: []');
 	lines.push('---', '', '');
 	return lines.join('\n');
 }
@@ -116,15 +125,27 @@ export async function createEntity(
 	return plugin.app.vault.create(path, buildEntityContent(type, fields));
 }
 
+export interface CreateEntityOptions {
+	/** When set, called with the new file instead of opening its entity page. */
+	onCreated?: (file: TFile) => void;
+	/**
+	 * When set, the modal also prompts for a relationship comment and the new
+	 * entity is created already connected to this record (the new note declares
+	 * the relationship). The entity page is not opened afterwards — the caller's
+	 * view (e.g. the graph) shows the new connection in place.
+	 */
+	connectTo?: { record: EntityRecord; label: string };
+}
+
 export class CreateEntityModal extends Modal {
 	private fields: NewEntityFields = { name: '', tag: '', date: '' };
+	private relComment = '';
 
 	constructor(
 		private plugin: LoomLoomPlugin,
 		private type: EntityType,
 		private project: ProjectDef,
-		/** When set, called with the new file instead of opening its entity page. */
-		private onCreated?: (file: TFile) => void
+		private options: CreateEntityOptions = {}
 	) {
 		super(plugin.app);
 		if (type === 'session' || type === 'event') this.fields.date = todayRaw();
@@ -162,6 +183,16 @@ export class CreateEntityModal extends Modal {
 				);
 		}
 
+		const connectTo = this.options.connectTo;
+		if (connectTo) {
+			new Setting(this.contentEl)
+				.setName('Relationship')
+				.setDesc(`How the new ${meta.label.toLowerCase()} relates to ${connectTo.label}.`)
+				.addText((text) =>
+					text.setPlaceholder('Identifier').onChange((v) => (this.relComment = v.trim()))
+				);
+		}
+
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
 				.setButtonText('Create')
@@ -179,11 +210,18 @@ export class CreateEntityModal extends Modal {
 			new Notice('Date is required.');
 			return;
 		}
+		const connectTo = this.options.connectTo;
+		if (connectTo) {
+			this.fields.relationship = {
+				type: this.relComment === '' ? 'related' : this.relComment,
+				target: connectTo.record.name,
+			};
+		}
 		try {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
 			this.close();
-			if (this.onCreated) this.onCreated(file);
-			else this.plugin.openEntityFile(file.path);
+			if (this.options.onCreated) this.options.onCreated(file);
+			else if (!connectTo) this.plugin.openEntityFile(file.path);
 		} catch (e) {
 			console.error('Loom Loom: failed to create entity', e);
 			new Notice('Could not create the note. See console for details.');

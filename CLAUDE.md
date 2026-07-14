@@ -47,8 +47,10 @@ and a custom layered graph view.
 - **Names**: display name = file basename (renames propagate); no `name` frontmatter.
   Session file names are managed (`<Project> Session <date>`) and never shown in-app —
   sessions display their date.
-- **Connections**: typed frontmatter relationships + `linkedSession` + plain `[[links]]`
-  anywhere in a note (relType `link`), all resolved bidirectionally; graph edges undirected.
+- **Connections**: typed frontmatter relationships + `linkedSession` (one link or a
+  list — events can span several sessions) + plain `[[links]]` anywhere in a note
+  (relType `link`), all resolved bidirectionally; graph edges undirected. Entity tags
+  live in `loomTags` (legacy `pluginTags` still read).
 - **Dates**: `LoomDate` = raw string + packed sortable number + y/m/d + calendar id.
   Sessions always Gregorian; other entities use the project calendar (custom in-game
   months when enabled). Formatting is per-project config, never JS `Date`.

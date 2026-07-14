@@ -27,8 +27,9 @@ Worldbuilding inside Obsidian for your writing or TTGRPG games.
 1. Run **Set up project** (or open the home view from the dice ribbon icon) and pick a
    project folder.
 2. Create entities from the home page, list views, or the `Create …` commands.
-3. Link events to sessions via the `linkedSession` frontmatter field; add typed
-   relationships in the `relationships` list.
+3. Link events to sessions via the `linkedSession` frontmatter field (one link or a
+   list — an event can span several sessions); add typed relationships in the
+   `relationships` list.
 4. Open the timeline and graph from home.
 
 All data stays local in your vault. The plugin makes no network requests.

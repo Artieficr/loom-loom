@@ -12,7 +12,7 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 
 ## Entities
 
-- [x] Six entity types with basic frontmatter templates (type, pluginTags, description, relationships; role for characters; date for events/sessions; linkedSession for events) — `src/types.ts`, `src/project.ts`
+- [x] Six entity types with basic frontmatter templates (type, loomTags, description, relationships; role for characters; date for events/sessions; linkedSession — one or several — for events) — `src/types.ts`, `src/project.ts`
 - [x] Creation commands + modal (sessions: date only, managed file name `<Project> Session <date>`) — `src/project.ts`, `src/main.ts`
 - [x] Entity page view: structured fields (name renames the file, description, tags, role, date, linked session picker, relationships editor, notes body) over plain .md; loom-internal clicks open it, file explorer still opens raw markdown — `src/views/entity-view.tsx`
 - [ ] Deep/final frontmatter schemas per type (deliberate v0.1 non-goal)
@@ -42,7 +42,7 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [ ] Proportional time spacing / zoom (currently ordinal spacing)
 - [ ] Drag/reflow interactivity
 
-## Graph ("Loom graph")
+## Graph ("Loom")
 
 - [x] Layered layout: sessions row, events grouped beneath linked session, globals on a fixed lower axis pulled toward connections — `src/graph/layout.ts`
 - [x] Drag with spring-back physics; single click dims unconnected, double click opens the entity page — `src/views/graph-view.tsx`

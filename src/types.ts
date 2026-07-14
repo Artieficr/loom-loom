@@ -73,12 +73,13 @@ export interface EntityRecord {
 	type: EntityType;
 	/** Root folder path of the owning project. */
 	project: string;
-	pluginTags: string[];
+	loomTags: string[];
 	description: string;
 	relationships: RelationshipDecl[];
 	date: LoomDate | null;
-	/** Event only: linkpath of the linked session note, unresolved. */
-	linkedSession: string | null;
+	/** Event only: linkpaths of linked session notes, unresolved. An event can
+	 *  belong to several sessions (e.g. a festival spanning three games). */
+	linkedSessions: string[];
 	/** Character only. */
 	role: string;
 	created: number;

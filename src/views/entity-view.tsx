@@ -1,9 +1,16 @@
-import { Notice, TFile, ViewStateResult, normalizePath } from 'obsidian';
-import { ReactElement, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ENTITY_META, EntityOrigin, VIEW_ENTITY, VIEW_LIST } from '../types';
+import { Menu, Notice, TFile, ViewStateResult, normalizePath } from 'obsidian';
+import {
+	MouseEvent as ReactMouseEvent,
+	ReactElement,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from 'react';
+import { ENTITY_META, ENTITY_TYPES, EntityOrigin, EntityType, VIEW_ENTITY, VIEW_LIST } from '../types';
 import { CreateEntityModal, sanitizeFileName, sessionFileName } from '../project';
 import { LoomFileReactView } from './react-view';
-import { recordLabel } from './common';
+import { Icon, SearchableSelect, SuggestInput, recordLabel } from './common';
 import { LinkTextarea } from './link-textarea';
 import { useIndexVersion } from './hooks';
 import type LoomLoomPlugin from '../main';
@@ -81,9 +88,24 @@ function useFrontmatterWriter(plugin: LoomLoomPlugin, file: TFile | null) {
 	);
 }
 
+/**
+ * Sets a frontmatter key, first removing other casings of it — Obsidian's
+ * Properties UI treats names case-insensitively and may have rewritten ours —
+ * plus any listed legacy keys.
+ */
+function setFmKey(fm: Record<string, unknown>, key: string, value: unknown, legacy: string[] = []) {
+	const lowers = new Set([key, ...legacy].map((k) => k.toLowerCase()));
+	for (const k of Object.keys(fm)) {
+		if (k !== key && lowers.has(k.toLowerCase())) delete fm[k];
+	}
+	fm[key] = value;
+}
+
 interface RelationshipDraft {
 	type: string;
 	target: string;
+	/** Transient, never written: narrows the target autocomplete to one entity type. */
+	filter?: EntityType | null;
 }
 
 function EntityPage({ view }: { view: EntityView }) {
@@ -93,7 +115,6 @@ function EntityPage({ view }: { view: EntityView }) {
 	const record = file ? plugin.indexer.get(file.path) : undefined;
 	const project = record ? plugin.indexer.getProjectByRoot(record.project) ?? null : null;
 	const writeFm = useFrontmatterWriter(plugin, file);
-	const datalistId = useId();
 
 	// Drafts are seeded once per file (component is keyed by path) so index
 	// updates triggered by our own saves never clobber what's being typed.
@@ -171,12 +192,10 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	const isSession = record.type === 'session';
 	const vocab = plugin.settings.tagVocabulary[record.type];
-	const allTags = [...new Set([...vocab, ...record.pluginTags])];
+	const allTags = [...new Set([...vocab, ...record.loomTags])];
 	const sessions = project ? plugin.indexer.getAll('session', project.root) : [];
-	const linkedSession = plugin.indexer.resolveLinkedSession(record);
-	const targetNames = project
-		? plugin.indexer.getAll(undefined, project.root).map((r) => r.name)
-		: [];
+	const linkedSessions = plugin.indexer.resolveLinkedSessions(record);
+	const targetRecords = project ? plugin.indexer.getAll(undefined, project.root) : [];
 
 	const commitName = async () => {
 		const base = sanitizeFileName(name);
@@ -218,14 +237,112 @@ function EntityPage({ view }: { view: EntityView }) {
 		});
 	};
 
-	const toggleTag = (tag: string) => {
-		const next = record.pluginTags.includes(tag)
-			? record.pluginTags.filter((t) => t !== tag)
-			: [...record.pluginTags, tag];
+	const writeLinkedSessions = (names: string[]) => {
 		writeFm((fm) => {
-			fm.pluginTags = next;
+			setFmKey(fm, 'linkedSession', names.map((n) => `[[${n}]]`));
 		});
 	};
+
+	const toggleTag = (tag: string) => {
+		const next = record.loomTags.includes(tag)
+			? record.loomTags.filter((t) => t !== tag)
+			: [...record.loomTags, tag];
+		writeFm((fm) => {
+			// Also migrates notes still carrying the key's pre-rename spelling.
+			setFmKey(fm, 'loomTags', next, ['pluginTags']);
+		});
+	};
+
+	// Relationship rows group under a subheader per target entity type; targets
+	// that don't resolve to a project entity (including still-empty new rows)
+	// stay at the bottom, ungrouped. A subheader only exists once it has rows.
+	const relEntries = relationships.map((rel, i) => ({
+		rel,
+		i,
+		entityType:
+			rel.target.trim() === ''
+				? null
+				: plugin.indexer.resolve(rel.target.trim(), record.path)?.type ?? null,
+	}));
+
+	const setRowFilter = (i: number, filter: EntityType | null) => {
+		const next = [...relationships];
+		next[i] = { ...next[i], filter };
+		setRelationships(next);
+	};
+
+	const openRelFilterMenu = (e: ReactMouseEvent<HTMLButtonElement>, i: number) => {
+		const current = relationships[i]?.filter ?? null;
+		const menu = new Menu();
+		menu.addItem((item) =>
+			item
+				.setTitle('All entities')
+				.setIcon('filter')
+				.setChecked(current === null)
+				.onClick(() => setRowFilter(i, null))
+		);
+		for (const t of ENTITY_TYPES) {
+			menu.addItem((item) =>
+				item
+					.setTitle(ENTITY_META[t].plural)
+					.setIcon(ENTITY_META[t].icon)
+					.setChecked(current === t)
+					.onClick(() => setRowFilter(i, t))
+			);
+		}
+		menu.showAtMouseEvent(e.nativeEvent);
+	};
+
+	const relRow = (rel: RelationshipDraft, i: number) => (
+		<div key={i} className="loom-rel-row">
+			<input
+				type="text"
+				className="loom-rel-type"
+				placeholder="Identifier"
+				value={rel.type}
+				onChange={(e) => {
+					const next = [...relationships];
+					next[i] = { ...rel, type: e.target.value };
+					setRelationships(next);
+				}}
+				onBlur={() => commitRelationships(relationships)}
+			/>
+			<button
+				className="loom-rel-filter"
+				aria-label="Filter suggestions by entity type"
+				onClick={(e) => openRelFilterMenu(e, i)}
+			>
+				<Icon name={rel.filter ? ENTITY_META[rel.filter].icon : 'filter'} />
+			</button>
+			<SuggestInput
+				className="loom-rel-target"
+				placeholder={rel.filter ? `${ENTITY_META[rel.filter].label} note` : 'Target note'}
+				value={rel.target}
+				options={targetRecords
+					.filter((r) => !rel.filter || r.type === rel.filter)
+					.map((r) => r.name)
+					.sort((a, b) => a.localeCompare(b))}
+				onChange={(v) => {
+					const next = [...relationships];
+					next[i] = { ...rel, target: v };
+					setRelationships(next);
+				}}
+				onPick={(v) => {
+					const next = [...relationships];
+					next[i] = { ...rel, target: v };
+					commitRelationships(next);
+				}}
+				onBlur={() => commitRelationships(relationships)}
+			/>
+			<button
+				className="loom-nav-btn"
+				aria-label="Remove relationship"
+				onClick={() => commitRelationships(relationships.filter((_, j) => j !== i))}
+			>
+				✕
+			</button>
+		</div>
+	);
 
 	return (
 		<div className="loom-entity">
@@ -305,7 +422,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						{allTags.map((tag) => (
 							<button
 								key={tag}
-								className={record.pluginTags.includes(tag) ? 'loom-chip loom-chip-on' : 'loom-chip'}
+								className={record.loomTags.includes(tag) ? 'loom-chip loom-chip-on' : 'loom-chip'}
 								onClick={() => toggleTag(tag)}
 							>
 								{tag}
@@ -332,84 +449,65 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : null}
 
 			{record.type === 'event' ? (
-				<label className="loom-field">
-					<span className="loom-field-label">Linked session</span>
-					<select
-						className="dropdown"
-						value={linkedSession?.name ?? ''}
-						onChange={(e) => {
-							const value = e.target.value;
-							if (value === '__create__') {
-								// Controlled select snaps back to the current link;
-								// the new session is written once the modal creates it.
-								if (project) {
-									new CreateEntityModal(plugin, 'session', project, (created) => {
-										writeFm((fm) => {
-											fm.linkedSession = `[[${created.basename}]]`;
-										});
-									}).open();
-								}
-								return;
-							}
-							writeFm((fm) => {
-								fm.linkedSession = value === '' ? '' : `[[${value}]]`;
-							});
-						}}
-					>
-						<option value="">—</option>
-						{sessions.map((s) => (
-							<option key={s.path} value={s.name}>
-								{recordLabel(s, project)}
-							</option>
-						))}
-						{project ? <option value="__create__">+ New session…</option> : null}
-					</select>
-				</label>
+				<div className="loom-field">
+					<span className="loom-field-label">Linked sessions</span>
+					{linkedSessions.length > 0 ? (
+						<div className="loom-tag-row">
+							{linkedSessions.map((s) => (
+								<span key={s.path} className="loom-chip loom-session-chip">
+									{recordLabel(s, project)}
+									<button
+										className="loom-chip-remove"
+										aria-label="Unlink session"
+										onClick={() =>
+											writeLinkedSessions(
+												linkedSessions.filter((o) => o.path !== s.path).map((o) => o.name)
+											)
+										}
+									>
+										✕
+									</button>
+								</span>
+							))}
+						</div>
+					) : null}
+					<SearchableSelect
+						placeholder="Link a session…"
+						options={sessions
+							.filter((s) => !linkedSessions.some((l) => l.path === s.path))
+							.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
+							.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+						onPick={(name) => writeLinkedSessions([...linkedSessions.map((s) => s.name), name])}
+						action={
+							project
+								? {
+										label: '+ New session…',
+										onPick: () =>
+											new CreateEntityModal(plugin, 'session', project, {
+												onCreated: (created) => {
+													writeLinkedSessions([...linkedSessions.map((s) => s.name), created.basename]);
+												},
+											}).open(),
+									}
+								: undefined
+						}
+					/>
+				</div>
 			) : null}
 
 			<div className="loom-field">
 				<span className="loom-field-label">Relationships</span>
-				<datalist id={datalistId}>
-					{targetNames.map((n) => (
-						<option key={n} value={n} />
-					))}
-				</datalist>
-				{relationships.map((rel, i) => (
-					<div key={i} className="loom-rel-row">
-						<input
-							type="text"
-							className="loom-rel-type"
-							placeholder="ally, parent-of…"
-							value={rel.type}
-							onChange={(e) => {
-								const next = [...relationships];
-								next[i] = { ...rel, type: e.target.value };
-								setRelationships(next);
-							}}
-							onBlur={() => commitRelationships(relationships)}
-						/>
-						<input
-							type="text"
-							className="loom-rel-target"
-							placeholder="Target note"
-							list={datalistId}
-							value={rel.target}
-							onChange={(e) => {
-								const next = [...relationships];
-								next[i] = { ...rel, target: e.target.value };
-								setRelationships(next);
-							}}
-							onBlur={() => commitRelationships(relationships)}
-						/>
-						<button
-							className="loom-nav-btn"
-							aria-label="Remove relationship"
-							onClick={() => commitRelationships(relationships.filter((_, j) => j !== i))}
-						>
-							✕
-						</button>
+				{ENTITY_TYPES.filter((t) => relEntries.some((e) => e.entityType === t)).map((t) => (
+					<div key={t} className="loom-rel-group">
+						<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
+						{relEntries.filter((e) => e.entityType === t).map((e) => relRow(e.rel, e.i))}
 					</div>
 				))}
+				{relEntries.some((e) => e.entityType === null) ? (
+					<div className="loom-rel-ungrouped">
+						{relEntries.filter((e) => e.entityType === null).map((e) => relRow(e.rel, e.i))}
+					</div>
+				) : null}
 				<button
 					className="loom-rel-add"
 					onClick={() => setRelationships([...relationships, { type: '', target: '' }])}

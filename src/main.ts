@@ -42,7 +42,7 @@ export default class LoomLoomPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: 'open-graph',
-			name: 'Open Loom graph',
+			name: 'Open Loom',
 			callback: () => this.withProject((p) => void this.activateView(VIEW_GRAPH, { project: p.root })),
 		});
 		this.addCommand({
