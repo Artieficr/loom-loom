@@ -31,6 +31,22 @@ export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 	session: { label: 'Session', plural: 'Sessions', folder: 'Entities/Sessions', icon: 'book-open' },
 };
 
+/**
+ * Hardcoded per-type tag vocabulary (deliberately not user-configurable —
+ * plugin features key off these). First real use: PC drives session attendance.
+ */
+export const ENTITY_TAGS: Record<EntityType, string[]> = {
+	character: ['PC', 'NPC', 'Cast'],
+	location: [],
+	faction: [],
+	item: [],
+	event: [],
+	session: [],
+};
+
+/** Characters tagged PC appear in session attendance and carry the alive flag. */
+export const PC_TAG = 'PC';
+
 /** Entity types that live on the timeline layers of the graph. */
 export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event'];
 /** Entity types that live on the fixed lower axis of the graph. */
@@ -80,8 +96,16 @@ export interface EntityRecord {
 	/** Event only: linkpaths of linked session notes, unresolved. An event can
 	 *  belong to several sessions (e.g. a festival spanning three games). */
 	linkedSessions: string[];
+	/** Session only: linkpaths of attending PC characters. These are hidden
+	 *  connections — deliberately no graph edges or side-panel entries. */
+	attendance: string[];
 	/** Character only. */
 	role: string;
+	/** Character only (PC): false once the character has died. */
+	alive: boolean;
+	/** Character only (PC): linkpath of the session they died in. Sessions
+	 *  after it no longer offer the character for attendance. */
+	deathSession: string | null;
 	created: number;
 	modified: number;
 }

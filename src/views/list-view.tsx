@@ -1,6 +1,6 @@
 import { ViewStateResult } from 'obsidian';
 import { ReactElement, useMemo, useState } from 'react';
-import { ENTITY_META, EntityRecord, EntityType, VIEW_LIST, isEntityType } from '../types';
+import { ENTITY_META, ENTITY_TAGS, EntityRecord, EntityType, VIEW_LIST, isEntityType } from '../types';
 import { ConfirmModal, CreateEntityModal } from '../project';
 import { LoomReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage, recordDate, recordLabel } from './common';
@@ -83,7 +83,7 @@ function EntityList({
 	const [tagFilter, setTagFilter] = useState('');
 
 	const project = resolveProject(plugin.indexer, projectRoot);
-	const vocab = plugin.settings.tagVocabulary[type];
+	const vocab = ENTITY_TAGS[type];
 
 	const records = useMemo(() => {
 		if (!project) return [];

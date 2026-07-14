@@ -72,6 +72,10 @@ relationships:
   (from `metadataCache` `links`/`frontmatterLinks`) that lands on another indexed entity
   becomes a connection of type `link`. Users shouldn't need the typed syntax just to get
   a graph edge; typed relationships take precedence when both point at the same target.
+- **Hidden links are the exception**: frontmatter links under the `attendance` and
+  `deathSession` keys are filtered out of connections entirely (`HIDDEN_LINK_KEYS` in
+  src/indexer.ts). Session attendance links every PC to every session they played —
+  drawing those edges would bury the graph, so they stay data-only.
 
 ## Names
 

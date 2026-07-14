@@ -48,6 +48,31 @@ function parseTagList(value: unknown): string[] {
 	return Array.isArray(value) ? value.filter((t): t is string => typeof t === 'string') : [];
 }
 
+/** Parses a frontmatter value holding one link or a list of links into deduplicated linkpaths. */
+function parseLinkList(value: unknown): string[] {
+	const raw = Array.isArray(value) ? value : [value];
+	const out: string[] = [];
+	for (const item of raw) {
+		if (typeof item !== 'string' || item === '') continue;
+		const linkpath = extractLinkpath(item);
+		if (linkpath && !out.includes(linkpath)) out.push(linkpath);
+	}
+	return out;
+}
+
+/**
+ * Frontmatter keys whose links are deliberately hidden: they never become
+ * connections or graph edges (session attendance would spray edges over the
+ * whole graph). Lowercase — compared case-insensitively.
+ */
+const HIDDEN_LINK_KEYS = ['attendance', 'deathsession'];
+
+function isHiddenLinkKey(key: string): boolean {
+	const lower = key.toLowerCase();
+	// List entries come through as "attendance.0", "attendance.1", …
+	return HIDDEN_LINK_KEYS.some((k) => lower === k || lower.startsWith(k + '.'));
+}
+
 /**
  * Case-insensitive frontmatter lookup. Obsidian's Properties UI treats
  * property names case-insensitively and can rewrite a key to another casing
@@ -271,16 +296,8 @@ export class LoomIndexer extends Component {
 		// project's calendar (custom in-game calendar when enabled).
 		const calendar =
 			type !== 'session' && project.config.customCalendar.enabled ? 'custom' : 'gregorian';
-		// `linkedSession` accepts a single link or a list of links (an event can
-		// span several sessions); the key keeps its historical singular name.
-		const linkedValue = fmField(fm, 'linkedSession');
-		const linkedRaw: unknown[] = Array.isArray(linkedValue) ? linkedValue : [linkedValue];
-		const linkedSessions: string[] = [];
-		for (const raw of linkedRaw) {
-			if (typeof raw !== 'string' || raw === '') continue;
-			const linkpath = extractLinkpath(raw);
-			if (linkpath && !linkedSessions.includes(linkpath)) linkedSessions.push(linkpath);
-		}
+		const aliveValue = fmField(fm, 'alive');
+		const deathValue = fmField(fm, 'deathSession');
 		return {
 			path: file.path,
 			name: file.basename,
@@ -292,8 +309,13 @@ export class LoomIndexer extends Component {
 			description: typeof fm.description === 'string' ? fm.description : '',
 			relationships,
 			date: parseLoomDate(fm.date, calendar, project.config),
-			linkedSessions,
+			// `linkedSession` accepts a single link or a list of links (an event
+			// can span several sessions); the key keeps its historical singular name.
+			linkedSessions: parseLinkList(fmField(fm, 'linkedSession')),
+			attendance: parseLinkList(fmField(fm, 'attendance')),
 			role: typeof fm.role === 'string' ? fm.role : '',
+			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
+			deathSession: typeof deathValue === 'string' ? extractLinkpath(deathValue) : null,
 			created: file.stat.ctime,
 			modified: file.stat.mtime,
 		};
@@ -367,7 +389,8 @@ export class LoomIndexer extends Component {
 		}
 		const file = this.app.vault.getFileByPath(path);
 		const cache = file ? this.app.metadataCache.getFileCache(file) : null;
-		for (const link of [...(cache?.links ?? []), ...(cache?.frontmatterLinks ?? [])]) {
+		const fmLinks = (cache?.frontmatterLinks ?? []).filter((l) => !isHiddenLinkKey(l.key));
+		for (const link of [...(cache?.links ?? []), ...fmLinks]) {
 			const linkpath = extractLinkpath(link.link);
 			const target = linkpath ? this.resolve(linkpath, path) : null;
 			if (target && target.path !== path && !linked.has(target.path)) {

@@ -16,6 +16,7 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Creation commands + modal (sessions: date only, managed file name `<Project> Session <date>`) — `src/project.ts`, `src/main.ts`
 - [x] Entity page view: structured fields (name renames the file, description, tags, role, date, linked session picker, notes body, relationships editor) over plain .md; loom-internal clicks open it, file explorer still opens raw markdown — `src/views/entity-view.tsx`
 - [x] Connected-entities sections on every entity page: one collapsible section per connected type (collapsed by default), entries expand to the target's description + notes with in-place edit/save and a jump-to-page arrow — `src/views/connected-entities.tsx`
+- [x] Session attendance: PC-character toggle chips on session pages, stored in `attendance` as hidden connections (no graph edges); PCs get an Alive tick + death-session picker, and later-dated sessions stop offering dead PCs — `src/views/entity-view.tsx`, `src/indexer.ts`
 - [ ] Deep/final frontmatter schemas per type (deliberate v0.1 non-goal)
 
 ## Index cache
