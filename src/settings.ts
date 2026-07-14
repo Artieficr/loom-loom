@@ -9,6 +9,8 @@ export interface LoomLoomSettings {
 	tagVocabulary: Record<EntityType, string[]>;
 	/** Graph side panel: sections with more entries than this start collapsed. */
 	graphCollapseThreshold: number;
+	/** Sideways bow (px, control-point offset) of edges that pass through other nodes. */
+	graphEdgeCurve: number;
 	/** Graph node fill color per entity type. */
 	nodeColors: Record<EntityType, string>;
 }
@@ -24,6 +26,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		session: [],
 	},
 	graphCollapseThreshold: 5,
+	graphEdgeCurve: 70,
 	nodeColors: {
 		session: '#7c5cff',
 		event: '#e08e45',
@@ -45,6 +48,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof data.projectRoot === 'string') base.projectRoot = data.projectRoot;
 	if (typeof data.graphCollapseThreshold === 'number' && data.graphCollapseThreshold >= 1) {
 		base.graphCollapseThreshold = Math.floor(data.graphCollapseThreshold);
+	}
+	if (typeof data.graphEdgeCurve === 'number') {
+		base.graphEdgeCurve = Math.max(20, Math.min(140, Math.floor(data.graphEdgeCurve)));
 	}
 	if (typeof data.tagVocabulary === 'object' && data.tagVocabulary !== null) {
 		for (const type of ENTITY_TYPES) {
@@ -88,6 +94,24 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					thresholdValueEl.setText(String(value));
 					this.plugin.settings.graphCollapseThreshold = value;
+					await this.plugin.saveSettings();
+				})
+		);
+
+		const curveSetting = new Setting(containerEl)
+			.setName('Graph edge curve')
+			.setDesc('How far edges bend sideways to avoid nodes sitting on their path.');
+		const curveValueEl = curveSetting.controlEl.createSpan({
+			text: String(this.plugin.settings.graphEdgeCurve),
+			cls: 'loom-slider-value',
+		});
+		curveSetting.addSlider((slider) =>
+			slider
+				.setLimits(20, 140, 5)
+				.setValue(this.plugin.settings.graphEdgeCurve)
+				.onChange(async (value) => {
+					curveValueEl.setText(String(value));
+					this.plugin.settings.graphEdgeCurve = value;
 					await this.plugin.saveSettings();
 				})
 		);

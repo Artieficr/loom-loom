@@ -17,6 +17,14 @@ export interface LayoutEdge {
 	a: string;
 	b: string;
 	relType: string;
+	/**
+	 * Signed perpendicular bow in px. 0 = straight line. Set when other nodes
+	 * sit on (or very near) the straight segment between the endpoints, which
+	 * the layered layout produces constantly — a session, its stacked events,
+	 * and a barycentered global often share the same x, making edges collinear
+	 * and invisible under each other.
+	 */
+	bow: number;
 }
 
 export interface GraphLayout {
@@ -44,7 +52,11 @@ const GLOBAL_MIN_SPACING = 130;
  * - row 2: global entities (characters, locations, factions, items) on one
  *   fixed horizontal axis, each pulled toward the mean x of its connections.
  */
-export function computeGraphLayout(indexer: LoomIndexer, projectRoot: string): GraphLayout {
+export function computeGraphLayout(
+	indexer: LoomIndexer,
+	projectRoot: string,
+	edgeCurve: number
+): GraphLayout {
 	const nodes = new Map<string, LayoutNode>();
 
 	const columns = buildColumns(indexer, null, projectRoot);
@@ -81,7 +93,7 @@ export function computeGraphLayout(indexer: LoomIndexer, projectRoot: string): G
 		const key = a < b ? `${a}\n${b}\n${relType}` : `${b}\n${a}\n${relType}`;
 		if (seen.has(key)) return;
 		seen.add(key);
-		edges.push({ a, b, relType });
+		edges.push({ a, b, relType, bow: 0 });
 		if (!neighbors.has(a)) neighbors.set(a, new Set());
 		if (!neighbors.has(b)) neighbors.set(b, new Set());
 		neighbors.get(a)?.add(b);
@@ -121,6 +133,59 @@ export function computeGraphLayout(indexer: LoomIndexer, projectRoot: string): G
 	}
 
 	const allNodes = [...nodes.values()];
+	bowObstructedEdges(edges, nodes, allNodes, edgeCurve);
 	const width = allNodes.reduce((m, n) => Math.max(m, n.x), 0) + MARGIN_X;
 	return { nodes: allNodes, edges, neighbors, width, height: globalY + 100 };
+}
+
+/** How close (px) a node center must be to a segment to count as obstructing. */
+const OBSTRUCTION_CLEARANCE = 28;
+
+function pointToSegmentDistance(
+	px: number,
+	py: number,
+	ax: number,
+	ay: number,
+	bx: number,
+	by: number
+): number {
+	const dx = bx - ax;
+	const dy = by - ay;
+	const lenSq = dx * dx + dy * dy;
+	const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+	return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+/**
+ * Marks edges whose straight segment passes through other nodes, giving them
+ * a sideways bow. Sides alternate across bowed edges so two curves sharing
+ * the same corridor split apart instead of overlapping again.
+ *
+ * `curve` is the user-configured control-point offset; the rendered curve
+ * deviates from the straight chord by half of it at the midpoint. Passing
+ * through additional nodes deepens the bow up to +80%.
+ */
+function bowObstructedEdges(
+	edges: LayoutEdge[],
+	nodes: Map<string, LayoutNode>,
+	allNodes: LayoutNode[],
+	curve: number
+): void {
+	let side = 1;
+	for (const edge of edges) {
+		const a = nodes.get(edge.a);
+		const b = nodes.get(edge.b);
+		if (!a || !b) continue;
+		let obstructions = 0;
+		for (const n of allNodes) {
+			if (n.id === edge.a || n.id === edge.b) continue;
+			if (pointToSegmentDistance(n.x, n.y, a.x, a.y, b.x, b.y) < OBSTRUCTION_CLEARANCE) {
+				obstructions++;
+			}
+		}
+		if (obstructions > 0) {
+			edge.bow = side * curve * (1 + Math.min(obstructions - 1, 2) * 0.4);
+			side = -side;
+		}
+	}
 }
