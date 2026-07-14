@@ -21,7 +21,7 @@ and a custom layered graph view.
 | `src/columns.ts` | Chronological column layout shared by timeline and graph (sessions anchor columns, linked events stack beneath) |
 | `src/project.ts` | Project scaffolding (.loom + folders), entity creation (managed session file names), setup/create/pick modals |
 | `src/timeline-settings.ts` | Per-project timeline settings modal: date format + custom calendar editor, writes to the .loom file |
-| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, timeline, graph + shared shell/hooks |
+| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`) |
 | `src/graph/` | Graph-only logic: layered layout computation, connections side panel |
 | `scripts/deploy.mjs` | Builds are copied to the test vault with `pnpm run deploy` |
 | `docs/ARCHITECTURE.md` | Data flow, relationship model, calendar abstraction, design tradeoffs |

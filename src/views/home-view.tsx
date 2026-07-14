@@ -7,7 +7,6 @@ import {
 	VIEW_GRAPH,
 	VIEW_HOME,
 	VIEW_LIST,
-	VIEW_TIMELINE,
 } from '../types';
 import { LoomFileReactView } from './react-view';
 import { Icon } from './common';
@@ -66,10 +65,6 @@ function Home({ view }: { view: HomeView }) {
 				))}
 			</div>
 			<div className="loom-home-grid loom-home-grid-wide">
-				<button className="loom-card" onClick={() => view.navigateTo(VIEW_TIMELINE, state)}>
-					<Icon name="calendar-range" />
-					<span className="loom-card-label">Timeline</span>
-				</button>
 				<button className="loom-card" onClick={() => view.navigateTo(VIEW_GRAPH, state)}>
 					<Icon name="git-fork" />
 					<span className="loom-card-label">Loom graph</span>

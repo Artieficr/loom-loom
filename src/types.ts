@@ -103,6 +103,5 @@ export interface TimelineDef {
 
 export const VIEW_HOME = 'loom-loom-home';
 export const VIEW_LIST = 'loom-loom-list';
-export const VIEW_TIMELINE = 'loom-loom-timeline';
 export const VIEW_GRAPH = 'loom-loom-graph';
 export const VIEW_ENTITY = 'loom-loom-entity';
