@@ -199,18 +199,19 @@
 	gap: var(--size-2-2);
 }
 
-/* Date + anchor bubble stack, date centered over the bubble. */
-.loom-col-anchor {
+/* Fixed-height header band shared by session bubbles and date labels, so
+   every column's events start on the same line. */
+.loom-col-header {
 	display: flex;
-	flex-direction: column;
 	align-items: center;
-	gap: var(--size-2-2);
+	min-height: 36px;
 }
 
 .loom-col-date {
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
 	text-align: center;
+	padding: 0 var(--size-4-2);
 }
 
 /* Events nested under a session indent right, like a code hierarchy shift. */
@@ -221,7 +222,14 @@
 	margin-left: var(--size-4-6);
 	border-left: 2px solid var(--background-modifier-border);
 	padding-left: var(--size-4-3);
-	margin-top: var(--size-2-2);
+}
+
+/* A sessionless event is not nested — no indent, no tree line — but starts
+   on the same line as the first nested event of session columns. */
+.loom-col-events-root {
+	margin-left: 0;
+	border-left: none;
+	padding-left: 0;
 }
 
 .loom-bubble {
@@ -302,8 +310,11 @@
 /* ---- timeline drawer ---- */
 
 .loom-drawer {
-	border-top: 1px solid var(--background-modifier-border);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	overflow: hidden;
 	flex-shrink: 0;
+	margin-top: var(--size-2-2);
 	/* Mid-grey at low alpha tints darker on light themes and lighter on dark
 	   themes, so the drawer separates from the graph without hardcoding a
 	   theme color. */
@@ -335,6 +346,14 @@
 }
 
 .loom-drawer-body {
+	overflow: hidden;
+}
+
+.loom-drawer-anim {
+	transition: height 220ms ease;
+}
+
+.loom-drawer-inner {
 	overflow: auto;
 	padding: var(--size-4-3);
 }

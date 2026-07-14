@@ -114,6 +114,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const [, setTick] = useState(0);
 	const [drawerOpen, setDrawerOpen] = useState(false);
 	const [drawerHeight, setDrawerHeight] = useState(240);
+	const [drawerResizing, setDrawerResizing] = useState(false);
 	const [defPath, setDefPath] = useState('');
 	const drawerDrag = useRef<{ pointerId: number; startY: number; startH: number } | null>(null);
 
@@ -400,6 +401,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (!drawerOpen || (e.target as HTMLElement).closest('button, select')) return;
 		e.currentTarget.setPointerCapture(e.pointerId);
 		drawerDrag.current = { pointerId: e.pointerId, startY: e.clientY, startH: drawerHeight };
+		// Height must follow the pointer 1:1 — suspend the slide transition.
+		setDrawerResizing(true);
 	};
 
 	const onDrawerBarPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -409,7 +412,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	};
 
 	const onDrawerBarPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
-		if (drawerDrag.current?.pointerId === e.pointerId) drawerDrag.current = null;
+		if (drawerDrag.current?.pointerId === e.pointerId) {
+			drawerDrag.current = null;
+			setDrawerResizing(false);
+		}
 	};
 
 	if (!project) {
@@ -545,11 +551,16 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							</button>
 						) : null}
 					</div>
-					{drawerOpen ? (
-						<div className="loom-drawer-body" style={{ height: drawerHeight }}>
+					<div
+						className={drawerResizing ? 'loom-drawer-body' : 'loom-drawer-body loom-drawer-anim'}
+						style={{ height: drawerOpen ? drawerHeight : 0 }}
+					>
+						{/* Inner keeps its full height while the outer collapses, so
+						    closing slides the content away instead of squishing it. */}
+						<div className="loom-drawer-inner" style={{ height: drawerHeight }}>
 							<TimelineStrip navigator={view} project={project} def={activeDef} />
 						</div>
-					) : null}
+					</div>
 				</div>
 			</div>
 		</ViewShell>
