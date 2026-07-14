@@ -207,6 +207,12 @@
 	min-height: 36px;
 }
 
+/* Date labels center over the event bubble that sets the column width. */
+.loom-col-header-date {
+	align-self: stretch;
+	justify-content: center;
+}
+
 .loom-col-date {
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
@@ -325,7 +331,7 @@
 	display: flex;
 	align-items: center;
 	gap: var(--size-4-2);
-	padding: var(--size-2-1) var(--size-4-2);
+	padding: var(--size-4-2);
 }
 
 /* The bar doubles as the resize edge while the drawer is open. */
