@@ -42,13 +42,16 @@ const EVENT_Y0 = 180;
 const EVENT_DY = 90;
 const GLOBAL_GAP = 140;
 const GLOBAL_MIN_SPACING = 130;
+/** Min horizontal distance (px) between a multi-session event and other nodes in its row. */
+const MULTI_CLEARANCE = 100;
 
 /**
  * Layered layout:
  * - row 0: sessions, ordered chronologically (same column order as the
  *   timeline view — both derive from `buildColumns`);
- * - row 1: events, stacked beneath their linked session's column, unlinked
- *   events anchoring their own column;
+ * - row 1: events, stacked beneath their linked session's column; events
+ *   linked to several sessions centered between them; unlinked events
+ *   anchoring their own column;
  * - row 2: global entities (characters, locations, factions, items) on one
  *   fixed horizontal axis, each pulled toward the mean x of its connections.
  */
@@ -61,6 +64,24 @@ export function computeGraphLayout(
 
 	const columns = buildColumns(indexer, null, projectRoot);
 	let maxStack = 0;
+
+	// An event linked to several sessions appears in each of their columns in
+	// `buildColumns` (that's what the timeline strip renders), but in the graph
+	// it is one node — centered between its sessions instead of stacked under a
+	// single column.
+	const occurrences = new Map<string, number>();
+	for (const col of columns) {
+		for (const ev of col.events) occurrences.set(ev.path, (occurrences.get(ev.path) ?? 0) + 1);
+	}
+	const multi = new Map<string, { record: EntityRecord; xs: number[] }>();
+
+	/** Occupied x positions per event stack row, for collision-free placement. */
+	const rows: number[][] = [];
+	const occupy = (row: number, x: number) => {
+		(rows[row] ??= []).push(x);
+		maxStack = Math.max(maxStack, row + 1);
+	};
+
 	columns.forEach((col, i) => {
 		const x = MARGIN_X + i * COL_WIDTH;
 		const anchorKind = col.anchor.type === 'session' ? 'session' : 'event';
@@ -71,11 +92,30 @@ export function computeGraphLayout(
 			y: anchorKind === 'session' ? SESSION_Y : EVENT_Y0,
 			kind: anchorKind,
 		});
-		col.events.forEach((ev, j) => {
-			nodes.set(ev.path, { id: ev.path, record: ev, x, y: EVENT_Y0 + j * EVENT_DY, kind: 'event' });
-			maxStack = Math.max(maxStack, j + 1);
-		});
+		if (anchorKind === 'event') occupy(0, x);
+		let stack = 0;
+		for (const ev of col.events) {
+			if ((occurrences.get(ev.path) ?? 0) > 1) {
+				const entry = multi.get(ev.path) ?? { record: ev, xs: [] };
+				entry.xs.push(x);
+				multi.set(ev.path, entry);
+				continue;
+			}
+			nodes.set(ev.path, { id: ev.path, record: ev, x, y: EVENT_Y0 + stack * EVENT_DY, kind: 'event' });
+			occupy(stack, x);
+			stack++;
+		}
 	});
+
+	// Multi-session events: mean x of their session columns, dropped to the
+	// first stack row with enough horizontal clearance from what's already there.
+	for (const { record, xs } of [...multi.values()].sort((a, b) => a.record.name.localeCompare(b.record.name))) {
+		const x = xs.reduce((s, v) => s + v, 0) / xs.length;
+		let row = 0;
+		while ((rows[row] ?? []).some((ox) => Math.abs(ox - x) < MULTI_CLEARANCE)) row++;
+		nodes.set(record.path, { id: record.path, record, x, y: EVENT_Y0 + row * EVENT_DY, kind: 'event' });
+		occupy(row, x);
+	}
 
 	const globals = GLOBAL_TYPES.flatMap((t) => indexer.getAll(t, projectRoot)).sort((a, b) =>
 		a.name.localeCompare(b.name)

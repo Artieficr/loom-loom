@@ -452,6 +452,15 @@
 .loom-sidepanel-title {
 	font-size: var(--font-ui-medium);
 	font-weight: var(--font-semibold);
+	flex: 1;
+	min-width: 0;
+}
+
+.loom-sidepanel-title-text {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .loom-sidepanel-desc {
@@ -464,17 +473,44 @@
 	margin-bottom: var(--size-2-3);
 }
 
+.loom-section-head {
+	display: flex;
+	align-items: center;
+}
+
 .loom-section-header {
 	display: flex;
 	align-items: center;
 	gap: var(--size-2-2);
-	width: 100%;
+	flex: 1;
+	min-width: 0;
 	background: none;
 	box-shadow: none;
 	cursor: pointer;
 	color: var(--text-normal);
 	font-weight: var(--font-medium);
 	padding: var(--size-2-2);
+}
+
+/* Creates a new entity of the section's type, pre-connected to the node. */
+.loom-section-add {
+	display: flex;
+	align-items: center;
+	background: none;
+	box-shadow: none;
+	cursor: pointer;
+	color: var(--text-muted);
+	padding: var(--size-2-2);
+}
+
+.loom-section-add:hover {
+	color: var(--text-normal);
+}
+
+.loom-section-add .loom-icon svg {
+	display: block;
+	width: var(--icon-s);
+	height: var(--icon-s);
 }
 
 .loom-caret {
@@ -493,16 +529,17 @@
 	font-size: var(--font-ui-smaller);
 }
 
+/* Entries keep one small indent from the panel's left edge, so names line up
+   in a single readable column across all sections. */
 .loom-section-body {
 	display: flex;
 	flex-direction: column;
-	padding-left: var(--size-4-3);
+	padding-left: var(--size-4-2);
 }
 
 .loom-link {
 	display: flex;
 	align-items: baseline;
-	gap: var(--size-4-2);
 	background: none;
 	box-shadow: none;
 	cursor: pointer;
@@ -511,8 +548,16 @@
 	text-align: left;
 }
 
+/* Two aligned columns: the name owns the left half of the row, the
+   relationship comment always starts at the center. Both truncate with an
+   ellipsis; the full text shows as a hover tooltip (see Truncated). */
 .loom-link-name {
 	color: var(--link-color);
+	flex: 0 0 50%;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .loom-link:hover .loom-link-name {
@@ -522,6 +567,69 @@
 .loom-link-rel {
 	color: var(--text-faint);
 	font-size: var(--font-ui-smaller);
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* ---- searchable dropdown ---- */
+
+.loom-combo {
+	position: relative;
+	max-width: 280px;
+}
+
+.loom-combo > input {
+	width: 100%;
+}
+
+/* As the relationship target, the combo fills the row like the input it replaced. */
+.loom-rel-row .loom-combo {
+	max-width: none;
+}
+
+.loom-combo-menu {
+	position: absolute;
+	top: 100%;
+	left: 0;
+	right: 0;
+	margin-top: var(--size-2-1);
+	display: flex;
+	flex-direction: column;
+	padding: var(--size-2-1);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+	max-height: 240px;
+	overflow-y: auto;
+	z-index: var(--layer-menu);
+}
+
+.loom-combo-item {
+	background: none;
+	box-shadow: none;
+	cursor: pointer;
+	text-align: left;
+	height: auto;
+	padding: var(--size-2-2) var(--size-4-2);
+	border-radius: var(--radius-s);
+}
+
+.loom-combo-item:hover {
+	background: var(--background-modifier-hover);
+}
+
+.loom-combo-action {
+	color: var(--text-accent);
+}
+
+.loom-combo-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	padding: var(--size-2-2) var(--size-4-2);
 }
 
 /* ---- settings ---- */
@@ -657,6 +765,72 @@
 	background: var(--interactive-accent) !important;
 	border-color: var(--interactive-accent) !important;
 	color: var(--text-on-accent) !important;
+}
+
+/* Linked-session chips: not toggles — a label with an unlink button. */
+.loom-tag-row .loom-session-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	cursor: default;
+}
+
+.loom-chip-remove {
+	background: none;
+	border: none;
+	box-shadow: none;
+	padding: 0;
+	height: auto;
+	line-height: 1;
+	font-size: var(--font-ui-smaller);
+	color: inherit;
+	cursor: pointer;
+}
+
+.loom-chip-remove:hover {
+	color: var(--text-normal);
+}
+
+.loom-rel-group .loom-rel-row {
+	margin-left: var(--size-4-2);
+}
+
+/* Rows whose target doesn't resolve yet (e.g. a freshly added empty row) sit
+   apart from the grouped ones until they land in their section. */
+.loom-rel-group + .loom-rel-ungrouped {
+	margin-top: var(--size-4-4);
+}
+
+/* Subheader of a relationship group (one per target entity type). */
+.loom-rel-group-label {
+	display: block;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-medium);
+	margin-top: var(--size-2-2);
+	margin-bottom: var(--size-2-1);
+}
+
+/* Narrows the target autocomplete of its row to one entity type. */
+.loom-rel-filter {
+	display: flex;
+	align-items: center;
+	background: none;
+	box-shadow: none;
+	cursor: pointer;
+	color: var(--text-muted);
+	padding: var(--size-2-2);
+	height: auto;
+}
+
+.loom-rel-filter:hover {
+	color: var(--text-normal);
+}
+
+.loom-rel-filter .loom-icon svg {
+	display: block;
+	width: var(--icon-s);
+	height: var(--icon-s);
 }
 
 .loom-rel-row {

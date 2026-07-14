@@ -21,7 +21,7 @@ function bySortKey(a: EntityRecord, b: EntityRecord): number {
 function matchesDef(record: EntityRecord, def: TimelineDef | null): boolean {
 	if (!def) return true;
 	if (!def.types.includes(record.type)) return false;
-	if (def.tags.length > 0 && !def.tags.some((t) => record.pluginTags.includes(t))) return false;
+	if (def.tags.length > 0 && !def.tags.some((t) => record.loomTags.includes(t))) return false;
 	return true;
 }
 
@@ -40,10 +40,14 @@ export function buildColumns(
 
 	const anchors: EntityRecord[] = [...sessions];
 	for (const event of events) {
-		const session = indexer.resolveLinkedSession(event);
-		const column = session ? columns.get(session.path) : undefined;
-		if (column) {
-			column.events.push(event);
+		// An event can span several sessions — it stacks in every matching
+		// column (the def filter may exclude some of its sessions).
+		const eventColumns = indexer
+			.resolveLinkedSessions(event)
+			.map((s) => columns.get(s.path))
+			.filter((c): c is TimelineColumn => c !== undefined);
+		if (eventColumns.length > 0) {
+			for (const column of eventColumns) column.events.push(event);
 		} else {
 			columns.set(event.path, { anchor: event, events: [] });
 			anchors.push(event);

@@ -44,6 +44,24 @@ export function extractLinkpath(raw: string): string | null {
 	return path.length > 0 ? path : null;
 }
 
+function parseTagList(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((t): t is string => typeof t === 'string') : [];
+}
+
+/**
+ * Case-insensitive frontmatter lookup. Obsidian's Properties UI treats
+ * property names case-insensitively and can rewrite a key to another casing
+ * (e.g. `loomTags` → `loomtags`), so our camelCase keys must be read loosely.
+ */
+function fmField(fm: FrontMatterCache, key: string): unknown {
+	if (fm[key] !== undefined) return fm[key];
+	const lower = key.toLowerCase();
+	for (const k of Object.keys(fm)) {
+		if (k.toLowerCase() === lower) return fm[k];
+	}
+	return undefined;
+}
+
 /**
  * The index cache: entity records built from frontmatter across all projects
  * (any folder holding a .loom file).
@@ -253,19 +271,28 @@ export class LoomIndexer extends Component {
 		// project's calendar (custom in-game calendar when enabled).
 		const calendar =
 			type !== 'session' && project.config.customCalendar.enabled ? 'custom' : 'gregorian';
-		const linkedSessionRaw = typeof fm.linkedSession === 'string' ? fm.linkedSession : '';
+		// `linkedSession` accepts a single link or a list of links (an event can
+		// span several sessions); the key keeps its historical singular name.
+		const linkedValue = fmField(fm, 'linkedSession');
+		const linkedRaw: unknown[] = Array.isArray(linkedValue) ? linkedValue : [linkedValue];
+		const linkedSessions: string[] = [];
+		for (const raw of linkedRaw) {
+			if (typeof raw !== 'string' || raw === '') continue;
+			const linkpath = extractLinkpath(raw);
+			if (linkpath && !linkedSessions.includes(linkpath)) linkedSessions.push(linkpath);
+		}
 		return {
 			path: file.path,
 			name: file.basename,
 			type,
 			project: project.root,
-			pluginTags: Array.isArray(fm.pluginTags)
-				? fm.pluginTags.filter((t): t is string => typeof t === 'string')
-				: [],
+			// `loomTags` is the current key; `pluginTags` is its pre-rename
+			// spelling, still read so existing notes keep their tags.
+			loomTags: parseTagList(fmField(fm, 'loomTags') ?? fmField(fm, 'pluginTags')),
 			description: typeof fm.description === 'string' ? fm.description : '',
 			relationships,
 			date: parseLoomDate(fm.date, calendar, project.config),
-			linkedSession: linkedSessionRaw === '' ? null : extractLinkpath(linkedSessionRaw),
+			linkedSessions,
 			role: typeof fm.role === 'string' ? fm.role : '',
 			created: file.stat.ctime,
 			modified: file.stat.mtime,
@@ -304,11 +331,16 @@ export class LoomIndexer extends Component {
 		return file ? this.records.get(file.path) ?? null : null;
 	}
 
-	/** The session record an event links to, if any. */
-	resolveLinkedSession(record: EntityRecord): EntityRecord | null {
-		if (!record.linkedSession) return null;
-		const target = this.resolve(record.linkedSession, record.path);
-		return target?.type === 'session' ? target : null;
+	/** The session records an event links to, deduplicated, possibly empty. */
+	resolveLinkedSessions(record: EntityRecord): EntityRecord[] {
+		const sessions: EntityRecord[] = [];
+		for (const linkpath of record.linkedSessions) {
+			const target = this.resolve(linkpath, record.path);
+			if (target?.type === 'session' && !sessions.some((s) => s.path === target.path)) {
+				sessions.push(target);
+			}
+		}
+		return sessions;
 	}
 
 	/**
@@ -328,8 +360,8 @@ export class LoomIndexer extends Component {
 				linked.add(target.path);
 			}
 		}
-		const session = this.resolveLinkedSession(record);
-		if (session && !linked.has(session.path)) {
+		for (const session of this.resolveLinkedSessions(record)) {
+			if (linked.has(session.path)) continue;
 			out.push({ record: session, relType: 'session', direction: 'outgoing' });
 			linked.add(session.path);
 		}
@@ -393,7 +425,7 @@ export class LoomIndexer extends Component {
 		if (!dir) return;
 		const payload = JSON.stringify(
 			{
-				schemaVersion: 2,
+				schemaVersion: 3,
 				generatedAt: Date.now(),
 				projects: [...this.projects.values()],
 				records: [...this.records.values()],

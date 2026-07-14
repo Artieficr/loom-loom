@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Connection, ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
+import { Icon, Truncated } from '../views/common';
 
 function Section({
 	label,
@@ -7,21 +8,32 @@ function Section({
 	threshold,
 	connectionLabel,
 	onOpen,
+	onCreate,
 }: {
 	label: string;
 	entries: Connection[];
 	threshold: number;
 	connectionLabel: (record: EntityRecord) => string;
 	onOpen: (path: string) => void;
+	onCreate: () => void;
 }) {
 	const [open, setOpen] = useState(entries.length <= threshold);
 	return (
 		<div className="loom-section">
-			<button className="loom-section-header" onClick={() => setOpen(!open)}>
-				<span className={open ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
-				{label}
-				<span className="loom-section-count">{entries.length}</span>
-			</button>
+			<div className="loom-section-head">
+				<button className="loom-section-header" onClick={() => setOpen(!open)}>
+					<span className={open ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
+					{label}
+					<span className="loom-section-count">{entries.length}</span>
+				</button>
+				<button
+					className="loom-section-add"
+					aria-label={`New connected ${label.toLowerCase()}`}
+					onClick={onCreate}
+				>
+					<Icon name="plus" />
+				</button>
+			</div>
 			{open ? (
 				<div className="loom-section-body">
 					{entries.map((conn) => (
@@ -30,8 +42,8 @@ function Section({
 							className="loom-link"
 							onClick={() => onOpen(conn.record.path)}
 						>
-							<span className="loom-link-name">{connectionLabel(conn.record)}</span>
-							<span className="loom-link-rel">{conn.relType}</span>
+							<Truncated className="loom-link-name" text={connectionLabel(conn.record)} />
+							<Truncated className="loom-link-rel" text={conn.relType} />
 						</button>
 					))}
 				</div>
@@ -48,6 +60,7 @@ export function GraphSidePanel({
 	threshold,
 	onOpen,
 	onClose,
+	onCreate,
 }: {
 	record: EntityRecord;
 	label: string;
@@ -56,6 +69,8 @@ export function GraphSidePanel({
 	threshold: number;
 	onOpen: (path: string) => void;
 	onClose: () => void;
+	/** Create a new entity of the given type, connected to `record`. */
+	onCreate: (type: EntityType) => void;
 }) {
 	const groups = new Map<EntityType, Connection[]>();
 	for (const conn of connections) {
@@ -68,7 +83,7 @@ export function GraphSidePanel({
 		<div className="loom-sidepanel">
 			<div className="loom-sidepanel-header">
 				<button className="loom-link loom-sidepanel-title" onClick={() => onOpen(record.path)}>
-					{label}
+					<Truncated className="loom-sidepanel-title-text" text={label} />
 				</button>
 				<button className="loom-nav-btn" onClick={onClose} aria-label="Close panel">
 					✕
@@ -87,6 +102,7 @@ export function GraphSidePanel({
 						threshold={threshold}
 						connectionLabel={connectionLabel}
 						onOpen={onOpen}
+						onCreate={() => onCreate(t)}
 					/>
 				))
 			)}

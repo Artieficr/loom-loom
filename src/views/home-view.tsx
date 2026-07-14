@@ -66,8 +66,8 @@ function Home({ view }: { view: HomeView }) {
 			</div>
 			<div className="loom-home-grid loom-home-grid-wide">
 				<button className="loom-card" onClick={() => view.navigateTo(VIEW_GRAPH, state)}>
-					<Icon name="git-fork" />
-					<span className="loom-card-label">Loom graph</span>
+					<Icon name="spool" />
+					<span className="loom-card-label">Loom</span>
 				</button>
 			</div>
 		</div>

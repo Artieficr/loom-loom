@@ -38,11 +38,11 @@ export class GraphView extends LoomReactView {
 	}
 
 	getDisplayText(): string {
-		return 'Loom graph';
+		return 'Loom';
 	}
 
 	getIcon(): string {
-		return 'git-fork';
+		return 'spool';
 	}
 
 	getState(): Record<string, unknown> {
@@ -370,7 +370,14 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				item
 					.setTitle(`New ${ENTITY_META[type].label.toLowerCase()}`)
 					.setIcon(ENTITY_META[type].icon)
-					.onClick(() => new CreateEntityModal(plugin, type, project).open())
+					.onClick(() =>
+						new CreateEntityModal(plugin, type, project, {
+							// Open through the view so the graph is recorded as the
+							// origin — the entity page's Back returns here, not to
+							// the type's list.
+							onCreated: (file) => view.openEntity(file.path),
+						}).open()
+					)
 			);
 		}
 		menu.showAtMouseEvent(e.nativeEvent);
@@ -464,7 +471,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	if (!project) {
 		return (
-			<ViewShell view={view} project={null} title="Loom graph">
+			<ViewShell view={view} project={null} title="Loom">
 				{noProjectMessage()}
 			</ViewShell>
 		);
@@ -474,7 +481,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		<ViewShell
 			view={view}
 			project={project}
-			title="Loom graph"
+			title="Loom"
 			titleExtra={
 				<button className="loom-nav-btn" onClick={fitAll}>
 					Fit view
@@ -561,6 +568,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						threshold={plugin.settings.graphCollapseThreshold}
 						onOpen={(path) => view.openEntity(path)}
 						onClose={() => setSelected(null)}
+						onCreate={(type) =>
+							new CreateEntityModal(plugin, type, project, {
+								connectTo: { record: selectedRecord, label: recordLabel(selectedRecord, project) },
+							}).open()
+						}
 					/>
 				) : null}
 				{layout.nodes.length === 0 ? <div className="loom-empty loom-graph-empty">No entities yet.</div> : null}
