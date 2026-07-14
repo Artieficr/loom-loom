@@ -18,8 +18,26 @@ import { Icon, ViewShell, noProjectMessage, recordLabel } from './common';
 import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
 
+/** Screen = world * k + t. */
+interface Camera {
+	tx: number;
+	ty: number;
+	k: number;
+}
+
+/** Transient UI state carried through view state so Back restores the graph as left. */
+interface GraphUiState {
+	camera?: Camera;
+	drawerOpen?: boolean;
+	drawerHeight?: number;
+}
+
 export class GraphView extends LoomReactView {
 	projectRoot: string | null = null;
+	/** Snapshot restored on mount (from setState). */
+	restored: GraphUiState = {};
+	/** Live snapshot the component keeps in sync (serialized by getState). */
+	current: GraphUiState = {};
 
 	getViewType(): string {
 		return VIEW_GRAPH;
@@ -34,12 +52,18 @@ export class GraphView extends LoomReactView {
 	}
 
 	getState(): Record<string, unknown> {
-		return { project: this.projectRoot };
+		return { project: this.projectRoot, ...this.current };
 	}
 
 	async setState(state: unknown, result: ViewStateResult): Promise<void> {
-		const s = state as { project?: unknown } | null;
+		const s = state as ({ project?: unknown } & GraphUiState) | null;
 		if (typeof s?.project === 'string') this.projectRoot = s.project;
+		const cam = s?.camera;
+		if (cam && typeof cam.tx === 'number' && typeof cam.ty === 'number' && typeof cam.k === 'number') {
+			this.restored.camera = cam;
+		}
+		if (typeof s?.drawerOpen === 'boolean') this.restored.drawerOpen = s.drawerOpen;
+		if (typeof s?.drawerHeight === 'number') this.restored.drawerHeight = s.drawerHeight;
 		await super.setState(state, result);
 		this.renderNow();
 	}
@@ -58,13 +82,6 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 3;
 /** Screen-space padding the selected node keeps from the viewport edges. */
 const REVEAL_MARGIN = 90;
-
-/** Screen = world * k + t. */
-interface Camera {
-	tx: number;
-	ty: number;
-	k: number;
-}
 
 interface Displacement {
 	dx: number;
@@ -109,11 +126,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	);
 
 	const [selected, setSelected] = useState<string | null>(null);
-	const [camera, setCamera] = useState<Camera>({ tx: 0, ty: 0, k: 1 });
+	const [camera, setCamera] = useState<Camera>(view.restored.camera ?? { tx: 0, ty: 0, k: 1 });
 	const [size, setSize] = useState({ w: 1200, h: 700 });
 	const [, setTick] = useState(0);
-	const [drawerOpen, setDrawerOpen] = useState(false);
-	const [drawerHeight, setDrawerHeight] = useState(240);
+	const [drawerOpen, setDrawerOpen] = useState(view.restored.drawerOpen ?? false);
+	const [drawerHeight, setDrawerHeight] = useState(view.restored.drawerHeight ?? 240);
 	const [drawerResizing, setDrawerResizing] = useState(false);
 	const [defPath, setDefPath] = useState('');
 	const drawerDrag = useRef<{ pointerId: number; startY: number; startH: number } | null>(null);
@@ -121,6 +138,12 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const wrapRef = useRef<HTMLDivElement>(null);
 	const cameraRef = useRef(camera);
 	cameraRef.current = camera;
+
+	// Keep the view's serializable snapshot in sync so navigating away and
+	// back (entity page Back button) restores the graph exactly as left.
+	useEffect(() => {
+		view.current = { camera, drawerOpen, drawerHeight };
+	}, [view, camera, drawerOpen, drawerHeight]);
 	const dispRef = useRef(new Map<string, Displacement>());
 	const dragRef = useRef<DragState | null>(null);
 	const panRef = useRef<PanState | null>(null);
