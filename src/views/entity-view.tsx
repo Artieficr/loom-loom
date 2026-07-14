@@ -1,6 +1,6 @@
-import { Notice, TFile, normalizePath } from 'obsidian';
+import { Notice, TFile, ViewStateResult, normalizePath } from 'obsidian';
 import { ReactElement, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ENTITY_META, VIEW_ENTITY, VIEW_LIST } from '../types';
+import { ENTITY_META, EntityOrigin, VIEW_ENTITY, VIEW_LIST } from '../types';
 import { CreateEntityModal, sanitizeFileName, sessionFileName } from '../project';
 import { LoomFileReactView } from './react-view';
 import { recordLabel } from './common';
@@ -17,8 +17,28 @@ const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
  * in any field connect exactly like links in any other note.
  */
 export class EntityView extends LoomFileReactView {
+	/** The view this entity page was opened from; Back returns there. */
+	origin: EntityOrigin | null = null;
+
 	getViewType(): string {
 		return VIEW_ENTITY;
+	}
+
+	getState(): Record<string, unknown> {
+		return { ...super.getState(), origin: this.origin };
+	}
+
+	async setState(state: unknown, result: ViewStateResult): Promise<void> {
+		const origin = (state as { origin?: unknown } | null)?.origin;
+		if (
+			typeof origin === 'object' &&
+			origin !== null &&
+			typeof (origin as EntityOrigin).type === 'string'
+		) {
+			this.origin = origin as EntityOrigin;
+		}
+		await super.setState(state, result);
+		this.renderNow();
 	}
 
 	getDisplayText(): string {
@@ -212,11 +232,16 @@ function EntityPage({ view }: { view: EntityView }) {
 			<div className="loom-entity-header">
 				<button
 					className="loom-nav-btn"
-					onClick={() =>
-						view.navigateTo(VIEW_LIST, { entityType: record.type, project: record.project })
-					}
+					onClick={() => {
+						// Return where this page was opened from (graph, list, …);
+						// fall back to the type's list when unknown (e.g. page
+						// opened right after creating the entity).
+						const origin = view.origin;
+						if (origin) view.navigateTo(origin.type, origin.state);
+						else view.navigateTo(VIEW_LIST, { entityType: record.type, project: record.project });
+					}}
 				>
-					← {ENTITY_META[record.type].plural}
+					← Back
 				</button>
 				<span className="loom-chip">{ENTITY_META[record.type].label}</span>
 				<div className="loom-shell-spacer" />

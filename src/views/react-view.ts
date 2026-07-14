@@ -1,4 +1,4 @@
-import { FileView, ItemView, TFile, WorkspaceLeaf } from 'obsidian';
+import { FileView, ItemView, TFile, View, WorkspaceLeaf } from 'obsidian';
 import { ReactElement } from 'react';
 import { Root, createRoot } from 'react-dom/client';
 import { VIEW_ENTITY } from '../types';
@@ -16,11 +16,18 @@ export interface LoomNavigator {
 	plugin: LoomLoomPlugin;
 }
 
-function openEntityIn(plugin: LoomLoomPlugin, path: string): void {
-	void plugin.app.workspace.getLeaf('tab').setViewState({
+/**
+ * Navigates the current leaf to an entity page, recording the current view
+ * as the origin so the page's Back button returns exactly there.
+ */
+function openEntityFrom(view: View, path: string): void {
+	void view.leaf.setViewState({
 		type: VIEW_ENTITY,
 		active: true,
-		state: { file: path },
+		state: {
+			file: path,
+			origin: { type: view.getViewType(), state: view.getState() },
+		},
 	});
 }
 
@@ -57,7 +64,7 @@ export abstract class LoomReactView extends ItemView implements LoomNavigator {
 	}
 
 	openEntity(path: string): void {
-		openEntityIn(this.plugin, path);
+		openEntityFrom(this, path);
 	}
 
 	/** Navigates this leaf to another plugin view (history-friendly). */
@@ -107,7 +114,7 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 	}
 
 	openEntity(path: string): void {
-		openEntityIn(this.plugin, path);
+		openEntityFrom(this, path);
 	}
 
 	navigateTo(viewType: string, state?: Record<string, unknown>): void {

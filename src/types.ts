@@ -101,6 +101,12 @@ export interface TimelineDef {
 	tags: string[];
 }
 
+/** Where an entity page was opened from; its Back button returns there. */
+export interface EntityOrigin {
+	type: string;
+	state: Record<string, unknown>;
+}
+
 export const VIEW_HOME = 'loom-loom-home';
 export const VIEW_LIST = 'loom-loom-list';
 export const VIEW_GRAPH = 'loom-loom-graph';
