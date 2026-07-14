@@ -306,6 +306,7 @@
 .loom-edge {
 	stroke: var(--background-modifier-border-hover);
 	stroke-width: 1.5;
+	fill: none;
 	transition: opacity 150ms ease;
 }
 
