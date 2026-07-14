@@ -7,7 +7,17 @@ import {
 	useRef,
 	useState,
 } from 'react';
-import { ENTITY_META, ENTITY_TYPES, EntityOrigin, EntityType, VIEW_ENTITY, VIEW_LIST } from '../types';
+import {
+	ENTITY_META,
+	ENTITY_TAGS,
+	ENTITY_TYPES,
+	EntityOrigin,
+	EntityRecord,
+	EntityType,
+	PC_TAG,
+	VIEW_ENTITY,
+	VIEW_LIST,
+} from '../types';
 import { CreateEntityModal, sanitizeFileName, sessionFileName } from '../project';
 import { LoomFileReactView } from './react-view';
 import { FRONTMATTER_RE, Icon, SearchableSelect, SuggestInput, recordLabel } from './common';
@@ -191,7 +201,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	}
 
 	const isSession = record.type === 'session';
-	const vocab = plugin.settings.tagVocabulary[record.type];
+	const vocab = ENTITY_TAGS[record.type];
 	const allTags = [...new Set([...vocab, ...record.loomTags])];
 	const sessions = project ? plugin.indexer.getAll('session', project.root) : [];
 	const linkedSessions = plugin.indexer.resolveLinkedSessions(record);
@@ -240,6 +250,56 @@ function EntityPage({ view }: { view: EntityView }) {
 	const writeLinkedSessions = (names: string[]) => {
 		writeFm((fm) => {
 			setFmKey(fm, 'linkedSession', names.map((n) => `[[${n}]]`));
+		});
+	};
+
+	// Session attendance: PC characters offered as toggle chips. A PC who died
+	// in an earlier session is no longer offered in sessions after it.
+	const attendancePcs = isSession
+		? plugin.indexer
+				.getAll('character', record.project)
+				.filter((c) => c.loomTags.includes(PC_TAG))
+				.filter((c) => {
+					if (c.alive || !c.deathSession || !record.date) return true;
+					const death = plugin.indexer.resolve(c.deathSession, c.path);
+					if (!death || death.type !== 'session' || !death.date) return true;
+					return record.date.sortKey <= death.date.sortKey;
+				})
+				.sort((a, b) => a.name.localeCompare(b.name))
+		: [];
+	const attendingPaths = new Set(
+		record.attendance
+			.map((lp) => plugin.indexer.resolve(lp, record.path)?.path)
+			.filter((p): p is string => p !== undefined)
+	);
+	const toggleAttendance = (c: EntityRecord) => {
+		const next = attendingPaths.has(c.path)
+			? record.attendance.filter((lp) => plugin.indexer.resolve(lp, record.path)?.path !== c.path)
+			: [...record.attendance, c.name];
+		writeFm((fm) => {
+			setFmKey(fm, 'attendance', next.map((n) => `[[${n}]]`));
+		});
+	};
+
+	// PC life state: unticking Alive reveals the death-session picker.
+	const isPc = record.type === 'character' && record.loomTags.includes(PC_TAG);
+	const deathSession =
+		record.deathSession !== null ? plugin.indexer.resolve(record.deathSession, record.path) : null;
+	const clearDeathKey = (fm: Record<string, unknown>) => {
+		for (const k of Object.keys(fm)) {
+			if (k.toLowerCase() === 'deathsession') delete fm[k];
+		}
+	};
+	const setAlive = (alive: boolean) => {
+		writeFm((fm) => {
+			setFmKey(fm, 'alive', alive);
+			if (alive) clearDeathKey(fm);
+		});
+	};
+	const setDeathSession = (sessionName: string | null) => {
+		writeFm((fm) => {
+			if (sessionName === null) clearDeathKey(fm);
+			else setFmKey(fm, 'deathSession', `[[${sessionName}]]`);
 		});
 	};
 
@@ -401,6 +461,27 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
+			{isSession ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Attendance</span>
+					{attendancePcs.length > 0 ? (
+						<div className="loom-tag-row">
+							{attendancePcs.map((c) => (
+								<button
+									key={c.path}
+									className={attendingPaths.has(c.path) ? 'loom-chip loom-chip-on' : 'loom-chip'}
+									onClick={() => toggleAttendance(c)}
+								>
+									{c.name}
+								</button>
+							))}
+						</div>
+					) : (
+						<div className="loom-attendance-empty">No PC characters in this project yet.</div>
+					)}
+				</div>
+			) : null}
+
 			<label className="loom-field">
 				<span className="loom-field-label">Description</span>
 				<textarea
@@ -446,6 +527,44 @@ function EntityPage({ view }: { view: EntityView }) {
 						}
 					/>
 				</label>
+			) : null}
+
+			{isPc ? (
+				<div className="loom-field">
+					<label className="loom-check">
+						<input type="checkbox" checked={record.alive} onChange={(e) => setAlive(e.target.checked)} />
+						Alive
+					</label>
+				</div>
+			) : null}
+
+			{isPc && !record.alive ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Death session</span>
+					{deathSession && deathSession.type === 'session' ? (
+						<div className="loom-tag-row">
+							<span className="loom-chip loom-session-chip">
+								{recordLabel(deathSession, project)}
+								<button
+									className="loom-chip-remove"
+									aria-label="Clear death session"
+									onClick={() => setDeathSession(null)}
+								>
+									✕
+								</button>
+							</span>
+						</div>
+					) : (
+						<SearchableSelect
+							placeholder="Pick the session…"
+							options={sessions
+								.slice()
+								.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
+								.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+							onPick={(name) => setDeathSession(name)}
+						/>
+					)}
+				</div>
 			) : null}
 
 			{record.type === 'event' ? (

@@ -1,5 +1,5 @@
 import { App, FuzzySuggestModal, Modal, Notice, Setting, TFile, normalizePath } from 'obsidian';
-import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType, LOOM_EXTENSION, TIMELINES_FOLDER } from './types';
+import { ENTITY_META, ENTITY_TAGS, ENTITY_TYPES, EntityRecord, EntityType, LOOM_EXTENSION, TIMELINES_FOLDER } from './types';
 import { defaultProjectConfig, serializeProjectConfig, todayRaw } from './calendar';
 import { ProjectDef } from './indexer';
 import type LoomLoomPlugin from './main';
@@ -94,9 +94,10 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 				]
 			: ['relationships: []']),
 	];
-	if (type === 'character') lines.push('role: ""');
+	if (type === 'character') lines.push('role: ""', 'alive: true');
 	if (type === 'event' || type === 'session') lines.push(`date: ${yamlQuote(fields.date)}`);
 	if (type === 'event') lines.push('linkedSession: []');
+	if (type === 'session') lines.push('attendance: []');
 	lines.push('---', '', '');
 	return lines.join('\n');
 }
@@ -165,7 +166,7 @@ export class CreateEntityModal extends Modal {
 			});
 		}
 
-		const vocab = this.plugin.settings.tagVocabulary[this.type];
+		const vocab = ENTITY_TAGS[this.type];
 		if (vocab.length > 0) {
 			new Setting(this.contentEl).setName('Tag').addDropdown((dd) => {
 				dd.addOption('', '—');

@@ -877,6 +877,20 @@ body.loom-text-large {
 	color: var(--text-on-accent) !important;
 }
 
+/* Alive tick (PC characters). */
+.loom-check {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	cursor: pointer;
+	width: fit-content;
+}
+
+.loom-attendance-empty {
+	color: var(--text-faint);
+	font-size: 0.9em;
+}
+
 /* Linked-session chips: not toggles — a label with an unlink button. */
 .loom-tag-row .loom-session-chip {
 	display: inline-flex;

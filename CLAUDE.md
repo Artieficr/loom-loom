@@ -50,7 +50,12 @@ and a custom layered graph view.
 - **Connections**: typed frontmatter relationships + `linkedSession` (one link or a
   list — events can span several sessions) + plain `[[links]]` anywhere in a note
   (relType `link`), all resolved bidirectionally; graph edges undirected. Entity tags
-  live in `loomTags` (legacy `pluginTags` still read).
+  live in `loomTags` (legacy `pluginTags` still read); the tag vocabulary is hardcoded
+  (`ENTITY_TAGS` in types.ts), not user-configurable.
+- **Hidden connections**: links under the `attendance` and `deathSession` frontmatter
+  keys never become connections or graph edges (session attendance would spray edges
+  everywhere). Sessions list attending PCs (`PC` tag); PCs carry `alive` and
+  `deathSession` — sessions dated after a PC's death session stop offering them.
 - **Dates**: `LoomDate` = raw string + packed sortable number + y/m/d + calendar id.
   Sessions always Gregorian; other entities use the project calendar (custom in-game
   months when enabled). Formatting is per-project config, never JS `Date`.
@@ -66,8 +71,10 @@ and a custom layered graph view.
 
 - `pnpm run build` — typecheck + production bundle; `pnpm run lint` — Obsidian's ESLint
   rules (treat errors as build failures); `pnpm run deploy` — build + copy the three
-  release files (`main.js`, `manifest.json`, `styles.css`) into the test vault at
-  `~/Dropbox/Obsidian/Test Vault`. Deploy at every ready-to-test state.
+  release files (`main.js`, `manifest.json`, `styles.css`) into both test vaults:
+  `~/Dropbox/Obsidian/Test Vault` and `~/Dropbox/Obsidian/Main vault` (the user's real
+  vault — real campaign data lives there, so writes must stay conservative). Deploy at
+  every ready-to-test state.
 - Releases ship exactly those three files, built by `.github/workflows/release.yml` when
   a GitHub release is created; `main.js` is never committed.
 
