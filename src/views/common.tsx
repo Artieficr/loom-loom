@@ -1,6 +1,6 @@
 import { setIcon } from 'obsidian';
 import { ReactNode, useEffect, useRef } from 'react';
-import { EntityRecord, VIEW_GRAPH } from '../types';
+import { EntityRecord } from '../types';
 import { formatLoomDate } from '../calendar';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
@@ -46,12 +46,11 @@ export function ViewShell({
 	view: LoomNavigator;
 	project: ProjectDef | null;
 	title: string;
-	/** Rendered right after the title (e.g. view-specific action buttons). */
+	/** Rendered on the right side of the title row (view-specific actions). */
 	titleExtra?: ReactNode;
 	toolbar?: ReactNode;
 	children: ReactNode;
 }) {
-	const state = project ? { project: project.root } : undefined;
 	return (
 		<div className="loom-shell">
 			<div className="loom-shell-header">
@@ -61,11 +60,8 @@ export function ViewShell({
 					</button>
 				) : null}
 				<h2 className="loom-shell-title">{title}</h2>
-				{titleExtra}
 				<div className="loom-shell-spacer" />
-				<button className="loom-nav-btn" onClick={() => view.navigateTo(VIEW_GRAPH, state)}>
-					Loom graph
-				</button>
+				{titleExtra}
 			</div>
 			{toolbar ? <div className="loom-toolbar">{toolbar}</div> : null}
 			<div className="loom-shell-body">{children}</div>

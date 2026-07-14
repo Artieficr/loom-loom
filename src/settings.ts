@@ -1,5 +1,5 @@
 import { App, PluginSettingTab, Setting, setIcon } from 'obsidian';
-import { ENTITY_META, ENTITY_TYPES, EntityType } from './types';
+import { ENTITY_META, ENTITY_TYPES, EntityType, GraphCamera } from './types';
 import { ConfirmModal } from './project';
 import type LoomLoomPlugin from './main';
 
@@ -16,6 +16,8 @@ export interface LoomLoomSettings {
 	graphFocusZoom: number;
 	/** Graph node fill color per entity type. */
 	nodeColors: Record<EntityType, string>;
+	/** Last camera per project root — not user-facing, remembered across sessions. */
+	graphCameras: Record<string, GraphCamera>;
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
@@ -39,6 +41,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		faction: '#d16d9e',
 		item: '#d8b13c',
 	},
+	graphCameras: {},
 };
 
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
@@ -46,6 +49,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		...DEFAULT_SETTINGS,
 		tagVocabulary: { ...DEFAULT_SETTINGS.tagVocabulary },
 		nodeColors: { ...DEFAULT_SETTINGS.nodeColors },
+		graphCameras: {},
 	};
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
@@ -72,6 +76,13 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			const color = (data.nodeColors as Record<string, unknown>)[type];
 			if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) {
 				base.nodeColors[type] = color;
+			}
+		}
+	}
+	if (typeof data.graphCameras === 'object' && data.graphCameras !== null) {
+		for (const [root, cam] of Object.entries(data.graphCameras)) {
+			if (cam && typeof cam.tx === 'number' && typeof cam.ty === 'number' && typeof cam.k === 'number') {
+				base.graphCameras[root] = { tx: cam.tx, ty: cam.ty, k: cam.k };
 			}
 		}
 	}

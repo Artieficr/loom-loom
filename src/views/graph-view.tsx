@@ -1,4 +1,4 @@
-import { Menu, ViewStateResult } from 'obsidian';
+import { Menu, ViewStateResult, debounce } from 'obsidian';
 import {
 	MouseEvent as ReactMouseEvent,
 	PointerEvent as ReactPointerEvent,
@@ -8,7 +8,7 @@ import {
 	useRef,
 	useState,
 } from 'react';
-import { ENTITY_META, ENTITY_TYPES, TimelineDef, VIEW_GRAPH } from '../types';
+import { ENTITY_META, ENTITY_TYPES, GraphCamera, TimelineDef, VIEW_GRAPH } from '../types';
 import { CreateEntityModal } from '../project';
 import { TimelineSettingsModal } from '../timeline-settings';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
@@ -18,12 +18,7 @@ import { Icon, ViewShell, noProjectMessage, recordLabel } from './common';
 import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
 
-/** Screen = world * k + t. */
-interface Camera {
-	tx: number;
-	ty: number;
-	k: number;
-}
+type Camera = GraphCamera;
 
 /** Transient UI state carried through view state so Back restores the graph as left. */
 interface GraphUiState {
@@ -126,7 +121,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	);
 
 	const [selected, setSelected] = useState<string | null>(null);
-	const [camera, setCamera] = useState<Camera>(view.restored.camera ?? { tx: 0, ty: 0, k: 1 });
+	const [camera, setCamera] = useState<Camera>(
+		() =>
+			view.restored.camera ??
+			(project ? plugin.settings.graphCameras[project.root] : undefined) ?? { tx: 0, ty: 0, k: 1 }
+	);
 	const [size, setSize] = useState({ w: 1200, h: 700 });
 	const [, setTick] = useState(0);
 	const [drawerOpen, setDrawerOpen] = useState(view.restored.drawerOpen ?? false);
@@ -141,9 +140,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	// Keep the view's serializable snapshot in sync so navigating away and
 	// back (entity page Back button) restores the graph exactly as left.
+	// The camera is also remembered per project across sessions.
+	const persistCamera = useMemo(
+		() =>
+			debounce((root: string, cam: Camera) => {
+				plugin.settings.graphCameras[root] = cam;
+				void plugin.saveSettings();
+			}, 800, true),
+		[plugin]
+	);
 	useEffect(() => {
 		view.current = { camera, drawerOpen, drawerHeight };
-	}, [view, camera, drawerOpen, drawerHeight]);
+		if (project) persistCamera(project.root, camera);
+	}, [view, camera, drawerOpen, drawerHeight, project, persistCamera]);
 	const dispRef = useRef(new Map<string, Displacement>());
 	const dragRef = useRef<DragState | null>(null);
 	const panRef = useRef<PanState | null>(null);
