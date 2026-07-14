@@ -107,6 +107,13 @@ export interface EntityOrigin {
 	state: Record<string, unknown>;
 }
 
+/** Graph camera: screen = world * k + t. */
+export interface GraphCamera {
+	tx: number;
+	ty: number;
+	k: number;
+}
+
 export const VIEW_HOME = 'loom-loom-home';
 export const VIEW_LIST = 'loom-loom-list';
 export const VIEW_GRAPH = 'loom-loom-graph';
