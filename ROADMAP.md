@@ -48,8 +48,10 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Node colors per entity type, configurable in settings — `src/settings.ts`, `src/views/graph-view.tsx`
 - [x] Side panel: connections grouped by type, collapsible, auto-collapse over threshold — `src/graph/side-panel.tsx`
 - [x] Horizontal culling of off-screen nodes — `src/views/graph-view.tsx`
+- [x] Camera navigation: wheel zoom around cursor, drag-pan with any mouse button, right-click a node to zoom + center, obstructed edges curved (configurable depth) — `src/views/graph-view.tsx`, `src/graph/layout.ts`
+- [x] Side panel keeps the selected node visible (auto-pans when the panel would cover it) — `src/views/graph-view.tsx`
 - [ ] Visual polish: animations, edge styling/bundling, performance tuning for large graphs
-- [ ] Vertical virtualization, zoom/pan beyond native scrolling
+- [ ] Vertical virtualization of culling
 
 ## Settings
 
