@@ -39,12 +39,15 @@ export function ViewShell({
 	view,
 	project,
 	title,
+	titleExtra,
 	toolbar,
 	children,
 }: {
 	view: LoomNavigator;
 	project: ProjectDef | null;
 	title: string;
+	/** Rendered right after the title (e.g. view-specific action buttons). */
+	titleExtra?: ReactNode;
 	toolbar?: ReactNode;
 	children: ReactNode;
 }) {
@@ -58,6 +61,7 @@ export function ViewShell({
 					</button>
 				) : null}
 				<h2 className="loom-shell-title">{title}</h2>
+				{titleExtra}
 				<div className="loom-shell-spacer" />
 				<button className="loom-nav-btn" onClick={() => view.navigateTo(VIEW_TIMELINE, state)}>
 					Timeline

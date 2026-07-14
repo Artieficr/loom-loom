@@ -292,14 +292,17 @@
 	display: flex;
 }
 
-.loom-graph-scroll {
+.loom-graph-viewport {
 	flex: 1;
-	overflow: auto;
+	overflow: hidden;
 	min-width: 0;
+	position: relative;
 }
 
 .loom-graph-svg {
 	display: block;
+	width: 100%;
+	height: 100%;
 	touch-action: none;
 }
 
@@ -311,7 +314,7 @@
 }
 
 .loom-node {
-	cursor: grab;
+	cursor: pointer;
 	transition: opacity 150ms ease;
 }
 
