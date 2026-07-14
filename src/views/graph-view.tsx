@@ -1,6 +1,15 @@
-import { ViewStateResult } from 'obsidian';
-import { PointerEvent as ReactPointerEvent, ReactElement, useEffect, useMemo, useRef, useState } from 'react';
-import { VIEW_GRAPH } from '../types';
+import { Menu, ViewStateResult } from 'obsidian';
+import {
+	MouseEvent as ReactMouseEvent,
+	PointerEvent as ReactPointerEvent,
+	ReactElement,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from 'react';
+import { ENTITY_META, ENTITY_TYPES, VIEW_GRAPH } from '../types';
+import { CreateEntityModal } from '../project';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { GraphSidePanel } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
@@ -278,6 +287,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	const onSvgPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
 		window.cancelAnimationFrame(cameraRaf.current);
+		// Right click opens the create menu (see onSvgContextMenu), not a pan.
+		if (e.button === 2) return;
 		// Middle click would otherwise start autoscroll.
 		if (e.button === 1) e.preventDefault();
 		e.currentTarget.setPointerCapture(e.pointerId);
@@ -306,6 +317,21 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (!pan || pan.pointerId !== e.pointerId) return;
 		panRef.current = null;
 		if (!pan.moved && e.button === 0) setSelected(null);
+	};
+
+	const onSvgContextMenu = (e: ReactMouseEvent<SVGSVGElement>) => {
+		e.preventDefault();
+		if (!project) return;
+		const menu = new Menu();
+		for (const type of ENTITY_TYPES) {
+			menu.addItem((item) =>
+				item
+					.setTitle(`New ${ENTITY_META[type].label.toLowerCase()}`)
+					.setIcon(ENTITY_META[type].icon)
+					.onClick(() => new CreateEntityModal(plugin, type, project).open())
+			);
+		}
+		menu.showAtMouseEvent(e.nativeEvent);
 	};
 
 	// --- Derived render data ---------------------------------------------------
@@ -382,7 +408,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						onPointerDown={onSvgPointerDown}
 						onPointerMove={onSvgPointerMove}
 						onPointerUp={onSvgPointerUp}
-						onContextMenu={(e) => e.preventDefault()}
+						onContextMenu={onSvgContextMenu}
 					>
 						<g transform={`translate(${camera.tx},${camera.ty}) scale(${camera.k})`}>
 							{layout.edges.map((edge) => {
