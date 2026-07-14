@@ -38,7 +38,7 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Sessions display only their date; event-anchored columns show the date above the name — `src/views/timeline-strip.tsx`
 - [x] Multiple timeline definitions from `/Timelines` frontmatter (types + tag filters), selectable in the drawer bar — `src/indexer.ts`
 - [x] Hover tooltip from `description`, click opens entity page — `src/views/timeline-strip.tsx`
-- [x] Per-project timeline settings: date display format + custom in-game calendar (month count, names, optional short names); opened from the drawer bar — `src/timeline-settings.ts`, `src/calendar.ts`
+- [x] Per-project timeline settings: date display format + custom in-game calendar (month count, names, optional short names); edited in the settings tab's Graph tab — `src/timeline-settings.ts`, `src/calendar.ts`
 - [ ] Proportional time spacing / zoom (currently ordinal spacing)
 - [ ] Drag/reflow interactivity
 

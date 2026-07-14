@@ -97,9 +97,10 @@ default to "Month N"). Rules:
   month names.
 - Display formats are a fixed set (`MMM Do, YYYY` … `DD.MM`); the short-month variants
   are only offered when short names exist (Gregorian always, custom only when enabled).
-- The editor UI lives in the timeline's "Timeline settings" modal
-  (src/timeline-settings.ts) and writes JSON back to the .loom file; the indexer's
-  `modify` watcher picks that up and rebuilds, so a calendar change reflows everything.
+- The editor UI (src/timeline-settings.ts) is embedded in the plugin settings tab's
+  Graph tab (with a project picker when the vault holds several projects) and writes
+  JSON back to the .loom file; the indexer's `modify` watcher picks that up and
+  rebuilds, so a calendar change reflows everything.
 
 ## Shared chronological columns
 
