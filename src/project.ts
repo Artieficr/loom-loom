@@ -245,22 +245,28 @@ export class SetupProjectModal extends Modal {
 	}
 }
 
-export class ConfirmDeleteModal extends Modal {
-	constructor(app: App, private label: string, private onConfirm: () => void) {
+export class ConfirmModal extends Modal {
+	constructor(
+		app: App,
+		private heading: string,
+		private detail: string,
+		private onConfirm: () => void | Promise<void>,
+		private confirmText = 'Continue'
+	) {
 		super(app);
 	}
 
 	onOpen(): void {
-		this.setTitle(`Delete "${this.label}"?`);
-		this.contentEl.createEl('p', { text: 'The note is moved to the trash.' });
+		this.setTitle(this.heading);
+		this.contentEl.createEl('p', { text: this.detail });
 		new Setting(this.contentEl)
 			.addButton((btn) => btn.setButtonText('Cancel').onClick(() => this.close()))
 			.addButton((btn) => {
 				// mod-warning by class: setWarning() is deprecated and its
 				// replacement (setDestructive) is 1.13/Catalyst-only.
-				btn.setButtonText('Delete').onClick(() => {
+				btn.setButtonText(this.confirmText).onClick(() => {
 					this.close();
-					this.onConfirm();
+					void this.onConfirm();
 				});
 				btn.buttonEl.addClass('mod-warning');
 			});

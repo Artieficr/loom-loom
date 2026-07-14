@@ -1,7 +1,7 @@
 import { ViewStateResult } from 'obsidian';
 import { ReactElement, useMemo, useState } from 'react';
 import { ENTITY_META, EntityRecord, EntityType, VIEW_LIST, isEntityType } from '../types';
-import { ConfirmDeleteModal, CreateEntityModal } from '../project';
+import { ConfirmModal, CreateEntityModal } from '../project';
 import { LoomReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage, recordDate, recordLabel } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
@@ -163,10 +163,16 @@ function EntityList({
 								aria-label="Delete"
 								onClick={(e) => {
 									e.stopPropagation();
-									new ConfirmDeleteModal(plugin.app, recordLabel(r, project), () => {
-										const file = plugin.app.vault.getFileByPath(r.path);
-										if (file) void plugin.app.fileManager.trashFile(file);
-									}).open();
+									new ConfirmModal(
+										plugin.app,
+										`Delete "${recordLabel(r, project)}"?`,
+										'The note is moved to the trash.',
+										() => {
+											const file = plugin.app.vault.getFileByPath(r.path);
+											if (file) void plugin.app.fileManager.trashFile(file);
+										},
+										'Delete'
+									).open();
 								}}
 							>
 								<Icon name="trash-2" />

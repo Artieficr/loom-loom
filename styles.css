@@ -441,12 +441,77 @@
 
 /* ---- settings ---- */
 
-.loom-slider-value {
+.loom-tab-bar {
+	display: flex;
+	gap: var(--size-2-1);
+	margin-bottom: var(--size-4-4);
+	flex-wrap: wrap;
+}
+
+.loom-tab {
+	padding: var(--size-2-2) var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: transparent;
+	box-shadow: none;
 	color: var(--text-muted);
-	font-variant-numeric: tabular-nums;
-	margin-right: var(--size-4-2);
-	min-width: 2ch;
-	text-align: right;
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-normal);
+	height: auto;
+}
+
+.loom-tab:hover:not(.loom-tab-active) {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.loom-tab-active {
+	background: var(--background-modifier-active-hover);
+	color: var(--text-normal);
+	font-weight: var(--font-semibold);
+}
+
+.loom-reset-btn {
+	background: none;
+	border: none;
+	box-shadow: none;
+	cursor: pointer;
+	color: var(--text-faint);
+	padding: 2px 4px;
+	margin-left: 4px;
+	border-radius: 4px;
+	display: inline-flex;
+	align-items: center;
+	flex-shrink: 0;
+}
+
+.loom-reset-btn:hover {
+	color: var(--text-muted);
+	background: var(--background-modifier-hover);
+}
+
+.loom-reset-btn svg {
+	width: 13px;
+	height: 13px;
+}
+
+.loom-restore-sep {
+	margin: 24px 0;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.loom-danger-btn {
+	background: var(--background-primary);
+	border: 1px solid #c62828;
+	box-shadow: none;
+	color: var(--text-normal);
+	cursor: pointer;
+}
+
+.loom-danger-btn:hover {
+	background: #c62828;
+	color: #ffffff;
 }
 
 /* ---- entity page ---- */

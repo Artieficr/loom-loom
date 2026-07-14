@@ -54,8 +54,6 @@ const CLICK_SLOP = 4;
 const CULL_MARGIN = 250;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 3;
-/** Zoom level a right-clicked node is focused at (never zooms out). */
-const FOCUS_ZOOM = 1.5;
 /** Screen-space padding the selected node keeps from the viewport edges. */
 const REVEAL_MARGIN = 90;
 
@@ -181,7 +179,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		const el = wrapRef.current;
 		const w = el?.clientWidth ?? size.w;
 		const h = el?.clientHeight ?? size.h;
-		const k = Math.max(FOCUS_ZOOM, cameraRef.current.k);
+		// Never zoom out when focusing — only in, up to the configured level.
+		const k = Math.max(plugin.settings.graphFocusZoom, cameraRef.current.k);
 		animateCamera({ k, tx: w / 2 - node.x * k, ty: h / 2 - node.y * k });
 	};
 
