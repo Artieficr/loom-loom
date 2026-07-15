@@ -3,6 +3,7 @@ export const ENTITY_TYPES = [
 	'location',
 	'faction',
 	'item',
+	'quest',
 	'event',
 	'session',
 ] as const;
@@ -27,6 +28,7 @@ export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 	location: { label: 'Location', plural: 'Locations', folder: 'Entities/Locations', icon: 'map-pin' },
 	faction: { label: 'Faction', plural: 'Factions', folder: 'Entities/Factions', icon: 'flag' },
 	item: { label: 'Item', plural: 'Items', folder: 'Entities/Items', icon: 'gem' },
+	quest: { label: 'Quest', plural: 'Quests', folder: 'Entities/Quests', icon: 'scroll' },
 	event: { label: 'Event', plural: 'Events', folder: 'Entities/Events', icon: 'calendar-days' },
 	session: { label: 'Session', plural: 'Sessions', folder: 'Entities/Sessions', icon: 'book-open' },
 };
@@ -40,6 +42,7 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 	location: [],
 	faction: [],
 	item: [],
+	quest: [],
 	event: [],
 	session: [],
 };
@@ -50,7 +53,7 @@ export const PC_TAG = 'PC';
 /** Entity types that live on the timeline layers of the graph. */
 export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event'];
 /** Entity types that live on the fixed lower axis of the graph. */
-export const GLOBAL_TYPES: readonly EntityType[] = ['character', 'location', 'faction', 'item'];
+export const GLOBAL_TYPES: readonly EntityType[] = ['character', 'location', 'faction', 'item', 'quest'];
 
 export const TIMELINES_FOLDER = 'Timelines';
 /** File extension of project home files (shown in the file explorer like .canvas/.base). */

@@ -39,6 +39,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		location: [],
 		faction: [],
 		item: [],
+		quest: [],
 		event: [],
 		session: [],
 	},
@@ -52,6 +53,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		location: '#4aa3d8',
 		faction: '#d16d9e',
 		item: '#d8b13c',
+		quest: '#c95f5f',
 	},
 	graphCameras: {},
 };

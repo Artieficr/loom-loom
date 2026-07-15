@@ -122,7 +122,7 @@ this:
 
 1. **Sessions** at a fixed y, x from column order.
 2. **Events** beneath their column's anchor, stacked with a fixed dy.
-3. **Globals** (characters/locations/factions/items) on one fixed lower axis. Desired x
+3. **Globals** (characters/locations/factions/items/quests) on one fixed lower axis. Desired x
    is the barycenter of their connections' x positions (two passes so global↔global
    edges exert pull once initial positions exist); then a left-to-right min-spacing sweep
    resolves overlaps. They never leave their row — that's the point: no vertical chaos.

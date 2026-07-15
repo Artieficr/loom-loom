@@ -438,10 +438,19 @@ body.loom-text-large {
 	background-color: var(--background-modifier-hover);
 }
 
-/* The bar doubles as the resize edge while the drawer is open. */
 .loom-drawer-bar-open {
-	cursor: ns-resize;
 	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* Window-edge-style resize strip on the open bar's top edge; the rest of the
+   bar keeps the pointer cursor and toggles on click. */
+.loom-drawer-handle {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 8px;
+	cursor: ns-resize;
 }
 
 .loom-drawer-chevron {
@@ -519,12 +528,14 @@ body.loom-text-large {
 	opacity: 0.15;
 }
 
+/* Click-through: right-click on an empty graph still opens the create menu. */
 .loom-graph-empty {
 	position: absolute;
 	inset: 0;
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	pointer-events: none;
 }
 
 /* ---- graph side panel ---- */
@@ -1096,6 +1107,21 @@ body.loom-text-large {
 }
 
 .loom-row-delete .loom-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+/* ---- entity page delete ---- */
+
+.loom-entity-delete:hover {
+	color: var(--text-error);
+}
+
+.loom-entity-delete .loom-icon {
+	display: flex;
+}
+
+.loom-entity-delete .loom-icon svg {
 	width: var(--icon-s);
 	height: var(--icon-s);
 }
