@@ -109,9 +109,22 @@ export interface EntityRecord {
 	/** Character only (PC): linkpath of the session they died in. Sessions
 	 *  after it no longer offer the character for attendance. */
 	deathSession: string | null;
+	/** Quest only: linkpath of the session the quest was received in. */
+	questReceived: string | null;
+	/** Quest only: '' while active, else one of QUEST_OUTCOMES. */
+	questOutcome: string;
+	/** Quest only: linkpath of the session the outcome happened in. */
+	questOutcomeSession: string | null;
+	/** Quest only: linkpaths of the characters who gave the quest. */
+	questGivers: string[];
+	/** Quest only: reward text (free-form). */
+	reward: string;
 	created: number;
 	modified: number;
 }
+
+/** How a quest can end; '' in `questOutcome` means it's still active. */
+export const QUEST_OUTCOMES = ['completed', 'abandoned', 'failed'] as const;
 
 /** A resolved connection between two indexed entities. */
 export interface Connection {
