@@ -1,5 +1,5 @@
 import { EntityRecord, EntityType } from '../types';
-import { buildColumns } from '../columns';
+import { TimelineColumn, buildColumns } from '../columns';
 import { LoomIndexer } from '../indexer';
 import { EdgeRoute, LANE_EPSILON, RoutedEdge } from './routing';
 
@@ -35,7 +35,8 @@ const MULTI_CLEARANCE = 100;
 
 /** Distance between parallel vertical trunk lanes in a corridor. */
 const LANE_GAP = 10;
-/** Distance between parallel horizontal lanes in a band. */
+/** Default/minimum distance between parallel horizontal lanes in a band —
+ *  overridable per call via `computeGraphLayout`'s `lineGap` (settings.graphLineGap). */
 const Y_GAP = 10;
 /** x padding a corridor keeps around its lane block. */
 const CORRIDOR_PAD = 35;
@@ -58,6 +59,9 @@ interface RawEdge {
 	a: string;
 	b: string;
 	relType: string;
+	/** Which endpoint's note declares the relationship (both = mutual). */
+	declaredByA: boolean;
+	declaredByB: boolean;
 }
 
 interface Placement {
@@ -78,6 +82,9 @@ interface CEdge {
 	upper: LayoutNode;
 	lower: LayoutNode;
 	relType: string;
+	/** Arrowhead at the upper/lower endpoint (declared by the other one). */
+	arrowUpper: boolean;
+	arrowLower: boolean;
 	kind: EdgeKind;
 	/** Band index a rowU belongs to; -1 = the band above the sessions row. */
 	uBand: number;
@@ -108,19 +115,25 @@ interface CEdge {
 export function computeGraphLayout(
 	indexer: LoomIndexer,
 	projectRoot: string,
-	layerOrder: readonly EntityType[]
+	layerOrder: readonly EntityType[],
+	/** Distance (px) between parallel horizontal connection lines — keeps them
+	 *  from overlapping. Defaults to the layout's own baseline spacing. */
+	lineGap: number = Y_GAP,
+	/** Drag-reordered x positions of unconnected global nodes (note path → world
+	 *  x). Connected nodes ignore it — their connection forces win. */
+	manualX?: ReadonlyMap<string, number>
 ): GraphLayout {
 	const { raw, neighbors } = collectEdges(indexer, projectRoot);
 
 	// Round 1: provisional placement with default corridors, only to learn how
 	// many trunk lanes each corridor must fit.
-	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors);
+	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors, manualX);
 	const demand = corridorDemand(classifyEdges(raw, prelim));
 
 	// Round 2: final placement with widened corridors, then full routing.
-	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors);
+	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX);
 	const classified = classifyEdges(raw, placed);
-	const bottom = routeEdges(classified, placed);
+	const bottom = routeEdges(classified, placed, lineGap);
 
 	const allNodes = [...placed.nodes.values()];
 	const width = allNodes.reduce((m, n) => Math.max(m, n.x), 0) + MARGIN_X;
@@ -128,6 +141,8 @@ export function computeGraphLayout(
 		a: e.upper.id,
 		b: e.lower.id,
 		relType: e.relType,
+		arrowA: e.arrowUpper,
+		arrowB: e.arrowLower,
 		route: toRoute(e),
 	}));
 	return { nodes: allNodes, edges, neighbors, width, height: bottom };
@@ -153,25 +168,30 @@ function collectEdges(
 ): { raw: RawEdge[]; neighbors: Map<string, Set<string>> } {
 	const records = indexer.getAll(undefined, projectRoot);
 	const indexed = new Set(records.map((r) => r.path));
-	const raw: RawEdge[] = [];
 	const neighbors = new Map<string, Set<string>>();
-	const seen = new Set<string>();
+	// One edge per pair+relType; a reverse declaration of the same relType
+	// merges into it as a mutual edge (arrowheads on both ends).
+	const byKey = new Map<string, RawEdge>();
 	for (const record of records) {
 		for (const conn of indexer.getOutgoing(record.path)) {
 			const a = record.path;
 			const b = conn.record.path;
 			if (!indexed.has(a) || !indexed.has(b) || a === b) continue;
 			const key = a < b ? `${a}\n${b}\n${conn.relType}` : `${b}\n${a}\n${conn.relType}`;
-			if (seen.has(key)) continue;
-			seen.add(key);
-			raw.push({ a, b, relType: conn.relType });
+			const existing = byKey.get(key);
+			if (existing) {
+				if (existing.a === a) existing.declaredByA = true;
+				else existing.declaredByB = true;
+				continue;
+			}
+			byKey.set(key, { a, b, relType: conn.relType, declaredByA: true, declaredByB: false });
 			if (!neighbors.has(a)) neighbors.set(a, new Set());
 			if (!neighbors.has(b)) neighbors.set(b, new Set());
 			neighbors.get(a)?.add(b);
 			neighbors.get(b)?.add(a);
 		}
 	}
-	return { raw, neighbors };
+	return { raw: [...byKey.values()], neighbors };
 }
 
 function placeNodes(
@@ -179,11 +199,23 @@ function placeNodes(
 	projectRoot: string,
 	layerOrder: readonly EntityType[],
 	corridorWidths: Map<number, number> | null,
-	neighbors: Map<string, Set<string>>
+	neighbors: Map<string, Set<string>>,
+	manualX?: ReadonlyMap<string, number>
 ): Placement {
 	const nodes = new Map<string, LayoutNode>();
 	const colOf = new Map<string, number>();
-	const columns = buildColumns(indexer, null, projectRoot);
+	const allColumns = buildColumns(indexer, null, projectRoot);
+
+	// Dateless, unconnected events don't need a chronological slot or edge
+	// corridors — pull them out of the column flow and let them float freely
+	// in the events row (drag-reorderable via manualX, like loose globals).
+	const isFreeEvent = (c: TimelineColumn) =>
+		c.anchor.type === 'event' &&
+		c.anchor.date === null &&
+		c.events.length === 0 &&
+		(neighbors.get(c.anchor.path)?.size ?? 0) === 0;
+	const freeEvents = allColumns.filter(isFreeEvent).map((c) => c.anchor);
+	const columns = allColumns.filter((c) => !isFreeEvent(c));
 
 	// Column x positions: corridor i is the gap left of column i; a corridor
 	// holding many trunk lanes widens beyond the default so lanes stay
@@ -264,6 +296,23 @@ function placeNodes(
 		occupy(row, x);
 	}
 
+	// Free events: manual spot if dragged there, otherwise packed after the
+	// last column so they group at the row's right edge.
+	const lastColX = colX.length > 0 ? colX[colX.length - 1] : MARGIN_X - COL_WIDTH;
+	freeEvents.forEach((record, i) => {
+		const x = manualX?.get(record.path) ?? lastColX + COL_WIDTH * (i + 1);
+		nodes.set(record.path, {
+			id: record.path,
+			record,
+			x,
+			y: EVENT_Y0,
+			kind: 'event',
+			zone: 0,
+		});
+		colOf.set(record.path, nearestColumn(colX, x));
+		occupy(0, x);
+	});
+
 	const eventsBottom = EVENT_Y0 + Math.max(maxStack, 1) * EVENT_DY;
 
 	// Global layers: one row per (non-empty) type in the configured order.
@@ -271,47 +320,140 @@ function placeNodes(
 		.map((t) => indexer.getAll(t, projectRoot).sort((a, b) => a.name.localeCompare(b.name)))
 		.filter((rs) => rs.length > 0);
 
-	// Desired x = barycenter of already-positioned neighbors, two passes so
-	// global↔global links also exert pull once first estimates exist.
+	// Per-row 1D force relaxation. Connected globals are pulled to the mean x
+	// of their neighbors (timeline nodes are fixed anchors, other globals use
+	// the current estimate); unconnected globals hold their drag-reordered
+	// manual x, or their initial alphabetical slot. Each pass ends with a
+	// collision resolve so the next pass pulls from separated positions —
+	// without it, a globals-only project collapses every estimate onto one
+	// point and the tie-break degenerates to alphabetical order.
 	const timelineMaxX = colX.length > 0 ? colX[colX.length - 1] : MARGIN_X;
 	const centerX = (MARGIN_X + timelineMaxX) / 2;
 	const allGlobals = layerRecords.flat();
-	const desired = new Map<string, number>();
-	for (let pass = 0; pass < 2; pass++) {
+	const est = new Map<string, number>();
+	const isConnected = (path: string) => (neighbors.get(path)?.size ?? 0) > 0;
+
+	// Connected components over globals. A component is "anchored" when any
+	// member links to a placed timeline node. Manual (drag-reorder) positions
+	// act as pseudo-edges for FREE components only: dragging one node of an
+	// isolated pair/cluster tows the whole group, while anchored components
+	// keep following their timeline pull (forces win).
+	const globalSet = new Set(allGlobals.map((g) => g.path));
+	const compOf = new Map<string, number>();
+	const anchoredComps = new Set<number>();
+	let compCount = 0;
+	for (const g of allGlobals) {
+		if (compOf.has(g.path)) continue;
+		const id = compCount++;
+		const queue = [g.path];
+		compOf.set(g.path, id);
+		let anchored = false;
+		while (queue.length > 0) {
+			const cur = queue.pop();
+			if (cur === undefined) break;
+			for (const n of neighbors.get(cur) ?? []) {
+				if (nodes.has(n)) anchored = true;
+				else if (globalSet.has(n) && !compOf.has(n)) {
+					compOf.set(n, id);
+					queue.push(n);
+				}
+			}
+		}
+		if (anchored) anchoredComps.add(id);
+	}
+	const manualPull = (path: string): number | undefined =>
+		manualX !== undefined && !anchoredComps.has(compOf.get(path) ?? -1)
+			? manualX.get(path)
+			: undefined;
+
+	for (const rs of layerRecords) {
+		const spread = (rs.length - 1) * GLOBAL_MIN_SPACING;
+		rs.forEach((g, i) => {
+			est.set(g.path, manualX?.get(g.path) ?? centerX - spread / 2 + i * GLOBAL_MIN_SPACING);
+		});
+	}
+	for (let pass = 0; pass < 40; pass++) {
 		for (const g of allGlobals) {
+			if (!isConnected(g.path)) continue;
 			const xs: number[] = [];
 			for (const n of neighbors.get(g.path) ?? []) {
-				const node = nodes.get(n);
-				if (node) xs.push(node.x);
-				else if (pass > 0 && desired.has(n)) xs.push(desired.get(n) ?? 0);
+				const fixed = nodes.get(n);
+				if (fixed) xs.push(fixed.x);
+				else if (est.has(n)) xs.push(est.get(n) ?? 0);
 			}
-			desired.set(g.path, xs.length > 0 ? xs.reduce((s, v) => s + v, 0) / xs.length : centerX);
+			const manual = manualPull(g.path);
+			if (manual !== undefined) xs.push(manual);
+			if (xs.length > 0) est.set(g.path, xs.reduce((s, v) => s + v, 0) / xs.length);
 		}
+		// Loose nodes (no connections, no manual spot) pack alphabetically to
+		// the right of their row's cluster instead of holding their initial
+		// slots — rows stay grouped rather than sprawling across the canvas.
+		for (const rs of layerRecords) {
+			const held = rs.filter((g) => isConnected(g.path) || manualX?.has(g.path));
+			const loose = rs.filter((g) => !isConnected(g.path) && !manualX?.has(g.path));
+			if (held.length === 0 || loose.length === 0) continue;
+			const right = Math.max(...held.map((g) => est.get(g.path) ?? centerX));
+			loose.forEach((g, i) => est.set(g.path, right + GLOBAL_MIN_SPACING * (i + 1)));
+		}
+		for (const rs of layerRecords) resolveRowOverlaps(rs, est);
 	}
 
 	const layers: LayoutNode[][] = layerRecords.map((rs, layerIdx) => {
-		const ordered = [...rs].sort((a, b) => (desired.get(a.path) ?? 0) - (desired.get(b.path) ?? 0));
-		let prevX = -Infinity;
+		const ordered = [...rs].sort((a, b) => (est.get(a.path) ?? 0) - (est.get(b.path) ?? 0));
 		const row: LayoutNode[] = [];
 		for (const g of ordered) {
-			const x = Math.max(desired.get(g.path) ?? centerX, prevX + GLOBAL_MIN_SPACING, MARGIN_X);
 			// y is provisional; routeEdges sizes the bands and sets the real row y.
 			const node: LayoutNode = {
 				id: g.path,
 				record: g,
-				x,
+				x: est.get(g.path) ?? centerX,
 				y: eventsBottom + MIN_BAND * (layerIdx + 1),
 				kind: 'global',
 				zone: layerIdx + 1,
 			};
 			nodes.set(g.path, node);
 			row.push(node);
-			prevX = x;
 		}
 		return row;
 	});
 
 	return { nodes, colX, colOf, eventsBottom, layers };
+}
+
+/**
+ * Enforces GLOBAL_MIN_SPACING within one row while moving estimates as little
+ * as possible: nodes are sorted by estimate, overlapping neighbors merge into
+ * pools, and each pool is laid out consecutively around the mean of its
+ * members' estimates (then clamped to the left margin).
+ */
+function resolveRowOverlaps(rs: EntityRecord[], est: Map<string, number>): void {
+	const order = [...rs].sort((a, b) => (est.get(a.path) ?? 0) - (est.get(b.path) ?? 0));
+	interface Pool {
+		sum: number;
+		paths: string[];
+	}
+	const half = (p: Pool) => ((p.paths.length - 1) / 2) * GLOBAL_MIN_SPACING;
+	const center = (p: Pool) => p.sum / p.paths.length;
+	const pools: Pool[] = [];
+	for (const g of order) {
+		pools.push({ sum: est.get(g.path) ?? 0, paths: [g.path] });
+		while (pools.length > 1) {
+			const cur = pools[pools.length - 1];
+			const prev = pools[pools.length - 2];
+			if (center(cur) - half(cur) >= center(prev) + half(prev) + GLOBAL_MIN_SPACING) break;
+			prev.sum += cur.sum;
+			prev.paths.push(...cur.paths);
+			pools.pop();
+		}
+	}
+	// The left-margin clamp can push a pool right into its successor — keep a
+	// running cursor so pools never re-overlap.
+	let cursor = -Infinity;
+	for (const pool of pools) {
+		const start = Math.max(center(pool) - half(pool), MARGIN_X, cursor);
+		pool.paths.forEach((path, i) => est.set(path, start + i * GLOBAL_MIN_SPACING));
+		cursor = start + pool.paths.length * GLOBAL_MIN_SPACING;
+	}
 }
 
 function nearestColumn(colX: number[], x: number): number {
@@ -325,7 +467,7 @@ function nearestColumn(colX: number[], x: number): number {
 function classifyEdges(raw: RawEdge[], placement: Placement): CEdge[] {
 	const { nodes, colOf } = placement;
 	const out: CEdge[] = [];
-	for (const { a, b, relType } of raw) {
+	for (const { a, b, relType, declaredByA, declaredByB } of raw) {
 		const na = nodes.get(a);
 		const nb = nodes.get(b);
 		if (!na || !nb) continue;
@@ -333,6 +475,9 @@ function classifyEdges(raw: RawEdge[], placement: Placement): CEdge[] {
 			upper: na,
 			lower: nb,
 			relType,
+			// The arrow sits at the endpoint the declaration points AT.
+			arrowUpper: declaredByB,
+			arrowLower: declaredByA,
 			kind: 'direct',
 			uBand: 0,
 			corridor: null,
@@ -341,6 +486,10 @@ function classifyEdges(raw: RawEdge[], placement: Placement): CEdge[] {
 			fanOffset: 0,
 			uY: 0,
 			needsRun: false,
+		};
+		const swapEnds = () => {
+			[e.upper, e.lower] = [e.lower, e.upper];
+			[e.arrowUpper, e.arrowLower] = [e.arrowLower, e.arrowUpper];
 		};
 		if (na.zone === nb.zone) {
 			if (na.zone > 0) {
@@ -353,14 +502,14 @@ function classifyEdges(raw: RawEdge[], placement: Placement): CEdge[] {
 				e.kind = 'rowU';
 				e.uBand = na.kind === 'session' ? -1 : 0;
 			} else {
-				if (na.y > nb.y) [e.upper, e.lower] = [nb, na];
+				if (na.y > nb.y) swapEnds();
 				e.kind =
 					Math.abs(na.x - nb.x) < 1 && !blockedBetween(placement, e.upper, e.lower)
 						? 'direct'
 						: 'orth';
 			}
 		} else {
-			if (na.zone > nb.zone) [e.upper, e.lower] = [nb, na];
+			if (na.zone > nb.zone) swapEnds();
 			e.kind = 'toLower';
 		}
 		if (e.kind === 'orth' || e.kind === 'toLower') {
@@ -405,7 +554,7 @@ function corridorDemand(edges: CEdge[]): Map<number, number> {
  * final pass nudging trunks off any node they'd pass through.
  * Returns the layout's bottom y.
  */
-function routeEdges(edges: CEdge[], placement: Placement): number {
+function routeEdges(edges: CEdge[], placement: Placement, yGap: number): number {
 	const { colX, layers, eventsBottom } = placement;
 
 	// --- Trunk lanes -----------------------------------------------------------
@@ -465,7 +614,7 @@ function routeEdges(edges: CEdge[], placement: Placement): number {
 	uOf(-1)
 		.sort((p, q) => Math.min(p.upper.x, p.lower.x) - Math.min(q.upper.x, q.lower.x))
 		.forEach((e, i) => {
-			e.uY = SESSION_Y - 44 - i * Y_GAP;
+			e.uY = SESSION_Y - 44 - i * yGap;
 		});
 
 	let bandTop = eventsBottom;
@@ -475,17 +624,17 @@ function routeEdges(edges: CEdge[], placement: Placement): number {
 			(p, q) => Math.min(p.upper.x, p.lower.x) - Math.min(q.upper.x, q.lower.x)
 		);
 		us.forEach((e, i) => {
-			e.uY = bandTop + U_TOP + i * Y_GAP;
+			e.uY = bandTop + U_TOP + i * yGap;
 		});
 		if (b === layers.length) {
-			bottom = bandTop + (us.length > 0 ? U_TOP + us.length * Y_GAP : 0) + 60;
+			bottom = bandTop + (us.length > 0 ? U_TOP + us.length * yGap : 0) + 60;
 			break;
 		}
 		const approaches = approachesOf(b);
 		const runs = approaches.filter((e) => e.needsRun).sort((p, q) => p.lower.x - q.lower.x);
 		const height = Math.max(
 			MIN_BAND,
-			U_TOP + us.length * Y_GAP + BAND_MID + (runs.length + 1) * Y_GAP + APPROACH_BOTTOM
+			U_TOP + us.length * yGap + BAND_MID + (runs.length + 1) * yGap + APPROACH_BOTTOM
 		);
 		const rowY = bandTop + height;
 		for (const node of layers[b]) node.y = rowY;
@@ -493,7 +642,7 @@ function routeEdges(edges: CEdge[], placement: Placement): number {
 		// horizontal run gets its own lane above it.
 		for (const e of approaches) e.approachY = rowY - APPROACH_BOTTOM;
 		runs.forEach((e, j) => {
-			e.approachY = rowY - APPROACH_BOTTOM - (j + 1) * Y_GAP;
+			e.approachY = rowY - APPROACH_BOTTOM - (j + 1) * yGap;
 		});
 		bandTop = rowY;
 	}

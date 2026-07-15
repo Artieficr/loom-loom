@@ -442,6 +442,53 @@ export class SetupProjectModal extends Modal {
 	}
 }
 
+/**
+ * Prompts for a relationship identifier when connecting two existing entities
+ * (graph node-on-node drop). Empty input falls back to 'related', matching
+ * the entity page's relationships editor.
+ */
+export class RelationshipPromptModal extends Modal {
+	private value = '';
+
+	constructor(
+		app: App,
+		private fromLabel: string,
+		private toLabel: string,
+		private onSubmit: (relType: string) => void
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.setTitle('Connect entities');
+		new Setting(this.contentEl)
+			.setName('Relationship')
+			.setDesc(`How ${this.fromLabel} relates to ${this.toLabel}.`)
+			.addText((text) => {
+				text.setPlaceholder('Identifier').onChange((v) => (this.value = v.trim()));
+				text.inputEl.addEventListener('keydown', (e) => {
+					if (e.key === 'Enter') this.submit();
+				});
+				window.setTimeout(() => text.inputEl.focus());
+			});
+		new Setting(this.contentEl).addButton((btn) =>
+			btn
+				.setButtonText('Connect')
+				.setCta()
+				.onClick(() => this.submit())
+		);
+	}
+
+	private submit(): void {
+		this.close();
+		this.onSubmit(this.value === '' ? 'related' : this.value);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
 export class ConfirmModal extends Modal {
 	constructor(
 		app: App,

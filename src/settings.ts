@@ -23,6 +23,10 @@ export interface LoomLoomSettings {
 	graphCollapseThreshold: number;
 	/** Zoom level a right-clicked node is focused at (both directions — can zoom in or out to reach it). */
 	graphFocusZoom: number;
+	/** Distance (px) between parallel horizontal connection lines in the graph — keeps them from overlapping. */
+	graphLineGap: number;
+	/** Size (px) of the relationship-direction arrowheads on graph edges. */
+	graphArrowSize: number;
 	/** Top-to-bottom row order of the global entity layers in the graph. */
 	globalLayerOrder: EntityType[];
 	/** Graph node fill color per entity type. */
@@ -32,6 +36,9 @@ export interface LoomLoomSettings {
 	/** Resized textarea heights (px) per entity file path, keyed by field name
 	 *  (e.g. "description", "notes") — not user-facing, remembered across sessions. */
 	entityBoxSizes: Record<string, Record<string, number>>;
+	/** Drag-reordered x of unconnected global graph nodes, per project root then
+	 *  note path — not user-facing. Connected nodes follow their forces instead. */
+	graphManualX: Record<string, Record<string, number>>;
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
@@ -48,6 +55,8 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	},
 	graphCollapseThreshold: 5,
 	graphFocusZoom: 1,
+	graphLineGap: 10,
+	graphArrowSize: 8,
 	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location'],
 	nodeColors: {
 		session: '#7c5cff',
@@ -60,6 +69,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	},
 	graphCameras: {},
 	entityBoxSizes: {},
+	graphManualX: {},
 };
 
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
@@ -70,6 +80,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		globalLayerOrder: [...DEFAULT_SETTINGS.globalLayerOrder],
 		graphCameras: {},
 		entityBoxSizes: {},
+		graphManualX: {},
 	};
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
@@ -82,6 +93,12 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.graphFocusZoom === 'number') {
 		base.graphFocusZoom = Math.max(0.3, Math.min(3, data.graphFocusZoom));
+	}
+	if (typeof data.graphLineGap === 'number') {
+		base.graphLineGap = Math.max(10, Math.min(40, data.graphLineGap));
+	}
+	if (typeof data.graphArrowSize === 'number') {
+		base.graphArrowSize = Math.max(4, Math.min(20, data.graphArrowSize));
 	}
 	if (typeof data.tagVocabulary === 'object' && data.tagVocabulary !== null) {
 		for (const type of ENTITY_TYPES) {
@@ -130,6 +147,16 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			if (Object.keys(sizes).length > 0) base.entityBoxSizes[path] = sizes;
 		}
 	}
+	if (typeof data.graphManualX === 'object' && data.graphManualX !== null) {
+		for (const [root, entries] of Object.entries(data.graphManualX)) {
+			if (typeof entries !== 'object' || entries === null) continue;
+			const xs: Record<string, number> = {};
+			for (const [path, x] of Object.entries(entries)) {
+				if (typeof x === 'number' && Number.isFinite(x)) xs[path] = x;
+			}
+			if (Object.keys(xs).length > 0) base.graphManualX[root] = xs;
+		}
+	}
 	return base;
 }
 
@@ -149,7 +176,7 @@ const SETTINGS_TABS: [SettingsTabId, string][] = [
 const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 	general: ['textSize'],
 	entities: ['tagVocabulary'],
-	graph: ['graphCollapseThreshold', 'graphFocusZoom', 'nodeColors', 'globalLayerOrder'],
+	graph: ['graphCollapseThreshold', 'graphFocusZoom', 'graphLineGap', 'graphArrowSize', 'nodeColors', 'globalLayerOrder'],
 };
 
 export class LoomLoomSettingTab extends PluginSettingTab {
@@ -273,6 +300,26 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			DEFAULT_SETTINGS.graphFocusZoom,
 			() => this.plugin.settings.graphFocusZoom,
 			(v) => (this.plugin.settings.graphFocusZoom = v)
+		);
+
+		this.slider(
+			containerEl,
+			'Relationship arrow size',
+			'Size of the arrowheads showing which note declares a relationship.',
+			{ min: 4, max: 20, step: 1 },
+			DEFAULT_SETTINGS.graphArrowSize,
+			() => this.plugin.settings.graphArrowSize,
+			(v) => (this.plugin.settings.graphArrowSize = v)
+		);
+
+		this.slider(
+			containerEl,
+			'Connection line spacing',
+			'Distance between parallel horizontal connection lines, so they don’t overlap. Minimum is the tightest spacing.',
+			{ min: 10, max: 40, step: 2 },
+			DEFAULT_SETTINGS.graphLineGap,
+			() => this.plugin.settings.graphLineGap,
+			(v) => (this.plugin.settings.graphLineGap = v)
 		);
 
 		new Setting(containerEl).setName('Node colors').setHeading();
