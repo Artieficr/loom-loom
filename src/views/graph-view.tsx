@@ -8,7 +8,7 @@ import {
 	useRef,
 	useState,
 } from 'react';
-import { ENTITY_META, ENTITY_TYPES, GraphCamera, TimelineDef, VIEW_GRAPH } from '../types';
+import { ENTITY_META, ENTITY_TYPES, GraphCamera, QUEST_OUTCOMES, TimelineDef, VIEW_GRAPH } from '../types';
 import { ConfirmModal, CreateEntityModal, RelationshipPromptModal } from '../project';
 import { extractLinkpath } from '../indexer';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
@@ -375,7 +375,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			const target = dropId !== null ? layout.nodes.find((n) => n.id === dropId) : undefined;
 			if (target) {
 				startSpring();
-				onNodeDrop(drag.node, target);
+				onNodeDrop(drag.node, target, { x: e.clientX, y: e.clientY });
 			} else if (
 				(drag.node.kind === 'global' ||
 					(drag.node.kind === 'event' &&
@@ -416,42 +416,150 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		);
 	};
 
-	/** The dragged node is always the declaring side: dropping it on a node it
-	 *  doesn't yet declare adds a relationship to ITS note (even if the other
-	 *  side declares one back — that's how mutual pairs are built); dropping it
-	 *  on one it already declares offers to remove its own declaration. */
-	const onNodeDrop = (from: LayoutNode, to: LayoutNode) => {
-		const fromLabel = recordLabel(from.record, project);
-		const toLabel = recordLabel(to.record, project);
-		if (declaresConnection(from, to.id)) {
-			new ConfirmModal(
-				plugin.app,
-				'Remove relationship',
-				`Remove the relationship ${fromLabel} declares to ${toLabel}?`,
-				() => removeConnection(from, to),
-				'Remove'
-			).open();
-			return;
-		}
-		new RelationshipPromptModal(plugin.app, fromLabel, toLabel, (relType) => {
-			const file = plugin.app.vault.getFileByPath(from.id);
-			if (!file) return;
-			plugin.app.fileManager
-				.processFrontMatter(file, (fm: Record<string, unknown>) => {
-					const rels = Array.isArray(fm.relationships) ? fm.relationships : [];
-					rels.push({ type: relType, target: `[[${to.record.name}]]` });
-					fm.relationships = rels;
-				})
-				.catch((err) => {
-					console.error('Loom Loom: failed to connect entities', err);
-					new Notice('Could not create the connection.');
-				});
-		}).open();
+	/** Writes to a node's frontmatter with error reporting. */
+	const writeNodeFm = (node: LayoutNode, apply: (fm: Record<string, unknown>) => void) => {
+		const file = plugin.app.vault.getFileByPath(node.id);
+		if (!file) return;
+		plugin.app.fileManager.processFrontMatter(file, apply).catch((err) => {
+			console.error('Loom Loom: failed to update frontmatter', err);
+			new Notice('Could not save the change.');
+		});
 	};
 
-	/** Removes the dragged node's own declarations pointing at `other`: typed
-	 *  relationship entries and (for events) linkedSession links. The other
-	 *  side's declarations are untouched — drag it to remove those. */
+	/** Frontmatter value as a link list (accepts a single string too). */
+	const linkList = (raw: unknown): unknown[] =>
+		Array.isArray(raw) ? raw : typeof raw === 'string' && raw !== '' ? [raw] : [];
+
+	/** Node-on-node drop. Pairs with a dedicated field offer to fill it — those
+	 *  writes go to the note that OWNS the field (a character dropped on a quest
+	 *  edits the quest's giver list), which is the natural direction there. The
+	 *  generic relationship stays dragged-note-declares. One option acts
+	 *  immediately; several open a menu at the drop point. */
+	const onNodeDrop = (from: LayoutNode, to: LayoutNode, at: { x: number; y: number }) => {
+		const fromLabel = recordLabel(from.record, project);
+		const toLabel = recordLabel(to.record, project);
+		const resolvesFrom = (node: LayoutNode) => (linkpath: string) =>
+			plugin.indexer.resolve(linkpath, node.id)?.path;
+		const options: { title: string; action: () => void }[] = [];
+
+		const pair = (typeA: string, typeB: string): { a: LayoutNode; b: LayoutNode } | null =>
+			from.record.type === typeA && to.record.type === typeB
+				? { a: from, b: to }
+				: from.record.type === typeB && to.record.type === typeA
+					? { a: to, b: from }
+					: null;
+
+		const questChar = pair('quest', 'character');
+		if (questChar) {
+			const { a: quest, b: char } = questChar;
+			const resolve = resolvesFrom(quest);
+			if (!quest.record.questGivers.some((lp) => resolve(lp) === char.id)) {
+				options.push({
+					title: 'Add as quest giver',
+					action: () =>
+						writeNodeFm(quest, (fm) => {
+							fm.questGiver = [...linkList(fm.questGiver), `[[${char.record.name}]]`];
+						}),
+				});
+			}
+		}
+
+		const questSession = pair('quest', 'session');
+		if (questSession) {
+			const { a: quest, b: session } = questSession;
+			const resolve = resolvesFrom(quest);
+			const link = `[[${session.record.name}]]`;
+			if (
+				quest.record.questReceived === null ||
+				resolve(quest.record.questReceived) !== session.id
+			) {
+				options.push({
+					title: 'Set as received session',
+					action: () =>
+						writeNodeFm(quest, (fm) => {
+							fm.questReceived = link;
+						}),
+				});
+			}
+			for (const outcome of QUEST_OUTCOMES) {
+				const alreadySet =
+					quest.record.questOutcome === outcome &&
+					quest.record.questOutcomeSession !== null &&
+					resolve(quest.record.questOutcomeSession) === session.id;
+				if (alreadySet) continue;
+				options.push({
+					title: `${outcome[0].toUpperCase() + outcome.slice(1)} in this session`,
+					action: () =>
+						writeNodeFm(quest, (fm) => {
+							fm.questOutcome = outcome;
+							fm.questOutcomeSession = link;
+						}),
+				});
+			}
+		}
+
+		const eventSession = pair('event', 'session');
+		if (eventSession) {
+			const { a: event, b: session } = eventSession;
+			const resolve = resolvesFrom(event);
+			if (!event.record.linkedSessions.some((lp) => resolve(lp) === session.id)) {
+				options.push({
+					title: 'Link to this session',
+					action: () =>
+						writeNodeFm(event, (fm) => {
+							fm.linkedSession = [...linkList(fm.linkedSession), `[[${session.record.name}]]`];
+						}),
+				});
+			}
+		}
+
+		// Generic relationship: which note declares it is configurable — by
+		// default the drop target (dropping A on B adds A into B), optionally
+		// the dragged note (connecting A to B).
+		const declarer = plugin.settings.graphDropEdits === 'dragged' ? from : to;
+		const other = declarer === from ? to : from;
+		const declarerLabel = declarer === from ? fromLabel : toLabel;
+		const otherLabel = declarer === from ? toLabel : fromLabel;
+		if (declaresConnection(declarer, other.id)) {
+			options.push({
+				title: 'Remove relationship…',
+				action: () =>
+					new ConfirmModal(
+						plugin.app,
+						'Remove relationship',
+						`Remove the relationship ${declarerLabel} declares to ${otherLabel}?`,
+						() => removeConnection(declarer, other),
+						'Remove'
+					).open(),
+			});
+		} else {
+			options.push({
+				title: 'Add relationship…',
+				action: () =>
+					new RelationshipPromptModal(plugin.app, declarerLabel, otherLabel, (relType) => {
+						writeNodeFm(declarer, (fm) => {
+							const rels = Array.isArray(fm.relationships) ? fm.relationships : [];
+							rels.push({ type: relType, target: `[[${other.record.name}]]` });
+							fm.relationships = rels;
+						});
+					}).open(),
+			});
+		}
+
+		if (options.length === 1) {
+			options[0].action();
+			return;
+		}
+		const menu = new Menu();
+		for (const opt of options) {
+			menu.addItem((item) => item.setTitle(opt.title).onClick(opt.action));
+		}
+		menu.showAtPosition(at);
+	};
+
+	/** Removes `node`'s own declarations pointing at `other` (the declaring
+	 *  side per the drop-edits setting): typed relationship entries and (for
+	 *  events) linkedSession links. The other side's declarations stay. */
 	const removeConnection = async (node: LayoutNode, other: LayoutNode) => {
 		const resolvesToOther = (linkpath: string) =>
 			plugin.indexer.resolve(linkpath, node.id)?.path === other.id;
@@ -772,7 +880,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										{dropRef.current === node.id && dragRef.current ? (
 											<circle
 												className={
-													declaresConnection(dragRef.current.node, node.id)
+													(plugin.settings.graphDropEdits === 'dragged'
+														? declaresConnection(dragRef.current.node, node.id)
+														: declaresConnection(node, dragRef.current.id))
 														? 'loom-drop-ring loom-drop-ring-remove'
 														: 'loom-drop-ring'
 												}
