@@ -20,8 +20,11 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Connected-entities sections on every entity page: one collapsible section per connected type (collapsed by default), entries expand to the target's description + notes with in-place edit/save and a jump-to-page arrow — `src/views/connected-entities.tsx`
 - [x] Session attendance: PC-character toggle chips on session pages, stored in `attendance` as hidden connections (no graph edges); PCs get an Alive tick + death-session picker, and later-dated sessions stop offering dead PCs — `src/views/entity-view.tsx`, `src/indexer.ts`
 - [x] Entity deletion with confirmation: trash icon on list rows and in the entity page header (Back/list fallback after delete) — `src/views/list-view.tsx`, `src/views/entity-view.tsx`
+- [x] Session date entry uses a native `<input type="date">` (calendar picker) in both the creation modal and the entity page, since sessions are always Gregorian; events keep the free-text field + "@today" (they may follow the project's custom calendar) — `src/project.ts`, `src/views/entity-view.tsx`
+- [ ] Description/Notes editing closer to Obsidian's native editor — so far only `[[` auto-close and link-name suggestions are replicated (`src/views/link-textarea.tsx`); still missing things like markdown formatting shortcuts/hotkeys, list continuation on Enter, tab/shift-tab indent, and other CM6 editor behaviors a plain `<textarea>` doesn't give for free
 - [ ] Deep/final frontmatter schemas per type (deliberate v0.1 non-goal)
 - [ ] Quest-specific fields (status, giver, rewards, …) — currently the basic template
+- [ ] Sublocations: a "New sublocation" action on a Location's own page creates a child Location entity, auto-connected back to its parent (a relationship declared on creation, not a separate frontmatter field) — otherwise a complete, independent Location entity like any other, not a stripped-down variant
 
 ## Index cache
 
@@ -38,6 +41,7 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 ## List views
 
 - [x] Per-type list with search, sort (name/created/modified/date), plugin-tag filter, click opens entity page, new-entity button — `src/views/list-view.tsx`
+- [ ] Nested sublocation lists: in the Locations list, sublocations group/indent under their parent, collapsible per parent (collapsed by default once a parent has more than 5), plus toolbar-level "Collapse all" / "Expand all" buttons
 
 ## Timeline
 

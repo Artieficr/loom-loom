@@ -199,7 +199,17 @@ export class CreateEntityModal extends Modal {
 			});
 		}
 
-		if (this.type === 'event' || this.type === 'session') {
+		if (this.type === 'session') {
+			// Sessions are always Gregorian, so a native date input's calendar
+			// picker applies cleanly — no free-text/custom-calendar ambiguity
+			// like events have, and it already lands on today by default.
+			new Setting(this.contentEl).setName('Date').addText((text) => {
+				text.inputEl.type = 'date';
+				text.setValue(this.fields.date).onChange((v) => (this.fields.date = v));
+			});
+		}
+
+		if (this.type === 'event') {
 			let dateText: TextComponent;
 			new Setting(this.contentEl)
 				.setName('Date')
@@ -207,7 +217,7 @@ export class CreateEntityModal extends Modal {
 				.addText((text) => {
 					dateText = text;
 					text
-						.setPlaceholder(this.type === 'event' ? 'YYYY-MM-DD' : '')
+						.setPlaceholder('Year-month-day')
 						.setValue(this.fields.date)
 						.onChange((v) => (this.fields.date = v.trim()));
 				})

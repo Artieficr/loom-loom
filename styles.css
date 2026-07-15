@@ -40,6 +40,9 @@ body.loom-text-large {
 	flex: 1;
 	min-width: 0;
 	overflow-y: auto;
+	/* Room to scroll the last field past the bottom edge, so it can sit
+	   mid-screen instead of being pinned uncomfortably low. */
+	padding-bottom: 40vh;
 }
 
 /* ---- navigation rail ---- */
@@ -227,6 +230,9 @@ body.loom-text-large {
 .loom-list {
 	display: flex;
 	flex-direction: column;
+	/* Room to scroll the last row past the bottom edge, so it can sit
+	   mid-screen instead of being pinned uncomfortably low. */
+	padding-bottom: 40vh;
 }
 
 .loom-row {
@@ -944,6 +950,7 @@ body.loom-text-large {
 }
 
 .loom-field input[type='text'],
+.loom-field input[type='date'],
 .loom-field textarea,
 .loom-field select {
 	width: 100%;
