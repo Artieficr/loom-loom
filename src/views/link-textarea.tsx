@@ -1,4 +1,12 @@
-import { KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+	KeyboardEvent as ReactKeyboardEvent,
+	MutableRefObject,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from 'react';
+import { startTextareaResize } from './common';
 
 /**
  * A textarea with the two most-missed editor behaviors for note-like fields:
@@ -12,14 +20,17 @@ export function LinkTextarea({
 	names,
 	rows,
 	placeholder,
+	textareaRef,
 }: {
 	value: string;
 	onChange: (value: string) => void;
 	names: string[];
 	rows?: number;
 	placeholder?: string;
+	/** Exposes the underlying textarea node to the parent (e.g. for a resize-memory hook). */
+	textareaRef?: MutableRefObject<HTMLTextAreaElement | null>;
 }) {
-	const taRef = useRef<HTMLTextAreaElement>(null);
+	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const pendingCaret = useRef<number | null>(null);
 	const [suggest, setSuggest] = useState<{ query: string; start: number; x: number; y: number } | null>(null);
 	const [selected, setSelected] = useState(0);
@@ -107,7 +118,10 @@ export function LinkTextarea({
 	return (
 		<div className="loom-link-textarea">
 			<textarea
-				ref={taRef}
+				ref={(el) => {
+					taRef.current = el;
+					if (textareaRef) textareaRef.current = el;
+				}}
 				rows={rows}
 				placeholder={placeholder}
 				value={value}
@@ -119,6 +133,7 @@ export function LinkTextarea({
 				onClick={(e) => detect(value, e.currentTarget.selectionStart)}
 				onBlur={() => setSuggest(null)}
 			/>
+			<div className="loom-resize-edge" onMouseDown={(e) => startTextareaResize(taRef.current, e)} />
 			{suggest && matches.length > 0 ? (
 				<div className="suggestion-container loom-suggest" style={{ left: suggest.x, top: suggest.y }}>
 					{matches.map((name, i) => (

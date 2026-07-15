@@ -15,6 +15,8 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Seven entity types with basic frontmatter templates (type, loomTags, description, relationships; role for characters; date for events/sessions; linkedSession — one or several — for events; quests currently share the basic template, unique fields planned) — `src/types.ts`, `src/project.ts`
 - [x] Creation command + modal: one context-aware "Create entity in current project" command with an entity-type suggester (replaced the per-type commands); sessions: date only, managed file name `<Project> Session <date>` — `src/project.ts`, `src/main.ts`
 - [x] Entity page view: structured fields (name renames the file, description, tags, role, date, linked session picker, notes body, relationships editor) over plain .md; loom-internal clicks open it, file explorer still opens raw markdown — `src/views/entity-view.tsx`
+- [x] Description/Notes textareas resize from any point on the bottom edge (not just the native corner grip) and remember their height per file across sessions (`settings.entityBoxSizes`, keyed by path, migrated on rename) — `src/views/common.tsx`, `src/views/entity-view.tsx`, `src/views/link-textarea.tsx`, `src/settings.ts`, `src/main.ts`
+- [x] Relationships editor: target search field offers "+ Create entity…" pinned at the top of its suggestion list, prompting an entity type then the create modal, wiring the new note in as that row's target — `src/views/entity-view.tsx`, `src/views/common.tsx`
 - [x] Connected-entities sections on every entity page: one collapsible section per connected type (collapsed by default), entries expand to the target's description + notes with in-place edit/save and a jump-to-page arrow — `src/views/connected-entities.tsx`
 - [x] Session attendance: PC-character toggle chips on session pages, stored in `attendance` as hidden connections (no graph edges); PCs get an Alive tick + death-session picker, and later-dated sessions stop offering dead PCs — `src/views/entity-view.tsx`, `src/indexer.ts`
 - [x] Entity deletion with confirmation: trash icon on list rows and in the entity page header (Back/list fallback after delete) — `src/views/list-view.tsx`, `src/views/entity-view.tsx`
@@ -50,17 +52,17 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 
 ## Graph ("Loom")
 
-- [x] Layered layout: sessions row, events grouped beneath linked session, globals on a fixed lower axis pulled toward connections — `src/graph/layout.ts`
+- [x] Layered layout: sessions row, events grouped beneath linked session, globals in one row per type (order configurable in settings, default quests/characters/factions/items/locations) pulled toward connections — `src/graph/layout.ts`
 - [x] Drag with spring-back physics; single click dims unconnected, double click opens the entity page — `src/views/graph-view.tsx`
 - [x] Node colors per entity type, configurable in settings — `src/settings.ts`, `src/views/graph-view.tsx`
 - [x] Side panel: connections grouped by type, collapsible, auto-collapse over threshold — `src/graph/side-panel.tsx`
 - [x] Horizontal culling of off-screen nodes — `src/views/graph-view.tsx`
-- [x] Camera navigation: wheel zoom around cursor, drag-pan with any mouse button, right-click a node to zoom + center, obstructed edges curved (configurable depth) — `src/views/graph-view.tsx`, `src/graph/layout.ts`
+- [x] Camera navigation: wheel zoom around cursor, drag-pan with any mouse button, right-click a node to zoom + center — `src/views/graph-view.tsx`
 - [x] Side panel keeps the selected node visible (auto-pans when the panel would cover it) — `src/views/graph-view.tsx`
 - [ ] Visual polish: animations, edge styling/bundling, performance tuning for large graphs
 - [ ] Vertical virtualization of culling
 - [ ] Sticky globals while panning: a global node whose connected timeline nodes are on screen slides along with the pan (e.g. Frodo, linked to sessions 4–10, stays visible while scrolling within that range) — never let one endpoint of a visible connection sit off-screen so the user loses track of what connects to what
-- [ ] Orthogonal edge routing instead of bowed curves: edges run as vertical/horizontal segments (parallel lines add structure). Overlapping at the shared start point is fine, but each edge must branch at its own vertical turn axis so lines never run on top of each other after splitting; give branching-heavy nodes extra horizontal room by spreading neighbor columns — inconsistent date spacing is an acceptable price for readable connections
+- [x] Orthogonal edge routing (replaced the bowed curves): horizontal exits, per-edge vertical trunk lanes in the corridors between columns (corridors widen for branching-heavy nodes — inconsistent date spacing accepted), horizontal runs in per-edge y-lanes in the bands between rows, diagonal fan entries into each cross-row edge's lower node, same-row edges as U shapes beside their row, all bends slightly rounded — `src/graph/routing.ts`, `src/graph/layout.ts`
 
 ## Settings
 

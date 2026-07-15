@@ -1,12 +1,96 @@
-import { setIcon, setTooltip } from 'obsidian';
-import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useRef, useState } from 'react';
+import { debounce, setIcon, setTooltip } from 'obsidian';
+import {
+	KeyboardEvent as ReactKeyboardEvent,
+	MouseEvent as ReactMouseEvent,
+	ReactNode,
+	RefObject,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from 'react';
 import { ENTITY_META, ENTITY_TYPES, EntityRecord, VIEW_GRAPH, VIEW_LIST } from '../types';
 import { formatLoomDate } from '../calendar';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
+import type LoomLoomPlugin from '../main';
 
 /** Matches a note's leading frontmatter block (used to split it from the body). */
 export const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
+
+/**
+ * Lets a textarea be resized by dragging anywhere along its bottom edge, not
+ * just the browser's native bottom-right corner grip. Pairs with the
+ * `.loom-resizable` / `.loom-resize-edge` CSS.
+ */
+export function startTextareaResize(el: HTMLTextAreaElement | null, e: ReactMouseEvent): void {
+	if (!el) return;
+	e.preventDefault();
+	const startY = e.clientY;
+	const startHeight = el.getBoundingClientRect().height;
+	const win = el.win;
+	const onMove = (ev: MouseEvent) => {
+		el.style.height = `${Math.max(60, startHeight + (ev.clientY - startY))}px`;
+	};
+	const onUp = () => {
+		win.removeEventListener('mousemove', onMove);
+		win.removeEventListener('mouseup', onUp);
+	};
+	win.addEventListener('mousemove', onMove);
+	win.addEventListener('mouseup', onUp);
+}
+
+/**
+ * Remembers a textarea's resized height per entity file, restoring it on
+ * mount and persisting (debounced) on every change — whether resized via
+ * `.loom-resize-edge` or the browser's native corner grip.
+ */
+export function useBoxSizeMemory(
+	plugin: LoomLoomPlugin,
+	filePath: string,
+	fieldKey: string,
+	ref: RefObject<HTMLTextAreaElement | null>,
+	// On cold Obsidian boot the entity page's first render or two can land
+	// before the index has rebuilt, when the textarea isn't mounted yet (the
+	// page shows its "not found" placeholder instead). This makes the caller
+	// pass a flag that flips once the real form (and the ref) is live, so the
+	// effect re-runs and actually finds the element — a plain [ref, ...] dep
+	// array never re-fires on that later mount, since the ref object itself
+	// never changes identity.
+	ready = true
+): void {
+	const persist = useMemo(
+		() =>
+			debounce(
+				(height: number) => {
+					plugin.settings.entityBoxSizes[filePath] = {
+						...plugin.settings.entityBoxSizes[filePath],
+						[fieldKey]: height,
+					};
+					void plugin.saveSettings();
+				},
+				500,
+				true
+			),
+		[plugin, filePath, fieldKey]
+	);
+
+	useEffect(() => {
+		const el = ref.current;
+		if (!el) return;
+		const saved = plugin.settings.entityBoxSizes[filePath]?.[fieldKey];
+		if (saved) el.style.height = `${saved}px`;
+
+		// getBoundingClientRect (not the observer's own contentRect) so the
+		// read matches the border-box height startTextareaResize writes.
+		const observer = new ResizeObserver(() => {
+			const height = Math.round(el.getBoundingClientRect().height);
+			if (height > 0) persist(height);
+		});
+		observer.observe(el);
+		return () => observer.disconnect();
+	}, [ref, plugin, filePath, fieldKey, persist, ready]);
+}
 
 /** Renders a Lucide icon by name. */
 export function Icon({ name }: { name: string }) {
@@ -49,6 +133,7 @@ export function SuggestInput({
 	onChange,
 	onPick,
 	onBlur,
+	action,
 }: {
 	className?: string;
 	placeholder?: string;
@@ -58,6 +143,9 @@ export function SuggestInput({
 	/** A suggestion was chosen — commit it (onChange is not called for picks). */
 	onPick: (value: string) => void;
 	onBlur?: () => void;
+	/** Extra fixed entry pinned at the top of the list (e.g. "+ Create entity…"),
+	 *  shown even when nothing matches the current text. */
+	action?: { label: string; onPick: () => void };
 }) {
 	const [open, setOpen] = useState(false);
 	const wrapRef = useRef<HTMLDivElement>(null);
@@ -101,10 +189,21 @@ export function SuggestInput({
 					}
 				}}
 			/>
-			{open && filtered.length > 0 ? (
+			{open && (filtered.length > 0 || action) ? (
 				// preventDefault keeps focus in the input, so picking a
 				// suggestion isn't raced by the blur commit.
 				<div className="loom-combo-menu" onMouseDown={(e) => e.preventDefault()}>
+					{action ? (
+						<button
+							className="loom-combo-item loom-combo-action"
+							onClick={() => {
+								setOpen(false);
+								action.onPick();
+							}}
+						>
+							{action.label}
+						</button>
+					) : null}
 					{filtered.map((o) => (
 						<button key={o} className="loom-combo-item" onClick={() => pick(o)}>
 							{o}

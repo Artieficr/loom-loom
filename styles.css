@@ -931,6 +931,18 @@ body.loom-text-large {
 	font-weight: var(--font-medium);
 }
 
+.loom-today-link {
+	align-self: flex-start;
+	color: var(--link-color, var(--text-accent));
+	cursor: pointer;
+	font-size: 0.85em;
+	text-decoration: underline;
+}
+
+.loom-today-link:hover {
+	background: var(--background-modifier-hover);
+}
+
 .loom-field input[type='text'],
 .loom-field textarea,
 .loom-field select {
@@ -940,6 +952,23 @@ body.loom-text-large {
 .loom-field textarea {
 	resize: vertical;
 	font-family: inherit;
+}
+
+/* Wrap a resizable textarea so `.loom-resize-edge` can overlay its bottom
+   edge — the native corner grip stays too, this just widens the grabbable
+   area to the whole edge instead of only the bottom-right corner. */
+.loom-resizable {
+	position: relative;
+}
+
+.loom-resize-edge {
+	position: absolute;
+	left: 0;
+	right: var(--size-4-3);
+	bottom: 0;
+	height: var(--size-4-2);
+	transform: translateY(50%);
+	cursor: ns-resize;
 }
 
 .loom-tag-row {
@@ -1062,6 +1091,7 @@ body.loom-text-large {
 }
 
 .loom-link-textarea {
+	position: relative;
 	width: 100%;
 }
 

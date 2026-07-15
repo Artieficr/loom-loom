@@ -115,17 +115,37 @@ implementations that could drift. A column is anchored by a session (or by an ev
 no linked session); events linked to a session stack beneath it *regardless of their own
 date*, matching the intended nested-bubble presentation.
 
-## Graph layout (src/graph/layout.ts)
+## Graph layout (src/graph/layout.ts) + edge routing (src/graph/routing.ts)
 
-Three fixed layers, custom-built because Obsidian's force-directed graph can't express
-this:
+Fixed rows, custom-built because Obsidian's force-directed graph can't express this:
 
 1. **Sessions** at a fixed y, x from column order.
 2. **Events** beneath their column's anchor, stacked with a fixed dy.
-3. **Globals** (characters/locations/factions/items/quests) on one fixed lower axis. Desired x
-   is the barycenter of their connections' x positions (two passes so global↔global
-   edges exert pull once initial positions exist); then a left-to-right min-spacing sweep
-   resolves overlaps. They never leave their row — that's the point: no vertical chaos.
+3. **Global layers**: one row per global type (quests/characters/factions/items/locations
+   by default; order configurable in the Graph settings tab). Desired x is the barycenter
+   of each node's connections (two passes so global↔global edges exert pull once initial
+   positions exist); then a per-row left-to-right min-spacing sweep resolves overlaps.
+   Nodes never leave their row — that's the point: no vertical chaos.
+
+Edges are routed orthogonally (circuit-diagram style, from Artie's sketch), not drawn
+as straight lines or curves:
+
+- An edge leaves its **upper** node horizontally, turns down a **vertical trunk lane**
+  unique to that edge, and — for cross-row edges — enters the lower node with a straight
+  **diagonal**, so several edges into one node fan in like spokes. All bends are slightly
+  rounded (6px).
+- Trunk lanes live in the **corridors** between timeline columns, 10px apart; a corridor
+  widens to fit its lane count (layout runs twice: a provisional pass to learn lane
+  demand, a final pass with spread columns — inconsistent date spacing is the accepted
+  price for readable connections). Trunks passing global rows are nudged sideways off
+  any node body on their path.
+- Horizontal runs live in the **bands** between rows, each on its own y-lane; band
+  heights grow with their lane count, which is what finally fixes each global row's y.
+- **Same-row edges** are U shapes through the band beside their row (below for globals
+  and events, above for sessions).
+- Geometry is split: the layout stores static lane/fan data per edge (`EdgeRoute`), the
+  view rebuilds each path from the live (drag-displaced) endpoint positions per frame,
+  so trunks stay put while stubs and fans follow a dragged node.
 
 Interaction (src/views/graph-view.tsx):
 
@@ -135,7 +155,8 @@ Interaction (src/views/graph-view.tsx):
 - **Click-to-dim**: selection dims everything *not* connected (contrast, not highlight
   color). Click vs. drag is disambiguated by a 4px slop.
 - **Culling**: nodes whose home x falls outside the scrolled viewport (±250px) aren't
-  rendered; edges render if either endpoint is visible.
+  rendered; edges cull on their full route extent (endpoints + trunk lane), so a long
+  trunk stays visible while both endpoints are off-screen.
 
 ## View pattern
 

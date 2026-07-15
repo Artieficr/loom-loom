@@ -5,6 +5,7 @@ import {
 	Modal,
 	Notice,
 	Setting,
+	TextComponent,
 	TFile,
 	TFolder,
 	normalizePath,
@@ -169,7 +170,10 @@ export class CreateEntityModal extends Modal {
 		private options: CreateEntityOptions = {}
 	) {
 		super(plugin.app);
-		if (type === 'session' || type === 'event') this.fields.date = todayRaw();
+		// Sessions are always dated (they represent actual play happening
+		// today); events often aren't (e.g. a recurring holiday with no
+		// specific occurrence), so only sessions get a default.
+		if (type === 'session') this.fields.date = todayRaw();
 	}
 
 	onOpen(): void {
@@ -196,11 +200,25 @@ export class CreateEntityModal extends Modal {
 		}
 
 		if (this.type === 'event' || this.type === 'session') {
+			let dateText: TextComponent;
 			new Setting(this.contentEl)
 				.setName('Date')
 				.setDesc('Year-month-day format.')
-				.addText((text) =>
-					text.setValue(this.fields.date).onChange((v) => (this.fields.date = v.trim()))
+				.addText((text) => {
+					dateText = text;
+					text
+						.setPlaceholder(this.type === 'event' ? 'YYYY-MM-DD' : '')
+						.setValue(this.fields.date)
+						.onChange((v) => (this.fields.date = v.trim()));
+				})
+				.addExtraButton((btn) =>
+					btn
+						.setIcon('calendar')
+						.setTooltip('Set to today')
+						.onClick(() => {
+							this.fields.date = todayRaw();
+							dateText.setValue(this.fields.date);
+						})
 				);
 		}
 
