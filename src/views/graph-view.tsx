@@ -1,4 +1,4 @@
-import { Menu, ViewStateResult, debounce, setTooltip } from 'obsidian';
+import { Menu, Notice, ViewStateResult, debounce, setTooltip } from 'obsidian';
 import {
 	MouseEvent as ReactMouseEvent,
 	PointerEvent as ReactPointerEvent,
@@ -9,9 +9,10 @@ import {
 	useState,
 } from 'react';
 import { ENTITY_META, ENTITY_TYPES, GraphCamera, TimelineDef, VIEW_GRAPH } from '../types';
-import { CreateEntityModal } from '../project';
+import { ConfirmModal, CreateEntityModal, RelationshipPromptModal } from '../project';
+import { extractLinkpath } from '../indexer';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
-import { edgePath, edgeXRange } from '../graph/routing';
+import { Pt, edgeEndDirs, edgePath, edgeXRange } from '../graph/routing';
 import { GraphSidePanel } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage, recordLabel } from './common';
@@ -77,6 +78,8 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 3;
 /** Screen-space padding the selected node keeps from the viewport edges. */
 const REVEAL_MARGIN = 90;
+/** World-space margin around a node's circle within which a dragged node snaps to it as a drop target. */
+const DROP_SNAP = 12;
 
 interface Displacement {
 	dx: number;
@@ -88,6 +91,7 @@ interface Displacement {
 
 interface DragState {
 	id: string;
+	node: LayoutNode;
 	pointerId: number;
 	startX: number;
 	startY: number;
@@ -110,15 +114,33 @@ function clamp(v: number, min: number, max: number): number {
 	return Math.max(min, Math.min(max, v));
 }
 
+/** SVG polygon points for an arrowhead whose tip sits at `tip`, pointing along `dir`. */
+function arrowPoints(tip: Pt, dir: Pt, size: number): string {
+	const bx = tip.x - dir.x * size;
+	const by = tip.y - dir.y * size;
+	const px = -dir.y * size * 0.45;
+	const py = dir.x * size * 0.45;
+	return `${tip.x},${tip.y} ${bx + px},${by + py} ${bx - px},${by - py}`;
+}
+
 function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | null }) {
 	const plugin = view.plugin;
 	const version = useIndexVersion(plugin.indexer);
 	const project = resolveProject(plugin.indexer, projectRoot);
 	const layerKey = plugin.settings.globalLayerOrder.join(',');
+	/** Bumped when a drag-reorder writes a new manual x, to re-run the layout. */
+	const [manualVersion, setManualVersion] = useState(0);
 	const layout = useMemo(
-		() => computeGraphLayout(plugin.indexer, project?.root ?? ' none', plugin.settings.globalLayerOrder),
+		() =>
+			computeGraphLayout(
+				plugin.indexer,
+				project?.root ?? ' none',
+				plugin.settings.globalLayerOrder,
+				plugin.settings.graphLineGap,
+				new Map(Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {}))
+			),
 		// layerKey stands in for the order array (mutated in place by settings).
-		[plugin.indexer, version, project, layerKey]
+		[plugin.indexer, version, project, layerKey, plugin.settings.graphLineGap, manualVersion]
 	);
 
 	const [selected, setSelected] = useState<string | null>(null);
@@ -167,6 +189,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	}, [view, camera, drawerOpen, drawerHeight, project, persistCamera]);
 	const dispRef = useRef(new Map<string, Displacement>());
 	const dragRef = useRef<DragState | null>(null);
+	/** Node id the currently dragged node hovers over (drop-to-connect target). */
+	const dropRef = useRef<string | null>(null);
+	/** A reorder drop waiting for the relayout, so the node eases from where it
+	 *  was released to its new home instead of jumping. */
+	const pendingReorder = useRef<{ id: string; x: number; y: number } | null>(null);
 	const panRef = useRef<PanState | null>(null);
 	const springRaf = useRef(0);
 	const cameraRaf = useRef(0);
@@ -297,7 +324,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		}
 		e.stopPropagation();
 		e.currentTarget.setPointerCapture(e.pointerId);
-		dragRef.current = { id: node.id, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, moved: false };
+		dragRef.current = { id: node.id, node, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, moved: false };
 		const d = dispRef.current.get(node.id) ?? { dx: 0, dy: 0, vx: 0, vy: 0, dragging: true };
 		d.dragging = true;
 		d.vx = 0;
@@ -317,6 +344,21 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			// Pointer deltas are screen px; node displacement is world space.
 			d.dx = dx / cameraRef.current.k;
 			d.dy = dy / cameraRef.current.k;
+			// Drop-to-connect: does the dragged node's center sit on another node?
+			const cx = drag.node.x + d.dx;
+			const cy = drag.node.y + d.dy;
+			let target: string | null = null;
+			for (const n of layout.nodes) {
+				if (n.id === drag.id) continue;
+				const nd = dispRef.current.get(n.id);
+				const nx = n.x + (nd?.dx ?? 0);
+				const ny = n.y + (nd?.dy ?? 0);
+				if (Math.hypot(nx - cx, ny - cy) <= RADII[n.kind] + DROP_SNAP) {
+					target = n.id;
+					break;
+				}
+			}
+			dropRef.current = target;
 			setTick((t) => t + 1);
 		}
 	};
@@ -325,13 +367,120 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		const drag = dragRef.current;
 		if (!drag || drag.pointerId !== e.pointerId) return;
 		dragRef.current = null;
+		const dropId = dropRef.current;
+		dropRef.current = null;
 		const d = dispRef.current.get(drag.id);
 		if (d) d.dragging = false;
 		if (drag.moved) {
-			startSpring();
+			const target = dropId !== null ? layout.nodes.find((n) => n.id === dropId) : undefined;
+			if (target) {
+				startSpring();
+				onNodeDrop(drag.node, target);
+			} else if (
+				(drag.node.kind === 'global' ||
+					(drag.node.kind === 'event' &&
+						drag.node.record.date === null &&
+						(layout.neighbors.get(drag.id)?.size ?? 0) === 0)) &&
+				project &&
+				d
+			) {
+				// Reorder drop: persisted for globals and for free events
+				// (dateless + unconnected — they float outside the column
+				// flow); the layout decides its weight — free-floating
+				// components follow the drop (towing their neighbors),
+				// timeline-anchored ones ease back home (their forces win).
+				const wx = drag.node.x + d.dx;
+				const wy = drag.node.y + d.dy;
+				const forProject = (plugin.settings.graphManualX[project.root] ??= {});
+				forProject[drag.id] = wx;
+				void plugin.saveSettings();
+				pendingReorder.current = { id: drag.id, x: wx, y: wy };
+				setManualVersion((v) => v + 1);
+			} else {
+				startSpring();
+			}
 		} else {
 			dispRef.current.delete(drag.id);
 			setSelected((cur) => (cur === node.id ? null : node.id));
+		}
+	};
+
+	// --- Drop-to-connect -------------------------------------------------------
+
+	/** Does `from`'s own note declare a relationship (or linkedSession) pointing at `toId`? */
+	const declaresConnection = (from: LayoutNode, toId: string): boolean => {
+		const hits = (linkpath: string) => plugin.indexer.resolve(linkpath, from.id)?.path === toId;
+		return (
+			from.record.relationships.some((r) => hits(r.linkpath)) ||
+			(from.record.type === 'event' && from.record.linkedSessions.some(hits))
+		);
+	};
+
+	/** The dragged node is always the declaring side: dropping it on a node it
+	 *  doesn't yet declare adds a relationship to ITS note (even if the other
+	 *  side declares one back — that's how mutual pairs are built); dropping it
+	 *  on one it already declares offers to remove its own declaration. */
+	const onNodeDrop = (from: LayoutNode, to: LayoutNode) => {
+		const fromLabel = recordLabel(from.record, project);
+		const toLabel = recordLabel(to.record, project);
+		if (declaresConnection(from, to.id)) {
+			new ConfirmModal(
+				plugin.app,
+				'Remove relationship',
+				`Remove the relationship ${fromLabel} declares to ${toLabel}?`,
+				() => removeConnection(from, to),
+				'Remove'
+			).open();
+			return;
+		}
+		new RelationshipPromptModal(plugin.app, fromLabel, toLabel, (relType) => {
+			const file = plugin.app.vault.getFileByPath(from.id);
+			if (!file) return;
+			plugin.app.fileManager
+				.processFrontMatter(file, (fm: Record<string, unknown>) => {
+					const rels = Array.isArray(fm.relationships) ? fm.relationships : [];
+					rels.push({ type: relType, target: `[[${to.record.name}]]` });
+					fm.relationships = rels;
+				})
+				.catch((err) => {
+					console.error('Loom Loom: failed to connect entities', err);
+					new Notice('Could not create the connection.');
+				});
+		}).open();
+	};
+
+	/** Removes the dragged node's own declarations pointing at `other`: typed
+	 *  relationship entries and (for events) linkedSession links. The other
+	 *  side's declarations are untouched — drag it to remove those. */
+	const removeConnection = async (node: LayoutNode, other: LayoutNode) => {
+		const resolvesToOther = (linkpath: string) =>
+			plugin.indexer.resolve(linkpath, node.id)?.path === other.id;
+		const file = plugin.app.vault.getFileByPath(node.id);
+		if (!file) return;
+		try {
+			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+				if (Array.isArray(fm.relationships)) {
+					fm.relationships = fm.relationships.filter((rel: unknown) => {
+						if (typeof rel !== 'object' || rel === null) return true;
+						const target = (rel as { target?: unknown }).target;
+						if (typeof target !== 'string') return true;
+						const linkpath = extractLinkpath(target);
+						return linkpath === null || !resolvesToOther(linkpath);
+					});
+				}
+				if (node.record.type === 'event') {
+					const raw = fm.linkedSession;
+					const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [];
+					fm.linkedSession = list.filter((entry: unknown) => {
+						if (typeof entry !== 'string') return true;
+						const linkpath = extractLinkpath(entry);
+						return linkpath === null || !resolvesToOther(linkpath);
+					});
+				}
+			});
+		} catch (err) {
+			console.error('Loom Loom: failed to remove connection', err);
+			new Notice('Could not remove the connection.');
 		}
 	};
 
@@ -450,6 +599,24 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		return { x: n.x + (d?.dx ?? 0), y: n.y + (d?.dy ?? 0) };
 	};
 
+	// After a reorder drop relayouts the row, seed the dropped node's
+	// displacement with (release point − new home) so it eases into place.
+	useEffect(() => {
+		const pending = pendingReorder.current;
+		if (!pending) return;
+		pendingReorder.current = null;
+		const node = nodeById.get(pending.id);
+		if (!node) return;
+		dispRef.current.set(pending.id, {
+			dx: pending.x - node.x,
+			dy: pending.y - node.y,
+			vx: 0,
+			vy: 0,
+			dragging: false,
+		});
+		startSpring();
+	}, [layout, nodeById]);
+
 	// --- Timeline drawer -------------------------------------------------------
 
 	const defs: TimelineDef[] = project ? plugin.indexer.getTimelines(project.root) : [];
@@ -532,12 +699,48 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								if (maxX < viewRange.min || minX > viewRange.max) return null;
 								const dim = connectedTo !== null && edge.a !== selected && edge.b !== selected;
 								const key = edge.a + '|' + edge.b + '|' + edge.relType;
+								// Declaration arrowheads, tips at the node rims.
+								const arrowSize = plugin.settings.graphArrowSize;
+								let arrows: ReactElement | null = null;
+								if (edge.arrowA || edge.arrowB) {
+									const dirs = edgeEndDirs(edge.route, pa, pb);
+									arrows = (
+										<g className={dim ? 'loom-edge-arrows loom-dim' : 'loom-edge-arrows'}>
+											{edge.arrowA ? (
+												<polygon
+													points={arrowPoints(
+														{
+															x: pa.x + dirs.start.x * (RADII[a.kind] + 1),
+															y: pa.y + dirs.start.y * (RADII[a.kind] + 1),
+														},
+														{ x: -dirs.start.x, y: -dirs.start.y },
+														arrowSize
+													)}
+												/>
+											) : null}
+											{edge.arrowB ? (
+												<polygon
+													points={arrowPoints(
+														{
+															x: pb.x - dirs.end.x * (RADII[b.kind] + 1),
+															y: pb.y - dirs.end.y * (RADII[b.kind] + 1),
+														},
+														dirs.end,
+														arrowSize
+													)}
+												/>
+											) : null}
+										</g>
+									);
+								}
 								return (
-									<path
-										key={key}
-										className={dim ? 'loom-edge loom-dim' : 'loom-edge'}
-										d={edgePath(edge.route, pa, pb)}
-									/>
+									<g key={key}>
+										<path
+											className={dim ? 'loom-edge loom-dim' : 'loom-edge'}
+											d={edgePath(edge.route, pa, pb)}
+										/>
+										{arrows}
+									</g>
 								);
 							})}
 							{layout.nodes.map((node) => {
@@ -566,6 +769,16 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 									>
 										{/* Native SVG tooltip carries the full name when truncated. */}
 										{shortLabel !== label ? <title>{label}</title> : null}
+										{dropRef.current === node.id && dragRef.current ? (
+											<circle
+												className={
+													declaresConnection(dragRef.current.node, node.id)
+														? 'loom-drop-ring loom-drop-ring-remove'
+														: 'loom-drop-ring'
+												}
+												r={RADII[node.kind] + 8}
+											/>
+										) : null}
 										<circle r={RADII[node.kind]} fill={plugin.settings.nodeColors[node.record.type]} />
 										<text className="loom-node-label" y={RADII[node.kind] + 16} textAnchor="middle">
 											{shortLabel}

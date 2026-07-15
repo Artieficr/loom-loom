@@ -33,6 +33,10 @@ export interface RoutedEdge {
 	a: string;
 	b: string;
 	relType: string;
+	/** Arrowhead at `a`/`b` — the relationship is declared by the other endpoint
+	 *  and points at this one (both set = mutual). */
+	arrowA: boolean;
+	arrowB: boolean;
 	route: EdgeRoute;
 }
 
@@ -107,6 +111,24 @@ export function roundedPath(pts: Pt[], r: number): string {
 /** Full path of an edge from its endpoints' live positions. */
 export function edgePath(route: EdgeRoute, a: Pt, b: Pt): string {
 	return roundedPath(edgePoints(route, a, b), CORNER_RADIUS);
+}
+
+/**
+ * Unit directions of a route's first segment (leaving `a`) and last segment
+ * (entering `b`) — used to place declaration arrowheads at the node rims.
+ */
+export function edgeEndDirs(route: EdgeRoute, a: Pt, b: Pt): { start: Pt; end: Pt } {
+	const pts = edgePoints(route, a, b);
+	const norm = (from: Pt, to: Pt): Pt => {
+		const dx = to.x - from.x;
+		const dy = to.y - from.y;
+		const len = Math.hypot(dx, dy) || 1;
+		return { x: dx / len, y: dy / len };
+	};
+	return {
+		start: norm(pts[0], pts[1] ?? b),
+		end: norm(pts[pts.length - 2] ?? a, pts[pts.length - 1]),
+	};
 }
 
 /** Horizontal extent of a route (for viewport culling of long trunks/runs). */

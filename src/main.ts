@@ -67,23 +67,43 @@ export default class LoomLoomPlugin extends Plugin {
 
 		this.addSettingTab(new LoomLoomSettingTab(this.app, this));
 
-		// Keep remembered textarea sizes (settings.entityBoxSizes) attached to
-		// the right file across renames, and drop them when a file is deleted.
+		// Keep per-file UI state (settings.entityBoxSizes, settings.graphManualX)
+		// attached to the right file across renames, dropped on delete.
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
 				if (!(file instanceof TFile)) return;
+				let changed = false;
 				const sizes = this.settings.entityBoxSizes[oldPath];
-				if (!sizes) return;
-				delete this.settings.entityBoxSizes[oldPath];
-				this.settings.entityBoxSizes[file.path] = sizes;
-				void this.saveSettings();
+				if (sizes) {
+					delete this.settings.entityBoxSizes[oldPath];
+					this.settings.entityBoxSizes[file.path] = sizes;
+					changed = true;
+				}
+				for (const entries of Object.values(this.settings.graphManualX)) {
+					if (oldPath in entries) {
+						entries[file.path] = entries[oldPath];
+						delete entries[oldPath];
+						changed = true;
+					}
+				}
+				if (changed) void this.saveSettings();
 			})
 		);
 		this.registerEvent(
 			this.app.vault.on('delete', (file) => {
-				if (!(file instanceof TFile) || !(file.path in this.settings.entityBoxSizes)) return;
-				delete this.settings.entityBoxSizes[file.path];
-				void this.saveSettings();
+				if (!(file instanceof TFile)) return;
+				let changed = false;
+				if (file.path in this.settings.entityBoxSizes) {
+					delete this.settings.entityBoxSizes[file.path];
+					changed = true;
+				}
+				for (const entries of Object.values(this.settings.graphManualX)) {
+					if (file.path in entries) {
+						delete entries[file.path];
+						changed = true;
+					}
+				}
+				if (changed) void this.saveSettings();
 			})
 		);
 
