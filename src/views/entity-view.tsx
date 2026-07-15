@@ -507,12 +507,26 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{record.type === 'event' || isSession ? (
+			{isSession ? (
+				<label className="loom-field">
+					<span className="loom-field-label">Date</span>
+					<input
+						type="date"
+						value={date}
+						onChange={(e) => {
+							setDate(e.target.value);
+							void commitDate(e.target.value);
+						}}
+					/>
+				</label>
+			) : null}
+
+			{record.type === 'event' ? (
 				<label className="loom-field">
 					<span className="loom-field-label">Date</span>
 					<input
 						type="text"
-						placeholder={record.type === 'event' ? 'Not specified' : '2026-07-14'}
+						placeholder="Not specified"
 						value={date}
 						onChange={(e) => setDate(e.target.value)}
 						onBlur={() => void commitDate()}
