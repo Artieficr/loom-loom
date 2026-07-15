@@ -15,6 +15,7 @@ import {
 	EntityRecord,
 	EntityType,
 	PC_TAG,
+	QUEST_OUTCOMES,
 	VIEW_ENTITY,
 	VIEW_LIST,
 } from '../types';
@@ -151,6 +152,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	useBoxSizeMemory(plugin, file?.path ?? '', 'description', descriptionRef, !!record);
 	useBoxSizeMemory(plugin, file?.path ?? '', 'notes', notesRef, !!record);
 	const [role, setRole] = useState(record?.role ?? '');
+	const [reward, setReward] = useState(record?.reward ?? '');
 	const [date, setDate] = useState(record?.date?.raw ?? '');
 	const [relationships, setRelationships] = useState<RelationshipDraft[]>(
 		record?.relationships.map((r) => ({ type: r.type, target: r.linkpath })) ?? []
@@ -166,6 +168,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		setName(record.name);
 		setDescription(record.description);
 		setRole(record.role);
+		setReward(record.reward);
 		setDate(record.date?.raw ?? '');
 		setRelationships(record.relationships.map((r) => ({ type: r.type, target: r.linkpath })));
 	}, [record]);
@@ -300,6 +303,52 @@ function EntityPage({ view }: { view: EntityView }) {
 			setFmKey(fm, 'attendance', next.map((n) => `[[${n}]]`));
 		});
 	};
+
+	// Quest fields: giver characters (several), received/outcome sessions, reward.
+	const isQuest = record.type === 'quest';
+	const questGiverRecords = isQuest
+		? record.questGivers
+				.map((lp) => plugin.indexer.resolve(lp, record.path))
+				.filter((r): r is EntityRecord => r !== null && r !== undefined)
+		: [];
+	const characters = isQuest && project ? plugin.indexer.getAll('character', project.root) : [];
+	const writeQuestGivers = (names: string[]) => {
+		writeFm((fm) => {
+			setFmKey(fm, 'questGiver', names.map((n) => `[[${n}]]`));
+		});
+	};
+	const questReceived =
+		isQuest && record.questReceived !== null
+			? plugin.indexer.resolve(record.questReceived, record.path)
+			: null;
+	const questOutcomeSession =
+		isQuest && record.questOutcomeSession !== null
+			? plugin.indexer.resolve(record.questOutcomeSession, record.path)
+			: null;
+	const setQuestSession = (key: 'questReceived' | 'questOutcomeSession', name: string | null) => {
+		writeFm((fm) => {
+			setFmKey(fm, key, name === null ? '' : `[[${name}]]`);
+		});
+	};
+	const setQuestOutcome = (outcome: string) => {
+		writeFm((fm) => {
+			setFmKey(fm, 'questOutcome', outcome);
+			if (outcome === '') setFmKey(fm, 'questOutcomeSession', '');
+		});
+	};
+	const sessionsByDate = sessions
+		.slice()
+		.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
+	const sessionChip = (s: EntityRecord, clear: () => void) => (
+		<div className="loom-tag-row">
+			<span className="loom-chip loom-session-chip">
+				{recordLabel(s, project)}
+				<button className="loom-chip-remove" aria-label="Clear session" onClick={clear}>
+					✕
+				</button>
+			</span>
+		</div>
+	);
 
 	// PC life state: unticking Alive reveals the death-session picker.
 	const isPc = record.type === 'character' && record.loomTags.includes(PC_TAG);
@@ -622,6 +671,103 @@ function EntityPage({ view }: { view: EntityView }) {
 						}
 					/>
 				</div>
+			) : null}
+
+			{isQuest ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Quest givers</span>
+					{questGiverRecords.length > 0 ? (
+						<div className="loom-tag-row">
+							{questGiverRecords.map((c) => (
+								<span key={c.path} className="loom-chip loom-session-chip">
+									{c.name}
+									<button
+										className="loom-chip-remove"
+										aria-label="Remove quest giver"
+										onClick={() =>
+											writeQuestGivers(
+												questGiverRecords.filter((o) => o.path !== c.path).map((o) => o.name)
+											)
+										}
+									>
+										✕
+									</button>
+								</span>
+							))}
+						</div>
+					) : null}
+					<SearchableSelect
+						placeholder="Add a quest giver…"
+						options={characters
+							.filter((c) => !questGiverRecords.some((g) => g.path === c.path))
+							.sort((a, b) => a.name.localeCompare(b.name))
+							.map((c) => ({ value: c.name, label: c.name }))}
+						onPick={(name) => writeQuestGivers([...questGiverRecords.map((g) => g.name), name])}
+					/>
+				</div>
+			) : null}
+
+			{isQuest ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Received in session</span>
+					{questReceived && questReceived.type === 'session' ? (
+						sessionChip(questReceived, () => setQuestSession('questReceived', null))
+					) : (
+						<SearchableSelect
+							placeholder="Pick the session…"
+							options={sessionsByDate.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+							onPick={(name) => setQuestSession('questReceived', name)}
+						/>
+					)}
+				</div>
+			) : null}
+
+			{isQuest ? (
+				<label className="loom-field">
+					<span className="loom-field-label">Outcome</span>
+					<select value={record.questOutcome} onChange={(e) => setQuestOutcome(e.target.value)}>
+						<option value="">Active</option>
+						{QUEST_OUTCOMES.map((o) => (
+							<option key={o} value={o}>
+								{o[0].toUpperCase() + o.slice(1)}
+							</option>
+						))}
+					</select>
+				</label>
+			) : null}
+
+			{isQuest && record.questOutcome !== '' ? (
+				<div className="loom-field">
+					<span className="loom-field-label">
+						{record.questOutcome[0].toUpperCase() + record.questOutcome.slice(1)} in session
+					</span>
+					{questOutcomeSession && questOutcomeSession.type === 'session' ? (
+						sessionChip(questOutcomeSession, () => setQuestSession('questOutcomeSession', null))
+					) : (
+						<SearchableSelect
+							placeholder="Pick the session…"
+							options={sessionsByDate.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+							onPick={(name) => setQuestSession('questOutcomeSession', name)}
+						/>
+					)}
+				</div>
+			) : null}
+
+			{isQuest ? (
+				<label className="loom-field">
+					<span className="loom-field-label">Reward</span>
+					<input
+						type="text"
+						placeholder="Not specified"
+						value={reward}
+						onChange={(e) => setReward(e.target.value)}
+						onBlur={() =>
+							writeFm((fm) => {
+								fm.reward = reward;
+							})
+						}
+					/>
+				</label>
 			) : null}
 
 			<label className="loom-field">

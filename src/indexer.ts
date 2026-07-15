@@ -15,6 +15,7 @@ import {
 	EntityRecord,
 	EntityType,
 	LOOM_EXTENSION,
+	QUEST_OUTCOMES,
 	RelationshipDecl,
 	TIMELINES_FOLDER,
 	TimelineDef,
@@ -298,6 +299,9 @@ export class LoomIndexer extends Component {
 			type !== 'session' && project.config.customCalendar.enabled ? 'custom' : 'gregorian';
 		const aliveValue = fmField(fm, 'alive');
 		const deathValue = fmField(fm, 'deathSession');
+		const receivedValue = fmField(fm, 'questReceived');
+		const outcomeValue = fmField(fm, 'questOutcome');
+		const outcomeSessionValue = fmField(fm, 'questOutcomeSession');
 		return {
 			path: file.path,
 			name: file.basename,
@@ -316,6 +320,16 @@ export class LoomIndexer extends Component {
 			role: typeof fm.role === 'string' ? fm.role : '',
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
 			deathSession: typeof deathValue === 'string' ? extractLinkpath(deathValue) : null,
+			questReceived: typeof receivedValue === 'string' ? extractLinkpath(receivedValue) : null,
+			questOutcome:
+				typeof outcomeValue === 'string' &&
+				(QUEST_OUTCOMES as readonly string[]).includes(outcomeValue.toLowerCase())
+					? outcomeValue.toLowerCase()
+					: '',
+			questOutcomeSession:
+				typeof outcomeSessionValue === 'string' ? extractLinkpath(outcomeSessionValue) : null,
+			questGivers: parseLinkList(fmField(fm, 'questGiver')),
+			reward: typeof fm.reward === 'string' ? fm.reward : '',
 			created: file.stat.ctime,
 			modified: file.stat.mtime,
 		};

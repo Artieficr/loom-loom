@@ -18,10 +18,11 @@ import {
 	EntityRecord,
 	EntityType,
 	LOOM_EXTENSION,
+	QUEST_OUTCOMES,
 	TIMELINES_FOLDER,
 	VIEW_LIST,
 } from './types';
-import { defaultProjectConfig, serializeProjectConfig, todayRaw } from './calendar';
+import { defaultProjectConfig, formatLoomDate, serializeProjectConfig, todayRaw } from './calendar';
 import { ProjectDef } from './indexer';
 import type LoomLoomPlugin from './main';
 
@@ -98,6 +99,12 @@ export interface NewEntityFields {
 	date: string;
 	/** When set, the new note declares this relationship in its frontmatter. */
 	relationship?: { type: string; target: string };
+	/** Quest only (all optional): note names, not links. */
+	questGiver?: string;
+	questReceived?: string;
+	questOutcome?: string;
+	questOutcomeSession?: string;
+	reward?: string;
 }
 
 export function buildEntityContent(type: EntityType, fields: NewEntityFields): string {
@@ -119,6 +126,18 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	if (type === 'event' || type === 'session') lines.push(`date: ${yamlQuote(fields.date)}`);
 	if (type === 'event') lines.push('linkedSession: []');
 	if (type === 'session') lines.push('attendance: []');
+	if (type === 'quest') {
+		const link = (name?: string) => (name && name !== '' ? yamlQuote(`[[${name}]]`) : '""');
+		lines.push(
+			fields.questGiver && fields.questGiver !== ''
+				? `questGiver: [${link(fields.questGiver)}]`
+				: 'questGiver: []',
+			`questReceived: ${link(fields.questReceived)}`,
+			`questOutcome: ${yamlQuote(fields.questOutcome ?? '')}`,
+			`questOutcomeSession: ${link(fields.questOutcomeSession)}`,
+			`reward: ${yamlQuote(fields.reward ?? '')}`
+		);
+	}
 	lines.push('---', '', '');
 	return lines.join('\n');
 }
@@ -197,6 +216,43 @@ export class CreateEntityModal extends Modal {
 				for (const tag of vocab) dd.addOption(tag, tag);
 				dd.onChange((v) => (this.fields.tag = v));
 			});
+		}
+
+		if (this.type === 'quest') {
+			const sessionLabel = (s: EntityRecord) =>
+				s.date ? formatLoomDate(s.date, this.project.config) : s.name;
+			const sessions = this.plugin.indexer
+				.getAll('session', this.project.root)
+				.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
+			const characters = this.plugin.indexer
+				.getAll('character', this.project.root)
+				.sort((a, b) => a.name.localeCompare(b.name));
+
+			new Setting(this.contentEl).setName('Quest giver').addDropdown((dd) => {
+				dd.addOption('', '—');
+				for (const c of characters) dd.addOption(c.name, c.name);
+				dd.onChange((v) => (this.fields.questGiver = v));
+			});
+			new Setting(this.contentEl).setName('Received in session').addDropdown((dd) => {
+				dd.addOption('', '—');
+				for (const s of sessions) dd.addOption(s.name, sessionLabel(s));
+				dd.onChange((v) => (this.fields.questReceived = v));
+			});
+			new Setting(this.contentEl).setName('Outcome').addDropdown((dd) => {
+				dd.addOption('', 'Active');
+				for (const o of QUEST_OUTCOMES) dd.addOption(o, o[0].toUpperCase() + o.slice(1));
+				dd.onChange((v) => (this.fields.questOutcome = v));
+			});
+			new Setting(this.contentEl).setName('Outcome session').addDropdown((dd) => {
+				dd.addOption('', '—');
+				for (const s of sessions) dd.addOption(s.name, sessionLabel(s));
+				dd.onChange((v) => (this.fields.questOutcomeSession = v));
+			});
+			new Setting(this.contentEl)
+				.setName('Reward')
+				.addText((text) =>
+					text.setPlaceholder('Not specified').onChange((v) => (this.fields.reward = v.trim()))
+				);
 		}
 
 		if (this.type === 'session') {
