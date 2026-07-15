@@ -1,4 +1,4 @@
-import { Menu, ViewStateResult, debounce } from 'obsidian';
+import { Menu, ViewStateResult, debounce, setTooltip } from 'obsidian';
 import {
 	MouseEvent as ReactMouseEvent,
 	PointerEvent as ReactPointerEvent,
@@ -134,6 +134,15 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const drawerDrag = useRef<{ pointerId: number; startY: number; startH: number } | null>(null);
 	/** True once a bar drag resized the drawer — the click that follows must not toggle. */
 	const drawerBarMoved = useRef(false);
+	const drawerBarRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		if (drawerBarRef.current) {
+			setTooltip(drawerBarRef.current, drawerOpen ? 'Collapse timeline' : 'Open timeline', {
+				placement: 'top',
+			});
+		}
+	}, [drawerOpen]);
 
 	const wrapRef = useRef<HTMLDivElement>(null);
 	const cameraRef = useRef(camera);
@@ -438,9 +447,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	const onDrawerBarPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
 		drawerBarMoved.current = false;
-		// The timeline picker on the bar is clickable, not a drag handle.
-		// A closed drawer has no height to resize — its bar only toggles.
-		if (!drawerOpen || (e.target as HTMLElement).closest('select')) return;
+		// Resizes only start from the top-edge strip — the rest of the bar
+		// (and the whole closed bar) is the click-to-toggle zone.
+		if (!drawerOpen || !(e.target as HTMLElement).closest('.loom-drawer-handle')) return;
 		e.currentTarget.setPointerCapture(e.pointerId);
 		drawerDrag.current = { pointerId: e.pointerId, startY: e.clientY, startH: drawerHeight };
 		// Height must follow the pointer 1:1 — suspend the slide transition.
@@ -463,7 +472,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	};
 
 	const onDrawerBarClick = (e: ReactMouseEvent<HTMLDivElement>) => {
-		if ((e.target as HTMLElement).closest('select')) return;
+		// The picker and the resize strip are their own affordances, not toggles.
+		if ((e.target as HTMLElement).closest('select, .loom-drawer-handle')) return;
 		// A resize drag ends with a click on the bar too — swallow it.
 		if (drawerBarMoved.current) return;
 		setDrawerOpen(!drawerOpen);
@@ -580,16 +590,27 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						}
 					/>
 				) : null}
-				{layout.nodes.length === 0 ? <div className="loom-empty loom-graph-empty">No entities yet.</div> : null}
+				{layout.nodes.length === 0 ? (
+					<div className="loom-empty loom-graph-empty">No entities yet. Right-click to create one.</div>
+				) : null}
 				</div>
 				<div className="loom-drawer">
 					<div
+						ref={drawerBarRef}
 						className={drawerOpen ? 'loom-drawer-bar loom-drawer-bar-open' : 'loom-drawer-bar'}
 						onPointerDown={onDrawerBarPointerDown}
 						onPointerMove={onDrawerBarPointerMove}
 						onPointerUp={onDrawerBarPointerUp}
 						onClick={onDrawerBarClick}
 					>
+						{drawerOpen ? (
+							<div
+								className="loom-drawer-handle"
+								ref={(el) => {
+									if (el) setTooltip(el, 'Drag to resize', { placement: 'top' });
+								}}
+							/>
+						) : null}
 						{drawerOpen && defs.length > 1 ? (
 							<select className="dropdown" value={activeDef?.path ?? ''} onChange={(e) => setDefPath(e.target.value)}>
 								{defs.map((d) => (

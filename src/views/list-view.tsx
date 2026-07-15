@@ -134,7 +134,16 @@ function EntityList({
 				</select>
 			) : null}
 			<div className="loom-shell-spacer" />
-			<button className="mod-cta" onClick={() => new CreateEntityModal(plugin, type, project).open()}>
+			<button
+				className="mod-cta"
+				onClick={() =>
+					new CreateEntityModal(plugin, type, project, {
+						// Open through the view so this list is recorded as the
+						// origin — the new entity page's Back returns here.
+						onCreated: (file) => view.openEntity(file.path),
+					}).open()
+				}
+			>
 				New {ENTITY_META[type].label.toLowerCase()}
 			</button>
 		</>

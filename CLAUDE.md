@@ -1,7 +1,7 @@
 # Loom Loom!
 
 System-agnostic TTRPG worldbuilding and session-management plugin for Obsidian. Tracks
-characters, locations, factions, items, events, and sessions as markdown notes with YAML
+characters, locations, factions, items, quests, events, and sessions as markdown notes with YAML
 frontmatter, plus typed relationships between them, visualized through a custom timeline
 and a custom layered graph view.
 

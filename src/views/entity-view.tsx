@@ -16,8 +16,9 @@ import {
 	EntityType,
 	PC_TAG,
 	VIEW_ENTITY,
+	VIEW_LIST,
 } from '../types';
-import { CreateEntityModal, sanitizeFileName, sessionFileName } from '../project';
+import { ConfirmModal, CreateEntityModal, sanitizeFileName, sessionFileName } from '../project';
 import { LoomFileReactView } from './react-view';
 import { FRONTMATTER_RE, Icon, NavRail, SearchableSelect, SuggestInput, recordLabel } from './common';
 import { ConnectedEntities } from './connected-entities';
@@ -427,6 +428,30 @@ function EntityPage({ view }: { view: EntityView }) {
 					onClick={() => view.navigateTo('markdown', { file: file.path })}
 				>
 					Open as markdown
+				</button>
+				<button
+					className="loom-nav-btn loom-entity-delete"
+					aria-label="Delete"
+					onClick={() =>
+						new ConfirmModal(
+							plugin.app,
+							`Delete "${recordLabel(record, project)}"?`,
+							'The note is moved to the trash.',
+							() => {
+								// Leave the page first so the view never sits on a
+								// trashed file, then delete.
+								const origin = view.origin;
+								if (origin) view.navigateTo(origin.type, origin.state);
+								else if (project) {
+									view.navigateTo(VIEW_LIST, { project: project.root, entityType: record.type });
+								}
+								void plugin.app.fileManager.trashFile(file);
+							},
+							'Delete'
+						).open()
+					}
+				>
+					<Icon name="trash-2" />
 				</button>
 			</div>
 
