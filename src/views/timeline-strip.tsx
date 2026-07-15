@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { EntityRecord, TimelineDef } from '../types';
 import { buildColumns } from '../columns';
 import { ProjectDef } from '../indexer';
@@ -6,10 +7,22 @@ import { LoomNavigator } from './react-view';
 import { recordDate, recordLabel } from './common';
 import { useIndexVersion } from './hooks';
 
+/** Longest description shown in the hover tooltip, in words. */
+const TOOLTIP_MAX_WORDS = 30;
+
+function truncateWords(text: string, max: number): string {
+	const words = text.split(/\s+/).filter((w) => w !== '');
+	return words.length <= max ? text : words.slice(0, max).join(' ') + ' …';
+}
+
 interface TooltipState {
 	record: EntityRecord;
 	x: number;
 	y: number;
+	/** Rendered above the chip when there's no room below it. */
+	above: boolean;
+	/** Portal target — the chip's own document (supports pop-out windows). */
+	body: HTMLElement;
 }
 
 function Bubble({
@@ -30,8 +43,18 @@ function Bubble({
 			className={`loom-bubble loom-bubble-${kind}`}
 			onClick={() => navigator.openEntity(record.path)}
 			onMouseEnter={(e) => {
-				const rect = e.currentTarget.getBoundingClientRect();
-				setTooltip({ record, x: rect.left + rect.width / 2, y: rect.bottom });
+				const el = e.currentTarget;
+				const rect = el.getBoundingClientRect();
+				// Flip above the chip when a below-tooltip would leave the window
+				// (the drawer sits at the bottom of the screen).
+				const above = rect.bottom + 200 > el.win.innerHeight;
+				setTooltip({
+					record,
+					x: rect.left + rect.width / 2,
+					y: above ? rect.top : rect.bottom,
+					above,
+					body: el.doc.body,
+				});
 			}}
 			onMouseLeave={() => setTooltip(null)}
 		>
@@ -119,11 +142,19 @@ export function TimelineStrip({
 					);
 				})}
 			</div>
-			{tooltip && tooltip.record.description !== '' ? (
-				<div className="loom-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>
-					{tooltip.record.description}
-				</div>
-			) : null}
+			{tooltip && tooltip.record.description !== ''
+				? // Portalled to the body: inside the workspace leaf, `contain`
+					// re-bases position:fixed and the tooltip lands away from the chip.
+					createPortal(
+						<div
+							className={tooltip.above ? 'loom-tooltip loom-tooltip-above' : 'loom-tooltip'}
+							style={{ left: tooltip.x, top: tooltip.y }}
+						>
+							{truncateWords(tooltip.record.description, TOOLTIP_MAX_WORDS)}
+						</div>,
+						tooltip.body
+					)
+				: null}
 		</div>
 	);
 }

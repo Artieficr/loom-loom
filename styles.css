@@ -387,6 +387,14 @@ body.loom-text-large {
 .loom-tooltip {
 	position: fixed;
 	transform: translate(-50%, var(--size-2-2));
+}
+
+/* Flipped above the chip when the drawer sits too close to the window bottom. */
+.loom-tooltip.loom-tooltip-above {
+	transform: translate(-50%, calc(-100% - var(--size-2-2)));
+}
+
+.loom-tooltip {
 	max-width: 280px;
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
