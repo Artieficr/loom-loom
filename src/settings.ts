@@ -1,5 +1,5 @@
 import { App, PluginSettingTab, Setting, setIcon } from 'obsidian';
-import { ENTITY_META, ENTITY_TYPES, EntityType, GraphCamera } from './types';
+import { ENTITY_META, ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera } from './types';
 import { ConfirmModal } from './project';
 import { TimelineSettingsEditor } from './timeline-settings';
 import type LoomLoomPlugin from './main';
@@ -21,14 +21,17 @@ export interface LoomLoomSettings {
 	tagVocabulary: Record<EntityType, string[]>;
 	/** Graph side panel: sections with more entries than this start collapsed. */
 	graphCollapseThreshold: number;
-	/** Sideways bow (px, control-point offset) of edges that pass through other nodes. */
-	graphEdgeCurve: number;
-	/** Zoom level a right-clicked node is focused at. */
+	/** Zoom level a right-clicked node is focused at (both directions — can zoom in or out to reach it). */
 	graphFocusZoom: number;
+	/** Top-to-bottom row order of the global entity layers in the graph. */
+	globalLayerOrder: EntityType[];
 	/** Graph node fill color per entity type. */
 	nodeColors: Record<EntityType, string>;
 	/** Last camera per project root — not user-facing, remembered across sessions. */
 	graphCameras: Record<string, GraphCamera>;
+	/** Resized textarea heights (px) per entity file path, keyed by field name
+	 *  (e.g. "description", "notes") — not user-facing, remembered across sessions. */
+	entityBoxSizes: Record<string, Record<string, number>>;
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
@@ -44,8 +47,8 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		session: [],
 	},
 	graphCollapseThreshold: 5,
-	graphEdgeCurve: 70,
-	graphFocusZoom: 1.5,
+	graphFocusZoom: 1,
+	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location'],
 	nodeColors: {
 		session: '#7c5cff',
 		event: '#e08e45',
@@ -56,6 +59,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		quest: '#c95f5f',
 	},
 	graphCameras: {},
+	entityBoxSizes: {},
 };
 
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
@@ -63,7 +67,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		...DEFAULT_SETTINGS,
 		tagVocabulary: { ...DEFAULT_SETTINGS.tagVocabulary },
 		nodeColors: { ...DEFAULT_SETTINGS.nodeColors },
+		globalLayerOrder: [...DEFAULT_SETTINGS.globalLayerOrder],
 		graphCameras: {},
+		entityBoxSizes: {},
 	};
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
@@ -74,11 +80,8 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof data.graphCollapseThreshold === 'number' && data.graphCollapseThreshold >= 1) {
 		base.graphCollapseThreshold = Math.floor(data.graphCollapseThreshold);
 	}
-	if (typeof data.graphEdgeCurve === 'number') {
-		base.graphEdgeCurve = Math.max(20, Math.min(140, Math.floor(data.graphEdgeCurve)));
-	}
 	if (typeof data.graphFocusZoom === 'number') {
-		base.graphFocusZoom = Math.max(1, Math.min(3, data.graphFocusZoom));
+		base.graphFocusZoom = Math.max(0.3, Math.min(3, data.graphFocusZoom));
 	}
 	if (typeof data.tagVocabulary === 'object' && data.tagVocabulary !== null) {
 		for (const type of ENTITY_TYPES) {
@@ -96,11 +99,35 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			}
 		}
 	}
+	if (Array.isArray(data.globalLayerOrder)) {
+		const order: EntityType[] = [];
+		for (const t of data.globalLayerOrder) {
+			if (typeof t === 'string' && (GLOBAL_TYPES as readonly string[]).includes(t) && !order.includes(t)) {
+				order.push(t);
+			}
+		}
+		// Types missing from the stored order (e.g. added in an update) append
+		// in default order so every global type always has a layer.
+		for (const t of DEFAULT_SETTINGS.globalLayerOrder) {
+			if (!order.includes(t)) order.push(t);
+		}
+		base.globalLayerOrder = order;
+	}
 	if (typeof data.graphCameras === 'object' && data.graphCameras !== null) {
 		for (const [root, cam] of Object.entries(data.graphCameras)) {
 			if (cam && typeof cam.tx === 'number' && typeof cam.ty === 'number' && typeof cam.k === 'number') {
 				base.graphCameras[root] = { tx: cam.tx, ty: cam.ty, k: cam.k };
 			}
+		}
+	}
+	if (typeof data.entityBoxSizes === 'object' && data.entityBoxSizes !== null) {
+		for (const [path, fields] of Object.entries(data.entityBoxSizes)) {
+			if (typeof fields !== 'object' || fields === null) continue;
+			const sizes: Record<string, number> = {};
+			for (const [key, height] of Object.entries(fields)) {
+				if (typeof height === 'number' && height > 0) sizes[key] = height;
+			}
+			if (Object.keys(sizes).length > 0) base.entityBoxSizes[path] = sizes;
 		}
 	}
 	return base;
@@ -122,7 +149,7 @@ const SETTINGS_TABS: [SettingsTabId, string][] = [
 const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 	general: ['textSize'],
 	entities: ['tagVocabulary'],
-	graph: ['graphCollapseThreshold', 'graphEdgeCurve', 'graphFocusZoom', 'nodeColors'],
+	graph: ['graphCollapseThreshold', 'graphFocusZoom', 'nodeColors', 'globalLayerOrder'],
 };
 
 export class LoomLoomSettingTab extends PluginSettingTab {
@@ -190,15 +217,19 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			void (async () => {
 				onReset();
 				await this.plugin.saveSettings();
-				// Re-render without losing the scroll position.
-				const scroller = this.containerEl.closest<HTMLElement>('.vertical-tab-content');
-				const scrollTop = scroller?.scrollTop ?? 0;
-				this.display();
-				window.requestAnimationFrame(() => {
-					if (scroller) scroller.scrollTop = scrollTop;
-				});
+				this.redisplay();
 			})()
 		);
+	}
+
+	/** Re-renders the tab without losing the scroll position. */
+	private redisplay(): void {
+		const scroller = this.containerEl.closest<HTMLElement>('.vertical-tab-content');
+		const scrollTop = scroller?.scrollTop ?? 0;
+		this.display();
+		window.requestAnimationFrame(() => {
+			if (scroller) scroller.scrollTop = scrollTop;
+		});
 	}
 
 	private renderEntities(containerEl: HTMLElement): void {
@@ -236,19 +267,9 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 
 		this.slider(
 			containerEl,
-			'Edge curve',
-			'How far edges bend sideways to avoid nodes sitting on their path.',
-			{ min: 20, max: 140, step: 5 },
-			DEFAULT_SETTINGS.graphEdgeCurve,
-			() => this.plugin.settings.graphEdgeCurve,
-			(v) => (this.plugin.settings.graphEdgeCurve = v)
-		);
-
-		this.slider(
-			containerEl,
 			'Focus zoom',
-			'Zoom level when right-clicking a node to center on it.',
-			{ min: 1, max: 3, step: 0.1 },
+			'Zoom level when right-clicking a node to center on it — zooms in or out to reach it.',
+			{ min: 0.3, max: 3, step: 0.1 },
 			DEFAULT_SETTINGS.graphFocusZoom,
 			() => this.plugin.settings.graphFocusZoom,
 			(v) => (this.plugin.settings.graphFocusZoom = v)
@@ -266,6 +287,35 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 				this.plugin.settings.nodeColors[type] = DEFAULT_SETTINGS.nodeColors[type];
 			});
 		}
+
+		new Setting(containerEl).setName('Global layers').setHeading();
+		containerEl.createEl('p', {
+			text: 'Top-to-bottom row order of the global entity layers in the graph.',
+			cls: 'setting-item-description',
+		});
+		const order = this.plugin.settings.globalLayerOrder;
+		const move = async (from: number, to: number) => {
+			[order[from], order[to]] = [order[to], order[from]];
+			await this.plugin.saveSettings();
+			this.redisplay();
+		};
+		order.forEach((type, i) => {
+			const setting = new Setting(containerEl).setName(`${i + 1}. ${ENTITY_META[type].plural}`);
+			setting.addExtraButton((btn) =>
+				btn
+					.setIcon('arrow-up')
+					.setTooltip('Move up')
+					.setDisabled(i === 0)
+					.onClick(() => void move(i, i - 1))
+			);
+			setting.addExtraButton((btn) =>
+				btn
+					.setIcon('arrow-down')
+					.setTooltip('Move down')
+					.setDisabled(i === order.length - 1)
+					.onClick(() => void move(i, i + 1))
+			);
+		});
 
 		this.renderTimeline(containerEl);
 

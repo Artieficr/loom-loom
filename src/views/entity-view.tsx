@@ -18,9 +18,25 @@ import {
 	VIEW_ENTITY,
 	VIEW_LIST,
 } from '../types';
-import { ConfirmModal, CreateEntityModal, sanitizeFileName, sessionFileName } from '../project';
+import {
+	ConfirmModal,
+	CreateEntityModal,
+	EntityTypeSuggestModal,
+	sanitizeFileName,
+	sessionFileName,
+} from '../project';
+import { todayRaw } from '../calendar';
 import { LoomFileReactView } from './react-view';
-import { FRONTMATTER_RE, Icon, NavRail, SearchableSelect, SuggestInput, recordLabel } from './common';
+import {
+	FRONTMATTER_RE,
+	Icon,
+	NavRail,
+	SearchableSelect,
+	startTextareaResize,
+	SuggestInput,
+	recordLabel,
+	useBoxSizeMemory,
+} from './common';
 import { ConnectedEntities } from './connected-entities';
 import { LinkTextarea } from './link-textarea';
 import { useIndexVersion } from './hooks';
@@ -130,6 +146,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	// updates triggered by our own saves never clobber what's being typed.
 	const [name, setName] = useState(record?.name ?? '');
 	const [description, setDescription] = useState(record?.description ?? '');
+	const descriptionRef = useRef<HTMLTextAreaElement>(null);
+	const notesRef = useRef<HTMLTextAreaElement | null>(null);
+	useBoxSizeMemory(plugin, file?.path ?? '', 'description', descriptionRef, !!record);
+	useBoxSizeMemory(plugin, file?.path ?? '', 'notes', notesRef, !!record);
 	const [role, setRole] = useState(record?.role ?? '');
 	const [date, setDate] = useState(record?.date?.raw ?? '');
 	const [relationships, setRelationships] = useState<RelationshipDraft[]>(
@@ -223,8 +243,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		await plugin.app.fileManager.renameFile(file, newPath);
 	};
 
-	const commitDate = async () => {
-		const value = date.trim();
+	const commitDate = async (raw: string = date) => {
+		const value = raw.trim();
 		writeFm((fm) => {
 			fm.date = value;
 		});
@@ -393,6 +413,23 @@ function EntityPage({ view }: { view: EntityView }) {
 					commitRelationships(next);
 				}}
 				onBlur={() => commitRelationships(relationships)}
+				action={
+					project
+						? {
+								label: '+ Create entity…',
+								onPick: () =>
+									new EntityTypeSuggestModal(plugin, (type) =>
+										new CreateEntityModal(plugin, type, project, {
+											onCreated: (created) => {
+												const next = [...relationships];
+												next[i] = { ...rel, target: created.basename };
+												commitRelationships(next);
+											},
+										}).open()
+									).open(),
+							}
+						: undefined
+				}
 			/>
 			<button
 				className="loom-nav-btn"
@@ -475,7 +512,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<span className="loom-field-label">Date</span>
 					<input
 						type="text"
-						placeholder="2026-07-14"
+						placeholder={record.type === 'event' ? 'Not specified' : '2026-07-14'}
 						value={date}
 						onChange={(e) => setDate(e.target.value)}
 						onBlur={() => void commitDate()}
@@ -483,6 +520,25 @@ function EntityPage({ view }: { view: EntityView }) {
 							if (e.key === 'Enter') void commitDate();
 						}}
 					/>
+					<span
+						className="loom-today-link"
+						role="button"
+						tabIndex={0}
+						onClick={() => {
+							const today = todayRaw();
+							setDate(today);
+							void commitDate(today);
+						}}
+						onKeyDown={(e) => {
+							if (e.key !== 'Enter' && e.key !== ' ') return;
+							e.preventDefault();
+							const today = todayRaw();
+							setDate(today);
+							void commitDate(today);
+						}}
+					>
+						@today
+					</span>
 				</label>
 			) : null}
 
@@ -507,18 +563,72 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+			{record.type === 'event' ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Linked sessions</span>
+					{linkedSessions.length > 0 ? (
+						<div className="loom-tag-row">
+							{linkedSessions.map((s) => (
+								<span key={s.path} className="loom-chip loom-session-chip">
+									{recordLabel(s, project)}
+									<button
+										className="loom-chip-remove"
+										aria-label="Unlink session"
+										onClick={() =>
+											writeLinkedSessions(
+												linkedSessions.filter((o) => o.path !== s.path).map((o) => o.name)
+											)
+										}
+									>
+										✕
+									</button>
+								</span>
+							))}
+						</div>
+					) : null}
+					<SearchableSelect
+						placeholder="Link a session…"
+						options={sessions
+							.filter((s) => !linkedSessions.some((l) => l.path === s.path))
+							.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
+							.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+						onPick={(name) => writeLinkedSessions([...linkedSessions.map((s) => s.name), name])}
+						action={
+							project
+								? {
+										label: '+ New session…',
+										onPick: () =>
+											new CreateEntityModal(plugin, 'session', project, {
+												onCreated: (created) => {
+													writeLinkedSessions([...linkedSessions.map((s) => s.name), created.basename]);
+												},
+											}).open(),
+									}
+								: undefined
+						}
+					/>
+				</div>
+			) : null}
+
 			<label className="loom-field">
 				<span className="loom-field-label">Description</span>
-				<textarea
-					rows={3}
-					value={description}
-					onChange={(e) => setDescription(e.target.value)}
-					onBlur={() =>
-						writeFm((fm) => {
-							fm.description = description;
-						})
-					}
-				/>
+				<div className="loom-resizable">
+					<textarea
+						ref={descriptionRef}
+						rows={10}
+						value={description}
+						onChange={(e) => setDescription(e.target.value)}
+						onBlur={() =>
+							writeFm((fm) => {
+								fm.description = description;
+							})
+						}
+					/>
+					<div
+						className="loom-resize-edge"
+						onMouseDown={(e) => startTextareaResize(descriptionRef.current, e)}
+					/>
+				</div>
 			</label>
 
 			{allTags.length > 0 ? (
@@ -592,53 +702,6 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{record.type === 'event' ? (
-				<div className="loom-field">
-					<span className="loom-field-label">Linked sessions</span>
-					{linkedSessions.length > 0 ? (
-						<div className="loom-tag-row">
-							{linkedSessions.map((s) => (
-								<span key={s.path} className="loom-chip loom-session-chip">
-									{recordLabel(s, project)}
-									<button
-										className="loom-chip-remove"
-										aria-label="Unlink session"
-										onClick={() =>
-											writeLinkedSessions(
-												linkedSessions.filter((o) => o.path !== s.path).map((o) => o.name)
-											)
-										}
-									>
-										✕
-									</button>
-								</span>
-							))}
-						</div>
-					) : null}
-					<SearchableSelect
-						placeholder="Link a session…"
-						options={sessions
-							.filter((s) => !linkedSessions.some((l) => l.path === s.path))
-							.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
-							.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
-						onPick={(name) => writeLinkedSessions([...linkedSessions.map((s) => s.name), name])}
-						action={
-							project
-								? {
-										label: '+ New session…',
-										onPick: () =>
-											new CreateEntityModal(plugin, 'session', project, {
-												onCreated: (created) => {
-													writeLinkedSessions([...linkedSessions.map((s) => s.name), created.basename]);
-												},
-											}).open(),
-									}
-								: undefined
-						}
-					/>
-				</div>
-			) : null}
-
 			<div className="loom-field loom-field-body">
 				<span className="loom-field-label">Notes</span>
 				<LinkTextarea
@@ -646,6 +709,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					placeholder="Freeform notes. [[Wikilinks]] connect like in any other note."
 					value={body ?? ''}
 					names={linkNames}
+					textareaRef={notesRef}
 					onChange={(v) => {
 						setBody(v);
 						saveBody(v);

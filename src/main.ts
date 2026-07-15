@@ -67,6 +67,26 @@ export default class LoomLoomPlugin extends Plugin {
 
 		this.addSettingTab(new LoomLoomSettingTab(this.app, this));
 
+		// Keep remembered textarea sizes (settings.entityBoxSizes) attached to
+		// the right file across renames, and drop them when a file is deleted.
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				if (!(file instanceof TFile)) return;
+				const sizes = this.settings.entityBoxSizes[oldPath];
+				if (!sizes) return;
+				delete this.settings.entityBoxSizes[oldPath];
+				this.settings.entityBoxSizes[file.path] = sizes;
+				void this.saveSettings();
+			})
+		);
+		this.registerEvent(
+			this.app.vault.on('delete', (file) => {
+				if (!(file instanceof TFile) || !(file.path in this.settings.entityBoxSizes)) return;
+				delete this.settings.entityBoxSizes[file.path];
+				void this.saveSettings();
+			})
+		);
+
 		this.app.workspace.onLayoutReady(() => {
 			void this.migrateLegacyProject().then(() => this.indexer.rebuild());
 		});

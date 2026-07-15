@@ -11,6 +11,7 @@ import {
 import { ENTITY_META, ENTITY_TYPES, GraphCamera, TimelineDef, VIEW_GRAPH } from '../types';
 import { CreateEntityModal } from '../project';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
+import { edgePath, edgeXRange } from '../graph/routing';
 import { GraphSidePanel } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage, recordLabel } from './common';
@@ -113,10 +114,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const plugin = view.plugin;
 	const version = useIndexVersion(plugin.indexer);
 	const project = resolveProject(plugin.indexer, projectRoot);
-	const edgeCurve = plugin.settings.graphEdgeCurve;
+	const layerKey = plugin.settings.globalLayerOrder.join(',');
 	const layout = useMemo(
-		() => computeGraphLayout(plugin.indexer, project?.root ?? ' none', edgeCurve),
-		[plugin.indexer, version, project, edgeCurve]
+		() => computeGraphLayout(plugin.indexer, project?.root ?? ' none', plugin.settings.globalLayerOrder),
+		// layerKey stands in for the order array (mutated in place by settings).
+		[plugin.indexer, version, project, layerKey]
 	);
 
 	const [selected, setSelected] = useState<string | null>(null);
@@ -231,8 +233,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		const el = wrapRef.current;
 		const w = el?.clientWidth ?? size.w;
 		const h = el?.clientHeight ?? size.h;
-		// Never zoom out when focusing — only in, up to the configured level.
-		const k = Math.max(plugin.settings.graphFocusZoom, cameraRef.current.k);
+		const k = plugin.settings.graphFocusZoom;
 		animateCamera({ k, tx: w / 2 - node.x * k, ty: h / 2 - node.y * k });
 	};
 
@@ -401,11 +402,20 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		return set;
 	}, [selected, layout]);
 
-	const visible = useMemo(() => {
-		const min = (0 - camera.tx) / camera.k - CULL_MARGIN;
-		const max = (size.w - camera.tx) / camera.k + CULL_MARGIN;
-		return new Set(layout.nodes.filter((n) => n.x >= min && n.x <= max).map((n) => n.id));
-	}, [layout, camera, size]);
+	const viewRange = useMemo(
+		() => ({
+			min: (0 - camera.tx) / camera.k - CULL_MARGIN,
+			max: (size.w - camera.tx) / camera.k + CULL_MARGIN,
+		}),
+		[camera, size]
+	);
+	const visible = useMemo(
+		() =>
+			new Set(
+				layout.nodes.filter((n) => n.x >= viewRange.min && n.x <= viewRange.max).map((n) => n.id)
+			),
+		[layout, viewRange]
+	);
 
 	const nodeById = useMemo(() => new Map(layout.nodes.map((n) => [n.id, n])), [layout]);
 	const selectedRecord = selected ? plugin.indexer.get(selected) : undefined;
@@ -513,28 +523,20 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							{layout.edges.map((edge) => {
 								const a = nodeById.get(edge.a);
 								const b = nodeById.get(edge.b);
-								if (!a || !b || (!visible.has(a.id) && !visible.has(b.id))) return null;
+								if (!a || !b) return null;
 								const pa = pos(a);
 								const pb = pos(b);
+								// Cull on the full route extent, so a long trunk
+								// stays visible while both endpoints are off-screen.
+								const [minX, maxX] = edgeXRange(edge.route, pa, pb);
+								if (maxX < viewRange.min || minX > viewRange.max) return null;
 								const dim = connectedTo !== null && edge.a !== selected && edge.b !== selected;
 								const key = edge.a + '|' + edge.b + '|' + edge.relType;
-								const cls = dim ? 'loom-edge loom-dim' : 'loom-edge';
-								if (edge.bow === 0) {
-									return <line key={key} className={cls} x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y} />;
-								}
-								// Obstructed edge: bow sideways (perpendicular to the
-								// segment) so it stays visible next to the nodes it
-								// would otherwise pass through.
-								const dx = pb.x - pa.x;
-								const dy = pb.y - pa.y;
-								const len = Math.hypot(dx, dy) || 1;
-								const cx = (pa.x + pb.x) / 2 + (-dy / len) * edge.bow;
-								const cy = (pa.y + pb.y) / 2 + (dx / len) * edge.bow;
 								return (
 									<path
 										key={key}
-										className={cls}
-										d={`M ${pa.x} ${pa.y} Q ${cx} ${cy} ${pb.x} ${pb.y}`}
+										className={dim ? 'loom-edge loom-dim' : 'loom-edge'}
+										d={edgePath(edge.route, pa, pb)}
 									/>
 								);
 							})}
