@@ -77,7 +77,7 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 ## Settings
 
 - [x] Tag vocabulary per entity type, graph collapse threshold (with value label), graph node colors — `src/settings.ts`
-- [x] Connection line spacing: distance between parallel horizontal graph edge lines (px, min/default 10, up to 40) — threaded through `computeGraphLayout`'s `lineGap` param — `src/settings.ts`, `src/graph/layout.ts`, `src/views/graph-view.tsx`
+- [x] Horizontal + vertical line spacing: distance between parallel graph edge lines (px, min/default 10, up to 40 each) — `lineGap`/`trunkGap` params of `computeGraphLayout`; vertical spacing is enforced by a trunk-separation pass (any two vertical trunks with overlapping y-spans get pushed `trunkGap` apart, re-clearing node collisions after each round) that also covers global-origin trunks hugging their node's side, which corridor fanning never spaced — `src/settings.ts`, `src/graph/layout.ts`, `src/views/graph-view.tsx`
 - [ ] Adopt the declarative settings API (`getSettingDefinitions`) once Obsidian 1.13 leaves Catalyst-only early access — the remaining lint warning; do not use 1.13-only APIs before then (minAppVersion stays 1.7.2)
 
 ## Undo (Ctrl+Z)
