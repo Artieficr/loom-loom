@@ -137,10 +137,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				project?.root ?? ' none',
 				plugin.settings.globalLayerOrder,
 				plugin.settings.graphLineGap,
-				new Map(Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {}))
+				new Map(Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {})),
+				plugin.settings.graphTrunkGap
 			),
 		// layerKey stands in for the order array (mutated in place by settings).
-		[plugin.indexer, version, project, layerKey, plugin.settings.graphLineGap, manualVersion]
+		[
+			plugin.indexer,
+			version,
+			project,
+			layerKey,
+			plugin.settings.graphLineGap,
+			plugin.settings.graphTrunkGap,
+			manualVersion,
+		]
 	);
 
 	const [selected, setSelected] = useState<string | null>(null);

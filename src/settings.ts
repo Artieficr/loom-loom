@@ -25,6 +25,8 @@ export interface LoomLoomSettings {
 	graphFocusZoom: number;
 	/** Distance (px) between parallel horizontal connection lines in the graph — keeps them from overlapping. */
 	graphLineGap: number;
+	/** Distance (px) between parallel vertical connection lines in the graph. */
+	graphTrunkGap: number;
 	/** Size (px) of the relationship-direction arrowheads on graph edges. */
 	graphArrowSize: number;
 	/** Which note a generic node-on-node drop edits: the node dropped onto
@@ -60,6 +62,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphCollapseThreshold: 5,
 	graphFocusZoom: 1,
 	graphLineGap: 10,
+	graphTrunkGap: 10,
 	graphArrowSize: 8,
 	graphDropEdits: 'target',
 	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location'],
@@ -101,6 +104,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.graphLineGap === 'number') {
 		base.graphLineGap = Math.max(10, Math.min(40, data.graphLineGap));
+	}
+	if (typeof data.graphTrunkGap === 'number') {
+		base.graphTrunkGap = Math.max(10, Math.min(40, data.graphTrunkGap));
 	}
 	if (typeof data.graphArrowSize === 'number') {
 		base.graphArrowSize = Math.max(4, Math.min(20, data.graphArrowSize));
@@ -188,6 +194,7 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 		'graphCollapseThreshold',
 		'graphFocusZoom',
 		'graphLineGap',
+		'graphTrunkGap',
 		'graphArrowSize',
 		'graphDropEdits',
 		'nodeColors',

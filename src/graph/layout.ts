@@ -33,7 +33,8 @@ const GLOBAL_MIN_SPACING = 130;
 /** Min horizontal distance (px) between a multi-session event and other nodes in its row. */
 const MULTI_CLEARANCE = 100;
 
-/** Distance between parallel vertical trunk lanes in a corridor. */
+/** Default/minimum distance between parallel vertical trunk lanes —
+ *  overridable per call via `computeGraphLayout`'s `trunkGap` (settings.graphTrunkGap). */
 const LANE_GAP = 10;
 /** Default/minimum distance between parallel horizontal lanes in a band —
  *  overridable per call via `computeGraphLayout`'s `lineGap` (settings.graphLineGap). */
@@ -121,19 +122,21 @@ export function computeGraphLayout(
 	lineGap: number = Y_GAP,
 	/** Drag-reordered x positions of unconnected global nodes (note path → world
 	 *  x). Connected nodes ignore it — their connection forces win. */
-	manualX?: ReadonlyMap<string, number>
+	manualX?: ReadonlyMap<string, number>,
+	/** Min distance (px) between parallel vertical trunk lines. */
+	trunkGap: number = LANE_GAP
 ): GraphLayout {
 	const { raw, neighbors } = collectEdges(indexer, projectRoot);
 
 	// Round 1: provisional placement with default corridors, only to learn how
 	// many trunk lanes each corridor must fit.
 	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors, manualX);
-	const demand = corridorDemand(classifyEdges(raw, prelim));
+	const demand = corridorDemand(classifyEdges(raw, prelim), trunkGap);
 
 	// Round 2: final placement with widened corridors, then full routing.
 	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX);
 	const classified = classifyEdges(raw, placed);
-	const bottom = routeEdges(classified, placed, lineGap);
+	const bottom = routeEdges(classified, placed, lineGap, trunkGap);
 
 	const allNodes = [...placed.nodes.values()];
 	const width = allNodes.reduce((m, n) => Math.max(m, n.x), 0) + MARGIN_X;
@@ -536,14 +539,14 @@ function blockedBetween(placement: Placement, upper: LayoutNode, lower: LayoutNo
 }
 
 /** Lane demand per corridor → extra width for round 2. */
-function corridorDemand(edges: CEdge[]): Map<number, number> {
+function corridorDemand(edges: CEdge[], trunkGap: number): Map<number, number> {
 	const counts = new Map<number, number>();
 	for (const e of edges) {
 		if (e.corridor !== null) counts.set(e.corridor, (counts.get(e.corridor) ?? 0) + 1);
 	}
 	const widths = new Map<number, number>();
 	for (const [corridor, count] of counts) {
-		widths.set(corridor, count * LANE_GAP + 2 * CORRIDOR_PAD);
+		widths.set(corridor, count * trunkGap + 2 * CORRIDOR_PAD);
 	}
 	return widths;
 }
@@ -554,7 +557,7 @@ function corridorDemand(edges: CEdge[]): Map<number, number> {
  * final pass nudging trunks off any node they'd pass through.
  * Returns the layout's bottom y.
  */
-function routeEdges(edges: CEdge[], placement: Placement, yGap: number): number {
+function routeEdges(edges: CEdge[], placement: Placement, yGap: number, trunkGap: number): number {
 	const { colX, layers, eventsBottom } = placement;
 
 	// --- Trunk lanes -----------------------------------------------------------
@@ -575,7 +578,7 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number): number 
 		group.sort((p, q) => p.lower.x - q.lower.x);
 		const center = corridorCenter(corridor);
 		group.forEach((e, j) => {
-			e.laneX = center + (j - (group.length - 1) / 2) * LANE_GAP;
+			e.laneX = center + (j - (group.length - 1) / 2) * trunkGap;
 		});
 	}
 	// Trunks leaving a global node (cross-layer edges): hug the node's side
@@ -661,18 +664,50 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number): number 
 	// A trunk spanning several rows must not run through nodes it passes;
 	// nudge sideways until clear (labels excluded — only circle bodies count).
 	const allNodes = [...placement.nodes.values()];
-	for (const e of edges) {
-		if (e.kind !== 'orth' && e.kind !== 'toLower') continue;
-		const spanTop = e.upper.y + 1;
-		const spanBottom = (e.kind === 'toLower' ? e.approachY : e.lower.y) - 1;
-		const blockers = allNodes.filter(
-			(n) => n.id !== e.upper.id && n.id !== e.lower.id && n.y > spanTop && n.y < spanBottom
-		);
-		for (let guard = 0; guard < 24; guard++) {
-			const hit = blockers.find((n) => Math.abs(e.laneX - n.x) < TRUNK_CLEAR);
-			if (!hit) break;
-			e.laneX = hit.x + (e.laneX >= hit.x ? TRUNK_CLEAR : -TRUNK_CLEAR);
+	const verts = edges.filter((e) => e.kind === 'orth' || e.kind === 'toLower');
+	const spanTopOf = (e: CEdge) => e.upper.y + 1;
+	const spanBottomOf = (e: CEdge) => (e.kind === 'toLower' ? e.approachY : e.lower.y) - 1;
+	const clearNodes = () => {
+		for (const e of verts) {
+			const spanTop = spanTopOf(e);
+			const spanBottom = spanBottomOf(e);
+			const blockers = allNodes.filter(
+				(n) => n.id !== e.upper.id && n.id !== e.lower.id && n.y > spanTop && n.y < spanBottom
+			);
+			for (let guard = 0; guard < 24; guard++) {
+				const hit = blockers.find((n) => Math.abs(e.laneX - n.x) < TRUNK_CLEAR);
+				if (!hit) break;
+				e.laneX = hit.x + (e.laneX >= hit.x ? TRUNK_CLEAR : -TRUNK_CLEAR);
+			}
 		}
+	};
+	clearNodes();
+
+	// --- Trunk separation pass -----------------------------------------------
+	// Corridor groups already fan `trunkGap` apart, but global-origin trunks
+	// hug their node's side and can land on top of an unrelated vertical.
+	// Push apart any two trunks whose y-spans overlap, re-clearing nodes after
+	// each round so the nudges never trade a line overlap for a node overlap.
+	for (let round = 0; round < 4; round++) {
+		let moved = false;
+		for (let i = 0; i < verts.length; i++) {
+			for (let j = i + 1; j < verts.length; j++) {
+				const p = verts[i];
+				const q = verts[j];
+				const overlap =
+					Math.min(spanBottomOf(p), spanBottomOf(q)) - Math.max(spanTopOf(p), spanTopOf(q));
+				if (overlap < 8) continue;
+				const dx = q.laneX - p.laneX;
+				if (Math.abs(dx) >= trunkGap) continue;
+				const push = (trunkGap - Math.abs(dx)) / 2;
+				const dir = dx !== 0 ? Math.sign(dx) : p.upper.x <= q.upper.x ? 1 : -1;
+				p.laneX -= dir * push;
+				q.laneX += dir * push;
+				moved = true;
+			}
+		}
+		if (!moved) break;
+		clearNodes();
 	}
 
 	return bottom;
