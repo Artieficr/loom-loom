@@ -27,6 +27,10 @@ export interface LoomLoomSettings {
 	graphLineGap: number;
 	/** Size (px) of the relationship-direction arrowheads on graph edges. */
 	graphArrowSize: number;
+	/** Which note a generic node-on-node drop edits: the node dropped onto
+	 *  ('target' — dropping A on B adds A into B) or the dragged one
+	 *  ('dragged' — connecting A to B). Field fills always edit the owner. */
+	graphDropEdits: 'target' | 'dragged';
 	/** Top-to-bottom row order of the global entity layers in the graph. */
 	globalLayerOrder: EntityType[];
 	/** Graph node fill color per entity type. */
@@ -57,6 +61,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphFocusZoom: 1,
 	graphLineGap: 10,
 	graphArrowSize: 8,
+	graphDropEdits: 'target',
 	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location'],
 	nodeColors: {
 		session: '#7c5cff',
@@ -99,6 +104,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.graphArrowSize === 'number') {
 		base.graphArrowSize = Math.max(4, Math.min(20, data.graphArrowSize));
+	}
+	if (data.graphDropEdits === 'target' || data.graphDropEdits === 'dragged') {
+		base.graphDropEdits = data.graphDropEdits;
 	}
 	if (typeof data.tagVocabulary === 'object' && data.tagVocabulary !== null) {
 		for (const type of ENTITY_TYPES) {
@@ -176,7 +184,15 @@ const SETTINGS_TABS: [SettingsTabId, string][] = [
 const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 	general: ['textSize'],
 	entities: ['tagVocabulary'],
-	graph: ['graphCollapseThreshold', 'graphFocusZoom', 'graphLineGap', 'graphArrowSize', 'nodeColors', 'globalLayerOrder'],
+	graph: [
+		'graphCollapseThreshold',
+		'graphFocusZoom',
+		'graphLineGap',
+		'graphArrowSize',
+		'graphDropEdits',
+		'nodeColors',
+		'globalLayerOrder',
+	],
 };
 
 export class LoomLoomSettingTab extends PluginSettingTab {
@@ -301,6 +317,31 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			() => this.plugin.settings.graphFocusZoom,
 			(v) => (this.plugin.settings.graphFocusZoom = v)
 		);
+
+		const dropSetting = new Setting(containerEl)
+			.setName('Drop-to-connect edits')
+			.setDesc(
+				createFragment((frag) => {
+					frag.appendText('Which note a node-on-node drop writes the relationship into:');
+					const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
+					ul.createEl('li', { text: 'The node dropped onto (the dragged node is added into it)' });
+					ul.createEl('li', { text: 'Or the dragged node itself' });
+					frag.appendText('Field fills like ');
+					frag.createEl('code').appendText('quest giver');
+					frag.appendText(' always edit the field\u2019s owner.');
+				})
+			)
+			.addDropdown((dd) => {
+				dd.addOption('target', 'Node dropped onto');
+				dd.addOption('dragged', 'Dragged node');
+				dd.setValue(this.plugin.settings.graphDropEdits).onChange(async (value) => {
+					this.plugin.settings.graphDropEdits = value as 'target' | 'dragged';
+					await this.plugin.saveSettings();
+				});
+			});
+		this.addReset(dropSetting, () => {
+			this.plugin.settings.graphDropEdits = DEFAULT_SETTINGS.graphDropEdits;
+		});
 
 		this.slider(
 			containerEl,

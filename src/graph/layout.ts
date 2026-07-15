@@ -631,7 +631,17 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number): number 
 			break;
 		}
 		const approaches = approachesOf(b);
-		const runs = approaches.filter((e) => e.needsRun).sort((p, q) => p.lower.x - q.lower.x);
+		// Runs into the SAME node tie on lower.x — break the tie by trunk
+		// distance, farther first (= lower lane): a near trunk's vertical then
+		// ends at its high lane before it could cross a far run's low lane,
+		// so same-target runs can't loop over each other.
+		const runs = approaches
+			.filter((e) => e.needsRun)
+			.sort(
+				(p, q) =>
+					p.lower.x - q.lower.x ||
+					Math.abs(q.laneX - q.lower.x) - Math.abs(p.laneX - p.lower.x)
+			);
 		const height = Math.max(
 			MIN_BAND,
 			U_TOP + us.length * yGap + BAND_MID + (runs.length + 1) * yGap + APPROACH_BOTTOM

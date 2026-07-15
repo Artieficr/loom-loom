@@ -389,6 +389,12 @@ body.loom-text-large {
 	transform: translate(-50%, var(--size-2-2));
 }
 
+/* Compact bullet list inside a setting description. */
+.loom-setting-list {
+	margin: var(--size-2-1) 0;
+	padding-left: var(--size-4-4);
+}
+
 /* Flipped above the chip when the drawer sits too close to the window bottom. */
 .loom-tooltip.loom-tooltip-above {
 	transform: translate(-50%, calc(-100% - var(--size-2-2)));
