@@ -1,7 +1,6 @@
-import { Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
+import { ItemView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
 import {
-	ENTITY_META,
-	ENTITY_TYPES,
+	EntityOrigin,
 	LOOM_EXTENSION,
 	VIEW_ENTITY,
 	VIEW_GRAPH,
@@ -10,7 +9,13 @@ import {
 } from './types';
 import { DEFAULT_SETTINGS, LoomLoomSettingTab, LoomLoomSettings, mergeSettings } from './settings';
 import { LoomIndexer, ProjectDef } from './indexer';
-import { CreateEntityModal, ProjectSuggestModal, SetupProjectModal, scaffoldProject } from './project';
+import {
+	CreateEntityModal,
+	EntityTypeSuggestModal,
+	ProjectSuggestModal,
+	SetupProjectModal,
+	scaffoldProject,
+} from './project';
 import { HomeView } from './views/home-view';
 import { EntityListView } from './views/list-view';
 import { GraphView } from './views/graph-view';
@@ -51,13 +56,14 @@ export default class LoomLoomPlugin extends Plugin {
 			name: 'Set up project',
 			callback: () => new SetupProjectModal(this).open(),
 		});
-		for (const type of ENTITY_TYPES) {
-			this.addCommand({
-				id: `create-${type}`,
-				name: `Create ${ENTITY_META[type].label.toLowerCase()}`,
-				callback: () => this.withProject((p) => new CreateEntityModal(this, type, p).open()),
-			});
-		}
+		this.addCommand({
+			id: 'create-entity',
+			name: 'Create entity in current project',
+			callback: () =>
+				this.withProject((p) =>
+					new EntityTypeSuggestModal(this, (type) => new CreateEntityModal(this, type, p).open()).open()
+				),
+		});
 
 		this.addSettingTab(new LoomLoomSettingTab(this.app, this));
 
@@ -83,8 +89,30 @@ export default class LoomLoomPlugin extends Plugin {
 		await this.saveSettings();
 	}
 
-	/** Runs `action` with a project: the only one, or picked via suggester. */
+	/**
+	 * Project implied by the active leaf: a loom view carrying a project in its
+	 * state (list/graph), or any open file inside a project folder (entity
+	 * pages, home .loom files, and plain markdown notes alike).
+	 */
+	private activeProject(): ProjectDef | undefined {
+		const state = this.app.workspace.getActiveViewOfType(ItemView)?.getState() as
+			| { project?: unknown }
+			| undefined;
+		if (typeof state?.project === 'string') {
+			const project = this.indexer.getProjectByRoot(state.project);
+			if (project) return project;
+		}
+		const file = this.app.workspace.getActiveFile();
+		return file ? this.indexer.projectForPath(file.path) : undefined;
+	}
+
+	/** Runs `action` with a project: the active one, the only one, or picked via suggester. */
 	withProject(action: (project: ProjectDef) => void): void {
+		const active = this.activeProject();
+		if (active) {
+			action(active);
+			return;
+		}
 		const projects = this.indexer.getProjects();
 		if (projects.length === 0) {
 			new Notice('No project yet — set one up first.');
@@ -106,11 +134,11 @@ export default class LoomLoomPlugin extends Plugin {
 	}
 
 	/** Opens an entity note in the plugin's entity page view, in a new tab. */
-	openEntityFile(path: string): void {
+	openEntityFile(path: string, origin?: EntityOrigin): void {
 		void this.app.workspace.getLeaf('tab').setViewState({
 			type: VIEW_ENTITY,
 			active: true,
-			state: { file: path },
+			state: { file: path, origin },
 		});
 	}
 

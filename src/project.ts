@@ -1,5 +1,25 @@
-import { App, FuzzySuggestModal, Modal, Notice, Setting, TFile, normalizePath } from 'obsidian';
-import { ENTITY_META, ENTITY_TAGS, ENTITY_TYPES, EntityRecord, EntityType, LOOM_EXTENSION, TIMELINES_FOLDER } from './types';
+import {
+	AbstractInputSuggest,
+	App,
+	FuzzySuggestModal,
+	Modal,
+	Notice,
+	Setting,
+	TFile,
+	TFolder,
+	normalizePath,
+} from 'obsidian';
+import {
+	ENTITY_META,
+	ENTITY_TAGS,
+	ENTITY_TYPES,
+	EntityOrigin,
+	EntityRecord,
+	EntityType,
+	LOOM_EXTENSION,
+	TIMELINES_FOLDER,
+	VIEW_LIST,
+} from './types';
 import { defaultProjectConfig, serializeProjectConfig, todayRaw } from './calendar';
 import { ProjectDef } from './indexer';
 import type LoomLoomPlugin from './main';
@@ -222,7 +242,15 @@ export class CreateEntityModal extends Modal {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
 			this.close();
 			if (this.options.onCreated) this.options.onCreated(file);
-			else if (!connectTo) this.plugin.openEntityFile(file.path);
+			else if (!connectTo) {
+				// The new page's Back goes to the type's list — the closest
+				// thing to an origin a modal-created entity has.
+				const origin: EntityOrigin = {
+					type: VIEW_LIST,
+					state: { project: this.project.root, entityType: this.type },
+				};
+				this.plugin.openEntityFile(file.path, origin);
+			}
 		} catch (e) {
 			console.error('Loom Loom: failed to create entity', e);
 			new Notice('Could not create the note. See console for details.');
@@ -234,8 +262,56 @@ export class CreateEntityModal extends Modal {
 	}
 }
 
+/**
+ * Folder suggestions attached to a plain text input: typing searches existing
+ * vault folders, but any path (including one that doesn't exist yet) stays
+ * typeable — unlike a pick-only fuzzy modal.
+ */
+class FolderSuggest extends AbstractInputSuggest<TFolder> {
+	/** Whether the popup is showing — lets the host input tell "Enter picks a
+	 *  suggestion" apart from "Enter means submit". */
+	suggestionsShown = false;
+
+	constructor(app: App, private input: HTMLInputElement) {
+		super(app, input);
+	}
+
+	open(): void {
+		super.open();
+		this.suggestionsShown = true;
+	}
+
+	close(): void {
+		super.close();
+		this.suggestionsShown = false;
+	}
+
+	getSuggestions(query: string): TFolder[] {
+		const q = query.toLowerCase();
+		return this.app.vault
+			.getAllFolders()
+			.filter((f) => f.path.toLowerCase().includes(q))
+			.sort((a, b) => a.path.localeCompare(b.path));
+	}
+
+	renderSuggestion(folder: TFolder, el: HTMLElement): void {
+		el.setText(folder.path);
+	}
+
+	selectSuggestion(folder: TFolder): void {
+		this.setValue(folder.path);
+		// Fire the input event so the wrapping TextComponent's onChange sees it.
+		this.input.trigger('input');
+		this.close();
+	}
+}
+
 export class SetupProjectModal extends Modal {
-	private path = 'Loom project';
+	/** 'create' scaffolds a new folder named after the project inside `dir`;
+	 *  'use' turns `dir` itself into the project folder. */
+	private mode: 'create' | 'use' = 'create';
+	private dir = '';
+	private name = '';
 
 	constructor(private plugin: LoomLoomPlugin) {
 		super(plugin.app);
@@ -243,14 +319,57 @@ export class SetupProjectModal extends Modal {
 
 	onOpen(): void {
 		this.setTitle('Set up project');
+		this.render();
+	}
+
+	private render(): void {
+		this.contentEl.empty();
+
+		const pills = this.contentEl.createDiv({ cls: 'loom-tab-bar' });
+		const pill = (mode: 'create' | 'use', label: string) => {
+			const btn = pills.createEl('button', {
+				cls: 'loom-tab' + (this.mode === mode ? ' loom-tab-active' : ''),
+				text: label,
+			});
+			btn.addEventListener('click', () => {
+				this.mode = mode;
+				this.render();
+			});
+		};
+		pill('create', 'Create a project folder');
+		pill('use', 'Use existing folder');
+
+		if (this.mode === 'create') {
+			new Setting(this.contentEl)
+				.setName('Project name')
+				.setDesc('A folder with this name is created in the chosen location.')
+				.addText((text) => {
+					text.setPlaceholder('My Loom project')
+						.setValue(this.name)
+						.onChange((v) => (this.name = v.trim()));
+					text.inputEl.addEventListener('keydown', (e) => {
+						if (e.key === 'Enter') void this.submit();
+					});
+					window.setTimeout(() => text.inputEl.focus());
+				});
+		}
 
 		new Setting(this.contentEl)
-			.setName('Project folder')
-			.setDesc('An existing folder is used as-is; missing folders are created. Entity and timeline subfolders and the project home file are scaffolded inside it.')
+			.setName(this.mode === 'create' ? 'Location' : 'Project folder')
+			.setDesc(
+				this.mode === 'create'
+					? 'Where the project folder is created. Leave empty for the vault root.'
+					: 'This folder becomes the project folder; entity subfolders and the home file are scaffolded inside it.'
+			)
 			.addText((text) => {
-				text.setValue(this.path).onChange((v) => (this.path = v.trim()));
+				text.setPlaceholder('Pick a folder')
+					.setValue(this.dir)
+					.onChange((v) => (this.dir = v.trim()));
+				const suggest = new FolderSuggest(this.app, text.inputEl);
 				text.inputEl.addEventListener('keydown', (e) => {
-					if (e.key === 'Enter') void this.submit();
+					// With the popup open, Enter picks the highlighted folder
+					// (handled by the suggest's scope); only a second Enter submits.
+					if (e.key === 'Enter' && !suggest.suggestionsShown) void this.submit();
 				});
 			});
 
@@ -263,12 +382,23 @@ export class SetupProjectModal extends Modal {
 	}
 
 	private async submit(): Promise<void> {
-		if (this.path === '') {
-			new Notice('Folder path is required.');
-			return;
+		let root: string;
+		if (this.mode === 'create') {
+			const name = sanitizeFileName(this.name);
+			if (name === '') {
+				new Notice('Project name is required.');
+				return;
+			}
+			root = this.dir === '' ? name : `${this.dir}/${name}`;
+		} else {
+			if (this.dir === '') {
+				new Notice('Folder path is required.');
+				return;
+			}
+			root = this.dir;
 		}
 		try {
-			const loomFile = await scaffoldProject(this.app, this.path);
+			const loomFile = await scaffoldProject(this.app, root);
 			this.plugin.indexer.rebuild();
 			this.close();
 			new Notice('Project ready.');
@@ -313,6 +443,25 @@ export class ConfirmModal extends Modal {
 
 	onClose(): void {
 		this.contentEl.empty();
+	}
+}
+
+export class EntityTypeSuggestModal extends FuzzySuggestModal<EntityType> {
+	constructor(plugin: LoomLoomPlugin, private onPick: (type: EntityType) => void) {
+		super(plugin.app);
+		this.setPlaceholder('Pick the entity type');
+	}
+
+	getItems(): EntityType[] {
+		return [...ENTITY_TYPES];
+	}
+
+	getItemText(type: EntityType): string {
+		return ENTITY_META[type].label;
+	}
+
+	onChooseItem(type: EntityType): void {
+		this.onPick(type);
 	}
 }
 

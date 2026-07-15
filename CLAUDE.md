@@ -13,7 +13,7 @@ and a custom layered graph view.
 
 | Path | Purpose |
 | --- | --- |
-| `src/main.ts` | Plugin entry: view/command/settings registration, .loom extension, legacy migration, project resolution for commands |
+| `src/main.ts` | Plugin entry: view/command/settings registration, .loom extension, legacy migration, context-aware project resolution for commands (active view/file, else single-project/picker) |
 | `src/types.ts` | Entity types + metadata, record/connection/timeline/date shapes, view type IDs |
 | `src/settings.ts` | Global settings: text size, tag vocabulary, graph node colors, collapse threshold; tabbed settings UI (General/Entities/Graph, per-project timeline settings under Graph) |
 | `src/indexer.ts` | Index cache: project discovery (.loom files), frontmatter → in-memory records, vault event handling, connection queries (incl. native links), JSON snapshot persistence |
