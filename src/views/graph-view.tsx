@@ -4,11 +4,20 @@ import {
 	PointerEvent as ReactPointerEvent,
 	ReactElement,
 	useEffect,
+	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
 } from 'react';
-import { ENTITY_META, ENTITY_TYPES, GraphCamera, QUEST_OUTCOMES, TimelineDef, VIEW_GRAPH } from '../types';
+import {
+	ENTITY_META,
+	ENTITY_TYPES,
+	EntityRecord,
+	GraphCamera,
+	QUEST_OUTCOMES,
+	TimelineDef,
+	VIEW_GRAPH,
+} from '../types';
 import type { LoomTextSize } from '../settings';
 import { ConfirmModal, CreateEntityModal, RelationshipPromptModal } from '../project';
 import { extractLinkpath } from '../indexer';
@@ -83,6 +92,10 @@ const MAX_ZOOM = 3;
 const REVEAL_MARGIN = 90;
 /** World-space margin around a node's circle within which a dragged node snaps to it as a drop target. */
 const DROP_SNAP = 12;
+/** Trash sector: drop radius (screen px) from the viewport's bottom-right
+ *  corner, and the distance at which the sector starts fading in. */
+const TRASH_R = 110;
+const TRASH_REVEAL = 260;
 
 interface Displacement {
 	dx: number;
@@ -99,6 +112,11 @@ interface DragState {
 	startX: number;
 	startY: number;
 	moved: boolean;
+	/** Dragged node's current world position (kept for live-reflow rebasing). */
+	worldX: number;
+	worldY: number;
+	lastClientX: number;
+	lastClientY: number;
 }
 
 interface PanState {
@@ -142,6 +160,17 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const layerKey = plugin.settings.globalLayerOrder.join(',');
 	/** Bumped when a drag-reorder writes a new manual x, to re-run the layout. */
 	const [manualVersion, setManualVersion] = useState(0);
+	/** Transient manual-x override while a reorder drag is in flight — the
+	 *  layout reflows live under the cursor instead of only after the drop. */
+	const liveManual = useRef<{ id: string; x: number } | null>(null);
+	const liveLayoutRaf = useRef(0);
+	const scheduleLiveLayout = () => {
+		if (liveLayoutRaf.current) return;
+		liveLayoutRaf.current = window.requestAnimationFrame(() => {
+			liveLayoutRaf.current = 0;
+			setManualVersion((v) => v + 1);
+		});
+	};
 	const layout = useMemo(
 		() =>
 			computeGraphLayout(
@@ -149,9 +178,13 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				project?.root ?? ' none',
 				plugin.settings.globalLayerOrder,
 				plugin.settings.graphLineGap,
-				new Map(Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {})),
+				new Map<string, number>([
+					...Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {}),
+					...(liveManual.current ? [[liveManual.current.id, liveManual.current.x] as const] : []),
+				]),
 				plugin.settings.graphTrunkGap,
-				LABEL_FONT_PX[plugin.settings.textSize]
+				LABEL_FONT_PX[plugin.settings.textSize],
+				liveManual.current?.id
 			),
 		// layerKey stands in for the order array (mutated in place by settings).
 		[
@@ -350,7 +383,18 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		}
 		e.stopPropagation();
 		e.currentTarget.setPointerCapture(e.pointerId);
-		dragRef.current = { id: node.id, node, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, moved: false };
+		dragRef.current = {
+			id: node.id,
+			node,
+			pointerId: e.pointerId,
+			startX: e.clientX,
+			startY: e.clientY,
+			moved: false,
+			worldX: node.x,
+			worldY: node.y,
+			lastClientX: e.clientX,
+			lastClientY: e.clientY,
+		};
 		const d = dispRef.current.get(node.id) ?? { dx: 0, dy: 0, vx: 0, vy: 0, dragging: true };
 		d.dragging = true;
 		d.vx = 0;
@@ -358,13 +402,45 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		dispRef.current.set(node.id, d);
 	};
 
+	/** Bails out of a drag whose pointerup never arrived (canceled pointer,
+	 *  lost capture): clears the state and springs everything home. Without
+	 *  this, a later button-less hover re-entered the move handler and the
+	 *  node stayed glued to the cursor. */
+	const abortDrag = () => {
+		const drag = dragRef.current;
+		if (!drag) return;
+		dragRef.current = null;
+		dropRef.current = null;
+		const hadLive = liveManual.current !== null;
+		liveManual.current = null;
+		const d = dispRef.current.get(drag.id);
+		if (d) d.dragging = false;
+		if (hadLive) setManualVersion((v) => v + 1);
+		startSpring();
+	};
+
+	/** Drags whose drop would persist a manual x (globals + free events) —
+	 *  these get the live reflow preview while in flight. */
+	const isReorderDrag = (node: LayoutNode) =>
+		node.kind === 'global' ||
+		(node.kind === 'event' &&
+			node.record.date === null &&
+			(layout.neighbors.get(node.id)?.size ?? 0) === 0);
+
 	const onNodePointerMove = (e: ReactPointerEvent<SVGGElement>) => {
 		const drag = dragRef.current;
 		if (!drag || drag.pointerId !== e.pointerId) return;
+		if (e.buttons === 0) {
+			// The release was missed — treat this stray move as it.
+			abortDrag();
+			return;
+		}
 		const dx = e.clientX - drag.startX;
 		const dy = e.clientY - drag.startY;
 		if (!drag.moved && Math.hypot(dx, dy) < CLICK_SLOP) return;
 		drag.moved = true;
+		drag.lastClientX = e.clientX;
+		drag.lastClientY = e.clientY;
 		const d = dispRef.current.get(drag.id);
 		if (d) {
 			// Pointer deltas are screen px; node displacement is world space.
@@ -373,6 +449,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			// Drop-to-connect: does the dragged node's center sit on another node?
 			const cx = drag.node.x + d.dx;
 			const cy = drag.node.y + d.dy;
+			drag.worldX = cx;
+			drag.worldY = cy;
 			let target: string | null = null;
 			for (const n of layout.nodes) {
 				if (n.id === drag.id) continue;
@@ -385,6 +463,12 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				}
 			}
 			dropRef.current = target;
+			// Live reflow: everything the drop would rearrange (row reorder,
+			// free-event repel, edge routing) follows the drag in real time.
+			if (isReorderDrag(drag.node) && project) {
+				liveManual.current = { id: drag.id, x: cx };
+				scheduleLiveLayout();
+			}
 			setTick((t) => t + 1);
 		}
 	};
@@ -395,34 +479,53 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		dragRef.current = null;
 		const dropId = dropRef.current;
 		dropRef.current = null;
+		const hadLive = liveManual.current !== null;
+		liveManual.current = null;
 		const d = dispRef.current.get(drag.id);
 		if (d) d.dragging = false;
 		if (drag.moved) {
+			// Trash sector drop: confirm, then move the note to the trash.
+			const cam = cameraRef.current;
+			const trashDist = Math.hypot(
+				size.w - (drag.worldX * cam.k + cam.tx),
+				size.h - (drag.worldY * cam.k + cam.ty)
+			);
+			if (trashDist < TRASH_R) {
+				if (hadLive) setManualVersion((v) => v + 1);
+				startSpring();
+				new ConfirmModal(
+					plugin.app,
+					`Delete "${recordLabel(drag.node.record, project ?? null)}"?`,
+					'The note is moved to the trash.',
+					() => {
+						const file = plugin.app.vault.getFileByPath(drag.id);
+						if (file) void plugin.app.fileManager.trashFile(file);
+					},
+					'Delete'
+				).open();
+				return;
+			}
 			const target = dropId !== null ? layout.nodes.find((n) => n.id === dropId) : undefined;
 			if (target) {
+				// Undo the live preview — a connect drop doesn't keep the spot.
+				if (hadLive) setManualVersion((v) => v + 1);
 				startSpring();
 				onNodeDrop(drag.node, target, { x: e.clientX, y: e.clientY });
-			} else if (
-				(drag.node.kind === 'global' ||
-					(drag.node.kind === 'event' &&
-						drag.node.record.date === null &&
-						(layout.neighbors.get(drag.id)?.size ?? 0) === 0)) &&
-				project &&
-				d
-			) {
+			} else if (isReorderDrag(drag.node) && project && d) {
 				// Reorder drop: persisted for globals and for free events
 				// (dateless + unconnected — they float outside the column
 				// flow); the layout decides its weight — free-floating
 				// components follow the drop (towing their neighbors),
 				// timeline-anchored ones ease back home (their forces win).
-				const wx = drag.node.x + d.dx;
-				const wy = drag.node.y + d.dy;
+				// The live preview already reflowed everything; this makes it
+				// stick.
 				const forProject = (plugin.settings.graphManualX[project.root] ??= {});
-				forProject[drag.id] = wx;
+				forProject[drag.id] = drag.worldX;
 				void plugin.saveSettings();
-				pendingReorder.current = { id: drag.id, x: wx, y: wy };
+				pendingReorder.current = { id: drag.id, x: drag.worldX, y: drag.worldY };
 				setManualVersion((v) => v + 1);
 			} else {
+				if (hadLive) setManualVersion((v) => v + 1);
 				startSpring();
 			}
 		} else {
@@ -516,6 +619,41 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						writeNodeFm(quest, (fm) => {
 							fm.questOutcome = outcome;
 							fm.questOutcomeSession = link;
+						}),
+				});
+			}
+		}
+
+		// Location on location: offer to make the DRAGGED one a sublocation of
+		// the target (its whole child hierarchy moves along), unless that's
+		// already its parent or it would create a cycle; the generic
+		// relationship below stays the alternative.
+		if (from.record.type === 'location' && to.record.type === 'location') {
+			const parentPathOf = (r: EntityRecord): string | undefined =>
+				r.parentLocation !== null
+					? plugin.indexer.resolve(r.parentLocation, r.path)?.path
+					: undefined;
+			const descendsFrom = (r: EntityRecord, ancestor: string): boolean => {
+				let cur: EntityRecord | undefined = r;
+				for (let guard = 0; guard < 20 && cur; guard++) {
+					const parentPath = parentPathOf(cur);
+					if (parentPath === undefined) return false;
+					if (parentPath === ancestor) return true;
+					cur = plugin.indexer.get(parentPath);
+				}
+				return false;
+			};
+			const alreadyChild = parentPathOf(from.record) === to.id;
+			const wouldCycle = descendsFrom(to.record, from.id);
+			if (!alreadyChild && !wouldCycle) {
+				options.push({
+					title: `Make sublocation of ${toLabel}`,
+					action: () =>
+						writeNodeFm(from, (fm) => {
+							for (const k of Object.keys(fm)) {
+								if (k.toLowerCase() === 'parentlocation') delete fm[k];
+							}
+							fm.parentLocation = `[[${to.record.name}]]`;
 						}),
 				});
 			}
@@ -638,10 +776,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					.setIcon(ENTITY_META[type].icon)
 					.onClick(() =>
 						new CreateEntityModal(plugin, type, project, {
-							// Open through the view so the graph is recorded as the
-							// origin — the entity page's Back returns here, not to
-							// the type's list.
-							onCreated: (file) => view.openEntity(file.path),
+							// Stay on the graph — opening the new page would break
+							// the flow; double-clicking the node opens it anytime.
+							onCreated: () => {},
 						}).open()
 					)
 			);
@@ -702,13 +839,49 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	}, [selected, nodeById]);
 
 	const pos = (n: LayoutNode) => {
+		// The dragged node renders exactly at the cursor's world position —
+		// never through home+displacement, which is one frame stale while
+		// live reflows move its home (it read as flicker/lag on the held node).
+		const drag = dragRef.current;
+		if (drag && drag.moved && drag.id === n.id) return { x: drag.worldX, y: drag.worldY };
 		const d = dispRef.current.get(n.id);
 		return { x: n.x + (d?.dx ?? 0), y: n.y + (d?.dy ?? 0) };
 	};
 
+	// Every relayout slides instead of snapping: nodes whose home moved carry
+	// the difference as displacement (keeping their rendered position) and
+	// the spring eases them to the new home — so live-reflow rearrangements
+	// glide around the dragged node rather than teleporting. Layout effects
+	// (pre-paint), or the snapped frame would flash before the carry applies.
+	const prevHomes = useRef<Map<string, Pt> | null>(null);
+	useLayoutEffect(() => {
+		const prev = prevHomes.current;
+		prevHomes.current = new Map(layout.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+		if (!prev) return;
+		let moved = false;
+		for (const n of layout.nodes) {
+			const p = prev.get(n.id);
+			if (!p) continue;
+			const dxHome = p.x - n.x;
+			const dyHome = p.y - n.y;
+			if (Math.abs(dxHome) < 0.5 && Math.abs(dyHome) < 0.5) continue;
+			const d = dispRef.current.get(n.id);
+			if (d?.dragging) continue; // the dragged node is rebased separately
+			dispRef.current.set(n.id, {
+				dx: (d?.dx ?? 0) + dxHome,
+				dy: (d?.dy ?? 0) + dyHome,
+				vx: d?.vx ?? 0,
+				vy: d?.vy ?? 0,
+				dragging: false,
+			});
+			moved = true;
+		}
+		if (moved) startSpring();
+	}, [layout]);
+
 	// After a reorder drop relayouts the row, seed the dropped node's
 	// displacement with (release point − new home) so it eases into place.
-	useEffect(() => {
+	useLayoutEffect(() => {
 		const pending = pendingReorder.current;
 		if (!pending) return;
 		pendingReorder.current = null;
@@ -722,6 +895,27 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			dragging: false,
 		});
 		startSpring();
+	}, [layout, nodeById]);
+
+	// A live reflow moves the dragged node's home mid-drag — rebase its
+	// displacement (and the pointer-delta origin) so its rendered position
+	// stays glued to the cursor while everything else rearranges around it.
+	useLayoutEffect(() => {
+		const drag = dragRef.current;
+		if (!drag || !drag.moved) return;
+		const fresh = nodeById.get(drag.id);
+		if (!fresh || fresh === drag.node) return;
+		const k = cameraRef.current.k;
+		drag.node = fresh;
+		drag.startX = drag.lastClientX - (drag.worldX - fresh.x) * k;
+		drag.startY = drag.lastClientY - (drag.worldY - fresh.y) * k;
+		dispRef.current.set(drag.id, {
+			dx: drag.worldX - fresh.x,
+			dy: drag.worldY - fresh.y,
+			vx: 0,
+			vy: 0,
+			dragging: true,
+		});
 	}, [layout, nodeById]);
 
 	// --- Timeline drawer -------------------------------------------------------
@@ -786,6 +980,27 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			<div className="loom-graph-stack">
 				<div className="loom-graph-wrap">
 					<div className="loom-graph-viewport" ref={wrapRef}>
+					{(() => {
+						// Trash sector: fades in as a dragged node nears the corner.
+						// Rendered under the svg so nodes pass over it.
+						const drag = dragRef.current;
+						if (!drag || !drag.moved) return null;
+						const c = cameraRef.current;
+						const dist = Math.hypot(
+							size.w - (drag.worldX * c.k + c.tx),
+							size.h - (drag.worldY * c.k + c.ty)
+						);
+						const opacity = Math.max(0, Math.min(1, (TRASH_REVEAL - dist) / (TRASH_REVEAL - TRASH_R)));
+						if (opacity <= 0) return null;
+						return (
+							<div
+								className={dist < TRASH_R ? 'loom-trash-zone loom-trash-active' : 'loom-trash-zone'}
+								style={{ opacity }}
+							>
+								<Icon name="trash-2" />
+							</div>
+						);
+					})()}
 					<svg
 						className="loom-graph-svg"
 						onPointerDown={onSvgPointerDown}
@@ -867,6 +1082,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										onPointerDown={(e) => onNodePointerDown(node, e)}
 										onPointerMove={onNodePointerMove}
 										onPointerUp={(e) => onNodePointerUp(node, e)}
+										onPointerCancel={abortDrag}
 										onDoubleClick={() => view.openEntity(node.id)}
 										onContextMenu={(e) => {
 											e.preventDefault();

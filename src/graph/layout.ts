@@ -1,4 +1,4 @@
-import { EntityRecord, EntityType, SUBLOCATION_REL } from '../types';
+import { EntityRecord, EntityType } from '../types';
 import { formatLoomDate } from '../calendar';
 import { TimelineColumn, buildColumns } from '../columns';
 import { LoomIndexer } from '../indexer';
@@ -155,17 +155,20 @@ export function computeGraphLayout(
 	trunkGap: number = LANE_GAP,
 	/** Node-label font size (px) under the current text-size setting — label
 	 *  overlap estimates (the checker pass) scale with it. */
-	labelFontPx: number = 12.8
+	labelFontPx: number = 12.8,
+	/** Node being live-dragged, if any: excluded from the checker pass so its
+	 *  transient label position can't toggle neighbors' stagger every frame. */
+	liveDragId?: string
 ): GraphLayout {
 	const { raw, neighbors } = collectEdges(indexer, projectRoot);
 
 	// Round 1: provisional placement with default corridors, only to learn how
 	// many trunk lanes each corridor must fit.
-	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors, manualX);
+	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors, manualX, liveDragId);
 	const demand = corridorDemand(classifyEdges(raw, prelim), trunkGap);
 
 	// Round 2: final placement with widened corridors, then full routing.
-	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX);
+	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX, liveDragId);
 	const classified = classifyEdges(raw, placed);
 	const bottom = routeEdges(classified, placed, lineGap, trunkGap);
 
@@ -175,7 +178,11 @@ export function computeGraphLayout(
 	const projectDef = indexer.getProjectByRoot(projectRoot);
 	const labelOf = (r: EntityRecord) =>
 		r.type === 'session' && r.date && projectDef ? formatLoomDate(r.date, projectDef.config) : r.name;
-	applyLabelChecker([...placed.nodes.values()], labelOf, labelFontPx);
+	applyLabelChecker(
+		[...placed.nodes.values()].filter((n) => n.id !== liveDragId),
+		labelOf,
+		labelFontPx
+	);
 	// Exit diagonals follow their node onto its staggered y.
 	for (const e of classified) {
 		if (e.kind === 'fan') e.departY = e.upper.y + DEPART_DROP;
@@ -250,7 +257,8 @@ function placeNodes(
 	layerOrder: readonly EntityType[],
 	corridorWidths: Map<number, number> | null,
 	neighbors: Map<string, Set<string>>,
-	manualX?: ReadonlyMap<string, number>
+	manualX?: ReadonlyMap<string, number>,
+	liveDragId?: string
 ): Placement {
 	const nodes = new Map<string, LayoutNode>();
 	const colOf = new Map<string, number>();
@@ -360,11 +368,19 @@ function placeNodes(
 		.sort((a, b) => a.x - b.x);
 	for (const { record, x: desired } of placedFree) {
 		let x = desired;
+		let dir = 0;
 		const taken = rows[0] ?? [];
 		for (let guard = 0; guard < 40; guard++) {
 			const hit = taken.find((ox) => Math.abs(ox - x) < MULTI_CLEARANCE);
 			if (hit === undefined) break;
-			x = hit + (x >= hit ? MULTI_CLEARANCE : -MULTI_CLEARANCE);
+			// The push side comes from the node's ORIGINAL spot and stays
+			// locked: comparing against the already-pushed position made the
+			// direction flip between rounds, so a repelled node chased away
+			// from an approaching drag endlessly (or oscillated between two
+			// obstacles). Now it settles just beside the intruder and swaps
+			// sides only once the intruder actually crosses its center.
+			if (dir === 0) dir = desired >= hit ? 1 : -1;
+			x = hit + dir * MULTI_CLEARANCE;
 		}
 		nodes.set(record.path, {
 			id: record.path,
@@ -381,18 +397,15 @@ function placeNodes(
 	const eventsBottom = EVENT_Y0 + Math.max(maxStack, 1) * EVENT_DY;
 
 	// Global layers: one row per (non-empty) type in the configured order.
-	// Sublocations — locations declaring a `sublocation of` relationship to
-	// another location — leave the locations row: they form a grid of rows
-	// right under it, built after the relaxation once parents have an x.
+	// Sublocations — locations carrying a `parentLocation` link to another
+	// location — leave the locations row: they form a grid of rows right
+	// under it, built after the relaxation once parents have an x.
 	const parentOf = new Map<string, string>();
 	for (const loc of indexer.getAll('location', projectRoot)) {
-		for (const rel of loc.relationships) {
-			if (rel.type.trim().toLowerCase() !== SUBLOCATION_REL) continue;
-			const target = indexer.resolve(rel.linkpath, loc.path);
-			if (target?.type === 'location' && target.path !== loc.path && target.project === projectRoot) {
-				parentOf.set(loc.path, target.path);
-				break;
-			}
+		if (loc.parentLocation === null) continue;
+		const target = indexer.resolve(loc.parentLocation, loc.path);
+		if (target?.type === 'location' && target.path !== loc.path && target.project === projectRoot) {
+			parentOf.set(loc.path, target.path);
 		}
 	}
 	// Each sublocation clusters under its nearest ancestor that sits in the
@@ -497,6 +510,16 @@ function placeNodes(
 	}
 	for (let pass = 0; pass < 40; pass++) {
 		for (const g of allGlobals) {
+			// The live-dragged node's home is the cursor, absolutely — averaging
+			// it with connection forces made its estimate lag behind, so the row
+			// order never flipped and a connected neighbor could never be passed.
+			if (g.path === liveDragId) {
+				const manual = manualX?.get(g.path);
+				if (manual !== undefined) {
+					est.set(g.path, manual);
+					continue;
+				}
+			}
 			const anchor = questAnchor.get(g.path);
 			if (anchor !== undefined) {
 				est.set(g.path, anchor);
@@ -526,33 +549,48 @@ function placeNodes(
 		for (const rs of layerRecords) resolveRowOverlaps(rs, est);
 	}
 
-	// Sublocation grid: one cluster per parent, SUB_COLS wide and wrapping to
-	// further rows, centered under the parent's relaxed position. Clusters
-	// sharing a grid row sweep right so they never overlap.
+	// Sublocation grid: hierarchical — each location's direct children sit
+	// one grid row below it, clustered under it SUB_COLS wide (wrapping
+	// pushes deeper levels further down), so a sublocation's own sublocations
+	// always land beneath it. Each child list follows the parent's
+	// drag-reordered `sublocationOrder` (then name); rows sweep right so
+	// entries sharing a grid row never overlap.
 	const subRowEntries: { record: EntityRecord; x: number }[][] = [];
 	if (subRoot.size > 0) {
-		const clusters = new Map<string, EntityRecord[]>();
-		for (const [path, root] of subRoot) {
+		const childrenOf = new Map<string, EntityRecord[]>();
+		for (const path of subRoot.keys()) {
 			const rec = indexer.get(path);
-			if (!rec) continue;
-			if (!clusters.has(root)) clusters.set(root, []);
-			clusters.get(root)?.push(rec);
+			const parent = parentOf.get(path);
+			if (!rec || parent === undefined) continue;
+			if (!childrenOf.has(parent)) childrenOf.set(parent, []);
+			childrenOf.get(parent)?.push(rec);
 		}
-		const orderedClusters = [...clusters.entries()].sort(
-			(a, b) => (est.get(a[0]) ?? centerX) - (est.get(b[0]) ?? centerX)
-		);
-		for (const [root, members] of orderedClusters) {
-			members.sort((a, b) => a.name.localeCompare(b.name));
-			const px = est.get(root) ?? centerX;
-			const w = Math.min(members.length, SUB_COLS);
-			members.forEach((m, i) => {
-				const col = i % SUB_COLS;
-				const gridRow = Math.floor(i / SUB_COLS);
-				(subRowEntries[gridRow] ??= []).push({
-					record: m,
-					x: px + (col - (w - 1) / 2) * GLOBAL_MIN_SPACING,
-				});
+		for (const [parentPath, kids] of childrenOf) {
+			const orderIdx = new Map<string, number>();
+			indexer.get(parentPath)?.sublocationOrder.forEach((lp, i) => {
+				const target = indexer.resolve(lp, parentPath);
+				if (target) orderIdx.set(target.path, i);
 			});
+			kids.sort(
+				(a, b) =>
+					(orderIdx.get(a.path) ?? Number.MAX_SAFE_INTEGER) -
+						(orderIdx.get(b.path) ?? Number.MAX_SAFE_INTEGER) ||
+					a.name.localeCompare(b.name)
+			);
+		}
+		const place = (parentPath: string, parentX: number, row: number) => {
+			const kids = childrenOf.get(parentPath) ?? [];
+			const w = Math.min(kids.length, SUB_COLS);
+			kids.forEach((kid, i) => {
+				const col = i % SUB_COLS;
+				const wrap = Math.floor(i / SUB_COLS);
+				const x = parentX + (col - (w - 1) / 2) * GLOBAL_MIN_SPACING;
+				(subRowEntries[row + wrap] ??= []).push({ record: kid, x });
+				place(kid.path, x, row + wrap + 1);
+			});
+		};
+		for (const rootPath of new Set(subRoot.values())) {
+			place(rootPath, est.get(rootPath) ?? centerX, 0);
 		}
 		for (const row of subRowEntries) {
 			row.sort((a, b) => a.x - b.x);

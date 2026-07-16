@@ -65,9 +65,10 @@ function parseLinkList(value: unknown): string[] {
 /**
  * Frontmatter keys whose links are deliberately hidden: they never become
  * connections or graph edges (session attendance would spray edges over the
- * whole graph). Lowercase — compared case-insensitively.
+ * whole graph; sublocationOrder would duplicate the children's own
+ * `sublocation` edges). Lowercase — compared case-insensitively.
  */
-const HIDDEN_LINK_KEYS = ['attendance', 'deathsession'];
+const HIDDEN_LINK_KEYS = ['attendance', 'deathsession', 'sublocationorder'];
 
 function isHiddenLinkKey(key: string): boolean {
 	const lower = key.toLowerCase();
@@ -329,6 +330,11 @@ export class LoomIndexer extends Component {
 			sessionNotes,
 			date: parseLoomDate(fm.date, calendar, project.config),
 			attendance: parseLinkList(fmField(fm, 'attendance')),
+			parentLocation:
+				typeof fmField(fm, 'parentLocation') === 'string'
+					? extractLinkpath(fmField(fm, 'parentLocation') as string)
+					: null,
+			sublocationOrder: parseLinkList(fmField(fm, 'sublocationOrder')),
 			role: typeof fm.role === 'string' ? fm.role : '',
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
 			deathSession: typeof deathValue === 'string' ? extractLinkpath(deathValue) : null,
@@ -398,6 +404,13 @@ export class LoomIndexer extends Component {
 		}
 		// Before the generic wikilink pass so these keep their typed relType
 		// instead of degrading to a plain 'link'.
+		if (record.parentLocation !== null) {
+			const parent = this.resolve(record.parentLocation, record.path);
+			if (parent?.type === 'location' && parent.path !== record.path && !linked.has(parent.path)) {
+				out.push({ record: parent, relType: 'sublocation', direction: 'outgoing' });
+				linked.add(parent.path);
+			}
+		}
 		for (const note of record.sessionNotes) {
 			const target = note.session ? this.resolve(note.session, record.path) : null;
 			if (target?.type === 'session' && !linked.has(target.path)) {

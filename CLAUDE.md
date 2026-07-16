@@ -49,6 +49,8 @@ and a custom layered graph view.
   sessions display their date.
 - **Connections**: typed frontmatter relationships + `sessionNotes` (session-pinned
   note entries `{session, text}`; the picked session becomes a `session note`
+  connection) + `parentLocation` on locations (sublocation parent — dedicated field
+  with its own page/list/graph UI, never a relationship; typed `sublocation`
   connection) + plain `[[links]]` anywhere in a note (relType `link`), all resolved
   bidirectionally; graph edges undirected. There is no dedicated event→session field
   (`linkedSession` was removed — relationships already cover it; old keys in existing

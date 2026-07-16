@@ -244,6 +244,44 @@ body.loom-text-large {
 	cursor: pointer;
 }
 
+/* Collapse toggle on location rows; the slot is reserved on every nested-mode
+   row (an empty span on childless ones) so names left-align per level. High
+   specificity keeps theme button skins from painting a background under it. */
+.loom-view button.loom-row-caret,
+span.loom-row-caret {
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	padding: 0;
+	height: auto;
+	cursor: pointer;
+	align-self: center;
+	flex: 0 0 auto;
+	width: var(--size-4-4);
+	text-align: center;
+}
+
+/* Sublocation rows read lighter than their parents. */
+.loom-row-sub .loom-row-name {
+	font-weight: var(--font-normal);
+}
+
+/* One horizontal scroll per main location's subtree: deep indents scroll the
+   subtree, never the whole list. Descriptions (min-width 0) give way first. */
+.loom-subtree {
+	overflow-x: auto;
+}
+
+.loom-subtree .loom-row {
+	min-width: min-content;
+}
+
+/* Sublocation count beside a parent location's name. */
+.loom-row-count {
+	color: var(--text-muted);
+	font-size: 0.8em;
+}
+
 .loom-row:hover {
 	background: var(--background-modifier-hover);
 }
@@ -500,6 +538,41 @@ body.loom-text-large {
 .loom-drawer-inner {
 	overflow: auto;
 	padding: var(--size-4-3);
+}
+
+/* Hidden trash sector: quarter circle fading in at the bottom-right corner
+   while a dragged node approaches; dropping inside asks to delete the note. */
+.loom-trash-zone {
+	position: absolute;
+	right: 0;
+	bottom: 0;
+	width: 180px;
+	height: 180px;
+	/* Soft radial fade from the corner — no outline, blends into the
+	   background at the edge; nodes render above it. */
+	background: radial-gradient(
+		circle at 100% 100%,
+		rgba(214, 96, 96, 0.38) 0%,
+		rgba(214, 96, 96, 0.24) 45%,
+		rgba(214, 96, 96, 0) 72%
+	);
+	display: flex;
+	align-items: flex-end;
+	justify-content: flex-end;
+	/* The icon hugs the corner so it sits on the colored core, not the fade. */
+	padding: 0 26px 26px 0;
+	color: var(--text-muted);
+	pointer-events: none;
+}
+
+.loom-trash-active {
+	background: radial-gradient(
+		circle at 100% 100%,
+		rgba(210, 72, 72, 0.6) 0%,
+		rgba(210, 72, 72, 0.38) 45%,
+		rgba(210, 72, 72, 0) 72%
+	);
+	color: var(--text-normal);
 }
 
 .loom-graph-viewport {
@@ -1091,8 +1164,9 @@ body.loom-text-large {
 	cursor: default;
 }
 
-.loom-chip-remove {
-	background: none;
+/* High specificity so theme button skins can't paint a background under ✕. */
+.loom-view button.loom-chip-remove {
+	background: transparent;
 	border: none;
 	box-shadow: none;
 	padding: 0;
@@ -1170,6 +1244,72 @@ body.loom-text-large {
 
 .loom-rel-add {
 	align-self: flex-start;
+}
+
+/* Separator above the page's big sections (Session notes, Sublocations,
+   Relationships, Connected entities). */
+.loom-field-sep,
+.loom-connected {
+	border-top: 1px solid var(--background-modifier-border);
+	padding-top: var(--size-4-4);
+	margin-top: var(--size-4-2);
+}
+
+/* Sublocations section: a left-aligned scannable column of clickable child
+   names (drag grip on the left to reorder, detach ✕ on the right), actions
+   beneath. The same link style names the parent on a sublocation's own page.
+   High-specificity flat styling so theme button skins can't paint a
+   background under the links. */
+.loom-subloc-list {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--size-2-1);
+}
+
+.loom-subloc-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	/* Rows slide into place live during a grip drag. */
+	transition: transform 120ms ease;
+}
+
+.loom-subloc-grip {
+	display: flex;
+	align-items: center;
+	color: var(--text-faint);
+	cursor: grab;
+	touch-action: none;
+}
+
+.loom-subloc-grip .loom-icon svg {
+	display: block;
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.loom-view button.loom-subloc-link {
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	padding: 0;
+	height: auto;
+	align-self: flex-start;
+	color: var(--text-accent);
+	cursor: pointer;
+	font-size: inherit;
+}
+
+.loom-view button.loom-subloc-link:hover {
+	text-decoration: underline;
+}
+
+.loom-subloc-actions {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-2);
 }
 
 /* Quest page: givers left of a full-height separator (border on the right
