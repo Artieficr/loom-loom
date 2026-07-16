@@ -300,10 +300,17 @@ export class LoomIndexer extends Component {
 		if (Array.isArray(rawSessionNotes)) {
 			for (const note of rawSessionNotes) {
 				if (typeof note !== 'object' || note === null) continue;
-				const { session, text } = note as { session?: unknown; text?: unknown };
+				const { session, text, places, seq } = note as {
+					session?: unknown;
+					text?: unknown;
+					places?: unknown;
+					seq?: unknown;
+				};
 				sessionNotes.push({
 					session: typeof session === 'string' ? extractLinkpath(session) : null,
 					text: typeof text === 'string' ? text : '',
+					places: parseLinkList(places),
+					seq: typeof seq === 'number' ? seq : null,
 				});
 			}
 		}
@@ -335,6 +342,7 @@ export class LoomIndexer extends Component {
 					? extractLinkpath(fmField(fm, 'parentLocation') as string)
 					: null,
 			sublocationOrder: parseLinkList(fmField(fm, 'sublocationOrder')),
+			members: parseLinkList(fmField(fm, 'members')),
 			role: typeof fm.role === 'string' ? fm.role : '',
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
 			deathSession: typeof deathValue === 'string' ? extractLinkpath(deathValue) : null,

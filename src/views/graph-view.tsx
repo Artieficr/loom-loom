@@ -375,10 +375,13 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	const onNodePointerDown = (node: LayoutNode, e: ReactPointerEvent<SVGGElement>) => {
 		if (e.button !== 0) {
-			// Keep right/middle presses on a node away from the pan handler:
-			// its pointer capture would retarget the contextmenu event and
-			// swallow the right-click focus.
+			// Keep right/middle presses on a node away from the pan handler.
 			e.stopPropagation();
+			// Middle click: zoom + center (edit moved to right click).
+			if (e.button === 1) {
+				e.preventDefault();
+				focusNode(node);
+			}
 			return;
 		}
 		e.stopPropagation();
@@ -619,6 +622,32 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						writeNodeFm(quest, (fm) => {
 							fm.questOutcome = outcome;
 							fm.questOutcomeSession = link;
+						}),
+				});
+			}
+		}
+
+		// Any node ↔ session: offer a session note on the non-session side
+		// (empty text, filled in on its page) alongside the generic relationship.
+		const sessionPair =
+			from.record.type === 'session' && to.record.type !== 'session'
+				? { session: from, other: to }
+				: to.record.type === 'session' && from.record.type !== 'session'
+					? { session: to, other: from }
+					: null;
+		if (sessionPair) {
+			const { session, other } = sessionPair;
+			const has = other.record.sessionNotes.some(
+				(n) => n.session !== null && plugin.indexer.resolve(n.session, other.id)?.path === session.id
+			);
+			if (!has) {
+				options.push({
+					title: 'Add session note',
+					action: () =>
+						writeNodeFm(other, (fm) => {
+							const notes = Array.isArray(fm.sessionNotes) ? fm.sessionNotes : [];
+							notes.push({ session: `[[${session.record.name}]]`, text: '' });
+							fm.sessionNotes = notes;
 						}),
 				});
 			}
@@ -1087,7 +1116,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										onContextMenu={(e) => {
 											e.preventDefault();
 											e.stopPropagation();
-											focusNode(node);
+											view.openEntity(node.id);
 										}}
 									>
 										{/* Native SVG tooltip carries the full name when truncated. */}

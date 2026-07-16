@@ -1476,3 +1476,235 @@ span.loom-row-caret {
 	width: var(--icon-s);
 	height: var(--icon-s);
 }
+
+/* Read-only session notes surfaced from sublocations/places. */
+.loom-note-inherited {
+	padding: var(--size-2-2) 0;
+}
+
+.loom-note-inherited-text {
+	color: var(--text-muted);
+	white-space: pre-wrap;
+}
+
+/* Location session notes: grouped by session, one row per place. */
+.loom-locnote-group {
+	margin-bottom: var(--size-4-2);
+}
+
+.loom-locnote {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--size-2-2);
+	margin-top: var(--size-2-2);
+}
+
+.loom-locnote-place {
+	flex: 0 0 15%;
+	min-width: 90px;
+	text-align: left;
+	color: var(--text-muted);
+}
+
+/* New-note draft row wraps instead of cramming one line. */
+.loom-locnote-new {
+	flex-wrap: wrap;
+}
+
+.loom-locnote-new .loom-note-text {
+	flex: 1 1 100%;
+}
+
+.loom-locnote {
+	transition: transform 120ms ease;
+}
+
+/* Hierarchy: session date > place header > note. Add buttons live at the TOP
+   of their sections so they never need scrolling. */
+.loom-locnote {
+	flex-direction: column;
+	align-items: stretch;
+	margin-left: var(--size-4-5, 20px);
+}
+
+.loom-locnote-head {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
+.loom-locnote .loom-note-text {
+	margin-left: 26px;
+}
+
+.loom-locnote-new {
+	flex-direction: row;
+	margin-left: 0;
+}
+
+.loom-locnote-group > .loom-tag-row .loom-session-chip {
+	font-weight: var(--font-medium);
+}
+
+/* Hub row action drawer: trash + unlink slide out right-to-left behind <. */
+.loom-hub-actions {
+	display: flex;
+	overflow: hidden;
+	max-width: 0;
+	transition: max-width 180ms ease;
+}
+
+.loom-hub-actions-open {
+	max-width: 120px;
+}
+
+.loom-hub-name {
+	flex: 0 1 650px;
+}
+
+.loom-hub-location,
+.loom-hub-involve {
+	position: relative;
+	width: 400px;
+	flex: 0 0 auto;
+}
+
+.loom-hub-location .loom-combo,
+.loom-hub-involve .loom-combo {
+	width: 100%;
+}
+
+.loom-hub-location .loom-combo input,
+.loom-hub-involve .loom-combo input {
+	width: 100%;
+}
+
+/* The type filter lives inside the Involve box, at its right edge: the
+   button overlaps the input's end via negative margin (layout-proof). */
+.loom-hub-involve {
+	display: flex;
+	align-items: center;
+}
+
+.loom-hub-involve .loom-combo input {
+	padding-right: 34px;
+}
+
+.loom-hub-involve .loom-rel-filter {
+	margin-left: -32px;
+	z-index: 1;
+}
+
+.loom-hub-location-row {
+	flex-wrap: wrap;
+}
+
+.loom-hub-involve-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	margin-left: 26px;
+}
+
+.loom-hub-involved {
+	margin-top: var(--size-2-1);
+}
+
+.loom-hub-involved {
+	margin-left: 26px;
+}
+
+.loom-hub-add-row {
+	display: flex;
+	gap: var(--size-4-2);
+}
+
+/* Section headings breathe before their first entry (Overview and all
+   loom-field-sep sections alike). */
+.loom-connected > .loom-field-label,
+.loom-field-sep > .loom-field-label {
+	display: block;
+	margin-bottom: var(--size-4-3);
+}
+
+/* Hub rows nest slightly under their per-type subheading, each note card
+   wrapped in a tinted box (settings-option look). */
+.loom-hub-section {
+	margin-left: var(--size-4-2);
+}
+
+.loom-hub-section .loom-locnote {
+	background: var(--background-secondary);
+	border: none;
+	border-radius: var(--radius-m);
+	padding: var(--size-4-3);
+	margin-left: 0;
+	margin-top: var(--size-4-2);
+}
+
+/* Fields keep the page background (slightly tinted vs. the card), so they
+   don't blend into the tinted card. */
+.loom-hub-section .loom-locnote input[type='text'],
+.loom-hub-section .loom-locnote textarea,
+.loom-hub-section .loom-locnote select {
+	background: var(--background-primary);
+}
+
+/* The involve filter is a bare icon, not a button. */
+.loom-view button.loom-rel-filter {
+	background: transparent;
+	border: none;
+	box-shadow: none;
+}
+
+.loom-hub-location-row {
+	margin-top: var(--size-2-2);
+}
+
+
+/* Text boxes always auto-size (grow AND shrink) to their content, one-line
+   minimum — manual sizing and scrolling are gone. */
+.loom-resize-edge {
+	display: none;
+}
+
+.loom-view textarea {
+	resize: none;
+	overflow-y: hidden;
+}
+
+/* Familiar responsive hover on the bare filter icon. */
+.loom-view button.loom-rel-filter:hover {
+	background: var(--background-modifier-hover);
+	border-radius: var(--radius-s);
+}
+
+/* Relationship target search carries its filter inside, at the right edge. */
+.loom-rel-targetbox {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	min-width: 0;
+}
+
+.loom-rel-targetbox .loom-rel-target {
+	flex: 1;
+}
+
+.loom-rel-targetbox .loom-rel-target input {
+	width: 100%;
+	padding-right: 34px;
+}
+
+.loom-rel-targetbox .loom-rel-filter {
+	margin-left: -32px;
+	z-index: 1;
+}
+
+/* Multiline boxes: a little vertical breathing room for the text. */
+.loom-resizable textarea,
+.loom-link-textarea textarea,
+.loom-note-text textarea {
+	padding-top: var(--size-4-2);
+	padding-bottom: var(--size-4-2);
+}

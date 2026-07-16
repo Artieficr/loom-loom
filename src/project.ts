@@ -101,6 +101,10 @@ export interface NewEntityFields {
 	relationship?: { type: string; target: string };
 	/** Location only: parent location name — the new location is its sublocation. */
 	parentLocation?: string;
+	/** Event only: entity names involved — written as `involves` relationships. */
+	involved?: string[];
+	/** Session name to prefill a session note for (events created from a session page). */
+	noteSession?: string;
 	/** Quest only (all optional): note names, not links. */
 	questGiver?: string;
 	questReceived?: string;
@@ -110,20 +114,33 @@ export interface NewEntityFields {
 }
 
 export function buildEntityContent(type: EntityType, fields: NewEntityFields): string {
-	const rel = fields.relationship;
+	const rels = [
+		...(fields.relationship ? [fields.relationship] : []),
+		...(fields.involved ?? []).map((n) => ({ type: 'involved', target: n })),
+	];
 	const lines = [
 		'---',
 		`type: ${type}`,
 		`loomTags: [${fields.tag === '' ? '' : yamlQuote(fields.tag)}]`,
 		'description: ""',
-		...(rel
+		...(rels.length > 0
 			? [
 					'relationships:',
-					`  - type: ${yamlQuote(rel.type)}`,
-					`    target: ${yamlQuote(`[[${rel.target}]]`)}`,
+					...rels.flatMap((r) => [
+						`  - type: ${yamlQuote(r.type)}`,
+						`    target: ${yamlQuote(`[[${r.target}]]`)}`,
+					]),
 				]
 			: ['relationships: []']),
 	];
+	if (fields.noteSession && fields.noteSession !== '') {
+		lines.push(
+			'sessionNotes:',
+			`  - session: ${yamlQuote(`[[${fields.noteSession}]]`)}`,
+			'    text: ""',
+			`    seq: ${Date.now()}`
+		);
+	}
 	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
 		lines.push(`parentLocation: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
 	}
@@ -211,6 +228,8 @@ export interface CreateEntityOptions {
 	/** Locations only: the new location is created as this one's sublocation
 	 *  (writes `parentLocation`, not a relationship). */
 	parentLocation?: EntityRecord;
+	/** The new entity starts with a session note pinned to this session. */
+	noteSession?: EntityRecord;
 }
 
 export class CreateEntityModal extends Modal {
@@ -268,10 +287,15 @@ export class CreateEntityModal extends Modal {
 				for (const c of characters) dd.addOption(c.name, c.name);
 				dd.onChange((v) => (this.fields.questGiver = v));
 			});
-			new Setting(this.contentEl).setName('Received in session').addDropdown((dd) => {
+		new Setting(this.contentEl).setName('Received in session').addDropdown((dd) => {
 				dd.addOption('', '—');
 				for (const s of sessions) dd.addOption(s.name, sessionLabel(s));
 				dd.onChange((v) => (this.fields.questReceived = v));
+				// Quests born from a session page default to being received there.
+				if (this.options.noteSession) {
+					this.fields.questReceived = this.options.noteSession.name;
+					dd.setValue(this.options.noteSession.name);
+				}
 			});
 			new Setting(this.contentEl).setName('Outcome').addDropdown((dd) => {
 				dd.addOption('', 'Active');
@@ -300,7 +324,30 @@ export class CreateEntityModal extends Modal {
 			});
 		}
 
-		if (this.type === 'event') {
+	if (this.type === 'event') {
+			// Involved entities: each pick appends; the list shows in the desc.
+			const involvedSetting = new Setting(this.contentEl).setName('Involved entities');
+			const refreshInvolved = () =>
+				involvedSetting.setDesc((this.fields.involved ?? []).join(', '));
+			involvedSetting.addDropdown((dd) => {
+				dd.addOption('', '—');
+				for (const r of this.plugin.indexer
+					.getAll(undefined, this.project.root)
+					.filter((r) => r.type !== 'session' && r.type !== 'event')
+					.sort((a, b) => a.name.localeCompare(b.name))) {
+					dd.addOption(r.name, r.name);
+				}
+				dd.onChange((v) => {
+					if (v === '') return;
+					(this.fields.involved ??= []).push(v);
+					dd.setValue('');
+					refreshInvolved();
+				});
+			});
+		}
+
+		// Events born from a session page need no date — the session carries it.
+		if (this.type === 'event' && !this.options.noteSession) {
 			let dateText: TextComponent;
 			new Setting(this.contentEl)
 				.setName('Date')
@@ -357,7 +404,8 @@ export class CreateEntityModal extends Modal {
 				target: connectTo.record.name,
 			};
 		}
-		if (this.options.parentLocation) this.fields.parentLocation = this.options.parentLocation.name;
+	if (this.options.parentLocation) this.fields.parentLocation = this.options.parentLocation.name;
+		if (this.options.noteSession) this.fields.noteSession = this.options.noteSession.name;
 		try {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
 			this.close();

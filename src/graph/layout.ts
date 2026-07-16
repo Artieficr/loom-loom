@@ -226,19 +226,21 @@ function collectEdges(
 	const records = indexer.getAll(undefined, projectRoot);
 	const indexed = new Set(records.map((r) => r.path));
 	const neighbors = new Map<string, Set<string>>();
-	// One edge per pair+relType; a reverse declaration of the same relType
-	// merges into it as a mutual edge (arrowheads on both ends).
+	// One edge per PAIR: any mutual declarations (even different relTypes)
+	// merge into a single edge with arrowheads on both ends; a typed relType
+	// wins over a plain 'link' for the merged edge's label.
 	const byKey = new Map<string, RawEdge>();
 	for (const record of records) {
 		for (const conn of indexer.getOutgoing(record.path)) {
 			const a = record.path;
 			const b = conn.record.path;
 			if (!indexed.has(a) || !indexed.has(b) || a === b) continue;
-			const key = a < b ? `${a}\n${b}\n${conn.relType}` : `${b}\n${a}\n${conn.relType}`;
+			const key = a < b ? `${a}\n${b}` : `${b}\n${a}`;
 			const existing = byKey.get(key);
 			if (existing) {
 				if (existing.a === a) existing.declaredByA = true;
 				else existing.declaredByB = true;
+				if (existing.relType === 'link' && conn.relType !== 'link') existing.relType = conn.relType;
 				continue;
 			}
 			byKey.set(key, { a, b, relType: conn.relType, declaredByA: true, declaredByB: false });

@@ -56,7 +56,7 @@ export function startTextareaResize(el: HTMLTextAreaElement | null, e: ReactMous
  * a remembered height from an earlier session), auto-grow stays off for it.
  */
 export function autoGrowTextarea(el: HTMLTextAreaElement | null): void {
-	if (!el || el.dataset.loomManualHeight === '1') return;
+	if (!el) return;
 	// Collapse to the natural (rows-attribute) height to measure the content,
 	// then grow to it; the offset/client difference re-adds the borders.
 	el.setCssProps({ height: 'auto' });
@@ -98,27 +98,11 @@ export function useBoxSizeMemory(
 		[plugin, filePath, fieldKey]
 	);
 
-	useEffect(() => {
-		const el = ref.current;
-		if (!el) return;
-		const saved = plugin.settings.entityBoxSizes[filePath]?.[fieldKey];
-		if (saved) {
-			el.style.height = `${saved}px`;
-			// A remembered height was set manually — keep auto-grow off for it.
-			el.dataset.loomManualHeight = '1';
-		}
+	// Boxes always auto-size to content now — nothing to restore or persist.
+	void ref;
+	void persist;
+	void ready;
 
-		// getBoundingClientRect (not the observer's own contentRect) so the
-		// read matches the border-box height startTextareaResize writes.
-		// Auto-grow height changes are not remembered — only manual ones.
-		const observer = new ResizeObserver(() => {
-			if (el.dataset.loomManualHeight !== '1') return;
-			const height = Math.round(el.getBoundingClientRect().height);
-			if (height > 0) persist(height);
-		});
-		observer.observe(el);
-		return () => observer.disconnect();
-	}, [ref, plugin, filePath, fieldKey, persist, ready]);
 }
 
 /** Renders a Lucide icon by name. */
