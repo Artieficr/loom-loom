@@ -141,6 +141,16 @@ interface SessionNoteDraft {
 	/** Session linkpath; '' while no session is picked yet. */
 	session: string;
 	text: string;
+	/** Locations only: linkpaths of places this note is about. */
+	places: string[];
+}
+
+interface LocNoteEntry {
+	owner: EntityRecord;
+	idx: number;
+	session: string | null;
+	text: string;
+	seq: number | null;
 }
 
 function EntityPage({ view }: { view: EntityView }) {
@@ -166,7 +176,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		record?.relationships.map((r) => ({ type: r.type, target: r.linkpath })) ?? []
 	);
 	const [sessionNotes, setSessionNotes] = useState<SessionNoteDraft[]>(
-		record?.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text })) ?? []
+		record?.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text, places: n.places })) ?? []
 	);
 	const [body, setBody] = useState<string | null>(null);
 	/** Live sublocation reorder: rows slide in real time while the grip is
@@ -174,6 +184,21 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [sublocDrag, setSublocDrag] = useState<{ from: number; over: number } | null>(null);
 	const sublocDragRef = useRef<{ startY: number; slot: number } | null>(null);
 	const sublocListRef = useRef<HTMLDivElement | null>(null);
+	/** Locations: pending "new session note" draft (place defaults to Self). */
+	const [locDraft, setLocDraft] = useState<{ session: string; place: string; text: string } | null>(
+		null
+	);
+	const [questsOpen, setQuestsOpen] = useState<{ active: boolean; finished: boolean }>({
+		active: true,
+		finished: false,
+	});
+	/** Hub row whose action menu (trash / unlink) is slid open, if any. */
+	const [hubMenu, setHubMenu] = useState<string | null>(null);
+	/** Per-hub-row entity-type filter for the Involve picker. */
+	const [hubFilter, setHubFilter] = useState<Record<string, EntityType | null>>({});
+	/** Live reorder of a session group's note rows (same slide as sublocations). */
+	const [noteDrag, setNoteDrag] = useState<{ gkey: string; from: number; over: number } | null>(null);
+	const noteDragRef = useRef<{ startY: number; slot: number } | null>(null);
 
 	// A freshly created note opens before metadataCache has indexed it, so the
 	// record can arrive one tick after mount — seed the drafts then.
@@ -187,7 +212,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		setReward(record.reward);
 		setDate(record.date?.raw ?? '');
 		setRelationships(record.relationships.map((r) => ({ type: r.type, target: r.linkpath })));
-		setSessionNotes(record.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text })));
+		setSessionNotes(record.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text, places: n.places })));
 	}, [record]);
 
 	useEffect(() => {
@@ -486,6 +511,192 @@ function EntityPage({ view }: { view: EntityView }) {
 		).open();
 	};
 
+	// Faction members: dedicated character list, not relationships.
+	const memberRecords =
+		record.type === 'faction'
+			? record.members
+					.map((lp) => plugin.indexer.resolve(lp, record.path))
+					.filter((r): r is EntityRecord => r != null && r.type === 'character')
+			: [];
+	const projectCharacters =
+		record.type === 'faction' && project ? plugin.indexer.getAll('character', project.root) : [];
+	const writeMembers = (names: string[]) => {
+		writeFm((fm) => {
+			setFmKey(fm, 'members', names.map((n) => `[[${n}]]`));
+		});
+	};
+
+	// Location session notes live on the location they are ABOUT: a note about
+	// the Tavern is stored in Tavern's frontmatter and surfaces (editable) on
+	// every ancestor, labeled with its place — "Self" on its own page. Adding
+	// a note for a descendant place from here writes into that descendant.
+	const locDescendants = projectLocations
+		.filter((l) => l.path !== record.path && descendsFromThis(l))
+		.sort((a, b) => a.name.localeCompare(b.name));
+	const locEntries: LocNoteEntry[] = isLocation
+		? [record, ...locDescendants].flatMap((owner) =>
+				owner.sessionNotes
+					.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq }))
+					.filter((e) => e.session !== null)
+			)
+		: [];
+	const locGroups = (() => {
+		const map = new Map<
+			string,
+			{ session: EntityRecord | null; raw: string; entries: typeof locEntries }
+		>();
+		for (const e of locEntries) {
+			const ses = e.session !== null ? plugin.indexer.resolve(e.session, e.owner.path) : null;
+			const key = ses?.path ?? 'raw:' + String(e.session);
+			if (!map.has(key)) map.set(key, { session: ses, raw: String(e.session), entries: [] });
+			map.get(key)?.entries.push(e);
+		}
+		// Within a group: creation order (seq, stamped on creation); legacy
+		// notes without one keep their stable pre-seq order, first.
+		for (const g of map.values()) g.entries.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+		return [...map.values()].sort(
+			(a, b) => (b.session?.date?.sortKey ?? 0) - (a.session?.date?.sortKey ?? 0)
+		);
+	})();
+	const noteShift = (gkey: string, i: number): number => {
+		if (!noteDrag || noteDrag.gkey !== gkey) return 0;
+		const { from, over } = noteDrag;
+		if (i === from) return over - from;
+		if (from < i && i <= over) return -1;
+		if (over <= i && i < from) return 1;
+		return 0;
+	};
+	const endNoteDrag = (entries: LocNoteEntry[], commit: boolean) => {
+		noteDragRef.current = null;
+		const drag = noteDrag;
+		setNoteDrag(null);
+		if (!commit || !drag || drag.from === drag.over) return;
+		const next = [...entries];
+		const [moved] = next.splice(drag.from, 1);
+		next.splice(drag.over, 0, moved);
+		// Re-stamp the whole group in its new order; seq lives on each note,
+		// so the order reads the same on every ancestor page.
+		const base = Date.now();
+		const perOwner = new Map<string, Map<number, number>>();
+		next.forEach((en, i) => {
+			if (!perOwner.has(en.owner.path)) perOwner.set(en.owner.path, new Map());
+			perOwner.get(en.owner.path)?.set(en.idx, base + i);
+		});
+		for (const [ownerPath, seqs] of perOwner) {
+			const owner = plugin.indexer.get(ownerPath);
+			if (!owner) continue;
+			writeOwnerNotes(owner, (arr) => {
+				for (const [idx, seq] of seqs) {
+					const item = arr[idx];
+					if (typeof item === 'object' && item !== null) (item as { seq?: unknown }).seq = seq;
+				}
+			});
+		}
+	};
+	const writeOwnerNotes = (owner: EntityRecord, apply: (arr: unknown[]) => void) => {
+		const f = plugin.app.vault.getFileByPath(owner.path);
+		if (!f) return;
+		plugin.app.fileManager
+			.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				const arr = Array.isArray(fm.sessionNotes) ? fm.sessionNotes : [];
+				apply(arr);
+				fm.sessionNotes = arr;
+			})
+			.catch((e) => {
+				console.error('Loom Loom: failed to update session notes', e);
+				new Notice('Could not save the change.');
+			});
+	};
+	const commitLocDraft = () => {
+		if (!locDraft || locDraft.session.trim() === '') return;
+		const target =
+			locDraft.place === record.name
+				? record
+				: locDescendants.find((l) => l.name === locDraft.place) ?? record;
+	writeOwnerNotes(target, (arr) =>
+			arr.push({ session: `[[${locDraft.session}]]`, text: locDraft.text, seq: Date.now() })
+		);
+	setLocDraft(null);
+	};
+
+	// Session pages are hubs: every note in the project pinned to this session,
+	// editable here (writes go to the owning note's file), plus quest states
+	// AS OF this session's date.
+	const hubEntries: LocNoteEntry[] = isSession
+		? plugin.indexer
+				.getAll(undefined, record.project)
+				.flatMap((owner) =>
+					owner.sessionNotes
+						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq }))
+						.filter(
+							(e) =>
+								e.session !== null &&
+								plugin.indexer.resolve(e.session, owner.path)?.path === record.path
+						)
+				)
+				.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+		: [];
+	const hubTargets =
+		isSession && project
+			? plugin.indexer
+					.getAll(undefined, project.root)
+					.filter((r) => r.type !== 'session' && r.type !== 'event')
+					.sort((a, b) => a.name.localeCompare(b.name))
+			: [];
+	const isInvolvedType = (t: string) => {
+		const lower = t.trim().toLowerCase();
+		return lower === 'involved' || lower === 'involves';
+	};
+	const involvedOf = (owner: EntityRecord) =>
+		owner.relationships
+			.filter((r) => isInvolvedType(r.type))
+			.map((r) => ({ rel: r, target: plugin.indexer.resolve(r.linkpath, owner.path) }))
+			.sort(
+				(a, b) =>
+					(a.target ? ENTITY_TYPES.indexOf(a.target.type) : 99) -
+						(b.target ? ENTITY_TYPES.indexOf(b.target.type) : 99) ||
+					(a.target?.name ?? a.rel.linkpath).localeCompare(b.target?.name ?? b.rel.linkpath)
+			);
+	const writeOwnerRels = (owner: EntityRecord, apply: (rels: unknown[]) => unknown[]) => {
+		const f = plugin.app.vault.getFileByPath(owner.path);
+		if (!f) return;
+		plugin.app.fileManager
+			.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				fm.relationships = apply(Array.isArray(fm.relationships) ? fm.relationships : []);
+			})
+			.catch((e) => {
+				console.error('Loom Loom: failed to update relationships', e);
+				new Notice('Could not save the change.');
+			});
+	};
+	const renameEntity = (owner: EntityRecord, raw: string) => {
+		const base = sanitizeFileName(raw);
+		if (base === '' || base === owner.name) return;
+		const f = plugin.app.vault.getFileByPath(owner.path);
+		if (!f) return;
+		const parent = f.parent?.path ?? '';
+		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+		if (plugin.app.vault.getAbstractFileByPath(newPath)) {
+			new Notice('A note with that name already exists.');
+			return;
+		}
+		void plugin.app.fileManager.renameFile(f, newPath);
+	};
+	const asOf = record.date?.sortKey ?? Number.MAX_SAFE_INTEGER;
+	const sessionQuests = (isSession && project ? plugin.indexer.getAll('quest', project.root) : [])
+		.map((q) => {
+			const rec = q.questReceived !== null ? plugin.indexer.resolve(q.questReceived, q.path) : null;
+			if (rec?.date && rec.date.sortKey > asOf) return null; // not yet received then
+			const out =
+				q.questOutcomeSession !== null
+					? plugin.indexer.resolve(q.questOutcomeSession, q.path)
+					: null;
+			const finished = q.questOutcome !== '' && out?.date !== undefined && out.date !== null && out.date.sortKey <= asOf;
+			return { quest: q, state: finished ? 'finished' : 'active' };
+		})
+		.filter((e): e is { quest: EntityRecord; state: string } => e !== null)
+		.sort((a, b) => a.quest.name.localeCompare(b.quest.name));
+
 	// PC life state: unticking Alive reveals the death-session picker.
 	const isPc = record.type === 'character' && record.loomTags.includes(PC_TAG);
 	const deathSession =
@@ -572,14 +783,8 @@ function EntityPage({ view }: { view: EntityView }) {
 				}}
 				onBlur={() => commitRelationships(relationships)}
 			/>
-			<button
-				className="loom-rel-filter"
-				aria-label="Filter suggestions by entity type"
-				onClick={(e) => openRelFilterMenu(e, i)}
-			>
-				<Icon name={rel.filter ? ENTITY_META[rel.filter].icon : 'filter'} />
-			</button>
-			<SuggestInput
+			<div className="loom-rel-targetbox">
+				<SuggestInput
 				className="loom-rel-target"
 				placeholder={rel.filter ? `${ENTITY_META[rel.filter].label} note` : 'Target note'}
 				value={rel.target}
@@ -616,6 +821,14 @@ function EntityPage({ view }: { view: EntityView }) {
 						: undefined
 				}
 			/>
+				<button
+				className="loom-rel-filter"
+				aria-label="Filter suggestions by entity type"
+				onClick={(e) => openRelFilterMenu(e, i)}
+			>
+				<Icon name={rel.filter ? ENTITY_META[rel.filter].icon : 'filter'} />
+			</button>
+			</div>
 			<button
 				className="loom-nav-btn"
 				aria-label="Remove relationship"
@@ -722,9 +935,33 @@ function EntityPage({ view }: { view: EntityView }) {
 					✕
 				</button>
 				</div>
+			{isLocation ? (
+					<div className="loom-tag-row">
+						{note.places.map((pl, pi) => (
+							<span key={pl} className="loom-chip loom-session-chip">
+								{pl}
+								<button
+									className="loom-chip-remove"
+									aria-label="Remove place"
+									onClick={() => setNote({ places: note.places.filter((_, j) => j !== pi) }, true)}
+								>
+									✕
+								</button>
+							</span>
+						))}
+						<SearchableSelect
+							placeholder="Add a place…"
+							options={projectLocations
+								.filter((l) => l.path !== record.path && !note.places.includes(l.name))
+								.sort((a, b) => a.name.localeCompare(b.name))
+								.map((l) => ({ value: l.name, label: l.name }))}
+							onPick={(name) => setNote({ places: [...note.places, name] }, true)}
+						/>
+					</div>
+				) : null}
 				<div className="loom-note-text">
 					<LinkTextarea
-						rows={5}
+						rows={1}
 						value={note.text}
 						names={linkNames}
 						onChange={(v) => setNote({ text: v }, false)}
@@ -751,7 +988,15 @@ function EntityPage({ view }: { view: EntityView }) {
 				>
 					← Back
 				</button>
-				<span className="loom-chip">{ENTITY_META[record.type].label}</span>
+			<span
+					className="loom-chip"
+					style={{
+						background: plugin.settings.nodeColors[record.type] + '40',
+						border: `1px solid ${plugin.settings.nodeColors[record.type]}`,
+					}}
+				>
+					{ENTITY_META[record.type].label}
+				</span>
 				<div className="loom-shell-spacer" />
 				{isLocation && record.parentLocation === null && project ? (
 					<button className="loom-nav-btn" onClick={openTurnIntoPicker}>
@@ -890,6 +1135,44 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+
+			{isSession && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Quests</span>
+					{(['active', 'finished'] as const).map((state) => {
+						const list = sessionQuests.filter((q) => q.state === state);
+						const open = questsOpen[state];
+						return (
+							<div key={state} className="loom-section">
+								<button
+									className="loom-section-header"
+									onClick={() => setQuestsOpen({ ...questsOpen, [state]: !open })}
+								>
+									<span className={open ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
+									{state === 'active' ? 'Active' : 'Finished'}
+									<span className="loom-section-count">{list.length}</span>
+								</button>
+								{open
+									? list.map(({ quest }) => (
+											<div key={quest.path} className="loom-locnote-head">
+												<button
+													className="loom-subloc-link"
+													onClick={() => view.openEntity(quest.path)}
+												>
+													{quest.name}
+												</button>
+												{state === 'finished' ? (
+													<span className="loom-row-count">{quest.questOutcome}</span>
+												) : null}
+											</div>
+										))
+									: null}
+							</div>
+						);
+					})}
+				</div>
+			) : null}
+
 			{/* Quest fields: givers left of a full-height separator; session/outcome
 			    row + reward right of it. The separator stretches with whichever
 			    side grows (wrapping giver chips, multi-line reward). */}
@@ -991,7 +1274,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				<div className="loom-resizable">
 					<textarea
 						ref={descriptionRef}
-						rows={3}
+						rows={1}
 						value={description}
 						onChange={(e) => setDescription(e.target.value)}
 						onBlur={() =>
@@ -1007,6 +1290,300 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			</label>
 
+			{isSession && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Session notes</span>
+					{/* Creation first, as always. An event born here starts with a
+					    session note already pinned to this session. */}
+				<div className="loom-hub-add-row">
+						<button
+							className="loom-rel-add"
+							onClick={() =>
+								new CreateEntityModal(plugin, 'event', project, {
+									noteSession: record,
+									onCreated: () => {},
+								}).open()
+							}
+						>
+							+ Add an event
+						</button>
+						<button
+							className="loom-rel-add"
+							onClick={() =>
+								new CreateEntityModal(plugin, 'quest', project, {
+									noteSession: record,
+									onCreated: () => {},
+								}).open()
+							}
+						>
+							+ Add a quest
+						</button>
+					</div>
+					{ENTITY_TYPES.filter((t) => hubEntries.some((e) => e.owner.type === t)).map((t) => (
+						<div key={t} className="loom-hub-section">
+							<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
+							{hubEntries.filter((e) => e.owner.type === t).map((en) => {
+						const menuKey = en.owner.path + String(en.idx);
+						const involved = involvedOf(en.owner);
+						return (
+							<div key={menuKey} className="loom-locnote">
+								<div className="loom-locnote-head">
+									<input
+										type="text"
+										className="loom-hub-name"
+										defaultValue={en.owner.name}
+										onBlur={(e) => renameEntity(en.owner, e.target.value)}
+										onKeyDown={(e) => {
+											if (e.key === 'Enter') renameEntity(en.owner, e.currentTarget.value);
+										}}
+									/>
+									<button
+										className="loom-nav-btn"
+										aria-label="Open page"
+										onClick={() => view.openEntity(en.owner.path)}
+									>
+									→
+									</button>
+									
+									<div className="loom-shell-spacer" />
+									<div
+										className={
+											hubMenu === menuKey ? 'loom-hub-actions loom-hub-actions-open' : 'loom-hub-actions'
+										}
+									>
+										<button
+											className="loom-nav-btn loom-entity-delete"
+											aria-label="Delete this entity"
+											onClick={() =>
+												new ConfirmModal(
+													plugin.app,
+													`Delete "${en.owner.name}"?`,
+													'The note is moved to the trash.',
+													() => {
+														const f = plugin.app.vault.getFileByPath(en.owner.path);
+														if (f) void plugin.app.fileManager.trashFile(f);
+													},
+													'Delete'
+												).open()
+											}
+										>
+											<Icon name="trash-2" />
+										</button>
+										<button
+											className="loom-nav-btn"
+											aria-label="Remove from this session"
+											onClick={() => {
+												const remove = () => writeOwnerNotes(en.owner, (arr) => arr.splice(en.idx, 1));
+												if (en.text.trim() === '') remove();
+												else {
+													new ConfirmModal(
+														plugin.app,
+														'Delete this session note?',
+														'The note text will be lost.',
+														remove,
+														'Delete'
+													).open();
+												}
+											}}
+										>
+											✕
+										</button>
+									</div>
+									<button
+										className="loom-nav-btn"
+										aria-label={hubMenu === menuKey ? 'Close actions' : 'Show actions'}
+										onClick={() => setHubMenu(hubMenu === menuKey ? null : menuKey)}
+									>
+										{hubMenu === menuKey ? '>' : '<'}
+									</button>
+								</div>
+							{(() => {
+										const locs = en.owner.relationships
+											.map((r) => ({ rel: r, target: plugin.indexer.resolve(r.linkpath, en.owner.path) }))
+											.filter(
+												(e) =>
+													e.rel.type.trim().toLowerCase() === 'location' &&
+													e.target?.type === 'location'
+											);
+									return (
+											<>
+												<div className="loom-hub-involve-row loom-hub-location-row">
+													<div className="loom-hub-location">
+													<SearchableSelect
+														placeholder="Location…"
+														options={hubTargets
+															.filter(
+																(t) =>
+																	t.type === 'location' && !locs.some((l) => l.target?.path === t.path)
+															)
+															.map((t) => ({ value: t.name, label: t.name }))}
+														onPick={(name) =>
+															writeOwnerRels(en.owner, (rels) => {
+																rels.push({ type: 'location', target: `[[${name}]]` });
+																return rels;
+															})
+														}
+												/>
+													</div>
+												</div>
+												{locs.length > 0 ? (
+													<div className="loom-hub-involved loom-tag-row">
+														{locs.map(({ rel, target }, li2) => (
+													<span
+														key={rel.linkpath + String(li2)}
+														className="loom-chip loom-session-chip"
+														style={{
+															background: plugin.settings.nodeColors.location + '40',
+															borderColor: plugin.settings.nodeColors.location,
+														}}
+													>
+														{target?.name ?? rel.linkpath}
+														<button
+															className="loom-chip-remove"
+															aria-label="Remove location"
+															onClick={() =>
+																writeOwnerRels(en.owner, (rels) => {
+																	const i = rels.findIndex(
+																		(r) =>
+																			typeof r === 'object' &&
+																			r !== null &&
+																			(r as { target?: unknown }).target === rel.targetRaw &&
+																			(r as { type?: unknown }).type === rel.type
+																	);
+																	if (i >= 0) rels.splice(i, 1);
+																	return rels;
+																})
+															}
+														>
+															✕
+														</button>
+												</span>
+														))}
+													</div>
+												) : null}
+											</>
+										);
+									})()}
+								<div className="loom-hub-involve-row">
+									<div className="loom-hub-involve">
+										<SearchableSelect
+										placeholder="Involve…"
+										options={hubTargets
+											.filter((t) => !involved.some((iv) => iv.target?.path === t.path))
+											.filter((t) => !hubFilter[menuKey] || t.type === hubFilter[menuKey])
+											.map((t) => ({ value: t.name, label: t.name }))}
+										onPick={(name) =>
+											writeOwnerRels(en.owner, (rels) => {
+												rels.push({ type: 'involved', target: `[[${name}]]` });
+												return rels;
+											})
+										}
+									/>
+										<button
+										className="loom-rel-filter"
+										aria-label="Filter suggestions by entity type"
+										onClick={(e) => {
+											const menu = new Menu();
+											const current = hubFilter[menuKey] ?? null;
+											menu.addItem((item) =>
+												item
+													.setTitle('All entities')
+													.setIcon('filter')
+													.setChecked(current === null)
+													.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: null }))
+											);
+											for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
+												menu.addItem((item) =>
+													item
+														.setTitle(ENTITY_META[t].plural)
+														.setIcon(ENTITY_META[t].icon)
+														.setChecked(current === t)
+														.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: t }))
+												);
+											}
+											menu.showAtMouseEvent(e.nativeEvent);
+										}}
+									>
+										<Icon
+											name={hubFilter[menuKey] ? ENTITY_META[hubFilter[menuKey]].icon : 'filter'}
+										/>
+									</button>
+									</div>
+								</div>
+								{involved.length > 0 ? (
+									<div className="loom-hub-involved loom-tag-row">
+										{involved.map(({ rel, target }, ii) => (
+											<span
+												key={rel.linkpath + String(ii)}
+												className="loom-chip loom-session-chip"
+												style={
+													target
+														? {
+																background: plugin.settings.nodeColors[target.type] + '40',
+																borderColor: plugin.settings.nodeColors[target.type],
+															}
+														: undefined
+												}
+											>
+												{target?.name ?? rel.linkpath}
+												<button
+													className="loom-chip-remove"
+													aria-label="Remove involved entity"
+													onClick={() =>
+														writeOwnerRels(en.owner, (rels) => {
+															const i = rels.findIndex(
+																(r) =>
+																	typeof r === 'object' &&
+																	r !== null &&
+																	(r as { target?: unknown }).target === rel.targetRaw &&
+																	typeof (r as { type?: unknown }).type === 'string' &&
+																	isInvolvedType((r as { type: string }).type)
+															);
+															if (i >= 0) rels.splice(i, 1);
+															return rels;
+														})
+													}
+												>
+													✕
+												</button>
+											</span>
+										))}
+									</div>
+								) : null}
+								<div className="loom-note-text">
+									<div className="loom-resizable">
+									<textarea
+										ref={(el) => autoGrowTextarea(el)}
+										onInput={(ev) => autoGrowTextarea(ev.currentTarget)}
+										rows={1}
+										defaultValue={en.text}
+										onBlur={(e) =>
+											writeOwnerNotes(en.owner, (arr) => {
+												const item = arr[en.idx];
+												if (typeof item === 'object' && item !== null) {
+													(item as { text?: unknown }).text = e.target.value;
+												}
+											})
+										}
+									/>
+									<div
+										className="loom-resize-edge"
+										onMouseDown={(ev) => {
+											const prev = ev.currentTarget.previousElementSibling;
+											if (prev instanceof HTMLTextAreaElement) startTextareaResize(prev, ev);
+										}}
+									/>
+									</div>
+								</div>
+							</div>
+						);
+					})}
+						</div>
+					))}
+				</div>
+			) : null}
+
+
 			{allTags.length > 0 ? (
 				<div className="loom-field">
 					<span className="loom-field-label">Tags</span>
@@ -1021,6 +1598,38 @@ function EntityPage({ view }: { view: EntityView }) {
 							</button>
 						))}
 					</div>
+				</div>
+			) : null}
+
+			{record.type === 'faction' ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Members</span>
+					{memberRecords.length > 0 ? (
+						<div className="loom-tag-row">
+							{memberRecords.map((c) => (
+								<span key={c.path} className="loom-chip loom-session-chip">
+									{c.name}
+									<button
+										className="loom-chip-remove"
+										aria-label="Remove member"
+										onClick={() =>
+											writeMembers(memberRecords.filter((o) => o.path !== c.path).map((o) => o.name))
+										}
+									>
+										✕
+									</button>
+								</span>
+							))}
+						</div>
+					) : null}
+					<SearchableSelect
+						placeholder="Add a member…"
+						options={projectCharacters
+							.filter((c) => !memberRecords.some((m) => m.path === c.path))
+							.sort((a, b) => a.name.localeCompare(b.name))
+							.map((c) => ({ value: c.name, label: c.name }))}
+						onPick={(name) => writeMembers([...memberRecords.map((m) => m.name), name])}
+					/>
 				</div>
 			) : null}
 
@@ -1078,10 +1687,11 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			<div className="loom-field loom-field-body">
+			{!isSession ? (
+<div className="loom-field loom-field-body">
 				<span className="loom-field-label">Notes</span>
 				<LinkTextarea
-					rows={3}
+					rows={1}
 					value={body ?? ''}
 					names={linkNames}
 					textareaRef={notesRef}
@@ -1091,17 +1701,220 @@ function EntityPage({ view }: { view: EntityView }) {
 					}}
 				/>
 			</div>
+			) : null}
 
-			{!isSession ? (
+
+			{!isSession && !isLocation ? (
 				<div className="loom-field loom-field-sep">
 					{sessionNotes.length > 0 ? <span className="loom-field-label">Session notes</span> : null}
-					{sessionNotes.map((note, i) => sessionNoteRow(note, i))}
 					<button
 						className="loom-rel-add"
-						onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '' }])}
+						onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [] }])}
 					>
 						+ Add a session note
 					</button>
+{sessionNotes.map((note, i) => sessionNoteRow(note, i))}
+					
+				</div>
+			) : null}
+
+			{isLocation && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Session notes</span>
+					{locDraft ? (
+						<div className="loom-locnote loom-locnote-new">
+							<div className="loom-note-session">
+								<SearchableSelect
+									placeholder="Pick a session…"
+									options={sessionsByDate.map((se) => ({ value: se.name, label: shortSessionLabel(se) }))}
+									onPick={(v) => setLocDraft({ ...locDraft, session: v })}
+								/>
+							</div>
+							<select
+								value={locDraft.place}
+								onChange={(e) => {
+									if (e.target.value === '__new__') {
+										new CreateEntityModal(plugin, 'location', project, {
+											parentLocation: record,
+											onCreated: (created) =>
+												setLocDraft((d) => (d ? { ...d, place: created.basename } : d)),
+										}).open();
+										return;
+									}
+									setLocDraft({ ...locDraft, place: e.target.value });
+								}}
+							>
+								<option value="__new__">+ New sublocation…</option>
+								<option value={record.name}>Self</option>
+								{locDescendants.map((l) => (
+									<option key={l.path} value={l.name}>
+										{l.name}
+									</option>
+								))}
+							</select>
+							<div className="loom-note-text">
+								<div className="loom-resizable">
+								<textarea
+									ref={(el) => autoGrowTextarea(el)}
+									onInput={(ev) => autoGrowTextarea(ev.currentTarget)}
+									rows={1}
+									value={locDraft.text}
+									onChange={(e) => setLocDraft({ ...locDraft, text: e.target.value })}
+								/>
+								<div
+									className="loom-resize-edge"
+									onMouseDown={(ev) => {
+										const prev = ev.currentTarget.previousElementSibling;
+										if (prev instanceof HTMLTextAreaElement) startTextareaResize(prev, ev);
+									}}
+								/>
+								</div>
+							</div>
+							<button className="loom-rel-add" disabled={locDraft.session === ''} onClick={commitLocDraft}>
+								Add
+							</button>
+							<button className="loom-nav-btn" onClick={() => setLocDraft(null)}>
+								Cancel
+							</button>
+						</div>
+					) : (
+						<button
+							className="loom-rel-add"
+							onClick={() => setLocDraft({ session: '', place: record.name, text: '' })}
+						>
+							+ Add a session note
+						</button>
+					)}
+{locGroups.map((g) => (
+						<div key={g.raw} className="loom-locnote-group">
+							<div className="loom-tag-row">
+								<span className="loom-chip loom-session-chip">
+									{g.session && g.session.type === 'session' ? shortSessionLabel(g.session) : g.raw}
+								</span>
+							</div>
+						{g.entries.map((en, gi) => (
+							<div
+								key={en.owner.path + String(en.idx)}
+								className="loom-locnote"
+								style={
+									noteShift(g.raw, gi) !== 0
+										? { transform: `translateY(${noteShift(g.raw, gi) * (noteDragRef.current?.slot ?? 64)}px)` }
+										: undefined
+								}
+							>
+								<div className="loom-locnote-head">
+<span
+									className="loom-subloc-grip"
+									onPointerDown={(e) => {
+										e.preventDefault();
+										e.currentTarget.setPointerCapture(e.pointerId);
+										const list = e.currentTarget.closest('.loom-locnote-group');
+										let slot = 64;
+										if (list) {
+											const rows = list.querySelectorAll('.loom-locnote');
+											if (rows.length > 1) {
+												slot =
+													(rows[1] as HTMLElement).offsetTop - (rows[0] as HTMLElement).offsetTop || 64;
+											}
+										}
+										noteDragRef.current = { startY: e.clientY, slot };
+										setNoteDrag({ gkey: g.raw, from: gi, over: gi });
+									}}
+									onPointerMove={(e) => {
+										const start = noteDragRef.current;
+										if (!start) return;
+										const over = Math.max(
+											0,
+											Math.min(g.entries.length - 1, gi + Math.round((e.clientY - start.startY) / start.slot))
+										);
+										setNoteDrag((cur) => (cur && cur.over !== over ? { ...cur, over } : cur));
+									}}
+									onPointerUp={() => endNoteDrag(g.entries, true)}
+									onPointerCancel={() => endNoteDrag(g.entries, false)}
+								>
+									<Icon name="grip-vertical" />
+								</span>
+									<button
+										className="loom-nav-btn"
+										aria-label="Change session"
+										onClick={() =>
+											new RecordSuggestModal(
+												plugin.app,
+												sessionsByDate,
+												(ses) =>
+													writeOwnerNotes(en.owner, (arr) => {
+														const item = arr[en.idx];
+														if (typeof item === 'object' && item !== null) {
+															(item as { session?: unknown }).session = `[[${ses.name}]]`;
+														}
+													}),
+												'Move note to session…'
+											).open()
+										}
+									>
+										<Icon name="calendar" />
+									</button>
+									{en.owner.path === record.path ? (
+										<span className="loom-locnote-place">Self</span>
+									) : (
+										<button
+											className="loom-subloc-link loom-locnote-place"
+											onClick={() => view.openEntity(en.owner.path)}
+										>
+											{en.owner.name}
+										</button>
+									)}
+									<button
+										className="loom-nav-btn"
+										aria-label="Remove session note"
+										onClick={() => {
+											const remove = () => writeOwnerNotes(en.owner, (arr) => arr.splice(en.idx, 1));
+											if (en.text.trim() === '') remove();
+											else {
+												new ConfirmModal(
+													plugin.app,
+													'Delete this session note?',
+													'The note text will be lost.',
+													remove,
+													'Delete'
+												).open();
+											}
+										}}
+									>
+										✕
+									</button>
+</div>
+<div className="loom-note-text">
+										<div className="loom-resizable">
+										<textarea
+										ref={(el) => autoGrowTextarea(el)}
+										onInput={(ev) => autoGrowTextarea(ev.currentTarget)}
+											rows={1}
+											defaultValue={en.text}
+											onBlur={(e) =>
+												writeOwnerNotes(en.owner, (arr) => {
+													const item = arr[en.idx];
+													if (typeof item === 'object' && item !== null) {
+														(item as { text?: unknown }).text = e.target.value;
+													}
+												})
+											}
+										/>
+										<div
+											className="loom-resize-edge"
+											onMouseDown={(ev) => {
+												const prev = ev.currentTarget.previousElementSibling;
+												if (prev instanceof HTMLTextAreaElement) startTextareaResize(prev, ev);
+											}}
+										/>
+										</div>
+									</div>
+									
+								</div>
+							))}
+						</div>
+					))}
+					
 				</div>
 			) : null}
 
@@ -1111,7 +1924,27 @@ function EntityPage({ view }: { view: EntityView }) {
 			{isLocation && project ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Sublocations</span>
-					{sublocations.length > 0 ? (
+					<div className="loom-subloc-actions">
+						<button
+							className="loom-rel-add"
+							onClick={() =>
+								new CreateEntityModal(plugin, 'location', project, {
+									parentLocation: record,
+									// Append at the END of the order and stay on this page.
+									onCreated: (created) =>
+										writeFm((fm) => {
+											setFmKey(fm, 'sublocationOrder', [
+												...sublocations.map((s) => `[[${s.name}]]`),
+												`[[${created.basename}]]`,
+											]);
+										}),
+								}).open()
+							}
+						>
+							+ New sublocation
+						</button>
+					</div>
+{sublocations.length > 0 ? (
 						<div className="loom-subloc-list" ref={sublocListRef}>
 							{sublocations.map((s, i) => (
 								<div
@@ -1162,25 +1995,18 @@ function EntityPage({ view }: { view: EntityView }) {
 							))}
 						</div>
 					) : null}
-					<div className="loom-subloc-actions">
-						<button
-							className="loom-rel-add"
-							onClick={() =>
-								new CreateEntityModal(plugin, 'location', project, {
-									parentLocation: record,
-									onCreated: (created) => view.openEntity(created.path),
-								}).open()
-							}
-						>
-							+ New sublocation
-						</button>
-					</div>
 				</div>
 			) : null}
 
 			<div className="loom-field loom-field-sep">
 				<span className="loom-field-label">Relationships</span>
-				{ENTITY_TYPES.filter((t) => relEntries.some((e) => e.entityType === t)).map((t) => (
+				<button
+					className="loom-rel-add"
+					onClick={() => setRelationships([...relationships, { type: '', target: '' }])}
+				>
+					Add relationship
+				</button>
+{ENTITY_TYPES.filter((t) => relEntries.some((e) => e.entityType === t)).map((t) => (
 					<div key={t} className="loom-rel-group">
 						<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
 						{relEntries.filter((e) => e.entityType === t).map((e) => relRow(e.rel, e.i))}
@@ -1191,12 +2017,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						{relEntries.filter((e) => e.entityType === null).map((e) => relRow(e.rel, e.i))}
 					</div>
 				) : null}
-				<button
-					className="loom-rel-add"
-					onClick={() => setRelationships([...relationships, { type: '', target: '' }])}
-				>
-					Add relationship
-				</button>
+				
 			</div>
 
 			<ConnectedEntities navigator={view} record={record} project={project} />

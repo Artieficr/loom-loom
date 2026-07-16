@@ -16,7 +16,7 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Seven entity types with basic frontmatter templates (type, loomTags, description, relationships; role for characters; date for events/sessions; quests currently share the basic template, unique fields planned) — `src/types.ts`, `src/project.ts`
 - [x] Creation command + modal: one context-aware "Create entity in current project" command with an entity-type suggester (replaced the per-type commands); sessions: date only, managed file name `<Project> Session <date>` — `src/project.ts`, `src/main.ts`
 - [x] Entity page view: structured fields (name renames the file, description, tags, role, date, notes body, relationships editor) over plain .md; loom-internal clicks open it, file explorer still opens raw markdown — `src/views/entity-view.tsx`
-- [x] Description/Notes textareas auto-grow to fit their content (3-line default, 5 for session notes — the `rows` floor; scrolling never occurs naturally); dragging the bottom edge is the manual override — it turns auto-grow off for that box, can squeeze it down to one line (then it scrolls), and the manual height is remembered per file across sessions (`settings.entityBoxSizes`, keyed by path, migrated on rename; the native corner grip is disabled since its resizes can't be told apart from auto-grow) — `src/views/common.tsx` (`autoGrowTextarea`), `src/views/entity-view.tsx`, `src/views/link-textarea.tsx`, `src/settings.ts`, `src/main.ts`
+- [x] All text boxes auto-size to their content, both growing and shrinking, one-line minimum — no scrolling, no manual sizing (resize edges hidden, height memory retired; `settings.entityBoxSizes` no longer read) — `src/views/common.tsx` (`autoGrowTextarea`), all views
 - [x] Relationships editor: target search field offers "+ Create entity…" pinned at the top of its suggestion list, prompting an entity type then the create modal, wiring the new note in as that row's target — `src/views/entity-view.tsx`, `src/views/common.tsx`
 - [x] Connected-entities sections on every entity page: one collapsible section per connected type (collapsed by default), entries expand to the target's description + notes with in-place edit/save and a jump-to-page arrow — `src/views/connected-entities.tsx`
 - [x] Session attendance: PC-character toggle chips on session pages, stored in `attendance` as hidden connections (no graph edges); PCs get an Alive tick + death-session picker, and later-dated sessions stop offering dead PCs — `src/views/entity-view.tsx`, `src/indexer.ts`
@@ -57,6 +57,7 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Multiple timeline definitions from `/Timelines` frontmatter (types + tag filters), selectable in the drawer bar — `src/indexer.ts`
 - [x] Hover tooltip from `description`, click opens entity page — `src/views/timeline-strip.tsx`
 - [x] Per-project timeline settings: date display format + custom in-game calendar (month count, names, optional short names); edited in the settings tab's Graph tab — `src/timeline-settings.ts`, `src/calendar.ts`
+- [ ] Timeline hover tooltip: show the event's full name as a header above the description — so a long name that's cut off in the strip is readable even when the event has no description; when the name is fully visible in the strip AND there is no description, show no tooltip at all
 - [ ] Proportional time spacing / zoom (currently ordinal spacing)
 - [ ] Drag/reflow interactivity
 
@@ -108,3 +109,23 @@ Plugin-wide undo of the last action, phased. Core design: an `UndoManager` on th
 - [x] CLAUDE.md / ROADMAP.md / docs/ARCHITECTURE.md populated with real v0.1 state
 - [x] Release workflow building main.js/manifest.json/styles.css on GitHub release — `.github/workflows/release.yml`
 - [ ] README with screenshots/GIFs before community plugin submission
+
+## Queued (2026-07-17 backlog, not started)
+
+- [ ] Graph forces: two characters connected to one location produced a long edge instead of pulling closer — verify the relaxation actually attracts location↔character pairs (suspect: anchored-component/manual gating or row sweep overriding the pull); repro: 2 chars + 1 shared location
+- [x] Merge bidirectional connections: when both notes declare any connection to each other, draw ONE edge with arrowheads on both ends instead of two parallel edges (today only same-relType pairs merge)
+- [x] Drop on/of a session prompts: "Create session note…" (opens/creates the entity's sessionNotes row for that session) or "Add relationship…"
+- [ ] Session pages: focused graph section — mini graph view showing only nodes connected to the session plus their interconnections
+- [x] Session pages rework: Notes body removed; "Session notes" hub — every note in the project pinned to this session listed with its place/owner as a clickable header, editable/deletable in place (writes go to the owning file), "+ Add an event" on top — the created event starts with a session note already pinned to this session, and its creation modal gains an "Involved entities" picker (characters, items, … written as involves relationships); order: Attendance, Quests, Description, Session notes; Quests section with Active/Finished collapsible lists, states computed AS OF the session's date — `src/views/entity-view.tsx`
+- [x] Graph interaction: right-click on a node opens its entity page (edit), middle-click takes over the zoom+center focus currently on right-click
+- [x] Sublocations: new child appends to the END of the parent's list (write it into sublocationOrder on creation instead of inheriting alphabetical placement); do NOT auto-open the new sublocation's page
+- [x] Faction members: dedicated list on faction pages (separate from relationships) for adding characters
+- [x] Location session notes with places: inside a location/sublocation's session note, allow picking one or several locations/sublocations; the note propagates up every ancestor level grouped under the same session + labeled with the sublocation it came from (City → Tavern → Hidden door: a Tavern note shows in City too)
+- [ ] Free placement for unconnected nodes: allow drag-drop anywhere within their layer (not just the first row) — needs manual y persistence alongside manualX
+- [x] Entity pages: the type chip in the header is tinted with the entity's node color (from graph settings) — src/views/entity-view.tsx
+- [ ] Character creation modal: tag picking as segmented pill buttons (rounded outer corners, shared borders between) instead of a dropdown
+- [ ] Map view (exploratory): an alternative to the graph for spatial worldbuilding — graph/timeline are session-centric; a basic buildable map, possibly by reworking how the locations layer renders inside the existing graph
+- [ ] Timeline: "no date" drawer docked at the left of the timeline drawer; events draggable between it and sessions to change which session they belong to, with a confirmation on session-to-session moves and a settings toggle to skip the confirmation
+- [x] Location session notes: drag-reorder entries (grip + live slide, like the sublocation list); every note carries a creation/reorder stamp (seq) so appending lands at the group's end and the order reads identically on every ancestor page — src/views/entity-view.tsx, src/indexer.ts
+- [ ] Session pages as connection hubs: remove the Notes section; "+ Add session note" as the primary action (pick/create the location it happened at, then involved entities — characters, items, …); notes propagate to every involved entity's page like location notes propagate to ancestors, editable from any related page
+- [ ] Location pages: replace location session notes with event-driven history — events already link to sessions (session note) and to locations (`location` relationship), so a location page should list the events that happened there (own + descendant sublocations), segmented by session; retire the location-side session-note editor (`sessionNotes` on locations) once this lands — the event is the single home of what happened

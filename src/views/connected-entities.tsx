@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
-import { FRONTMATTER_RE, Icon, Truncated, recordLabel } from './common';
+import { FRONTMATTER_RE, Icon, Truncated, autoGrowTextarea, recordLabel } from './common';
 
 /**
  * Inline view of every entity connected to the page's record: one collapsible
@@ -33,6 +33,7 @@ export function ConnectedEntities({
 
 	return (
 		<div className="loom-connected">
+			<span className="loom-field-label">Overview</span>
 			{types.map((t) => (
 				<Section
 					// key on record.path so collapsed state resets per page
@@ -167,11 +168,11 @@ function Entry({
 						<>
 							<label className="loom-field">
 								<span className="loom-field-label">Description</span>
-								<textarea rows={3} value={descDraft} onChange={(e) => setDescDraft(e.target.value)} />
+								<textarea rows={1} ref={(el) => autoGrowTextarea(el)} onInput={(ev) => autoGrowTextarea(ev.currentTarget)} value={descDraft} onChange={(e) => setDescDraft(e.target.value)} />
 							</label>
 							<label className="loom-field">
 								<span className="loom-field-label">Notes</span>
-								<textarea rows={6} value={bodyDraft} onChange={(e) => setBodyDraft(e.target.value)} />
+								<textarea rows={1} ref={(el) => autoGrowTextarea(el)} onInput={(ev) => autoGrowTextarea(ev.currentTarget)} value={bodyDraft} onChange={(e) => setBodyDraft(e.target.value)} />
 							</label>
 						</>
 					) : (

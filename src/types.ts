@@ -84,6 +84,12 @@ export interface SessionNoteDecl {
 	/** Linkpath of the session ("..." from "[[...]]"), or null while unpicked. */
 	session: string | null;
 	text: string;
+	/** Locations only: linkpaths of locations/sublocations this note is about.
+	 *  Notes surface on every ancestor of their owner and of these places. */
+	places: string[];
+	/** Creation/reorder stamp: group entries sort by it, so appending lands at
+	 *  the end and drag-reorder persists identically on every ancestor page. */
+	seq: number | null;
 }
 
 /** A typed relationship as declared in one note's frontmatter. */
@@ -121,6 +127,9 @@ export interface EntityRecord {
 	 *  (drag-reordered on the parent's page). Hidden links — the children
 	 *  already connect via their own parentLocation. */
 	sublocationOrder: string[];
+	/** Faction only: linkpaths of member characters (dedicated list, not
+	 *  relationships). */
+	members: string[];
 	/** Character only. */
 	role: string;
 	/** Character only (PC): false once the character has died. */
