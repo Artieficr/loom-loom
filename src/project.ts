@@ -99,6 +99,8 @@ export interface NewEntityFields {
 	date: string;
 	/** When set, the new note declares this relationship in its frontmatter. */
 	relationship?: { type: string; target: string };
+	/** Location only: parent location name — the new location is its sublocation. */
+	parentLocation?: string;
 	/** Quest only (all optional): note names, not links. */
 	questGiver?: string;
 	questReceived?: string;
@@ -122,6 +124,9 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 				]
 			: ['relationships: []']),
 	];
+	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
+		lines.push(`parentLocation: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
+	}
 	if (type === 'character') lines.push('role: ""', 'alive: true');
 	if (type === 'event' || type === 'session') lines.push(`date: ${yamlQuote(fields.date)}`);
 	if (type === 'session') lines.push('attendance: []');
@@ -139,6 +144,34 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	}
 	lines.push('---', '', '');
 	return lines.join('\n');
+}
+
+/**
+ * Fuzzy-searchable picker over entity records — for choices that can grow
+ * huge with a project (e.g. "Turn to a sublocation" over every location).
+ */
+export class RecordSuggestModal extends FuzzySuggestModal<EntityRecord> {
+	constructor(
+		app: App,
+		private records: EntityRecord[],
+		private onPick: (record: EntityRecord) => void,
+		placeholder?: string
+	) {
+		super(app);
+		if (placeholder) this.setPlaceholder(placeholder);
+	}
+
+	getItems(): EntityRecord[] {
+		return this.records;
+	}
+
+	getItemText(record: EntityRecord): string {
+		return record.name;
+	}
+
+	onChooseItem(record: EntityRecord): void {
+		this.onPick(record);
+	}
 }
 
 /** Session file names are managed, never user-facing inside the plugin. */
@@ -169,13 +202,15 @@ export interface CreateEntityOptions {
 	/** When set, called with the new file instead of opening its entity page. */
 	onCreated?: (file: TFile) => void;
 	/**
-	 * When set, the new entity is created already connected to this record (the
-	 * new note declares the relationship). Without `relType` the modal prompts
-	 * for a relationship comment; with it the identifier is fixed and no prompt
-	 * is shown (e.g. "New sublocation" always declares `sublocation of`). The
-	 * entity page is not opened afterwards unless the caller's `onCreated` does.
+	 * When set, the modal also prompts for a relationship comment and the new
+	 * entity is created already connected to this record (the new note declares
+	 * the relationship). The entity page is not opened afterwards — the caller's
+	 * view (e.g. the graph) shows the new connection in place.
 	 */
-	connectTo?: { record: EntityRecord; label: string; relType?: string };
+	connectTo?: { record: EntityRecord; label: string };
+	/** Locations only: the new location is created as this one's sublocation
+	 *  (writes `parentLocation`, not a relationship). */
+	parentLocation?: EntityRecord;
 }
 
 export class CreateEntityModal extends Modal {
@@ -197,7 +232,7 @@ export class CreateEntityModal extends Modal {
 
 	onOpen(): void {
 		const meta = ENTITY_META[this.type];
-		this.setTitle(`New ${meta.label.toLowerCase()}`);
+		this.setTitle(this.options.parentLocation ? 'New sublocation' : `New ${meta.label.toLowerCase()}`);
 
 		if (this.type !== 'session') {
 			new Setting(this.contentEl).setName('Name').addText((text) => {
@@ -289,7 +324,7 @@ export class CreateEntityModal extends Modal {
 		}
 
 		const connectTo = this.options.connectTo;
-		if (connectTo && connectTo.relType === undefined) {
+		if (connectTo) {
 			new Setting(this.contentEl)
 				.setName('Relationship')
 				.setDesc(`How the new ${meta.label.toLowerCase()} relates to ${connectTo.label}.`)
@@ -318,10 +353,11 @@ export class CreateEntityModal extends Modal {
 		const connectTo = this.options.connectTo;
 		if (connectTo) {
 			this.fields.relationship = {
-				type: connectTo.relType ?? (this.relComment === '' ? 'related' : this.relComment),
+				type: this.relComment === '' ? 'related' : this.relComment,
 				target: connectTo.record.name,
 			};
 		}
+		if (this.options.parentLocation) this.fields.parentLocation = this.options.parentLocation.name;
 		try {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
 			this.close();

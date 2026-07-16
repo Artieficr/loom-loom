@@ -83,17 +83,21 @@ relationships:
   (from `metadataCache` `links`/`frontmatterLinks`) that lands on another indexed entity
   becomes a connection of type `link`. Users shouldn't need the typed syntax just to get
   a graph edge; typed relationships take precedence when both point at the same target.
-- **Hidden links are the exception**: frontmatter links under the `attendance` and
-  `deathSession` keys are filtered out of connections entirely (`HIDDEN_LINK_KEYS` in
-  src/indexer.ts). Session attendance links every PC to every session they played —
-  drawing those edges would bury the graph, so they stay data-only.
-- **Sublocations are a relationship convention, not a field**: a location whose note
-  declares a relationship with the identifier `sublocation of` (`SUBLOCATION_REL`,
-  case-insensitive) to another location is a sublocation. The "New sublocation"
-  action on a location page just creates a location with that relationship
-  prefilled. The graph moves sublocations out of the locations row into per-parent
-  grid clusters right under it (4 wide, wrapping); everywhere else they are ordinary
-  locations.
+- **Hidden links are the exception**: frontmatter links under the `attendance`,
+  `deathSession`, and `sublocationOrder` keys are filtered out of connections
+  entirely (`HIDDEN_LINK_KEYS` in src/indexer.ts). Session attendance links every PC
+  to every session they played — drawing those edges would bury the graph;
+  `sublocationOrder` (the parent-side display order) would duplicate the children's
+  own `sublocation` edges. They stay data-only.
+- **Sublocations are a dedicated field, not a relationship**: a location whose
+  frontmatter carries `parentLocation: "[[Parent]]"` is a sublocation of that
+  location (an earlier iteration used a `sublocation of` relationship; it was
+  replaced because sublocations have their own UI — parent link + child list on
+  location pages, nested location list, sublocation grid in the graph — and mixing
+  them into the relationships editor confused both). The link contributes a typed
+  `sublocation` connection. Nesting is arbitrary-depth; the graph flattens a tree
+  into one grid under its top ancestor, while the location list nests recursively.
+  Cycle guards everywhere treat cyclic parents as top-level.
 
 ## Names
 

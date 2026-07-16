@@ -50,14 +50,6 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 /** Characters tagged PC appear in session attendance and carry the alive flag. */
 export const PC_TAG = 'PC';
 
-/**
- * Relationship identifier that makes a location a sublocation of its target
- * (compared case-insensitively). Declared by the child on creation via the
- * "New sublocation" action — deliberately a plain relationship, not a
- * separate frontmatter field. The graph moves sublocations out of the
- * locations row into a grid right under it.
- */
-export const SUBLOCATION_REL = 'sublocation of';
 
 /** Entity types that live on the timeline layers of the graph. */
 export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event'];
@@ -119,6 +111,16 @@ export interface EntityRecord {
 	/** Session only: linkpaths of attending PC characters. These are hidden
 	 *  connections — deliberately no graph edges or side-panel entries. */
 	attendance: string[];
+	/** Location only: linkpath of the parent location — what makes this a
+	 *  sublocation. Its own frontmatter key (not a relationship): sublocations
+	 *  have dedicated UI (parent link + sublocation lists, nested location
+	 *  list, grid rows under the locations row in the graph) and a typed
+	 *  `sublocation` connection. */
+	parentLocation: string | null;
+	/** Location only: manual display order of this location's sublocations
+	 *  (drag-reordered on the parent's page). Hidden links — the children
+	 *  already connect via their own parentLocation. */
+	sublocationOrder: string[];
 	/** Character only. */
 	role: string;
 	/** Character only (PC): false once the character has died. */

@@ -16,7 +16,6 @@ import {
 	EntityType,
 	PC_TAG,
 	QUEST_OUTCOMES,
-	SUBLOCATION_REL,
 	VIEW_ENTITY,
 	VIEW_LIST,
 } from '../types';
@@ -24,6 +23,7 @@ import {
 	ConfirmModal,
 	CreateEntityModal,
 	EntityTypeSuggestModal,
+	RecordSuggestModal,
 	sanitizeFileName,
 	sessionFileName,
 } from '../project';
@@ -169,6 +169,11 @@ function EntityPage({ view }: { view: EntityView }) {
 		record?.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text })) ?? []
 	);
 	const [body, setBody] = useState<string | null>(null);
+	/** Live sublocation reorder: rows slide in real time while the grip is
+	 *  held; the row itself is never carried by the cursor. */
+	const [sublocDrag, setSublocDrag] = useState<{ from: number; over: number } | null>(null);
+	const sublocDragRef = useRef<{ startY: number; slot: number } | null>(null);
+	const sublocListRef = useRef<HTMLDivElement | null>(null);
 
 	// A freshly created note opens before metadataCache has indexed it, so the
 	// record can arrive one tick after mount — seed the drafts then.
@@ -376,6 +381,110 @@ function EntityPage({ view }: { view: EntityView }) {
 			</span>
 		</div>
 	);
+
+	// Locations: `parentLocation` makes this a sublocation — dedicated logic,
+	// deliberately not a relationship. Any location can hold sublocations of
+	// its own (nesting); the parent picker excludes the location itself and
+	// its descendants so a cycle can't be built.
+	const isLocation = record.type === 'location';
+	const projectLocations =
+		isLocation && project ? plugin.indexer.getAll('location', project.root) : [];
+	const resolveParentOf = (l: EntityRecord) =>
+		l.parentLocation !== null ? plugin.indexer.resolve(l.parentLocation, l.path) : null;
+	const parentLocation = isLocation ? resolveParentOf(record) : null;
+	// Children follow the parent's drag-reordered `sublocationOrder`; entries
+	// not (yet) in it append alphabetically.
+	const sublocOrderIdx = new Map<string, number>(
+		record.sublocationOrder
+			.map((lp, i) => [plugin.indexer.resolve(lp, record.path)?.path, i] as const)
+			.filter((e): e is [string, number] => e[0] !== undefined)
+	);
+	const sublocations = projectLocations
+		.filter((l) => l.path !== record.path && resolveParentOf(l)?.path === record.path)
+		.sort(
+			(a, b) =>
+				(sublocOrderIdx.get(a.path) ?? Number.MAX_SAFE_INTEGER) -
+					(sublocOrderIdx.get(b.path) ?? Number.MAX_SAFE_INTEGER) ||
+				a.name.localeCompare(b.name)
+		);
+	const writeSublocationOrder = (ordered: EntityRecord[]) => {
+		writeFm((fm) => {
+			setFmKey(fm, 'sublocationOrder', ordered.map((s) => `[[${s.name}]]`));
+		});
+	};
+	const sublocSlotHeight = (): number => {
+		const list = sublocListRef.current;
+		if (!list || list.children.length < 2) return 28;
+		const a = list.children[0] as HTMLElement;
+		const b = list.children[1] as HTMLElement;
+		return b.offsetTop - a.offsetTop || 28;
+	};
+	/** How many slots row `i` is displaced by the drag in progress. */
+	const sublocShift = (i: number): number => {
+		if (!sublocDrag) return 0;
+		const { from, over } = sublocDrag;
+		if (i === from) return over - from;
+		if (from < i && i <= over) return -1;
+		if (over <= i && i < from) return 1;
+		return 0;
+	};
+	const endSublocDrag = (commit: boolean) => {
+		sublocDragRef.current = null;
+		const drag = sublocDrag;
+		setSublocDrag(null);
+		if (!commit || !drag || drag.from === drag.over) return;
+		const next = [...sublocations];
+		const [moved] = next.splice(drag.from, 1);
+		next.splice(drag.over, 0, moved);
+		writeSublocationOrder(next);
+	};
+	/** Detaching lives on the parent's page — the child's own page only shows
+	 *  its parent as a link (no removal there). */
+	const detachSublocation = (s: EntityRecord) => {
+		const childFile = plugin.app.vault.getFileByPath(s.path);
+		if (!childFile) return;
+		plugin.app.fileManager
+			.processFrontMatter(childFile, (fm: Record<string, unknown>) => {
+				for (const k of Object.keys(fm)) {
+					if (k.toLowerCase() === 'parentlocation') delete fm[k];
+				}
+			})
+			.catch((e) => {
+				console.error('Loom Loom: failed to detach sublocation', e);
+				new Notice('Could not detach the sublocation.');
+			});
+		writeSublocationOrder(sublocations.filter((o) => o.path !== s.path));
+	};
+	const descendsFromThis = (l: EntityRecord): boolean => {
+		let cur: EntityRecord | null = l;
+		for (let guard = 0; guard < 20 && cur !== null; guard++) {
+			const parent: EntityRecord | null = resolveParentOf(cur);
+			if (!parent) return false;
+			if (parent.path === record.path) return true;
+			cur = parent;
+		}
+		return false;
+	};
+	const setParentLocation = (name: string) => {
+		writeFm((fm) => {
+			setFmKey(fm, 'parentLocation', `[[${name}]]`);
+		});
+	};
+	/** "Turn to a sublocation": fuzzy-searchable picker over every other
+	 *  location (including sublocations — the whole child hierarchy moves
+	 *  along), minus this location's own descendants so a cycle can't be
+	 *  built. A search, not a plain menu — projects can get huge. */
+	const openTurnIntoPicker = () => {
+		const candidates = projectLocations
+			.filter((l) => l.path !== record.path && !descendsFromThis(l))
+			.sort((a, b) => a.name.localeCompare(b.name));
+		new RecordSuggestModal(
+			plugin.app,
+			candidates,
+			(l) => setParentLocation(l.name),
+			'Pick the parent location…'
+		).open();
+	};
 
 	// PC life state: unticking Alive reveals the death-session picker.
 	const isPc = record.type === 'character' && record.loomTags.includes(PC_TAG);
@@ -644,23 +753,9 @@ function EntityPage({ view }: { view: EntityView }) {
 				</button>
 				<span className="loom-chip">{ENTITY_META[record.type].label}</span>
 				<div className="loom-shell-spacer" />
-				{record.type === 'location' && project ? (
-					<button
-						className="loom-nav-btn"
-						onClick={() =>
-							new CreateEntityModal(plugin, 'location', project, {
-								// The child declares `sublocation of` back to this page's
-								// location; otherwise it's a full Location like any other.
-								connectTo: {
-									record,
-									label: recordLabel(record, project),
-									relType: SUBLOCATION_REL,
-								},
-								onCreated: (created) => view.openEntity(created.path),
-							}).open()
-						}
-					>
-						New sublocation
+				{isLocation && record.parentLocation === null && project ? (
+					<button className="loom-nav-btn" onClick={openTurnIntoPicker}>
+						Turn to a sublocation
 					</button>
 				) : null}
 				<button
@@ -708,6 +803,21 @@ function EntityPage({ view }: { view: EntityView }) {
 						}}
 					/>
 				</label>
+			) : null}
+
+			{/* Plain link, no detach here — a sublocation is released from its
+			    parent's page, not its own. */}
+			{isLocation && record.parentLocation !== null ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Sublocation of</span>
+					{parentLocation ? (
+						<button className="loom-subloc-link" onClick={() => view.openEntity(parentLocation.path)}>
+							{parentLocation.name}
+						</button>
+					) : (
+						<span>{record.parentLocation}</span>
+					)}
+				</div>
 			) : null}
 
 			{isSession ? (
@@ -983,7 +1093,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			</div>
 
 			{!isSession ? (
-				<div className="loom-field">
+				<div className="loom-field loom-field-sep">
 					{sessionNotes.length > 0 ? <span className="loom-field-label">Session notes</span> : null}
 					{sessionNotes.map((note, i) => sessionNoteRow(note, i))}
 					<button
@@ -995,7 +1105,80 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			<div className="loom-field">
+			{/* Sublocations live outside the relationships model: the list of
+			    children, creating one, and demoting this location under another
+			    all work through the dedicated parentLocation key. */}
+			{isLocation && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Sublocations</span>
+					{sublocations.length > 0 ? (
+						<div className="loom-subloc-list" ref={sublocListRef}>
+							{sublocations.map((s, i) => (
+								<div
+									key={s.path}
+									className="loom-subloc-row"
+									style={
+										sublocShift(i) !== 0
+											? { transform: `translateY(${sublocShift(i) * (sublocDragRef.current?.slot ?? 28)}px)` }
+											: undefined
+									}
+								>
+									<span
+										className="loom-subloc-grip"
+										onPointerDown={(e) => {
+											e.preventDefault();
+											e.currentTarget.setPointerCapture(e.pointerId);
+											sublocDragRef.current = { startY: e.clientY, slot: sublocSlotHeight() };
+											setSublocDrag({ from: i, over: i });
+										}}
+										onPointerMove={(e) => {
+											const start = sublocDragRef.current;
+											if (!start) return;
+											const over = Math.max(
+												0,
+												Math.min(
+													sublocations.length - 1,
+													i + Math.round((e.clientY - start.startY) / start.slot)
+												)
+											);
+											setSublocDrag((cur) => (cur && cur.over !== over ? { ...cur, over } : cur));
+										}}
+										onPointerUp={() => endSublocDrag(true)}
+										onPointerCancel={() => endSublocDrag(false)}
+									>
+										<Icon name="grip-vertical" />
+									</span>
+									<button className="loom-subloc-link" onClick={() => view.openEntity(s.path)}>
+										{s.name}
+									</button>
+									<button
+										className="loom-chip-remove"
+										aria-label="Detach sublocation"
+										onClick={() => detachSublocation(s)}
+									>
+										✕
+									</button>
+								</div>
+							))}
+						</div>
+					) : null}
+					<div className="loom-subloc-actions">
+						<button
+							className="loom-rel-add"
+							onClick={() =>
+								new CreateEntityModal(plugin, 'location', project, {
+									parentLocation: record,
+									onCreated: (created) => view.openEntity(created.path),
+								}).open()
+							}
+						>
+							+ New sublocation
+						</button>
+					</div>
+				</div>
+			) : null}
+
+			<div className="loom-field loom-field-sep">
 				<span className="loom-field-label">Relationships</span>
 				{ENTITY_TYPES.filter((t) => relEntries.some((e) => e.entityType === t)).map((t) => (
 					<div key={t} className="loom-rel-group">
