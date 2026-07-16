@@ -9,11 +9,12 @@ import {
 	useState,
 } from 'react';
 import { ENTITY_META, ENTITY_TYPES, GraphCamera, QUEST_OUTCOMES, TimelineDef, VIEW_GRAPH } from '../types';
+import type { LoomTextSize } from '../settings';
 import { ConfirmModal, CreateEntityModal, RelationshipPromptModal } from '../project';
 import { extractLinkpath } from '../indexer';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { Pt, edgeEndDirs, edgePath, edgeXRange } from '../graph/routing';
-import { GraphSidePanel } from '../graph/side-panel';
+import { GraphSidePanel, PANEL_MAX, PANEL_MIN } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage, recordLabel } from './common';
 import { TimelineStrip } from './timeline-strip';
@@ -26,6 +27,7 @@ interface GraphUiState {
 	camera?: Camera;
 	drawerOpen?: boolean;
 	drawerHeight?: number;
+	panelWidth?: number;
 }
 
 export class GraphView extends LoomReactView {
@@ -60,6 +62,7 @@ export class GraphView extends LoomReactView {
 		}
 		if (typeof s?.drawerOpen === 'boolean') this.restored.drawerOpen = s.drawerOpen;
 		if (typeof s?.drawerHeight === 'number') this.restored.drawerHeight = s.drawerHeight;
+		if (typeof s?.panelWidth === 'number') this.restored.panelWidth = s.panelWidth;
 		await super.setState(state, result);
 		this.renderNow();
 	}
@@ -110,6 +113,15 @@ interface PanState {
 const DRAWER_MIN = 120;
 const DRAWER_MAX = 520;
 
+/** Estimated node-label font size (px) per text-size setting: labels render
+ *  at 0.8em of the view base (compact 13px, normal 16px, large 19.2px). The
+ *  layout's label-overlap checker scales with this. */
+const LABEL_FONT_PX: Record<LoomTextSize, number> = {
+	compact: 10.4,
+	normal: 12.8,
+	large: 15.4,
+};
+
 function clamp(v: number, min: number, max: number): number {
 	return Math.max(min, Math.min(max, v));
 }
@@ -138,7 +150,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				plugin.settings.globalLayerOrder,
 				plugin.settings.graphLineGap,
 				new Map(Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {})),
-				plugin.settings.graphTrunkGap
+				plugin.settings.graphTrunkGap,
+				LABEL_FONT_PX[plugin.settings.textSize]
 			),
 		// layerKey stands in for the order array (mutated in place by settings).
 		[
@@ -148,6 +161,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			layerKey,
 			plugin.settings.graphLineGap,
 			plugin.settings.graphTrunkGap,
+			plugin.settings.textSize,
 			manualVersion,
 		]
 	);
@@ -162,6 +176,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const [, setTick] = useState(0);
 	const [drawerOpen, setDrawerOpen] = useState(view.restored.drawerOpen ?? false);
 	const [drawerHeight, setDrawerHeight] = useState(view.restored.drawerHeight ?? 240);
+	const [panelWidth, setPanelWidth] = useState(
+		clamp(view.restored.panelWidth ?? PANEL_MIN, PANEL_MIN, PANEL_MAX)
+	);
 	const [drawerResizing, setDrawerResizing] = useState(false);
 	const [defPath, setDefPath] = useState('');
 	const drawerDrag = useRef<{ pointerId: number; startY: number; startH: number } | null>(null);
@@ -193,9 +210,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		[plugin]
 	);
 	useEffect(() => {
-		view.current = { camera, drawerOpen, drawerHeight };
+		view.current = { camera, drawerOpen, drawerHeight, panelWidth };
 		if (project) persistCamera(project.root, camera);
-	}, [view, camera, drawerOpen, drawerHeight, project, persistCamera]);
+	}, [view, camera, drawerOpen, drawerHeight, panelWidth, project, persistCamera]);
 	const dispRef = useRef(new Map<string, Displacement>());
 	const dragRef = useRef<DragState | null>(null);
 	/** Node id the currently dragged node hovers over (drop-to-connect target). */
@@ -416,13 +433,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	// --- Drop-to-connect -------------------------------------------------------
 
-	/** Does `from`'s own note declare a relationship (or linkedSession) pointing at `toId`? */
+	/** Does `from`'s own note declare a relationship pointing at `toId`? */
 	const declaresConnection = (from: LayoutNode, toId: string): boolean => {
 		const hits = (linkpath: string) => plugin.indexer.resolve(linkpath, from.id)?.path === toId;
-		return (
-			from.record.relationships.some((r) => hits(r.linkpath)) ||
-			(from.record.type === 'event' && from.record.linkedSessions.some(hits))
-		);
+		return from.record.relationships.some((r) => hits(r.linkpath));
 	};
 
 	/** Writes to a node's frontmatter with error reporting. */
@@ -507,21 +521,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			}
 		}
 
-		const eventSession = pair('event', 'session');
-		if (eventSession) {
-			const { a: event, b: session } = eventSession;
-			const resolve = resolvesFrom(event);
-			if (!event.record.linkedSessions.some((lp) => resolve(lp) === session.id)) {
-				options.push({
-					title: 'Link to this session',
-					action: () =>
-						writeNodeFm(event, (fm) => {
-							fm.linkedSession = [...linkList(fm.linkedSession), `[[${session.record.name}]]`];
-						}),
-				});
-			}
-		}
-
 		// Generic relationship: which note declares it is configurable — by
 		// default the drop target (dropping A on B adds A into B), optionally
 		// the dragged note (connecting A to B).
@@ -566,9 +565,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		menu.showAtPosition(at);
 	};
 
-	/** Removes `node`'s own declarations pointing at `other` (the declaring
-	 *  side per the drop-edits setting): typed relationship entries and (for
-	 *  events) linkedSession links. The other side's declarations stay. */
+	/** Removes `node`'s own typed relationship entries pointing at `other`
+	 *  (the declaring side per the drop-edits setting). The other side's
+	 *  declarations stay. */
 	const removeConnection = async (node: LayoutNode, other: LayoutNode) => {
 		const resolvesToOther = (linkpath: string) =>
 			plugin.indexer.resolve(linkpath, node.id)?.path === other.id;
@@ -582,15 +581,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						const target = (rel as { target?: unknown }).target;
 						if (typeof target !== 'string') return true;
 						const linkpath = extractLinkpath(target);
-						return linkpath === null || !resolvesToOther(linkpath);
-					});
-				}
-				if (node.record.type === 'event') {
-					const raw = fm.linkedSession;
-					const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [];
-					fm.linkedSession = list.filter((entry: unknown) => {
-						if (typeof entry !== 'string') return true;
-						const linkpath = extractLinkpath(entry);
 						return linkpath === null || !resolvesToOther(linkpath);
 					});
 				}
@@ -915,6 +905,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						connections={plugin.indexer.getConnections(selectedRecord.path)}
 						connectionLabel={(r) => recordLabel(r, project)}
 						threshold={plugin.settings.graphCollapseThreshold}
+						width={panelWidth}
+						onWidthChange={setPanelWidth}
 						onOpen={(path) => view.openEntity(path)}
 						onClose={() => setSelected(null)}
 						onCreate={(type) =>

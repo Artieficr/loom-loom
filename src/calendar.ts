@@ -172,6 +172,16 @@ export function formatLoomDate(date: LoomDate, config: ProjectConfig): string {
 }
 
 /**
+ * Formats a LoomDate in the compact `MMM Do, YYYY` form (e.g. "Jun 2nd, 2026")
+ * regardless of the project's configured display format — for tight spots
+ * like session pickers. Custom-calendar months without short names fall back
+ * to their full name.
+ */
+export function formatLoomDateShort(date: LoomDate, config: ProjectConfig): string {
+	return `${monthName(date, config, true)} ${ordinal(date.day)}, ${date.year}`;
+}
+
+/**
  * Formats available for a project. Short-month formats are only offered when
  * the custom calendar either is off (Gregorian shorts always exist) or has
  * short names enabled.

@@ -383,9 +383,10 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			});
 		}
 
-		new Setting(containerEl).setName('Global layers').setHeading();
+		// "Global" is the layout's internal term — users just see entity rows.
+		new Setting(containerEl).setName('Entity layers').setHeading();
 		containerEl.createEl('p', {
-			text: 'Top-to-bottom row order of the global entity layers in the graph.',
+			text: 'Top-to-bottom row order of the entity layers in the graph.',
 			cls: 'setting-item-description',
 		});
 		const order = this.plugin.settings.globalLayerOrder;
@@ -411,6 +412,18 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 					.onClick(() => void move(i, i + 1))
 			);
 		});
+		// A labeled button under the rows instead of the usual per-setting reset
+		// icon — a lone ↺ beside the heading read as noise. Plain (not inside a
+		// Setting row) so it doesn't get the row frame.
+		const resetRow = containerEl.createDiv({ cls: 'loom-layer-reset' });
+		const resetBtn = resetRow.createEl('button', { text: 'Reset order' });
+		resetBtn.addEventListener('click', () =>
+			void (async () => {
+				this.plugin.settings.globalLayerOrder = [...DEFAULT_SETTINGS.globalLayerOrder];
+				await this.plugin.saveSettings();
+				this.redisplay();
+			})()
+		);
 
 		this.renderTimeline(containerEl);
 

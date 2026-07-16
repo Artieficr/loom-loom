@@ -6,7 +6,7 @@ import {
 	useRef,
 	useState,
 } from 'react';
-import { startTextareaResize } from './common';
+import { autoGrowTextarea, startTextareaResize } from './common';
 
 /**
  * A textarea with the two most-missed editor behaviors for note-like fields:
@@ -41,6 +41,11 @@ export function LinkTextarea({
 			el.setSelectionRange(pendingCaret.current, pendingCaret.current);
 			pendingCaret.current = null;
 		}
+	}, [value]);
+
+	// Fit the content — no natural scrolling (manual resize turns this off).
+	useEffect(() => {
+		autoGrowTextarea(taRef.current);
 	}, [value]);
 
 	const matches = useMemo(() => {

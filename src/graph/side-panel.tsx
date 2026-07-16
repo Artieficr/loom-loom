@@ -1,6 +1,10 @@
-import { useState } from 'react';
+import { PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
 import { Connection, ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
 import { Icon, Truncated } from '../views/common';
+
+/** The panel's original fixed width — resizing can only widen it. */
+export const PANEL_MIN = 260;
+export const PANEL_MAX = 640;
 
 function Section({
 	label,
@@ -58,6 +62,8 @@ export function GraphSidePanel({
 	connections,
 	connectionLabel,
 	threshold,
+	width,
+	onWidthChange,
 	onOpen,
 	onClose,
 	onCreate,
@@ -67,11 +73,30 @@ export function GraphSidePanel({
 	connections: Connection[];
 	connectionLabel: (record: EntityRecord) => string;
 	threshold: number;
+	/** Current panel width (px), owned by the graph view so it persists. */
+	width: number;
+	onWidthChange: (width: number) => void;
 	onOpen: (path: string) => void;
 	onClose: () => void;
 	/** Create a new entity of the given type, connected to `record`. */
 	onCreate: (type: EntityType) => void;
 }) {
+	const resize = useRef<{ pointerId: number; startX: number; startW: number } | null>(null);
+	const onHandlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+		e.preventDefault();
+		e.currentTarget.setPointerCapture(e.pointerId);
+		resize.current = { pointerId: e.pointerId, startX: e.clientX, startW: width };
+	};
+	const onHandlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+		const drag = resize.current;
+		if (!drag || drag.pointerId !== e.pointerId) return;
+		const next = drag.startW + (drag.startX - e.clientX);
+		onWidthChange(Math.max(PANEL_MIN, Math.min(PANEL_MAX, next)));
+	};
+	const onHandlePointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+		if (resize.current?.pointerId === e.pointerId) resize.current = null;
+	};
+
 	const groups = new Map<EntityType, Connection[]>();
 	for (const conn of connections) {
 		const list = groups.get(conn.record.type) ?? [];
@@ -80,7 +105,14 @@ export function GraphSidePanel({
 	}
 
 	return (
-		<div className="loom-sidepanel">
+		<div className="loom-sidepanel" style={{ width }}>
+			<div
+				className="loom-sidepanel-handle"
+				onPointerDown={onHandlePointerDown}
+				onPointerMove={onHandlePointerMove}
+				onPointerUp={onHandlePointerUp}
+			/>
+			<div className="loom-sidepanel-scroll">
 			<div className="loom-sidepanel-header">
 				<button className="loom-link loom-sidepanel-title" onClick={() => onOpen(record.path)}>
 					<Truncated className="loom-sidepanel-title-text" text={label} />
@@ -106,6 +138,7 @@ export function GraphSidePanel({
 					/>
 				))
 			)}
+			</div>
 		</div>
 	);
 }

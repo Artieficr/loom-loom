@@ -18,11 +18,11 @@ and a custom layered graph view.
 | `src/settings.ts` | Global settings: text size, tag vocabulary, graph node colors, collapse threshold, global layer order; tabbed settings UI (General/Entities/Graph, per-project timeline settings under Graph) |
 | `src/indexer.ts` | Index cache: project discovery (.loom files), frontmatter → in-memory records, vault event handling, connection queries (incl. native links), JSON snapshot persistence |
 | `src/calendar.ts` | Date model: parsing (Gregorian + custom in-game calendars), display formats, per-project `ProjectConfig` (de)serialization |
-| `src/columns.ts` | Chronological column layout shared by timeline and graph (sessions anchor columns, linked events stack beneath) |
+| `src/columns.ts` | Chronological column layout shared by timeline and graph (sessions anchor columns, session-connected events stack beneath) |
 | `src/project.ts` | Project scaffolding (.loom + folders), entity creation (managed session file names), setup/create/pick modals |
 | `src/timeline-settings.ts` | Per-project timeline settings editor (date format + custom calendar), embedded in the settings tab's Graph tab, writes to the .loom file |
 | `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`). Entity pages embed collapsible connected-entity sections with in-place editing (`connected-entities.tsx`) |
-| `src/graph/` | Graph-only logic: layered layout (timeline rows + per-type global layers), orthogonal edge routing (trunk lanes/fans/bands in `routing.ts`), connections side panel |
+| `src/graph/` | Graph-only logic: layered layout (timeline rows + per-type global layers), orthogonal edge routing (trunk lanes/bands in `routing.ts`; every endpoint attaches via diagonal fans with per-side capacity), connections side panel |
 | `scripts/deploy.mjs` | Builds are copied to the test vault with `pnpm run deploy` |
 | `docs/ARCHITECTURE.md` | Data flow, relationship model, calendar abstraction, design tradeoffs |
 | `ROADMAP.md` | Feature checklist with code locations |
@@ -47,9 +47,12 @@ and a custom layered graph view.
 - **Names**: display name = file basename (renames propagate); no `name` frontmatter.
   Session file names are managed (`<Project> Session <date>`) and never shown in-app —
   sessions display their date.
-- **Connections**: typed frontmatter relationships + `linkedSession` (one link or a
-  list — events can span several sessions) + plain `[[links]]` anywhere in a note
-  (relType `link`), all resolved bidirectionally; graph edges undirected. Entity tags
+- **Connections**: typed frontmatter relationships + `sessionNotes` (session-pinned
+  note entries `{session, text}`; the picked session becomes a `session note`
+  connection) + plain `[[links]]` anywhere in a note (relType `link`), all resolved
+  bidirectionally; graph edges undirected. There is no dedicated event→session field
+  (`linkedSession` was removed — relationships already cover it; old keys in existing
+  notes still connect as plain frontmatter links). Entity tags
   live in `loomTags` (legacy `pluginTags` still read); the tag vocabulary is hardcoded
   (`ENTITY_TAGS` in types.ts), not user-configurable.
 - **Hidden connections**: links under the `attendance` and `deathSession` frontmatter

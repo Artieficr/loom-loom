@@ -50,6 +50,15 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 /** Characters tagged PC appear in session attendance and carry the alive flag. */
 export const PC_TAG = 'PC';
 
+/**
+ * Relationship identifier that makes a location a sublocation of its target
+ * (compared case-insensitively). Declared by the child on creation via the
+ * "New sublocation" action — deliberately a plain relationship, not a
+ * separate frontmatter field. The graph moves sublocations out of the
+ * locations row into a grid right under it.
+ */
+export const SUBLOCATION_REL = 'sublocation of';
+
 /** Entity types that live on the timeline layers of the graph. */
 export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event'];
 /** Entity types that live on the fixed lower axis of the graph. */
@@ -76,6 +85,15 @@ export interface LoomDate {
 	calendar: CalendarId;
 }
 
+/** A session-scoped note as declared in one note's frontmatter: freeform text
+ *  pinned to the session it was written about, so when something was noted is
+ *  tracked alongside what. Linking a session connects the entity to it. */
+export interface SessionNoteDecl {
+	/** Linkpath of the session ("..." from "[[...]]"), or null while unpicked. */
+	session: string | null;
+	text: string;
+}
+
 /** A typed relationship as declared in one note's frontmatter. */
 export interface RelationshipDecl {
 	type: string;
@@ -95,10 +113,9 @@ export interface EntityRecord {
 	loomTags: string[];
 	description: string;
 	relationships: RelationshipDecl[];
+	/** Session-scoped notes; each picked session becomes a connection. */
+	sessionNotes: SessionNoteDecl[];
 	date: LoomDate | null;
-	/** Event only: linkpaths of linked session notes, unresolved. An event can
-	 *  belong to several sessions (e.g. a festival spanning three games). */
-	linkedSessions: string[];
 	/** Session only: linkpaths of attending PC characters. These are hidden
 	 *  connections — deliberately no graph edges or side-panel entries. */
 	attendance: string[];

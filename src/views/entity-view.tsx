@@ -16,6 +16,7 @@ import {
 	EntityType,
 	PC_TAG,
 	QUEST_OUTCOMES,
+	SUBLOCATION_REL,
 	VIEW_ENTITY,
 	VIEW_LIST,
 } from '../types';
@@ -26,13 +27,14 @@ import {
 	sanitizeFileName,
 	sessionFileName,
 } from '../project';
-import { todayRaw } from '../calendar';
+import { formatLoomDateShort, todayRaw } from '../calendar';
 import { LoomFileReactView } from './react-view';
 import {
 	FRONTMATTER_RE,
 	Icon,
 	NavRail,
 	SearchableSelect,
+	autoGrowTextarea,
 	startTextareaResize,
 	SuggestInput,
 	recordLabel,
@@ -135,6 +137,12 @@ interface RelationshipDraft {
 	filter?: EntityType | null;
 }
 
+interface SessionNoteDraft {
+	/** Session linkpath; '' while no session is picked yet. */
+	session: string;
+	text: string;
+}
+
 function EntityPage({ view }: { view: EntityView }) {
 	const plugin = view.plugin;
 	const version = useIndexVersion(plugin.indexer);
@@ -157,6 +165,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [relationships, setRelationships] = useState<RelationshipDraft[]>(
 		record?.relationships.map((r) => ({ type: r.type, target: r.linkpath })) ?? []
 	);
+	const [sessionNotes, setSessionNotes] = useState<SessionNoteDraft[]>(
+		record?.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text })) ?? []
+	);
 	const [body, setBody] = useState<string | null>(null);
 
 	// A freshly created note opens before metadataCache has indexed it, so the
@@ -171,6 +182,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		setReward(record.reward);
 		setDate(record.date?.raw ?? '');
 		setRelationships(record.relationships.map((r) => ({ type: r.type, target: r.linkpath })));
+		setSessionNotes(record.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text })));
 	}, [record]);
 
 	useEffect(() => {
@@ -183,6 +195,12 @@ function EntityPage({ view }: { view: EntityView }) {
 			cancelled = true;
 		};
 	}, [plugin, file]);
+
+	// Description fits its content — no natural scrolling (the notes box does
+	// the same inside LinkTextarea); a manual resize turns auto-grow off.
+	useEffect(() => {
+		autoGrowTextarea(descriptionRef.current);
+	}, [description]);
 
 	// Project entities first (alphabetical), then the rest of the vault.
 	const linkNames = useMemo(() => {
@@ -227,7 +245,6 @@ function EntityPage({ view }: { view: EntityView }) {
 	const vocab = ENTITY_TAGS[record.type];
 	const allTags = [...new Set([...vocab, ...record.loomTags])];
 	const sessions = project ? plugin.indexer.getAll('session', project.root) : [];
-	const linkedSessions = plugin.indexer.resolveLinkedSessions(record);
 	const targetRecords = project ? plugin.indexer.getAll(undefined, project.root) : [];
 
 	const commitName = async () => {
@@ -270,9 +287,19 @@ function EntityPage({ view }: { view: EntityView }) {
 		});
 	};
 
-	const writeLinkedSessions = (names: string[]) => {
+	const commitSessionNotes = (next: SessionNoteDraft[]) => {
+		setSessionNotes(next);
 		writeFm((fm) => {
-			setFmKey(fm, 'linkedSession', names.map((n) => `[[${n}]]`));
+			setFmKey(
+				fm,
+				'sessionNotes',
+				next
+					.filter((n) => n.session.trim() !== '' || n.text.trim() !== '')
+					.map((n) => ({
+						session: n.session.trim() === '' ? '' : `[[${n.session.trim()}]]`,
+						text: n.text,
+					}))
+			);
 		});
 	};
 
@@ -483,12 +510,120 @@ function EntityPage({ view }: { view: EntityView }) {
 			<button
 				className="loom-nav-btn"
 				aria-label="Remove relationship"
-				onClick={() => commitRelationships(relationships.filter((_, j) => j !== i))}
+				onClick={() => {
+					const remove = () => commitRelationships(relationships.filter((_, j) => j !== i));
+					// A still-empty new row goes silently; a filled one asks first.
+					if (rel.target.trim() === '') remove();
+					else {
+						new ConfirmModal(
+							plugin.app,
+							'Remove relationship?',
+							`Removes "${rel.type.trim() === '' ? 'related' : rel.type.trim()}" → ${rel.target.trim()}.`,
+							remove,
+							'Remove'
+						).open();
+					}
+				}}
 			>
 				✕
 			</button>
 		</div>
 	);
+
+	// One session-scoped note: session picker on the left (chip once picked),
+	// note text on the right. Picking the session commits immediately, which is
+	// what connects the entity to it; the text commits on blur like other fields.
+	// The picker column is narrow, so dates always use the compact form here.
+	const shortSessionLabel = (s: EntityRecord) =>
+		s.date && project ? formatLoomDateShort(s.date, project.config) : s.name;
+	const sessionNoteRow = (note: SessionNoteDraft, i: number) => {
+		const picked =
+			note.session.trim() !== '' ? plugin.indexer.resolve(note.session.trim(), record.path) : null;
+		// A session already carrying a note isn't offered again.
+		const takenSessions = new Set(
+			sessionNotes
+				.filter((_, j) => j !== i)
+				.map((n) =>
+					n.session.trim() !== '' ? plugin.indexer.resolve(n.session.trim(), record.path)?.path : undefined
+				)
+				.filter((p): p is string => p !== undefined)
+		);
+		const setNote = (patch: Partial<SessionNoteDraft>, commit: boolean) => {
+			const next = [...sessionNotes];
+			next[i] = { ...note, ...patch };
+			if (commit) commitSessionNotes(next);
+			else setSessionNotes(next);
+		};
+		return (
+			<div key={i} className="loom-note-row" onBlur={() => commitSessionNotes(sessionNotes)}>
+				<div className="loom-note-head">
+				<div className="loom-note-session">
+					{picked && picked.type === 'session' ? (
+						<div className="loom-tag-row">
+							<span className="loom-chip loom-session-chip">
+								{shortSessionLabel(picked)}
+								<button
+									className="loom-chip-remove"
+									aria-label="Clear session"
+									onClick={() => setNote({ session: '' }, true)}
+								>
+									✕
+								</button>
+							</span>
+						</div>
+					) : (
+						<SearchableSelect
+							placeholder="Pick a session…"
+							options={sessionsByDate
+								.filter((s) => s.path !== record.path && !takenSessions.has(s.path))
+								.map((s) => ({ value: s.name, label: shortSessionLabel(s) }))}
+							onPick={(name) => setNote({ session: name }, true)}
+							action={
+								project
+									? {
+											label: '+ New session…',
+											onPick: () =>
+												new CreateEntityModal(plugin, 'session', project, {
+													onCreated: (created) => setNote({ session: created.basename }, true),
+												}).open(),
+										}
+									: undefined
+							}
+						/>
+					)}
+				</div>
+				<button
+					className="loom-nav-btn loom-note-remove"
+					aria-label="Remove session note"
+					onClick={() => {
+						const remove = () => commitSessionNotes(sessionNotes.filter((_, j) => j !== i));
+						// Only a note that actually holds text needs a confirmation.
+						if (note.text.trim() === '') remove();
+						else {
+							new ConfirmModal(
+								plugin.app,
+								'Delete this session note?',
+								'The note text will be lost.',
+								remove,
+								'Delete'
+							).open();
+						}
+					}}
+				>
+					✕
+				</button>
+				</div>
+				<div className="loom-note-text">
+					<LinkTextarea
+						rows={5}
+						value={note.text}
+						names={linkNames}
+						onChange={(v) => setNote({ text: v }, false)}
+					/>
+				</div>
+			</div>
+		);
+	};
 
 	return (
 		<div className="loom-entity-row">
@@ -509,6 +644,25 @@ function EntityPage({ view }: { view: EntityView }) {
 				</button>
 				<span className="loom-chip">{ENTITY_META[record.type].label}</span>
 				<div className="loom-shell-spacer" />
+				{record.type === 'location' && project ? (
+					<button
+						className="loom-nav-btn"
+						onClick={() =>
+							new CreateEntityModal(plugin, 'location', project, {
+								// The child declares `sublocation of` back to this page's
+								// location; otherwise it's a full Location like any other.
+								connectTo: {
+									record,
+									label: recordLabel(record, project),
+									relType: SUBLOCATION_REL,
+								},
+								onCreated: (created) => view.openEntity(created.path),
+							}).open()
+						}
+					>
+						New sublocation
+					</button>
+				) : null}
 				<button
 					className="loom-nav-btn"
 					onClick={() => view.navigateTo('markdown', { file: file.path })}
@@ -626,148 +780,100 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{record.type === 'event' ? (
-				<div className="loom-field">
-					<span className="loom-field-label">Linked sessions</span>
-					{linkedSessions.length > 0 ? (
-						<div className="loom-tag-row">
-							{linkedSessions.map((s) => (
-								<span key={s.path} className="loom-chip loom-session-chip">
-									{recordLabel(s, project)}
-									<button
-										className="loom-chip-remove"
-										aria-label="Unlink session"
-										onClick={() =>
-											writeLinkedSessions(
-												linkedSessions.filter((o) => o.path !== s.path).map((o) => o.name)
-											)
-										}
-									>
-										✕
-									</button>
-								</span>
-							))}
-						</div>
-					) : null}
-					<SearchableSelect
-						placeholder="Link a session…"
-						options={sessions
-							.filter((s) => !linkedSessions.some((l) => l.path === s.path))
-							.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
-							.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
-						onPick={(name) => writeLinkedSessions([...linkedSessions.map((s) => s.name), name])}
-						action={
-							project
-								? {
-										label: '+ New session…',
-										onPick: () =>
-											new CreateEntityModal(plugin, 'session', project, {
-												onCreated: (created) => {
-													writeLinkedSessions([...linkedSessions.map((s) => s.name), created.basename]);
-												},
-											}).open(),
-									}
-								: undefined
-						}
-					/>
-				</div>
-			) : null}
-
+			{/* Quest fields: givers left of a full-height separator; session/outcome
+			    row + reward right of it. The separator stretches with whichever
+			    side grows (wrapping giver chips, multi-line reward). */}
 			{isQuest ? (
-				<div className="loom-field">
-					<span className="loom-field-label">Quest givers</span>
-					{questGiverRecords.length > 0 ? (
-						<div className="loom-tag-row">
-							{questGiverRecords.map((c) => (
-								<span key={c.path} className="loom-chip loom-session-chip">
-									{c.name}
-									<button
-										className="loom-chip-remove"
-										aria-label="Remove quest giver"
-										onClick={() =>
-											writeQuestGivers(
-												questGiverRecords.filter((o) => o.path !== c.path).map((o) => o.name)
-											)
-										}
-									>
-										✕
-									</button>
-								</span>
-							))}
-						</div>
-					) : null}
-					<SearchableSelect
-						placeholder="Add a quest giver…"
-						options={characters
-							.filter((c) => !questGiverRecords.some((g) => g.path === c.path))
-							.sort((a, b) => a.name.localeCompare(b.name))
-							.map((c) => ({ value: c.name, label: c.name }))}
-						onPick={(name) => writeQuestGivers([...questGiverRecords.map((g) => g.name), name])}
-					/>
-				</div>
-			) : null}
-
-			{isQuest ? (
-				<div className="loom-field">
-					<span className="loom-field-label">Received in session</span>
-					{questReceived && questReceived.type === 'session' ? (
-						sessionChip(questReceived, () => setQuestSession('questReceived', null))
-					) : (
+				<div className="loom-quest-grid">
+					<div className="loom-field loom-quest-givers">
+						<span className="loom-field-label">Quest givers</span>
 						<SearchableSelect
-							placeholder="Pick the session…"
-							options={sessionsByDate.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
-							onPick={(name) => setQuestSession('questReceived', name)}
+							placeholder="Add a quest giver…"
+							options={characters
+								.filter((c) => !questGiverRecords.some((g) => g.path === c.path))
+								.sort((a, b) => a.name.localeCompare(b.name))
+								.map((c) => ({ value: c.name, label: c.name }))}
+							onPick={(name) => writeQuestGivers([...questGiverRecords.map((g) => g.name), name])}
 						/>
-					)}
+						{questGiverRecords.length > 0 ? (
+							<div className="loom-tag-row">
+								{questGiverRecords.map((c) => (
+									<span key={c.path} className="loom-chip loom-session-chip">
+										{c.name}
+										<button
+											className="loom-chip-remove"
+											aria-label="Remove quest giver"
+											onClick={() =>
+												writeQuestGivers(
+													questGiverRecords.filter((o) => o.path !== c.path).map((o) => o.name)
+												)
+											}
+										>
+											✕
+										</button>
+									</span>
+								))}
+							</div>
+						) : null}
+					</div>
+					<div className="loom-quest-right">
+						<div className="loom-quest-sessions">
+							<div className="loom-field">
+								<span className="loom-field-label">Received in session</span>
+								{questReceived && questReceived.type === 'session' ? (
+									sessionChip(questReceived, () => setQuestSession('questReceived', null))
+								) : (
+									<SearchableSelect
+										placeholder="Pick the session…"
+										options={sessionsByDate.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+										onPick={(name) => setQuestSession('questReceived', name)}
+									/>
+								)}
+							</div>
+							{record.questOutcome !== '' ? (
+								<div className="loom-field">
+									<span className="loom-field-label">
+										{record.questOutcome[0].toUpperCase() + record.questOutcome.slice(1)} in session
+									</span>
+									{questOutcomeSession && questOutcomeSession.type === 'session' ? (
+										sessionChip(questOutcomeSession, () => setQuestSession('questOutcomeSession', null))
+									) : (
+										<SearchableSelect
+											placeholder="Pick the session…"
+											options={sessionsByDate.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+											onPick={(name) => setQuestSession('questOutcomeSession', name)}
+										/>
+									)}
+								</div>
+							) : null}
+							<label className="loom-field">
+								<span className="loom-field-label">Outcome</span>
+								<select value={record.questOutcome} onChange={(e) => setQuestOutcome(e.target.value)}>
+									<option value="">Active</option>
+									{QUEST_OUTCOMES.map((o) => (
+										<option key={o} value={o}>
+											{o[0].toUpperCase() + o.slice(1)}
+										</option>
+									))}
+								</select>
+							</label>
+						</div>
+						<label className="loom-field">
+							<span className="loom-field-label">Reward</span>
+							<input
+								type="text"
+								placeholder="Not specified"
+								value={reward}
+								onChange={(e) => setReward(e.target.value)}
+								onBlur={() =>
+									writeFm((fm) => {
+										fm.reward = reward;
+									})
+								}
+							/>
+						</label>
+					</div>
 				</div>
-			) : null}
-
-			{isQuest ? (
-				<label className="loom-field">
-					<span className="loom-field-label">Outcome</span>
-					<select value={record.questOutcome} onChange={(e) => setQuestOutcome(e.target.value)}>
-						<option value="">Active</option>
-						{QUEST_OUTCOMES.map((o) => (
-							<option key={o} value={o}>
-								{o[0].toUpperCase() + o.slice(1)}
-							</option>
-						))}
-					</select>
-				</label>
-			) : null}
-
-			{isQuest && record.questOutcome !== '' ? (
-				<div className="loom-field">
-					<span className="loom-field-label">
-						{record.questOutcome[0].toUpperCase() + record.questOutcome.slice(1)} in session
-					</span>
-					{questOutcomeSession && questOutcomeSession.type === 'session' ? (
-						sessionChip(questOutcomeSession, () => setQuestSession('questOutcomeSession', null))
-					) : (
-						<SearchableSelect
-							placeholder="Pick the session…"
-							options={sessionsByDate.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
-							onPick={(name) => setQuestSession('questOutcomeSession', name)}
-						/>
-					)}
-				</div>
-			) : null}
-
-			{isQuest ? (
-				<label className="loom-field">
-					<span className="loom-field-label">Reward</span>
-					<input
-						type="text"
-						placeholder="Not specified"
-						value={reward}
-						onChange={(e) => setReward(e.target.value)}
-						onBlur={() =>
-							writeFm((fm) => {
-								fm.reward = reward;
-							})
-						}
-					/>
-				</label>
 			) : null}
 
 			<label className="loom-field">
@@ -775,7 +881,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				<div className="loom-resizable">
 					<textarea
 						ref={descriptionRef}
-						rows={10}
+						rows={3}
 						value={description}
 						onChange={(e) => setDescription(e.target.value)}
 						onBlur={() =>
@@ -865,8 +971,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			<div className="loom-field loom-field-body">
 				<span className="loom-field-label">Notes</span>
 				<LinkTextarea
-					rows={10}
-					placeholder="Freeform notes. [[Wikilinks]] connect like in any other note."
+					rows={3}
 					value={body ?? ''}
 					names={linkNames}
 					textareaRef={notesRef}
@@ -876,6 +981,19 @@ function EntityPage({ view }: { view: EntityView }) {
 					}}
 				/>
 			</div>
+
+			{!isSession ? (
+				<div className="loom-field">
+					{sessionNotes.length > 0 ? <span className="loom-field-label">Session notes</span> : null}
+					{sessionNotes.map((note, i) => sessionNoteRow(note, i))}
+					<button
+						className="loom-rel-add"
+						onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '' }])}
+					>
+						+ Add a session note
+					</button>
+				</div>
+			) : null}
 
 			<div className="loom-field">
 				<span className="loom-field-label">Relationships</span>
