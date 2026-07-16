@@ -17,6 +17,7 @@ import {
 	LOOM_EXTENSION,
 	QUEST_OUTCOMES,
 	RelationshipDecl,
+	SessionNoteDecl,
 	TIMELINES_FOLDER,
 	TimelineDef,
 	isEntityType,
@@ -293,6 +294,19 @@ export class LoomIndexer extends Component {
 			}
 		}
 
+		const sessionNotes: SessionNoteDecl[] = [];
+		const rawSessionNotes = fmField(fm, 'sessionNotes');
+		if (Array.isArray(rawSessionNotes)) {
+			for (const note of rawSessionNotes) {
+				if (typeof note !== 'object' || note === null) continue;
+				const { session, text } = note as { session?: unknown; text?: unknown };
+				sessionNotes.push({
+					session: typeof session === 'string' ? extractLinkpath(session) : null,
+					text: typeof text === 'string' ? text : '',
+				});
+			}
+		}
+
 		// Sessions always track real-world dates; everything else follows the
 		// project's calendar (custom in-game calendar when enabled).
 		const calendar =
@@ -312,10 +326,8 @@ export class LoomIndexer extends Component {
 			loomTags: parseTagList(fmField(fm, 'loomTags') ?? fmField(fm, 'pluginTags')),
 			description: typeof fm.description === 'string' ? fm.description : '',
 			relationships,
+			sessionNotes,
 			date: parseLoomDate(fm.date, calendar, project.config),
-			// `linkedSession` accepts a single link or a list of links (an event
-			// can span several sessions); the key keeps its historical singular name.
-			linkedSessions: parseLinkList(fmField(fm, 'linkedSession')),
 			attendance: parseLinkList(fmField(fm, 'attendance')),
 			role: typeof fm.role === 'string' ? fm.role : '',
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
@@ -367,22 +379,10 @@ export class LoomIndexer extends Component {
 		return file ? this.records.get(file.path) ?? null : null;
 	}
 
-	/** The session records an event links to, deduplicated, possibly empty. */
-	resolveLinkedSessions(record: EntityRecord): EntityRecord[] {
-		const sessions: EntityRecord[] = [];
-		for (const linkpath of record.linkedSessions) {
-			const target = this.resolve(linkpath, record.path);
-			if (target?.type === 'session' && !sessions.some((s) => s.path === target.path)) {
-				sessions.push(target);
-			}
-		}
-		return sessions;
-	}
-
 	/**
-	 * Connections declared on the note: typed relationships, the linked
-	 * session, and plain [[wikilinks]] anywhere in the note (body or
-	 * frontmatter) that land on another indexed entity.
+	 * Connections declared on the note: typed relationships, sessions picked
+	 * for session notes, and plain [[wikilinks]] anywhere in the note (body
+	 * or frontmatter) that land on another indexed entity.
 	 */
 	getOutgoing(path: string): Connection[] {
 		const record = this.records.get(path);
@@ -396,10 +396,14 @@ export class LoomIndexer extends Component {
 				linked.add(target.path);
 			}
 		}
-		for (const session of this.resolveLinkedSessions(record)) {
-			if (linked.has(session.path)) continue;
-			out.push({ record: session, relType: 'session', direction: 'outgoing' });
-			linked.add(session.path);
+		// Before the generic wikilink pass so these keep their typed relType
+		// instead of degrading to a plain 'link'.
+		for (const note of record.sessionNotes) {
+			const target = note.session ? this.resolve(note.session, record.path) : null;
+			if (target?.type === 'session' && !linked.has(target.path)) {
+				out.push({ record: target, relType: 'session note', direction: 'outgoing' });
+				linked.add(target.path);
+			}
 		}
 		const file = this.app.vault.getFileByPath(path);
 		const cache = file ? this.app.metadataCache.getFileCache(file) : null;

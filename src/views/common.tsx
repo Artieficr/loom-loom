@@ -19,9 +19,11 @@ import type LoomLoomPlugin from '../main';
 export const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
 
 /**
- * Lets a textarea be resized by dragging anywhere along its bottom edge, not
- * just the browser's native bottom-right corner grip. Pairs with the
- * `.loom-resizable` / `.loom-resize-edge` CSS.
+ * Lets a textarea be resized by dragging its bottom edge. Pairs with the
+ * `.loom-resizable` / `.loom-resize-edge` CSS. Dragging is the manual act
+ * that turns auto-grow off for the element (see `autoGrowTextarea`) — only a
+ * manually squeezed box can end up smaller than its content and scroll.
+ * The smallest manual size is one line of text.
  */
 export function startTextareaResize(el: HTMLTextAreaElement | null, e: ReactMouseEvent): void {
 	if (!el) return;
@@ -29,8 +31,15 @@ export function startTextareaResize(el: HTMLTextAreaElement | null, e: ReactMous
 	const startY = e.clientY;
 	const startHeight = el.getBoundingClientRect().height;
 	const win = el.win;
+	const style = win.getComputedStyle(el);
+	const minHeight =
+		(parseFloat(style.lineHeight) || 24) +
+		(parseFloat(style.paddingTop) || 0) +
+		(parseFloat(style.paddingBottom) || 0) +
+		(el.offsetHeight - el.clientHeight);
+	el.dataset.loomManualHeight = '1';
 	const onMove = (ev: MouseEvent) => {
-		el.style.height = `${Math.max(60, startHeight + (ev.clientY - startY))}px`;
+		el.style.height = `${Math.max(minHeight, startHeight + (ev.clientY - startY))}px`;
 	};
 	const onUp = () => {
 		win.removeEventListener('mousemove', onMove);
@@ -38,6 +47,20 @@ export function startTextareaResize(el: HTMLTextAreaElement | null, e: ReactMous
 	};
 	win.addEventListener('mousemove', onMove);
 	win.addEventListener('mouseup', onUp);
+}
+
+/**
+ * Auto-grows a textarea to fit its content so scrolling never occurs
+ * naturally: height tracks the content, with the `rows` attribute as the
+ * floor. Once the box has been resized manually (drag on the resize edge, or
+ * a remembered height from an earlier session), auto-grow stays off for it.
+ */
+export function autoGrowTextarea(el: HTMLTextAreaElement | null): void {
+	if (!el || el.dataset.loomManualHeight === '1') return;
+	// Collapse to the natural (rows-attribute) height to measure the content,
+	// then grow to it; the offset/client difference re-adds the borders.
+	el.setCssProps({ height: 'auto' });
+	el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
 }
 
 /**
@@ -79,11 +102,17 @@ export function useBoxSizeMemory(
 		const el = ref.current;
 		if (!el) return;
 		const saved = plugin.settings.entityBoxSizes[filePath]?.[fieldKey];
-		if (saved) el.style.height = `${saved}px`;
+		if (saved) {
+			el.style.height = `${saved}px`;
+			// A remembered height was set manually — keep auto-grow off for it.
+			el.dataset.loomManualHeight = '1';
+		}
 
 		// getBoundingClientRect (not the observer's own contentRect) so the
 		// read matches the border-box height startTextareaResize writes.
+		// Auto-grow height changes are not remembered — only manual ones.
 		const observer = new ResizeObserver(() => {
+			if (el.dataset.loomManualHeight !== '1') return;
 			const height = Math.round(el.getBoundingClientRect().height);
 			if (height > 0) persist(height);
 		});

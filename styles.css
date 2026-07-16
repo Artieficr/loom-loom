@@ -580,11 +580,34 @@ body.loom-text-large {
 /* ---- graph side panel ---- */
 
 .loom-sidepanel {
+	position: relative;
 	width: 260px;
 	flex-shrink: 0;
-	overflow-y: auto;
 	border-left: 1px solid var(--background-modifier-border);
+}
+
+/* The scrollable content lives one level in, so the resize grip spans the
+   panel's full visible height regardless of scroll position. */
+.loom-sidepanel-scroll {
+	height: 100%;
+	overflow-y: auto;
 	padding: var(--size-4-3);
+}
+
+/* Resize grip along the panel's left edge (min width = the original 260px). */
+.loom-sidepanel-handle {
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: var(--size-2-3);
+	cursor: col-resize;
+	z-index: 1;
+}
+
+.loom-sidepanel-handle:hover {
+	background: var(--interactive-accent-hover);
+	opacity: 0.4;
 }
 
 .loom-sidepanel-header {
@@ -900,6 +923,13 @@ body.loom-text-large {
 	font-weight: var(--font-semibold);
 }
 
+/* "Reset order" under the entity-layer rows: right-aligned, no row frame. */
+.loom-layer-reset {
+	display: flex;
+	justify-content: flex-end;
+	padding-top: var(--size-4-2);
+}
+
 .loom-reset-btn {
 	background: none;
 	border: none;
@@ -995,10 +1025,17 @@ body.loom-text-large {
 }
 
 /* Wrap a resizable textarea so `.loom-resize-edge` can overlay its bottom
-   edge — the native corner grip stays too, this just widens the grabbable
-   area to the whole edge instead of only the bottom-right corner. */
+   edge. These boxes auto-grow to fit their content, so the native corner
+   grip is disabled — its resizes couldn't be told apart from auto-grow, and
+   the edge drag is the one manual override (which also turns auto-grow off). */
 .loom-resizable {
 	position: relative;
+}
+
+.loom-resizable textarea,
+.loom-link-textarea textarea {
+	resize: none;
+	overflow-y: auto;
 }
 
 .loom-resize-edge {
@@ -1074,6 +1111,11 @@ body.loom-text-large {
 	margin-left: var(--size-4-2);
 }
 
+/* Breathing room between relationship rows sharing one type group. */
+.loom-rel-group .loom-rel-row + .loom-rel-row {
+	margin-top: var(--size-4-2);
+}
+
 /* Rows whose target doesn't resolve yet (e.g. a freshly added empty row) sit
    apart from the grouped ones until they land in their section. */
 .loom-rel-group + .loom-rel-ungrouped {
@@ -1128,6 +1170,105 @@ body.loom-text-large {
 
 .loom-rel-add {
 	align-self: flex-start;
+}
+
+/* Quest page: givers left of a full-height separator (border on the right
+   column, so it stretches with whichever side grows), sessions/outcome row
+   plus reward on the right. */
+.loom-quest-grid {
+	display: flex;
+	align-items: stretch;
+	gap: var(--size-4-4);
+}
+
+.loom-quest-givers {
+	flex: 0 0 30%;
+	min-width: 0;
+}
+
+.loom-quest-right {
+	flex: 1;
+	min-width: 0;
+	border-left: 1px solid var(--background-modifier-border);
+	padding-left: var(--size-4-4);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-3);
+}
+
+.loom-quest-sessions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-4);
+}
+
+.loom-quest-sessions > .loom-field {
+	min-width: 160px;
+}
+
+/* Received/completed session chips match one-line text boxes in height
+   (quest-giver chips deliberately stay the smaller size). */
+.loom-quest-sessions .loom-tag-row .loom-session-chip {
+	height: var(--input-height);
+	padding: 0 var(--size-4-2);
+}
+
+/* Session notes: session picker/chip in a header row (remove button at its
+   right edge), the note text below using the full width. */
+.loom-note-row {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+.loom-note-head {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
+/* Default size = the old 15% column grown by 10%; the content decides beyond
+   that — a date that wouldn't fit widens the frame (fit-content) instead of
+   cutting off, but it never shrinks below the default. Because fit-content
+   follows the rendered text, the text-size setting (compact/normal/large)
+   can't cause cut-offs either. */
+.loom-note-session {
+	flex: 0 0 auto;
+	width: fit-content;
+	min-width: max(16.5%, 121px);
+}
+
+.loom-note-remove {
+	margin-left: auto;
+}
+
+.loom-note-session .loom-combo {
+	width: 100%;
+}
+
+/* width 0 + min-width 100% zeroes the input's intrinsic width, so the
+   unpicked "Pick a session…" box sits at exactly the frame's default size —
+   the same footprint the picked date chip gets. */
+.loom-note-session .loom-combo input {
+	width: 0;
+	min-width: 100%;
+}
+
+/* The picked session keeps the proportions of the picker it replaces: a
+   full-width, one-line-input-height box with the ✕ on its right edge, at
+   regular text size rather than chip size. */
+.loom-note-session .loom-tag-row .loom-session-chip {
+	width: 100%;
+	height: var(--input-height);
+	padding: 0 var(--size-4-2);
+	justify-content: space-between;
+	overflow: hidden;
+	font-size: 1em;
+}
+
+.loom-note-text {
+	flex: 1;
+	min-width: 0;
 }
 
 .loom-link-textarea {

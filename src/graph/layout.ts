@@ -1,4 +1,5 @@
-import { EntityRecord, EntityType } from '../types';
+import { EntityRecord, EntityType, SUBLOCATION_REL } from '../types';
+import { formatLoomDate } from '../calendar';
 import { TimelineColumn, buildColumns } from '../columns';
 import { LoomIndexer } from '../indexer';
 import { EdgeRoute, LANE_EPSILON, RoutedEdge } from './routing';
@@ -32,6 +33,9 @@ const EVENT_DY = 90;
 const GLOBAL_MIN_SPACING = 130;
 /** Min horizontal distance (px) between a multi-session event and other nodes in its row. */
 const MULTI_CLEARANCE = 100;
+/** Sublocation grid width: a parent's sublocations sit SUB_COLS wide under
+ *  it, wrapping to further rows (the 5th starts row two, the 9th row three…). */
+const SUB_COLS = 4;
 
 /** Default/minimum distance between parallel vertical trunk lanes —
  *  overridable per call via `computeGraphLayout`'s `trunkGap` (settings.graphTrunkGap). */
@@ -43,8 +47,26 @@ const Y_GAP = 10;
 const CORRIDOR_PAD = 35;
 /** Horizontal spread between neighboring diagonal fan entries into one node. */
 const FAN_GAP = 14;
-/** Max |fanOffset| so wide fans don't reach into row neighbors. */
+/** Half-width of the space one node side offers its fan — wider fans would
+ *  reach into row neighbors. */
 const FAN_MAX = 55;
+/** Connections that fit on one node side without overlapping (spaced FAN_GAP
+ *  across the side's 2×FAN_MAX). Beyond this the side is full: the spread
+ *  compresses evenly across the available width and overlap is accepted. */
+const FAN_CAP = Math.floor((2 * FAN_MAX) / FAN_GAP) + 1;
+/** Fan spacing for `n` connections on one side: full FAN_GAP while they fit,
+ *  evenly compressed once the side's capacity is exceeded. */
+const fanStep = (n: number) => (n <= FAN_CAP ? FAN_GAP : (2 * FAN_MAX) / (n - 1));
+/** y drop from a node's center to the top of its outgoing trunks — the exit
+ *  diagonals end here (mirror of APPROACH_BOTTOM on the entry side). */
+const DEPART_DROP = 36;
+/** Average glyph width as a fraction of the label font size — used to
+ *  estimate label pixel widths for the checker pass. */
+const LABEL_CHAR_W = 0.58;
+/** Node labels render truncated to this many characters (see graph-view). */
+const LABEL_MAX_CHARS = 24;
+/** Horizontal breathing room between two neighboring labels (px). */
+const LABEL_PAD = 8;
 /** x clearance a trunk keeps from any node center it passes. */
 const TRUNK_CLEAR = 26;
 /** Minimum height of the band between two rows (the old globals gap). */
@@ -77,7 +99,7 @@ interface Placement {
 	layers: LayoutNode[][];
 }
 
-type EdgeKind = 'direct' | 'orth' | 'toLower' | 'rowU';
+type EdgeKind = 'direct' | 'fan' | 'rowU';
 
 interface CEdge {
 	upper: LayoutNode;
@@ -91,9 +113,13 @@ interface CEdge {
 	uBand: number;
 	corridor: number | null;
 	laneX: number;
+	departY: number;
 	approachY: number;
 	fanOffset: number;
 	uY: number;
+	/** rowU turn-point x offsets relative to each endpoint. */
+	uOffUpper: number;
+	uOffLower: number;
 	needsRun: boolean;
 }
 
@@ -110,8 +136,10 @@ interface CEdge {
  * Edges are routed orthogonally (see routing.ts): trunk lanes live in the
  * corridors between columns, which widen to fit their lane count (`the
  * "spread branching-heavy columns" rule`); horizontal runs and same-row U
- * shapes get per-edge y-lanes in the bands between rows; the lower endpoint
- * of every cross-row edge is entered by a diagonal fan segment.
+ * shapes get per-edge y-lanes in the bands between rows; both endpoints of
+ * every cross-row edge attach with a diagonal fan segment (unified angled
+ * style), spread across the node side up to its capacity (FAN_CAP) and
+ * compressed into overlap beyond it.
  */
 export function computeGraphLayout(
 	indexer: LoomIndexer,
@@ -124,7 +152,10 @@ export function computeGraphLayout(
 	 *  x). Connected nodes ignore it — their connection forces win. */
 	manualX?: ReadonlyMap<string, number>,
 	/** Min distance (px) between parallel vertical trunk lines. */
-	trunkGap: number = LANE_GAP
+	trunkGap: number = LANE_GAP,
+	/** Node-label font size (px) under the current text-size setting — label
+	 *  overlap estimates (the checker pass) scale with it. */
+	labelFontPx: number = 12.8
 ): GraphLayout {
 	const { raw, neighbors } = collectEdges(indexer, projectRoot);
 
@@ -137,6 +168,18 @@ export function computeGraphLayout(
 	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX);
 	const classified = classifyEdges(raw, placed);
 	const bottom = routeEdges(classified, placed, lineGap, trunkGap);
+
+	// Checker pass (after routing, so row membership and bands were computed
+	// from the flat rows): row neighbors whose labels would overlap alternate
+	// slightly above/below their row; nodes with enough room stay put.
+	const projectDef = indexer.getProjectByRoot(projectRoot);
+	const labelOf = (r: EntityRecord) =>
+		r.type === 'session' && r.date && projectDef ? formatLoomDate(r.date, projectDef.config) : r.name;
+	applyLabelChecker([...placed.nodes.values()], labelOf, labelFontPx);
+	// Exit diagonals follow their node onto its staggered y.
+	for (const e of classified) {
+		if (e.kind === 'fan') e.departY = e.upper.y + DEPART_DROP;
+	}
 
 	const allNodes = [...placed.nodes.values()];
 	const width = allNodes.reduce((m, n) => Math.max(m, n.x), 0) + MARGIN_X;
@@ -155,12 +198,16 @@ function toRoute(e: CEdge): EdgeRoute {
 	switch (e.kind) {
 		case 'direct':
 			return { kind: 'direct' };
-		case 'orth':
-			return { kind: 'orth', laneX: e.laneX };
-		case 'toLower':
-			return { kind: 'toLower', laneX: e.laneX, approachY: e.approachY, fanOffset: e.fanOffset };
+		case 'fan':
+			return {
+				kind: 'fan',
+				laneX: e.laneX,
+				departY: e.departY,
+				approachY: e.approachY,
+				fanOffset: e.fanOffset,
+			};
 		case 'rowU':
-			return { kind: 'rowU', uY: e.uY };
+			return { kind: 'rowU', uY: e.uY, offA: e.uOffUpper, offB: e.uOffLower };
 	}
 }
 
@@ -279,12 +326,13 @@ function placeNodes(
 		}
 	});
 
-	// Multi-session events: mean x of their session columns, dropped to the
-	// first stack row with enough horizontal clearance from what's already there.
+	// Multi-session events: centered between their earliest and latest session
+	// columns, dropped to the first stack row with enough horizontal clearance
+	// from what's already there.
 	for (const { record, xs } of [...multi.values()].sort((a, b) =>
 		a.record.name.localeCompare(b.record.name)
 	)) {
-		const x = xs.reduce((s, v) => s + v, 0) / xs.length;
+		const x = (Math.min(...xs) + Math.max(...xs)) / 2;
 		let row = 0;
 		while ((rows[row] ?? []).some((ox) => Math.abs(ox - x) < MULTI_CLEARANCE)) row++;
 		nodes.set(record.path, {
@@ -300,10 +348,24 @@ function placeNodes(
 	}
 
 	// Free events: manual spot if dragged there, otherwise packed after the
-	// last column so they group at the row's right edge.
+	// last column so they group at the row's right edge. Either way they are
+	// repelled out of overlaps — a dragged spot can land on a column anchor,
+	// a stacked event, or another free event.
 	const lastColX = colX.length > 0 ? colX[colX.length - 1] : MARGIN_X - COL_WIDTH;
-	freeEvents.forEach((record, i) => {
-		const x = manualX?.get(record.path) ?? lastColX + COL_WIDTH * (i + 1);
+	const placedFree = freeEvents
+		.map((record, i) => ({
+			record,
+			x: manualX?.get(record.path) ?? lastColX + COL_WIDTH * (i + 1),
+		}))
+		.sort((a, b) => a.x - b.x);
+	for (const { record, x: desired } of placedFree) {
+		let x = desired;
+		const taken = rows[0] ?? [];
+		for (let guard = 0; guard < 40; guard++) {
+			const hit = taken.find((ox) => Math.abs(ox - x) < MULTI_CLEARANCE);
+			if (hit === undefined) break;
+			x = hit + (x >= hit ? MULTI_CLEARANCE : -MULTI_CLEARANCE);
+		}
 		nodes.set(record.path, {
 			id: record.path,
 			record,
@@ -314,14 +376,46 @@ function placeNodes(
 		});
 		colOf.set(record.path, nearestColumn(colX, x));
 		occupy(0, x);
-	});
+	}
 
 	const eventsBottom = EVENT_Y0 + Math.max(maxStack, 1) * EVENT_DY;
 
 	// Global layers: one row per (non-empty) type in the configured order.
-	const layerRecords = layerOrder
-		.map((t) => indexer.getAll(t, projectRoot).sort((a, b) => a.name.localeCompare(b.name)))
-		.filter((rs) => rs.length > 0);
+	// Sublocations — locations declaring a `sublocation of` relationship to
+	// another location — leave the locations row: they form a grid of rows
+	// right under it, built after the relaxation once parents have an x.
+	const parentOf = new Map<string, string>();
+	for (const loc of indexer.getAll('location', projectRoot)) {
+		for (const rel of loc.relationships) {
+			if (rel.type.trim().toLowerCase() !== SUBLOCATION_REL) continue;
+			const target = indexer.resolve(rel.linkpath, loc.path);
+			if (target?.type === 'location' && target.path !== loc.path && target.project === projectRoot) {
+				parentOf.set(loc.path, target.path);
+				break;
+			}
+		}
+	}
+	// Each sublocation clusters under its nearest ancestor that sits in the
+	// locations row itself (nested sublocations flatten into one grid); parent
+	// cycles fall back to the ordinary row.
+	const subRoot = new Map<string, string>();
+	for (const path of parentOf.keys()) {
+		let cur = path;
+		for (let guard = 0; guard < 20 && parentOf.has(cur); guard++) {
+			cur = parentOf.get(cur) ?? cur;
+		}
+		if (!parentOf.has(cur)) subRoot.set(path, cur);
+	}
+	const layerRows = layerOrder
+		.map((type) => ({
+			type,
+			records: indexer
+				.getAll(type, projectRoot)
+				.filter((r) => !subRoot.has(r.path))
+				.sort((a, b) => a.name.localeCompare(b.name)),
+		}))
+		.filter((row) => row.records.length > 0);
+	const layerRecords = layerRows.map((row) => row.records);
 
 	// Per-row 1D force relaxation. Connected globals are pulled to the mean x
 	// of their neighbors (timeline nodes are fixed anchors, other globals use
@@ -335,6 +429,27 @@ function placeNodes(
 	const allGlobals = layerRecords.flat();
 	const est = new Map<string, number>();
 	const isConnected = (path: string) => (neighbors.get(path)?.size ?? 0) > 0;
+
+	// Quests respect their session fields above all other connections: a quest
+	// sits under the session it was received in; once an outcome session is
+	// set, it centers between the received and outcome sessions. Anchored
+	// quests are re-pinned every pass, so other connections and manual drags
+	// never pull them away (the row's min-spacing sweep still applies).
+	const questAnchor = new Map<string, number>();
+	for (const g of allGlobals) {
+		if (g.type !== 'quest') continue;
+		const sessionX = (lp: string | null): number | undefined => {
+			const target = lp !== null ? indexer.resolve(lp, g.path) : null;
+			return target?.type === 'session' ? nodes.get(target.path)?.x : undefined;
+		};
+		const received = sessionX(g.questReceived);
+		const outcome = sessionX(g.questOutcomeSession);
+		const anchor =
+			received !== undefined && outcome !== undefined
+				? (received + outcome) / 2
+				: received ?? outcome;
+		if (anchor !== undefined) questAnchor.set(g.path, anchor);
+	}
 
 	// Connected components over globals. A component is "anchored" when any
 	// member links to a placed timeline node. Manual (drag-reorder) positions
@@ -372,11 +487,21 @@ function placeNodes(
 	for (const rs of layerRecords) {
 		const spread = (rs.length - 1) * GLOBAL_MIN_SPACING;
 		rs.forEach((g, i) => {
-			est.set(g.path, manualX?.get(g.path) ?? centerX - spread / 2 + i * GLOBAL_MIN_SPACING);
+			est.set(
+				g.path,
+				questAnchor.get(g.path) ??
+					manualX?.get(g.path) ??
+					centerX - spread / 2 + i * GLOBAL_MIN_SPACING
+			);
 		});
 	}
 	for (let pass = 0; pass < 40; pass++) {
 		for (const g of allGlobals) {
+			const anchor = questAnchor.get(g.path);
+			if (anchor !== undefined) {
+				est.set(g.path, anchor);
+				continue;
+			}
 			if (!isConnected(g.path)) continue;
 			const xs: number[] = [];
 			for (const n of neighbors.get(g.path) ?? []) {
@@ -401,26 +526,117 @@ function placeNodes(
 		for (const rs of layerRecords) resolveRowOverlaps(rs, est);
 	}
 
-	const layers: LayoutNode[][] = layerRecords.map((rs, layerIdx) => {
-		const ordered = [...rs].sort((a, b) => (est.get(a.path) ?? 0) - (est.get(b.path) ?? 0));
-		const row: LayoutNode[] = [];
-		for (const g of ordered) {
+	// Sublocation grid: one cluster per parent, SUB_COLS wide and wrapping to
+	// further rows, centered under the parent's relaxed position. Clusters
+	// sharing a grid row sweep right so they never overlap.
+	const subRowEntries: { record: EntityRecord; x: number }[][] = [];
+	if (subRoot.size > 0) {
+		const clusters = new Map<string, EntityRecord[]>();
+		for (const [path, root] of subRoot) {
+			const rec = indexer.get(path);
+			if (!rec) continue;
+			if (!clusters.has(root)) clusters.set(root, []);
+			clusters.get(root)?.push(rec);
+		}
+		const orderedClusters = [...clusters.entries()].sort(
+			(a, b) => (est.get(a[0]) ?? centerX) - (est.get(b[0]) ?? centerX)
+		);
+		for (const [root, members] of orderedClusters) {
+			members.sort((a, b) => a.name.localeCompare(b.name));
+			const px = est.get(root) ?? centerX;
+			const w = Math.min(members.length, SUB_COLS);
+			members.forEach((m, i) => {
+				const col = i % SUB_COLS;
+				const gridRow = Math.floor(i / SUB_COLS);
+				(subRowEntries[gridRow] ??= []).push({
+					record: m,
+					x: px + (col - (w - 1) / 2) * GLOBAL_MIN_SPACING,
+				});
+			});
+		}
+		for (const row of subRowEntries) {
+			row.sort((a, b) => a.x - b.x);
+			let cursor = MARGIN_X;
+			for (const entry of row) {
+				entry.x = Math.max(entry.x, cursor);
+				cursor = entry.x + GLOBAL_MIN_SPACING;
+			}
+		}
+	}
+
+	const finalRows: { record: EntityRecord; x: number }[][] = [];
+	for (const { type, records: rs } of layerRows) {
+		finalRows.push(
+			[...rs]
+				.sort((a, b) => (est.get(a.path) ?? 0) - (est.get(b.path) ?? 0))
+				.map((g) => ({ record: g, x: est.get(g.path) ?? centerX }))
+		);
+		if (type === 'location') finalRows.push(...subRowEntries);
+	}
+	// Safety net: grid rows still need a home if the locations row vanished.
+	if (subRowEntries.length > 0 && !layerRows.some((r) => r.type === 'location')) {
+		finalRows.push(...subRowEntries);
+	}
+
+	const layers: LayoutNode[][] = finalRows.map((entries, layerIdx) =>
+		entries.map(({ record, x }) => {
 			// y is provisional; routeEdges sizes the bands and sets the real row y.
 			const node: LayoutNode = {
-				id: g.path,
-				record: g,
-				x: est.get(g.path) ?? centerX,
+				id: record.path,
+				record,
+				x,
 				y: eventsBottom + MIN_BAND * (layerIdx + 1),
 				kind: 'global',
 				zone: layerIdx + 1,
 			};
-			nodes.set(g.path, node);
-			row.push(node);
-		}
-		return row;
-	});
+			nodes.set(record.path, node);
+			return node;
+		})
+	);
 
 	return { nodes, colX, colOf, eventsBottom, layers };
+}
+
+/**
+ * Staggers row neighbors whose labels would overlap into a checkers pattern:
+ * within each run of consecutive overlapping labels, nodes alternate slightly
+ * above and below the row line, so neighboring names land on different lines.
+ * Nodes whose labels fit stay exactly on their row. Label widths are
+ * estimated from `labelFontPx`, so the pattern follows the text-size setting;
+ * the stagger amplitude scales with it too (two staggered labels must clear
+ * one line height between them).
+ */
+function applyLabelChecker(
+	nodes: LayoutNode[],
+	labelOf: (record: EntityRecord) => string,
+	labelFontPx: number
+): void {
+	const rows = new Map<number, LayoutNode[]>();
+	for (const n of nodes) {
+		const key = Math.round(n.y);
+		if (!rows.has(key)) rows.set(key, []);
+		rows.get(key)?.push(n);
+	}
+	const halfWidth = (n: LayoutNode) =>
+		(Math.min(labelOf(n.record).length, LABEL_MAX_CHARS) * LABEL_CHAR_W * labelFontPx + LABEL_PAD) / 2;
+	const delta = Math.round(labelFontPx * 0.75);
+	for (const row of rows.values()) {
+		if (row.length < 2) continue;
+		row.sort((a, b) => a.x - b.x);
+		let runStart = 0;
+		for (let i = 1; i <= row.length; i++) {
+			const overlapsPrev =
+				i < row.length && row[i].x - row[i - 1].x < halfWidth(row[i]) + halfWidth(row[i - 1]);
+			if (overlapsPrev) continue;
+			// [runStart, i) is a maximal overlap run; stagger it (runs of one stay flat).
+			if (i - runStart > 1) {
+				for (let j = runStart; j < i; j++) {
+					row[j].y += (j - runStart) % 2 === 0 ? -delta : delta;
+				}
+			}
+			runStart = i;
+		}
+	}
 }
 
 /**
@@ -485,9 +701,12 @@ function classifyEdges(raw: RawEdge[], placement: Placement): CEdge[] {
 			uBand: 0,
 			corridor: null,
 			laneX: 0,
+			departY: 0,
 			approachY: 0,
 			fanOffset: 0,
 			uY: 0,
+			uOffUpper: 0,
+			uOffLower: 0,
 			needsRun: false,
 		};
 		const swapEnds = () => {
@@ -509,13 +728,13 @@ function classifyEdges(raw: RawEdge[], placement: Placement): CEdge[] {
 				e.kind =
 					Math.abs(na.x - nb.x) < 1 && !blockedBetween(placement, e.upper, e.lower)
 						? 'direct'
-						: 'orth';
+						: 'fan';
 			}
 		} else {
 			if (na.zone > nb.zone) swapEnds();
-			e.kind = 'toLower';
+			e.kind = 'fan';
 		}
-		if (e.kind === 'orth' || e.kind === 'toLower') {
+		if (e.kind === 'fan') {
 			// Trunks from timeline nodes live in the corridor beside the source
 			// column, on the side facing the target; trunks from global nodes
 			// hug the node instead (assigned in routeEdges).
@@ -584,25 +803,51 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number, trunkGap
 	// Trunks leaving a global node (cross-layer edges): hug the node's side
 	// facing the target.
 	for (const e of edges) {
-		if (e.kind === 'toLower' && e.upper.zone > 0) {
+		if (e.kind === 'fan' && e.upper.zone > 0) {
 			e.laneX = e.upper.x + (e.lower.x >= e.upper.x ? 1 : -1) * (TRUNK_CLEAR + 3);
 		}
 	}
 
-	// --- Diagonal fans ---------------------------------------------------------
+	// --- Exit diagonals ----------------------------------------------------------
+	// Every fan edge leaves its upper node with a diagonal to the trunk top;
+	// trunks always sit beside the source column (or hug a global's side), so
+	// one node's exits spread naturally across its trunk lanes — no run needed.
+	for (const e of edges) {
+		if (e.kind === 'fan') e.departY = e.upper.y + DEPART_DROP;
+	}
+
+	// --- Entry diagonals (fans) --------------------------------------------------
 	const byTarget = new Map<string, CEdge[]>();
 	for (const e of edges) {
-		if (e.kind !== 'toLower') continue;
+		if (e.kind !== 'fan') continue;
 		if (!byTarget.has(e.lower.id)) byTarget.set(e.lower.id, []);
 		byTarget.get(e.lower.id)?.push(e);
 	}
 	for (const group of byTarget.values()) {
 		group.sort((p, q) => p.laneX - q.laneX);
+		// The node side's space first, overlap only once it's full: FAN_GAP
+		// spacing while the fan fits, evenly compressed across ±FAN_MAX beyond.
+		const step = fanStep(group.length);
 		group.forEach((e, j) => {
-			const off = (j - (group.length - 1) / 2) * FAN_GAP;
-			e.fanOffset = Math.max(-FAN_MAX, Math.min(FAN_MAX, off));
+			e.fanOffset = (j - (group.length - 1) / 2) * step;
 			e.needsRun = Math.abs(e.lower.x + e.fanOffset - e.laneX) > LANE_EPSILON;
 		});
+	}
+
+	// Approaches into timeline nodes (cross-column session/event edges — the
+	// old orthogonal Z, now fanned like everything else): base line just above
+	// the target, each run in its own lane; farther trunks first (= lower
+	// lane) for the same reason as the band runs below.
+	for (const group of byTarget.values()) {
+		const target = group[0].lower;
+		if (target.zone !== 0) continue;
+		for (const e of group) e.approachY = target.y - APPROACH_BOTTOM;
+		group
+			.filter((e) => e.needsRun)
+			.sort((p, q) => Math.abs(q.laneX - q.lower.x) - Math.abs(p.laneX - p.lower.x))
+			.forEach((e, j) => {
+				e.approachY = target.y - APPROACH_BOTTOM - (j + 1) * yGap;
+			});
 	}
 
 	// --- Bands & row y ---------------------------------------------------------
@@ -611,7 +856,7 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number, trunkGap
 	// the last band (below the bottom row) holds only U lanes.
 	const uOf = (band: number) => edges.filter((e) => e.kind === 'rowU' && e.uBand === band);
 	const approachesOf = (layer: number) =>
-		edges.filter((e) => e.kind === 'toLower' && e.lower.zone === layer + 1);
+		edges.filter((e) => e.kind === 'fan' && e.lower.zone === layer + 1);
 
 	// Sessions-row U lanes live above the top row and don't affect band sizing.
 	uOf(-1)
@@ -660,13 +905,39 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number, trunkGap
 		bandTop = rowY;
 	}
 
+	// --- Angled U ends -----------------------------------------------------------
+	// rowU turn points fan across each node's side exactly like entry fans:
+	// FAN_GAP apart while the side has room, evenly compressed beyond its
+	// capacity. Sorted by the far endpoint so left-bound Us lean left.
+	const uEnds = new Map<string, { e: CEdge; upperEnd: boolean; otherX: number }[]>();
+	for (const e of edges) {
+		if (e.kind !== 'rowU') continue;
+		for (const upperEnd of [true, false]) {
+			const node = upperEnd ? e.upper : e.lower;
+			const other = upperEnd ? e.lower : e.upper;
+			if (!uEnds.has(node.id)) uEnds.set(node.id, []);
+			uEnds.get(node.id)?.push({ e, upperEnd, otherX: other.x });
+		}
+	}
+	for (const ends of uEnds.values()) {
+		ends.sort((p, q) => p.otherX - q.otherX);
+		const step = fanStep(ends.length);
+		ends.forEach((end, j) => {
+			const off = (j - (ends.length - 1) / 2) * step;
+			if (end.upperEnd) end.e.uOffUpper = off;
+			else end.e.uOffLower = off;
+		});
+	}
+
 	// --- Trunk collision pass ----------------------------------------------------
 	// A trunk spanning several rows must not run through nodes it passes;
 	// nudge sideways until clear (labels excluded — only circle bodies count).
 	const allNodes = [...placement.nodes.values()];
-	const verts = edges.filter((e) => e.kind === 'orth' || e.kind === 'toLower');
+	const verts = edges.filter((e) => e.kind === 'fan');
 	const spanTopOf = (e: CEdge) => e.upper.y + 1;
-	const spanBottomOf = (e: CEdge) => (e.kind === 'toLower' ? e.approachY : e.lower.y) - 1;
+	const spanBottomOf = (e: CEdge) => e.approachY - 1;
+	const spansOverlap = (p: CEdge, q: CEdge) =>
+		Math.min(spanBottomOf(p), spanBottomOf(q)) - Math.max(spanTopOf(p), spanTopOf(q)) >= 8;
 	const clearNodes = () => {
 		for (const e of verts) {
 			const spanTop = spanTopOf(e);
@@ -677,7 +948,22 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number, trunkGap
 			for (let guard = 0; guard < 24; guard++) {
 				const hit = blockers.find((n) => Math.abs(e.laneX - n.x) < TRUNK_CLEAR);
 				if (!hit) break;
-				e.laneX = hit.x + (e.laneX >= hit.x ? TRUNK_CLEAR : -TRUNK_CLEAR);
+				const dir = e.laneX >= hit.x ? 1 : -1;
+				let x = hit.x + dir * TRUNK_CLEAR;
+				// Step past lanes already taken by trunks sharing this y-span —
+				// clamping every passer-by to exactly node.x ± TRUNK_CLEAR used
+				// to stack them on one lane, and the separation pass below then
+				// pushed one back into the node's clearance, clamping it onto
+				// the shared lane again (an oscillation that always ended with
+				// two coincident verticals).
+				for (let step = 0; step < 24; step++) {
+					const taken = verts.some(
+						(o) => o !== e && Math.abs(o.laneX - x) < trunkGap && spansOverlap(o, e)
+					);
+					if (!taken) break;
+					x += dir * trunkGap;
+				}
+				e.laneX = x;
 			}
 		}
 	};

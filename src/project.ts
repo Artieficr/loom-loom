@@ -124,7 +124,6 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	];
 	if (type === 'character') lines.push('role: ""', 'alive: true');
 	if (type === 'event' || type === 'session') lines.push(`date: ${yamlQuote(fields.date)}`);
-	if (type === 'event') lines.push('linkedSession: []');
 	if (type === 'session') lines.push('attendance: []');
 	if (type === 'quest') {
 		const link = (name?: string) => (name && name !== '' ? yamlQuote(`[[${name}]]`) : '""');
@@ -170,12 +169,13 @@ export interface CreateEntityOptions {
 	/** When set, called with the new file instead of opening its entity page. */
 	onCreated?: (file: TFile) => void;
 	/**
-	 * When set, the modal also prompts for a relationship comment and the new
-	 * entity is created already connected to this record (the new note declares
-	 * the relationship). The entity page is not opened afterwards — the caller's
-	 * view (e.g. the graph) shows the new connection in place.
+	 * When set, the new entity is created already connected to this record (the
+	 * new note declares the relationship). Without `relType` the modal prompts
+	 * for a relationship comment; with it the identifier is fixed and no prompt
+	 * is shown (e.g. "New sublocation" always declares `sublocation of`). The
+	 * entity page is not opened afterwards unless the caller's `onCreated` does.
 	 */
-	connectTo?: { record: EntityRecord; label: string };
+	connectTo?: { record: EntityRecord; label: string; relType?: string };
 }
 
 export class CreateEntityModal extends Modal {
@@ -289,7 +289,7 @@ export class CreateEntityModal extends Modal {
 		}
 
 		const connectTo = this.options.connectTo;
-		if (connectTo) {
+		if (connectTo && connectTo.relType === undefined) {
 			new Setting(this.contentEl)
 				.setName('Relationship')
 				.setDesc(`How the new ${meta.label.toLowerCase()} relates to ${connectTo.label}.`)
@@ -318,7 +318,7 @@ export class CreateEntityModal extends Modal {
 		const connectTo = this.options.connectTo;
 		if (connectTo) {
 			this.fields.relationship = {
-				type: this.relComment === '' ? 'related' : this.relComment,
+				type: connectTo.relType ?? (this.relComment === '' ? 'related' : this.relComment),
 				target: connectTo.record.name,
 			};
 		}

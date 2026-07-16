@@ -3,9 +3,12 @@ import { LoomIndexer } from './indexer';
 
 /**
  * One column of the chronological layout: a session (or an event that isn't
- * linked to any session) anchoring the column, with linked events stacked
- * beneath it. Both the timeline view and the graph view derive horizontal
- * ordering from this, so the two stay consistent by construction.
+ * connected to any session) anchoring the column, with the session's
+ * connected events stacked beneath it. Both the timeline view and the graph
+ * view derive horizontal ordering from this, so the two stay consistent by
+ * construction. Session membership is any connection between the event and
+ * the session — a typed relationship (declared on either side) or a plain
+ * [[wikilink]]; events respect sessions above all other connections.
  */
 export interface TimelineColumn {
 	anchor: EntityRecord;
@@ -42,9 +45,12 @@ export function buildColumns(
 	for (const event of events) {
 		// An event can span several sessions — it stacks in every matching
 		// column (the def filter may exclude some of its sessions).
+		const seen = new Set<string>();
 		const eventColumns = indexer
-			.resolveLinkedSessions(event)
-			.map((s) => columns.get(s.path))
+			.getConnections(event.path)
+			.filter((c) => c.record.type === 'session')
+			.filter((c) => (seen.has(c.record.path) ? false : (seen.add(c.record.path), true)))
+			.map((c) => columns.get(c.record.path))
 			.filter((c): c is TimelineColumn => c !== undefined);
 		if (eventColumns.length > 0) {
 			for (const column of eventColumns) column.events.push(event);

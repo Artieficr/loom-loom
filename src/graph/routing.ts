@@ -2,31 +2,32 @@
  * Orthogonal edge routing: the geometry vocabulary shared by the layout
  * (which allocates lanes) and the graph view (which draws paths).
  *
- * Edge grammar (from Artie's sketch):
- * - edges leave the upper node horizontally, turn down a vertical trunk lane
- *   unique to the edge (parallel trunks run LANE_GAP apart), optionally run
- *   horizontally in the approach band above the target's row, and enter the
- *   lower node with a straight diagonal — several edges into one node fan in
- *   like spokes;
+ * Edge grammar (from Artie's sketch, angled ends unified on every node):
+ * - edges leave the upper node with a straight diagonal down to the top of a
+ *   vertical trunk lane unique to the edge (parallel trunks run LANE_GAP
+ *   apart), optionally run horizontally in the approach band above the
+ *   target's row, and enter the lower node with a straight diagonal — several
+ *   edges out of or into one node fan like spokes;
  * - edges between nodes on the same row make a U through the band beside the
- *   row (below for globals/events, above for sessions);
+ *   row (below for globals/events, above for sessions), its turn points
+ *   spread across each node's side like a fan;
  * - all bends are slightly rounded.
  */
 
 export type EdgeRoute =
 	/** Straight line between the endpoints (vertically adjacent same-column nodes). */
 	| { kind: 'direct' }
-	/** Orthogonal Z between two timeline nodes: horizontal → trunk → horizontal. */
-	| { kind: 'orth'; laneX: number }
 	/**
-	 * Upper node → lower-row node: horizontal → trunk at `laneX` → optional
-	 * horizontal run at `approachY` → diagonal into the target. `fanOffset` is
-	 * the diagonal's start x relative to the target so the fan follows a
-	 * dragged node.
+	 * Upper node → lower node, angled at both ends: diagonal exit down to the
+	 * trunk top at (`laneX`, `departY`) → trunk to `approachY` → optional
+	 * horizontal run → diagonal into the target. `fanOffset` is the entry
+	 * diagonal's start x relative to the target so the fan follows a dragged
+	 * node.
 	 */
-	| { kind: 'toLower'; laneX: number; approachY: number; fanOffset: number }
-	/** Same-row pair: down (or up) to `uY`, across, back into the other node. */
-	| { kind: 'rowU'; uY: number };
+	| { kind: 'fan'; laneX: number; departY: number; approachY: number; fanOffset: number }
+	/** Same-row pair: angled down (or up) to `uY`, across, back into the other
+	 *  node; `offA`/`offB` are the turn points' x relative to their nodes. */
+	| { kind: 'rowU'; uY: number; offA: number; offB: number };
 
 /** Routed connection; `a` is the upper (or left) endpoint, `b` the other. */
 export interface RoutedEdge {
@@ -56,17 +57,19 @@ export function edgePoints(route: EdgeRoute, a: Pt, b: Pt): Pt[] {
 	switch (route.kind) {
 		case 'direct':
 			return [a, b];
-		case 'orth':
-			return dedupe([a, { x: route.laneX, y: a.y }, { x: route.laneX, y: b.y }, b]);
-		case 'toLower': {
+		case 'fan': {
 			const fanX = b.x + route.fanOffset;
-			const pts: Pt[] = [a, { x: route.laneX, y: a.y }, { x: route.laneX, y: route.approachY }];
+			const pts: Pt[] = [
+				a,
+				{ x: route.laneX, y: route.departY },
+				{ x: route.laneX, y: route.approachY },
+			];
 			if (Math.abs(fanX - route.laneX) > LANE_EPSILON) pts.push({ x: fanX, y: route.approachY });
 			pts.push(b);
 			return dedupe(pts);
 		}
 		case 'rowU':
-			return dedupe([a, { x: a.x, y: route.uY }, { x: b.x, y: route.uY }, b]);
+			return dedupe([a, { x: a.x + route.offA, y: route.uY }, { x: b.x + route.offB, y: route.uY }, b]);
 	}
 }
 
@@ -135,7 +138,7 @@ export function edgeEndDirs(route: EdgeRoute, a: Pt, b: Pt): { start: Pt; end: P
 export function edgeXRange(route: EdgeRoute, a: Pt, b: Pt): [number, number] {
 	let min = Math.min(a.x, b.x);
 	let max = Math.max(a.x, b.x);
-	if (route.kind === 'orth' || route.kind === 'toLower') {
+	if (route.kind === 'fan') {
 		min = Math.min(min, route.laneX);
 		max = Math.max(max, route.laneX);
 	}

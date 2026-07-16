@@ -65,9 +65,20 @@ relationships:
   time, creating or renaming a target note elsewhere in the vault would leave stale
   resolved paths in every record pointing at it; lazily resolving makes that class of
   bug impossible at negligible per-query cost.
-- `linkedSession` on events uses the same mechanism and contributes an edge of type
-  `session`. It holds one link or a list of links — an event can belong to several
-  sessions (e.g. a festival spanning three games); the key keeps its singular name.
+- **Events attach to sessions through ordinary connections** — a relationship
+  declared on either side or a plain [[wikilink]]. There is no dedicated
+  event→session field: `linkedSession` existed and was removed as redundant with
+  relationships (existing notes still carrying the key keep their connections,
+  because frontmatter links fall through to the generic `link` mechanism). The
+  timeline/graph column layout (`src/columns.ts`) stacks an event under every
+  session it's connected to; an event connected to several sessions centers between
+  its earliest and latest session columns.
+- **Session notes**: every entity can carry `sessionNotes` — a list of
+  `{ session: "[[...]]", text }` objects, freeform text pinned to the session it was
+  written about (so *when* something was noted is tracked alongside *what*). Each picked
+  session contributes an edge of type `session note`, so writing a session note is also
+  what connects the entity to that session. Edited under the Notes field on every entity
+  page except sessions themselves ("+ Add a session note").
 - **Native links count too**: any plain `[[wikilink]]` in a note's body or frontmatter
   (from `metadataCache` `links`/`frontmatterLinks`) that lands on another indexed entity
   becomes a connection of type `link`. Users shouldn't need the typed syntax just to get
@@ -76,6 +87,13 @@ relationships:
   `deathSession` keys are filtered out of connections entirely (`HIDDEN_LINK_KEYS` in
   src/indexer.ts). Session attendance links every PC to every session they played —
   drawing those edges would bury the graph, so they stay data-only.
+- **Sublocations are a relationship convention, not a field**: a location whose note
+  declares a relationship with the identifier `sublocation of` (`SUBLOCATION_REL`,
+  case-insensitive) to another location is a sublocation. The "New sublocation"
+  action on a location page just creates a location with that relationship
+  prefilled. The graph moves sublocations out of the locations row into per-parent
+  grid clusters right under it (4 wide, wrapping); everywhere else they are ordinary
+  locations.
 
 ## Names
 
