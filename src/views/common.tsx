@@ -332,6 +332,61 @@ export function recordDate(record: EntityRecord, project: ProjectDef | null): st
 	return formatLoomDate(record.date, project.config);
 }
 
+/**
+ * THE entity tag. Every entity reference rendered as a tag — involved
+ * entities, faction members, quest givers, memberships, session links — uses
+ * this one component so they all read identically: a pill tinted with the
+ * entity's node color, the name clickable when `onOpen` is given, an optional
+ * ✕. Session tags keep their special sizing via `className` overrides
+ * (`loom-note-session` / `loom-quest-sessions` containers) but share the
+ * coloring. Don't hand-roll chip spans — extend this.
+ */
+export function EntityChip({
+	plugin,
+	record,
+	label,
+	onOpen,
+	onRemove,
+	removeLabel,
+}: {
+	plugin: LoomLoomPlugin;
+	/** null = unresolved link; renders the label uncolored. */
+	record: EntityRecord | null;
+	/** Display text; defaults to the record name (pass recordLabel() for sessions). */
+	label?: string;
+	onOpen?: () => void;
+	onRemove?: () => void;
+	removeLabel?: string;
+}) {
+	const text = label ?? record?.name ?? '';
+	return (
+		<span
+			className="loom-chip loom-session-chip loom-entity-chip"
+			style={
+				record
+					? {
+							background: plugin.settings.nodeColors[record.type] + '40',
+							borderColor: plugin.settings.nodeColors[record.type],
+						}
+					: undefined
+			}
+		>
+			{onOpen && record ? (
+				<button className="loom-subloc-link" onClick={onOpen}>
+					{text}
+				</button>
+			) : (
+				text
+			)}
+			{onRemove ? (
+				<button className="loom-chip-remove" aria-label={removeLabel ?? 'Remove'} onClick={onRemove}>
+					✕
+				</button>
+			) : null}
+		</span>
+	);
+}
+
 function RailButton({
 	icon,
 	label,

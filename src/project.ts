@@ -2,6 +2,7 @@ import {
 	AbstractInputSuggest,
 	App,
 	FuzzySuggestModal,
+	Menu,
 	Modal,
 	Notice,
 	Setting,
@@ -18,7 +19,6 @@ import {
 	EntityRecord,
 	EntityType,
 	LOOM_EXTENSION,
-	QUEST_OUTCOMES,
 	TIMELINES_FOLDER,
 	VIEW_LIST,
 } from './types';
@@ -97,19 +97,20 @@ export interface NewEntityFields {
 	name: string;
 	tag: string;
 	date: string;
+	description?: string;
 	/** When set, the new note declares this relationship in its frontmatter. */
 	relationship?: { type: string; target: string };
 	/** Location only: parent location name — the new location is its sublocation. */
 	parentLocation?: string;
-	/** Event only: entity names involved — written as `involves` relationships. */
+	/** Event only: entity names involved — written into the starting session
+	 *  note's `involved` list (session-less for lore events). */
 	involved?: string[];
 	/** Session name to prefill a session note for (events created from a session page). */
 	noteSession?: string;
-	/** Quest only (all optional): note names, not links. */
-	questGiver?: string;
+	/** Quest only (all optional): note names, not links. New quests are always
+	 *  born active — outcome fields are written empty. */
+	questGivers?: string[];
 	questReceived?: string;
-	questOutcome?: string;
-	questOutcomeSession?: string;
 	reward?: string;
 }
 
@@ -119,7 +120,7 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 		'---',
 		`type: ${type}`,
 		`loomTags: [${fields.tag === '' ? '' : yamlQuote(fields.tag)}]`,
-		'description: ""',
+		`description: ${yamlQuote(fields.description ?? '')}`,
 		...(rels.length > 0
 			? [
 					'relationships:',
@@ -130,14 +131,19 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 				]
 			: ['relationships: []']),
 	];
-	if (fields.noteSession && fields.noteSession !== '') {
+	// A starting session note carries the birth session and/or the involved
+	// entities. Involvement without a session (a lore event) writes a
+	// session-less note — involved links still connect (relType `involved`).
+	const involved = fields.involved ?? [];
+	if ((fields.noteSession && fields.noteSession !== '') || involved.length > 0) {
 		lines.push(
 			'sessionNotes:',
-			`  - session: ${yamlQuote(`[[${fields.noteSession}]]`)}`,
+			`  - session: ${
+				fields.noteSession && fields.noteSession !== '' ? yamlQuote(`[[${fields.noteSession}]]`) : '""'
+			}`,
 			'    text: ""',
 			`    seq: ${Date.now()}`
 		);
-		const involved = fields.involved ?? [];
 		if (involved.length > 0) {
 			lines.push('    involved:');
 			for (const n of involved) lines.push(`      - ${yamlQuote(`[[${n}]]`)}`);
@@ -146,18 +152,19 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
 		lines.push(`parentLocation: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
 	}
-	if (type === 'character') lines.push('role: ""', 'alive: true');
+	if (type === 'character') lines.push('alive: true');
 	if (type === 'event' || type === 'session') lines.push(`date: ${yamlQuote(fields.date)}`);
 	if (type === 'session') lines.push('attendance: []');
 	if (type === 'quest') {
 		const link = (name?: string) => (name && name !== '' ? yamlQuote(`[[${name}]]`) : '""');
+		const givers = (fields.questGivers ?? []).filter((n) => n !== '');
 		lines.push(
-			fields.questGiver && fields.questGiver !== ''
-				? `questGiver: [${link(fields.questGiver)}]`
+			givers.length > 0
+				? `questGiver: [${givers.map((n) => yamlQuote(`[[${n}]]`)).join(', ')}]`
 				: 'questGiver: []',
 			`questReceived: ${link(fields.questReceived)}`,
-			`questOutcome: ${yamlQuote(fields.questOutcome ?? '')}`,
-			`questOutcomeSession: ${link(fields.questOutcomeSession)}`,
+			'questOutcome: ""',
+			'questOutcomeSession: ""',
 			`reward: ${yamlQuote(fields.reward ?? '')}`
 		);
 	}
@@ -190,6 +197,40 @@ export class RecordSuggestModal extends FuzzySuggestModal<EntityRecord> {
 
 	onChooseItem(record: EntityRecord): void {
 		this.onPick(record);
+	}
+}
+
+/**
+ * Inline record search attached to a plain text input (modal counterpart of
+ * the views' SearchableSelect): typing filters, picking hands the record over
+ * and clears the input for the next pick.
+ */
+class RecordInputSuggest extends AbstractInputSuggest<EntityRecord> {
+	constructor(
+		app: App,
+		private input: HTMLInputElement,
+		private records: () => EntityRecord[],
+		private pick: (r: EntityRecord) => void,
+		private label: (r: EntityRecord) => string = (r) => r.name
+	) {
+		super(app, input);
+	}
+
+	getSuggestions(query: string): EntityRecord[] {
+		const q = query.toLowerCase();
+		return this.records().filter(
+			(r) => r.name.toLowerCase().includes(q) || this.label(r).toLowerCase().includes(q)
+		);
+	}
+
+	renderSuggestion(r: EntityRecord, el: HTMLElement): void {
+		el.setText(this.label(r));
+	}
+
+	selectSuggestion(r: EntityRecord): void {
+		this.pick(r);
+		this.input.value = '';
+		this.close();
 	}
 }
 
@@ -232,11 +273,21 @@ export interface CreateEntityOptions {
 	parentLocation?: EntityRecord;
 	/** The new entity starts with a session note pinned to this session. */
 	noteSession?: EntityRecord;
+	/** Events only: offer a session search in the modal (optional pick — a
+	 *  lore event stays session-less). Ignored when `noteSession` is set. */
+	sessionPicker?: boolean;
+	/** Events only: names pre-added to the involved list (still removable) —
+	 *  e.g. the character whose page spawned the event. */
+	defaultInvolved?: string[];
 }
 
 export class CreateEntityModal extends Modal {
 	private fields: NewEntityFields = { name: '', tag: '', date: '' };
 	private relComment = '';
+	/** Event only: session picked via the modal's session search. */
+	private pickedSession: EntityRecord | null = null;
+	/** Quest only: session the quest was received in. */
+	private receivedSession: EntityRecord | null = null;
 
 	constructor(
 		private plugin: LoomLoomPlugin,
@@ -249,6 +300,35 @@ export class CreateEntityModal extends Modal {
 		// today); events often aren't (e.g. a recurring holiday with no
 		// specific occurrence), so only sessions get a default.
 		if (type === 'session') this.fields.date = todayRaw();
+		if (options.defaultInvolved && options.defaultInvolved.length > 0) {
+			this.fields.involved = [...options.defaultInvolved];
+		}
+	}
+
+	/** Standard entity tag (see EntityChip in views/common.tsx) for modal chip rows. */
+	private renderChip(
+		container: HTMLElement,
+		record: EntityRecord | null,
+		label: string,
+		onRemove: () => void
+	): void {
+		const chip = container.createSpan({ cls: 'loom-chip loom-session-chip loom-entity-chip' });
+		if (record) {
+			const color = this.plugin.settings.nodeColors[record.type];
+			chip.style.background = color + '40';
+			chip.style.borderColor = color;
+		}
+		chip.createSpan({ text: label });
+		const x = chip.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
+		x.addEventListener('click', (e) => {
+			e.preventDefault();
+			onRemove();
+		});
+	}
+
+	/** Resolves a picked name back to its record (for chip colors). */
+	private resolveName(name: string): EntityRecord | null {
+		return this.plugin.indexer.resolve(name, this.project.loomPath);
 	}
 
 	onOpen(): void {
@@ -288,6 +368,8 @@ export class CreateEntityModal extends Modal {
 		}
 
 		if (this.type === 'quest') {
+			// New quests are always active — no outcome fields here; they live
+			// on the quest page once the quest actually ends.
 			const sessionLabel = (s: EntityRecord) =>
 				s.date ? formatLoomDate(s.date, this.project.config) : s.name;
 			const sessions = this.plugin.indexer
@@ -297,36 +379,72 @@ export class CreateEntityModal extends Modal {
 				.getAll('character', this.project.root)
 				.sort((a, b) => a.name.localeCompare(b.name));
 
-			new Setting(this.contentEl).setName('Quest giver').addDropdown((dd) => {
-				dd.addOption('', '—');
-				for (const c of characters) dd.addOption(c.name, c.name);
-				dd.onChange((v) => (this.fields.questGiver = v));
+			// Quest givers: search + entity tags with ✕, like the quest page.
+			this.fields.questGivers = [];
+			new Setting(this.contentEl).setName('Quest giver').addText((text) => {
+				text.setPlaceholder('Add a quest giver…');
+				new RecordInputSuggest(
+					this.app,
+					text.inputEl,
+					() => characters.filter((c) => !(this.fields.questGivers ?? []).includes(c.name)),
+					(r) => {
+						(this.fields.questGivers ??= []).push(r.name);
+						refreshGivers();
+					}
+				);
 			});
-		new Setting(this.contentEl).setName('Received in session').addDropdown((dd) => {
-				dd.addOption('', '—');
-				for (const s of sessions) dd.addOption(s.name, sessionLabel(s));
-				dd.onChange((v) => (this.fields.questReceived = v));
-				// Quests born from a session page default to being received there.
-				if (this.options.noteSession) {
-					this.fields.questReceived = this.options.noteSession.name;
-					dd.setValue(this.options.noteSession.name);
+			const giverChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
+			const refreshGivers = () => {
+				giverChips.empty();
+				for (const name of this.fields.questGivers ?? []) {
+					this.renderChip(giverChips, this.resolveName(name), name, () => {
+						this.fields.questGivers = (this.fields.questGivers ?? []).filter((n) => n !== name);
+						refreshGivers();
+					});
 				}
-			});
-			new Setting(this.contentEl).setName('Outcome').addDropdown((dd) => {
-				dd.addOption('', 'Active');
-				for (const o of QUEST_OUTCOMES) dd.addOption(o, o[0].toUpperCase() + o.slice(1));
-				dd.onChange((v) => (this.fields.questOutcome = v));
-			});
-			new Setting(this.contentEl).setName('Outcome session').addDropdown((dd) => {
-				dd.addOption('', '—');
-				for (const s of sessions) dd.addOption(s.name, sessionLabel(s));
-				dd.onChange((v) => (this.fields.questOutcomeSession = v));
-			});
+			};
+
+			// Received session: search like the quest page; the pick becomes a
+			// session tag with ✕. Quests born from a session page default there.
+			this.receivedSession = this.options.noteSession ?? null;
+			const receivedSetting = new Setting(this.contentEl).setName('Received in session');
+			const receivedEl = receivedSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
+			const refreshReceived = () => {
+				receivedEl.empty();
+				if (this.receivedSession) {
+					this.renderChip(receivedEl, this.receivedSession, sessionLabel(this.receivedSession), () => {
+						this.receivedSession = null;
+						refreshReceived();
+					});
+				} else {
+					const input = receivedEl.createEl('input', {
+						type: 'text',
+						attr: { placeholder: 'Pick the session…' },
+					});
+					new RecordInputSuggest(
+						this.app,
+						input,
+						() => sessions,
+						(r) => {
+							this.receivedSession = r;
+							refreshReceived();
+						},
+						sessionLabel
+					);
+				}
+			};
+			refreshReceived();
+
 			new Setting(this.contentEl)
 				.setName('Reward')
 				.addText((text) =>
 					text.setPlaceholder('Not specified').onChange((v) => (this.fields.reward = v.trim()))
 				);
+			// Full-width row: label above, the text box using the whole window width.
+			const desc = new Setting(this.contentEl)
+				.setName('Description')
+				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
+			desc.setClass('loom-modal-wide');
 		}
 
 		if (this.type === 'session') {
@@ -339,26 +457,106 @@ export class CreateEntityModal extends Modal {
 			});
 		}
 
-	if (this.type === 'event' && this.options.noteSession) {
-			// Involved entities: each pick appends; the list shows in the desc.
-			const involvedSetting = new Setting(this.contentEl).setName('Involved entities');
-			const refreshInvolved = () =>
-				involvedSetting.setDesc((this.fields.involved ?? []).join(', '));
-			involvedSetting.addDropdown((dd) => {
-				dd.addOption('', '—');
-				for (const r of this.plugin.indexer
+	if (this.type === 'event') {
+			// Optional birth session (skipped when the session page already
+			// provides it): search over sessions, the pick becomes a session tag
+			// with ✕. Left unspecified = a lore event with no session.
+			if (this.options.sessionPicker && !this.options.noteSession) {
+				const sessionLabel = (s: EntityRecord) =>
+					s.date ? formatLoomDate(s.date, this.project.config) : s.name;
+				const sessions = this.plugin.indexer
+					.getAll('session', this.project.root)
+					.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
+				const sessionSetting = new Setting(this.contentEl)
+					.setName('Session')
+					.setDesc('When it happened; leave unspecified for lore events.');
+				const sessionEl = sessionSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
+				const refreshSession = () => {
+					sessionEl.empty();
+					if (this.pickedSession) {
+						this.renderChip(sessionEl, this.pickedSession, sessionLabel(this.pickedSession), () => {
+							this.pickedSession = null;
+							refreshSession();
+						});
+					} else {
+						const input = sessionEl.createEl('input', {
+							type: 'text',
+							attr: { placeholder: 'Not specified' },
+						});
+						new RecordInputSuggest(
+							this.app,
+							input,
+							() => sessions,
+							(r) => {
+								this.pickedSession = r;
+								refreshSession();
+							},
+							sessionLabel
+						);
+					}
+				};
+				refreshSession();
+			}
+
+			// Involved entities: search with a type filter; picks collect as
+			// entity tags with ✕ (mirrors the pages' Involve… control).
+			let involveFilter: EntityType | null = null;
+			const candidates = () =>
+				this.plugin.indexer
 					.getAll(undefined, this.project.root)
 					.filter((r) => r.type !== 'session' && r.type !== 'event')
-					.sort((a, b) => a.name.localeCompare(b.name))) {
-					dd.addOption(r.name, r.name);
-				}
-				dd.onChange((v) => {
-					if (v === '') return;
-					(this.fields.involved ??= []).push(v);
-					dd.setValue('');
-					refreshInvolved();
+					.filter((r) => involveFilter === null || r.type === involveFilter)
+					.filter((r) => !(this.fields.involved ?? []).includes(r.name))
+					.sort((a, b) => a.name.localeCompare(b.name));
+			new Setting(this.contentEl)
+				.setName('Involved entities')
+				.addText((text) => {
+					text.setPlaceholder('Involve…');
+					new RecordInputSuggest(this.app, text.inputEl, candidates, (r) => {
+						(this.fields.involved ??= []).push(r.name);
+						refreshInvolved();
+					});
+				})
+				.addExtraButton((btn) => {
+					btn.setIcon('filter').setTooltip('Filter suggestions by entity type');
+					btn.extraSettingsEl.addEventListener('click', (e) => {
+						const menu = new Menu();
+						menu.addItem((item) =>
+							item
+								.setTitle('All entities')
+								.setIcon('filter')
+								.setChecked(involveFilter === null)
+								.onClick(() => {
+									involveFilter = null;
+									btn.setIcon('filter');
+								})
+						);
+						for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
+							menu.addItem((item) =>
+								item
+									.setTitle(ENTITY_META[t].plural)
+									.setIcon(ENTITY_META[t].icon)
+									.setChecked(involveFilter === t)
+									.onClick(() => {
+										involveFilter = t;
+										btn.setIcon(ENTITY_META[t].icon);
+									})
+							);
+						}
+						menu.showAtMouseEvent(e);
+					});
 				});
-			});
+			const involvedChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
+			const refreshInvolved = () => {
+				involvedChips.empty();
+				for (const name of this.fields.involved ?? []) {
+					this.renderChip(involvedChips, this.resolveName(name), name, () => {
+						this.fields.involved = (this.fields.involved ?? []).filter((n) => n !== name);
+						refreshInvolved();
+					});
+				}
+			};
+			refreshInvolved();
 		}
 
 		// Events born from a session page need no date — the session carries it.
@@ -423,6 +621,8 @@ export class CreateEntityModal extends Modal {
 		}
 	if (this.options.parentLocation) this.fields.parentLocation = this.options.parentLocation.name;
 		if (this.options.noteSession) this.fields.noteSession = this.options.noteSession.name;
+		else if (this.pickedSession) this.fields.noteSession = this.pickedSession.name;
+		if (this.type === 'quest') this.fields.questReceived = this.receivedSession?.name ?? '';
 		try {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
 			this.close();
