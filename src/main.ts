@@ -79,7 +79,10 @@ export default class LoomLoomPlugin extends Plugin {
 					this.settings.entityBoxSizes[file.path] = sizes;
 					changed = true;
 				}
-				for (const entries of Object.values(this.settings.graphManualX)) {
+			for (const entries of [
+					...Object.values(this.settings.graphManualX),
+					...Object.values(this.settings.graphManualY),
+				]) {
 					if (oldPath in entries) {
 						entries[file.path] = entries[oldPath];
 						delete entries[oldPath];
@@ -97,7 +100,10 @@ export default class LoomLoomPlugin extends Plugin {
 					delete this.settings.entityBoxSizes[file.path];
 					changed = true;
 				}
-				for (const entries of Object.values(this.settings.graphManualX)) {
+			for (const entries of [
+					...Object.values(this.settings.graphManualX),
+					...Object.values(this.settings.graphManualY),
+				]) {
 					if (file.path in entries) {
 						delete entries[file.path];
 						changed = true;

@@ -45,6 +45,8 @@ export interface LoomLoomSettings {
 	/** Drag-reordered x of unconnected global graph nodes, per project root then
 	 *  note path — not user-facing. Connected nodes follow their forces instead. */
 	graphManualX: Record<string, Record<string, number>>;
+	/** Drag-dropped y of fully-unconnected graph nodes, per project root then note path. */
+	graphManualY: Record<string, Record<string, number>>;
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
@@ -78,6 +80,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphCameras: {},
 	entityBoxSizes: {},
 	graphManualX: {},
+	graphManualY: {},
 };
 
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
@@ -89,6 +92,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		graphCameras: {},
 		entityBoxSizes: {},
 		graphManualX: {},
+		graphManualY: {},
 	};
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
@@ -169,6 +173,16 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 				if (typeof x === 'number' && Number.isFinite(x)) xs[path] = x;
 			}
 			if (Object.keys(xs).length > 0) base.graphManualX[root] = xs;
+		}
+	}
+	if (typeof data.graphManualY === 'object' && data.graphManualY !== null) {
+		for (const [root, entries] of Object.entries(data.graphManualY)) {
+			if (typeof entries !== 'object' || entries === null) continue;
+			const ys: Record<string, number> = {};
+			for (const [path, y] of Object.entries(entries)) {
+				if (typeof y === 'number' && Number.isFinite(y)) ys[path] = y;
+			}
+			if (Object.keys(ys).length > 0) base.graphManualY[root] = ys;
 		}
 	}
 	return base;

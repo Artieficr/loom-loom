@@ -114,10 +114,7 @@ export interface NewEntityFields {
 }
 
 export function buildEntityContent(type: EntityType, fields: NewEntityFields): string {
-	const rels = [
-		...(fields.relationship ? [fields.relationship] : []),
-		...(fields.involved ?? []).map((n) => ({ type: 'involved', target: n })),
-	];
+	const rels = fields.relationship ? [fields.relationship] : [];
 	const lines = [
 		'---',
 		`type: ${type}`,
@@ -140,6 +137,11 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 			'    text: ""',
 			`    seq: ${Date.now()}`
 		);
+		const involved = fields.involved ?? [];
+		if (involved.length > 0) {
+			lines.push('    involved:');
+			for (const n of involved) lines.push(`      - ${yamlQuote(`[[${n}]]`)}`);
+		}
 	}
 	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
 		lines.push(`parentLocation: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
@@ -263,13 +265,26 @@ export class CreateEntityModal extends Modal {
 			});
 		}
 
-		const vocab = ENTITY_TAGS[this.type];
+	const vocab = ENTITY_TAGS[this.type];
 		if (vocab.length > 0) {
-			new Setting(this.contentEl).setName('Tag').addDropdown((dd) => {
-				dd.addOption('', '—');
-				for (const tag of vocab) dd.addOption(tag, tag);
-				dd.onChange((v) => (this.fields.tag = v));
-			});
+			// Segmented pills: outer corners rounded, shared borders between.
+			const setting = new Setting(this.contentEl).setName('Tag');
+			const seg = setting.controlEl.createDiv({ cls: 'loom-seg' });
+			const buttons: HTMLButtonElement[] = [];
+			const refresh = () => {
+				for (const b of buttons) b.classList.toggle('loom-seg-on', this.fields.tag === b.dataset.tag);
+			};
+			for (const opt of [{ v: '', label: '—' }, ...vocab.map((t) => ({ v: t, label: t }))]) {
+				const b = seg.createEl('button', { text: opt.label, cls: 'loom-seg-btn' });
+				b.dataset.tag = opt.v;
+				b.addEventListener('click', (e) => {
+					e.preventDefault();
+					this.fields.tag = opt.v;
+					refresh();
+				});
+				buttons.push(b);
+			}
+			refresh();
 		}
 
 		if (this.type === 'quest') {
@@ -324,7 +339,7 @@ export class CreateEntityModal extends Modal {
 			});
 		}
 
-	if (this.type === 'event') {
+	if (this.type === 'event' && this.options.noteSession) {
 			// Involved entities: each pick appends; the list shows in the desc.
 			const involvedSetting = new Setting(this.contentEl).setName('Involved entities');
 			const refreshInvolved = () =>
@@ -347,6 +362,8 @@ export class CreateEntityModal extends Modal {
 		}
 
 		// Events born from a session page need no date — the session carries it.
+		// (The Involved picker below writes into that session note, so it only
+		// appears for session-born events.)
 		if (this.type === 'event' && !this.options.noteSession) {
 			let dateText: TextComponent;
 			new Setting(this.contentEl)

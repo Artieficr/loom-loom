@@ -21,7 +21,7 @@ and a custom layered graph view.
 | `src/columns.ts` | Chronological column layout shared by timeline and graph (sessions anchor columns, session-connected events stack beneath) |
 | `src/project.ts` | Project scaffolding (.loom + folders), entity creation (managed session file names), setup/create/pick modals |
 | `src/timeline-settings.ts` | Per-project timeline settings editor (date format + custom calendar), embedded in the settings tab's Graph tab, writes to the .loom file |
-| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`). Entity pages embed collapsible connected-entity sections with in-place editing (`connected-entities.tsx`) |
+| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph, focused per-session mini graph (`mini-graph.tsx`) + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`). Entity pages embed collapsible connected-entity sections with in-place editing (`connected-entities.tsx`) |
 | `src/graph/` | Graph-only logic: layered layout (timeline rows + per-type global layers), orthogonal edge routing (trunk lanes/bands in `routing.ts`; every endpoint attaches via diagonal fans with per-side capacity), connections side panel |
 | `scripts/deploy.mjs` | Builds are copied to the test vault with `pnpm run deploy` |
 | `docs/ARCHITECTURE.md` | Data flow, relationship model, calendar abstraction, design tradeoffs |
@@ -57,9 +57,10 @@ and a custom layered graph view.
   notes still connect as plain frontmatter links). Entity tags
   live in `loomTags` (legacy `pluginTags` still read); the tag vocabulary is hardcoded
   (`ENTITY_TAGS` in types.ts), not user-configurable.
-- **Hidden connections**: links under the `attendance` and `deathSession` frontmatter
-  keys never become connections or graph edges (session attendance would spray edges
-  everywhere). Sessions list attending PCs (`PC` tag); PCs carry `alive` and
+- **Hidden connections**: links under the `deathSession` and `sublocationOrder` keys
+  never become connections or graph edges. `attendance` is hidden from the generic
+  link pass but emits typed `attendance` connections (a ticked PC connects to the
+  session). Sessions list attending PCs (`PC` tag); PCs carry `alive` and
   `deathSession` — sessions dated after a PC's death session stop offering them.
 - **Dates**: `LoomDate` = raw string + packed sortable number + y/m/d + calendar id.
   Sessions always Gregorian; other entities use the project calendar (custom in-game
