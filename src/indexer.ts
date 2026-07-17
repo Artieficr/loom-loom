@@ -12,8 +12,10 @@ import {
 } from 'obsidian';
 import {
 	Connection,
+	DEFAULT_MEMBER_ROLE,
 	EntityRecord,
 	EntityType,
+	FactionMemberDecl,
 	LOOM_EXTENSION,
 	QUEST_OUTCOMES,
 	RelationshipDecl,
@@ -48,6 +50,40 @@ export function extractLinkpath(raw: string): string | null {
 
 function parseTagList(value: unknown): string[] {
 	return Array.isArray(value) ? value.filter((t): t is string => typeof t === 'string') : [];
+}
+
+/**
+ * Extracts the character linkpath from one raw `members` entry — a plain link
+ * string ("[[Sam]]") or an object `{ character, role }`. Shared with the
+ * entity page, which edits the faction's raw frontmatter list in place.
+ */
+export function memberEntryLinkpath(item: unknown): string | null {
+	if (typeof item === 'string' && item !== '') return extractLinkpath(item);
+	if (typeof item === 'object' && item !== null) {
+		const character = (item as { character?: unknown }).character;
+		if (typeof character === 'string' && character !== '') return extractLinkpath(character);
+	}
+	return null;
+}
+
+/** Parses a faction's `members` list into deduplicated membership declarations. */
+function parseMemberList(value: unknown): FactionMemberDecl[] {
+	const raw = Array.isArray(value) ? value : [value];
+	const out: FactionMemberDecl[] = [];
+	for (const item of raw) {
+		const linkpath = memberEntryLinkpath(item);
+		if (!linkpath || out.some((m) => m.linkpath === linkpath)) continue;
+		const { role, location } =
+			typeof item === 'object' && item !== null
+				? (item as { role?: unknown; location?: unknown })
+				: { role: undefined, location: undefined };
+		out.push({
+			linkpath,
+			role: typeof role === 'string' && role.trim() !== '' ? role : DEFAULT_MEMBER_ROLE,
+			location: typeof location === 'string' ? extractLinkpath(location) : null,
+		});
+	}
+	return out;
 }
 
 /** Parses a frontmatter value holding one link or a list of links into deduplicated linkpaths. */
@@ -344,8 +380,7 @@ export class LoomIndexer extends Component {
 					? extractLinkpath(fmField(fm, 'parentLocation') as string)
 					: null,
 			sublocationOrder: parseLinkList(fmField(fm, 'sublocationOrder')),
-			members: parseLinkList(fmField(fm, 'members')),
-			role: typeof fm.role === 'string' ? fm.role : '',
+			members: parseMemberList(fmField(fm, 'members')),
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
 			deathSession: typeof deathValue === 'string' ? extractLinkpath(deathValue) : null,
 			questReceived: typeof receivedValue === 'string' ? extractLinkpath(receivedValue) : null,
@@ -424,6 +459,19 @@ export class LoomIndexer extends Component {
 		}
 		// Before the generic wikilink pass so these keep their typed relType
 		// instead of degrading to a plain 'link'.
+		// A custom membership role labels the connection (graph edge, side
+		// panel); only the default role reads as plain 'member'.
+		for (const m of record.members) {
+			const member = this.resolve(m.linkpath, record.path);
+			if (member?.type === 'character' && !linked.has(member.path)) {
+				out.push({
+					record: member,
+					relType: m.role === DEFAULT_MEMBER_ROLE ? 'member' : m.role,
+					direction: 'outgoing',
+				});
+				linked.add(member.path);
+			}
+		}
 		if (record.parentLocation !== null) {
 			const parent = this.resolve(record.parentLocation, record.path);
 			if (parent?.type === 'location' && parent.path !== record.path && !linked.has(parent.path)) {
@@ -506,7 +554,8 @@ export class LoomIndexer extends Component {
 		if (!dir) return;
 		const payload = JSON.stringify(
 			{
-				schemaVersion: 3,
+				// v4: members entries became { linkpath, role } declarations.
+				schemaVersion: 4,
 				generatedAt: Date.now(),
 				projects: [...this.projects.values()],
 				records: [...this.records.values()],

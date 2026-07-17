@@ -51,7 +51,11 @@ and a custom layered graph view.
   note entries `{session, text}`; the picked session becomes a `session note`
   connection) + `parentLocation` on locations (sublocation parent — dedicated field
   with its own page/list/graph UI, never a relationship; typed `sublocation`
-  connection) + plain `[[links]]` anywhere in a note (relType `link`), all resolved
+  connection) + `members` on factions (member characters, plain links or
+  `{ character, role, location }` objects; typed `member` connection; mirrored on
+  character pages as an editable "Faction(s)" section — role / faction / optional
+  location rows plus "+ Add faction" — writing the faction's file) + plain
+  `[[links]]` anywhere in a note (relType `link`), all resolved
   bidirectionally; graph edges undirected. There is no dedicated event→session field
   (`linkedSession` was removed — relationships already cover it; old keys in existing
   notes still connect as plain frontmatter links). Entity tags
@@ -65,6 +69,12 @@ and a custom layered graph view.
 - **Dates**: `LoomDate` = raw string + packed sortable number + y/m/d + calendar id.
   Sessions always Gregorian; other entities use the project calendar (custom in-game
   months when enabled). Formatting is per-project config, never JS `Date`.
+- **Entity chips**: every entity reference rendered as a tag/pill goes through
+  `EntityChip` (`src/views/common.tsx`) — node-colored, clickable name, optional ✕.
+  Never hand-roll chip spans; in non-React surfaces (modals) replicate its exact
+  markup (`loom-chip loom-session-chip loom-entity-chip` + inline node colors, see
+  `CreateEntityModal.renderChip`). Session chips are special-sized in some spots via
+  container CSS but always carry the session node color.
 
 ## Constraints
 

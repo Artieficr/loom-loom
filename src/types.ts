@@ -95,6 +95,23 @@ export interface SessionNoteDecl {
 	involved: string[];
 }
 
+/** One faction membership as declared in the faction's `members` frontmatter.
+ *  Entries are plain links ("[[Sam]]", role = the default "Member", no
+ *  location) or objects `{ character: "[[Sam]]", role: "Quartermaster",
+ *  location: "[[Harbor]]" }` once a role or location is set. The faction is
+ *  the membership's only home — the character page's "Faction(s)" section
+ *  reads and writes the faction's file. */
+export interface FactionMemberDecl {
+	/** Extracted linkpath of the member character; resolved at query time. */
+	linkpath: string;
+	role: string;
+	/** Linkpath of the location the member serves at, or null. */
+	location: string | null;
+}
+
+/** Role shown (and stored as a plain link) when a membership has no explicit role. */
+export const DEFAULT_MEMBER_ROLE = 'Member';
+
 /** A typed relationship as declared in one note's frontmatter. */
 export interface RelationshipDecl {
 	type: string;
@@ -130,11 +147,9 @@ export interface EntityRecord {
 	 *  (drag-reordered on the parent's page). Hidden links — the children
 	 *  already connect via their own parentLocation. */
 	sublocationOrder: string[];
-	/** Faction only: linkpaths of member characters (dedicated list, not
-	 *  relationships). */
-	members: string[];
-	/** Character only. */
-	role: string;
+	/** Faction only: member characters with per-membership roles (dedicated
+	 *  list, not relationships; typed `member` connection). */
+	members: FactionMemberDecl[];
 	/** Character only (PC): false once the character has died. */
 	alive: boolean;
 	/** Character only (PC): linkpath of the session they died in. Sessions

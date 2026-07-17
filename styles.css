@@ -1164,8 +1164,40 @@ span.loom-row-caret {
 	cursor: default;
 }
 
-/* High specificity so theme button skins can't paint a background under ✕. */
-.loom-view button.loom-chip-remove {
+/* THE entity tag (EntityChip in common.tsx): carries the full standard chip
+   look on its own, so it renders identically in any container — no
+   .loom-tag-row wrapper needed. All entity references rendered as tags go
+   through it; node colors come inline from settings. */
+/* Chip rows and single-pick slots inside creation modals. */
+.loom-modal-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-2-2);
+	margin: var(--size-2-2) 0 var(--size-4-2);
+}
+
+.loom-modal-pick {
+	display: flex;
+	align-items: center;
+}
+
+.loom-entity-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	cursor: default;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: none;
+	height: auto;
+	padding: var(--size-2-1) var(--size-4-2);
+	white-space: nowrap;
+}
+
+/* High specificity so theme button skins can't paint a background under ✕.
+   (.loom-entity-chip variant covers chips outside views, e.g. in modals.) */
+.loom-view button.loom-chip-remove,
+.loom-entity-chip button.loom-chip-remove {
 	background: transparent;
 	border: none;
 	box-shadow: none;
@@ -1234,6 +1266,65 @@ span.loom-row-caret {
 	gap: var(--size-2-2);
 }
 
+/* Faction membership rows on character pages reuse the relationship layout:
+   [role] "of faction" [faction chip] "at" [location] ✕. The location slot
+   flexes so the remove ✕ lands at the row's right edge like rel rows. */
+.loom-member-row .loom-rel-type {
+	flex: 0 1 7em;
+}
+
+/* Same text size as the rest of the row — only the color sets them apart.
+   Extra horizontal margin on top of the row gap keeps them readable. */
+.loom-member-sep {
+	color: var(--text-muted);
+	white-space: nowrap;
+	margin: 0 var(--size-2-2);
+}
+
+/* Breathing room between "+ Add faction" and the membership rows. */
+.loom-faction-add {
+	margin-bottom: var(--size-4-2);
+}
+
+.loom-member-row .loom-chip {
+	white-space: nowrap;
+}
+
+.loom-member-loc {
+	flex: 1;
+	min-width: 0;
+}
+
+.loom-member-loc .loom-combo {
+	width: 100%;
+}
+
+/* The "+ Add faction" draft row: the faction picker fills the row. */
+.loom-member-row > .loom-combo {
+	flex: 1;
+}
+
+/* Full-width modal rows (e.g. the quest Description): label above, control
+   using the whole window width. */
+.loom-modal-wide.setting-item {
+	flex-direction: column;
+	align-items: stretch;
+	gap: var(--size-2-2);
+}
+
+.loom-modal-wide .setting-item-info {
+	margin-right: 0;
+}
+
+.loom-modal-wide .setting-item-control {
+	width: 100%;
+}
+
+.loom-modal-wide textarea {
+	width: 100%;
+	min-height: 72px;
+}
+
 .loom-rel-type {
 	flex: 0 0 32%;
 }
@@ -1253,6 +1344,13 @@ span.loom-row-caret {
 	border-top: 1px solid var(--background-modifier-border);
 	padding-top: var(--size-4-4);
 	margin-top: var(--size-4-2);
+}
+
+/* A section that also closes with a separator (e.g. the character Faction
+   section, whose neighbors carry no border of their own). */
+.loom-field-sep-after {
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-bottom: var(--size-4-4);
 }
 
 /* Sublocations section: a left-aligned scannable column of clickable child
@@ -1361,9 +1459,10 @@ span.loom-row-caret {
 	gap: var(--size-2-2);
 }
 
+/* Top-aligned: the involve/location columns grow downward with their chips. */
 .loom-note-head {
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	gap: var(--size-2-2);
 }
 
@@ -1548,6 +1647,14 @@ span.loom-row-caret {
 	font-weight: var(--font-medium);
 }
 
+/* Character Events group chips match the session-note session chip size
+   (input height, regular text) — a level-1 header the events nest under. */
+.loom-char-event-group > .loom-tag-row .loom-session-chip {
+	height: var(--input-height);
+	padding: 0 var(--size-4-2);
+	font-size: 1em;
+}
+
 /* Hub row action drawer: trash + unlink slide out right-to-left behind <. */
 .loom-hub-actions {
 	display: flex;
@@ -1567,18 +1674,30 @@ span.loom-row-caret {
 .loom-hub-location,
 .loom-hub-involve {
 	position: relative;
-	width: 400px;
-	flex: 0 0 auto;
+	width: 100%;
 }
 
+/* Uncapped (past the 280px .loom-combo default) so the search uses the whole
+   column and the chips below get the same room. */
 .loom-hub-location .loom-combo,
 .loom-hub-involve .loom-combo {
 	width: 100%;
+	max-width: none;
 }
 
 .loom-hub-location .loom-combo input,
 .loom-hub-involve .loom-combo input {
 	width: 100%;
+}
+
+/* One column per picker: the search on top, its picked chips wrapping right
+   below it (involved under Involve…, locations under Location…). */
+.loom-hub-col {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	flex: 0 1 400px;
+	min-width: 0;
 }
 
 /* The type filter lives inside the Involve box, at its right edge: the
@@ -1603,16 +1722,8 @@ span.loom-row-caret {
 
 .loom-hub-involve-row {
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	gap: var(--size-2-2);
-	margin-left: 26px;
-}
-
-.loom-hub-involved {
-	margin-top: var(--size-2-1);
-}
-
-.loom-hub-involved {
 	margin-left: 26px;
 }
 

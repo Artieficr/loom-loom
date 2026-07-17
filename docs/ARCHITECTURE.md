@@ -98,6 +98,16 @@ relationships:
   `sublocation` connection. Nesting is arbitrary-depth; the graph flattens a tree
   into one grid under its top ancestor, while the location list nests recursively.
   Cycle guards everywhere treat cyclic parents as top-level.
+- **Faction membership is a dedicated field with one home**: a faction's `members`
+  frontmatter list holds its member characters — plain links (`"[[Sam]]"`, role =
+  the default `Member`, no location) or
+  `{ character: "[[Sam]]", role: "Quartermaster", location: "[[Harbor]]" }` once a
+  role or location is set (only non-default keys are written). The faction page
+  edits the list as chips (search-to-add on top); the character page mirrors it as
+  a "Faction(s)" section of relationship-style rows —
+  `[role] of faction [faction] at [location]` — plus a "+ Add faction" picker, all
+  reading and writing the *faction's* file, so a change on either page is the same
+  edit and both always agree. Each entry contributes a typed `member` connection.
 
 ## Names
 
@@ -192,7 +202,7 @@ component state. Navigation between plugin views reuses the same leaf
 uses a new tab so the user doesn't lose the view they navigated from.
 
 **Entity pages**: every loom-internal click opens `VIEW_ENTITY` — a structured form
-(name/date/description/tags/role/linked session/relationships/notes) over the same .md
+(name/date/description/tags/relationships/notes) over the same .md
 file. Registering a second view type for `md` does *not* hijack the default editor:
 opening the file from the file explorer still yields normal markdown, which is exactly
 the intended split ("app inside Obsidian" vs. plain notes). Field drafts are seeded once
@@ -207,5 +217,6 @@ frontmatter block.
 the two systems can't collide (the pre-rename `pluginTags` spelling is still read, and
 migrated to `loomTags` the next time a note's tags are edited). The vocabulary per
 entity type lives in settings (defaults: characters get PC/NPC/Cast, everything else
-empty) because it will grow. `role` on characters is a separate freeform field per the
-brief — the creation modal fills `loomTags` only.
+empty) because it will grow. The creation modal fills `loomTags` only. (Characters
+briefly had a freeform `role` frontmatter field; it was dropped in favor of
+per-membership roles on faction `members` entries.)
