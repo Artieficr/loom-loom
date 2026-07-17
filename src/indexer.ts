@@ -300,17 +300,19 @@ export class LoomIndexer extends Component {
 		if (Array.isArray(rawSessionNotes)) {
 			for (const note of rawSessionNotes) {
 				if (typeof note !== 'object' || note === null) continue;
-				const { session, text, places, seq } = note as {
+				const { session, text, places, seq, involved } = note as {
 					session?: unknown;
 					text?: unknown;
 					places?: unknown;
 					seq?: unknown;
+					involved?: unknown;
 				};
 				sessionNotes.push({
 					session: typeof session === 'string' ? extractLinkpath(session) : null,
 					text: typeof text === 'string' ? text : '',
 					places: parseLinkList(places),
 					seq: typeof seq === 'number' ? seq : null,
+					involved: parseLinkList(involved),
 				});
 			}
 		}
@@ -410,6 +412,16 @@ export class LoomIndexer extends Component {
 				linked.add(target.path);
 			}
 		}
+	// Ticked attendance connects the PC to the session (typed edge); the
+		// key stays in HIDDEN_LINK_KEYS only to keep the generic pass from
+		// double-counting it as a plain link.
+		for (const lp of record.attendance) {
+			const pc = this.resolve(lp, record.path);
+			if (pc?.type === 'character' && !linked.has(pc.path)) {
+				out.push({ record: pc, relType: 'attendance', direction: 'outgoing' });
+				linked.add(pc.path);
+			}
+		}
 		// Before the generic wikilink pass so these keep their typed relType
 		// instead of degrading to a plain 'link'.
 		if (record.parentLocation !== null) {
@@ -419,11 +431,18 @@ export class LoomIndexer extends Component {
 				linked.add(parent.path);
 			}
 		}
-		for (const note of record.sessionNotes) {
+	for (const note of record.sessionNotes) {
 			const target = note.session ? this.resolve(note.session, record.path) : null;
 			if (target?.type === 'session' && !linked.has(target.path)) {
 				out.push({ record: target, relType: 'session note', direction: 'outgoing' });
 				linked.add(target.path);
+			}
+			for (const lp of note.involved) {
+				const inv = this.resolve(lp, record.path);
+				if (inv && inv.path !== record.path && !linked.has(inv.path)) {
+					out.push({ record: inv, relType: 'involved', direction: 'outgoing' });
+					linked.add(inv.path);
+				}
 			}
 		}
 		const file = this.app.vault.getFileByPath(path);

@@ -37,11 +37,14 @@ import {
 	autoGrowTextarea,
 	startTextareaResize,
 	SuggestInput,
+	Truncated,
 	recordLabel,
 	useBoxSizeMemory,
 } from './common';
 import { ConnectedEntities } from './connected-entities';
 import { LinkTextarea } from './link-textarea';
+import { extractLinkpath } from '../indexer';
+import { MiniGraph } from './mini-graph';
 import { useIndexVersion } from './hooks';
 import type LoomLoomPlugin from '../main';
 
@@ -143,7 +146,13 @@ interface SessionNoteDraft {
 	text: string;
 	/** Locations only: linkpaths of places this note is about. */
 	places: string[];
+	/** Linkpaths of involved entities (the note is their home). */
+	involved: string[];
 }
+
+/** Session-graph sections left open, by file path — survives page re-opens
+ *  within the session (not persisted to disk). */
+const openSessionGraphs = new Set<string>();
 
 interface LocNoteEntry {
 	owner: EntityRecord;
@@ -151,6 +160,7 @@ interface LocNoteEntry {
 	session: string | null;
 	text: string;
 	seq: number | null;
+	involved: string[];
 }
 
 function EntityPage({ view }: { view: EntityView }) {
@@ -176,7 +186,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		record?.relationships.map((r) => ({ type: r.type, target: r.linkpath })) ?? []
 	);
 	const [sessionNotes, setSessionNotes] = useState<SessionNoteDraft[]>(
-		record?.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text, places: n.places })) ?? []
+		record?.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved })) ?? []
 	);
 	const [body, setBody] = useState<string | null>(null);
 	/** Live sublocation reorder: rows slide in real time while the grip is
@@ -188,6 +198,14 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [locDraft, setLocDraft] = useState<{ session: string; place: string; text: string } | null>(
 		null
 	);
+	/** Session graph section, collapsed by default; remembered per file. */
+	const [graphOpen, setGraphOpenState] = useState(() => openSessionGraphs.has(file?.path ?? ''));
+	const setGraphOpen = (open: boolean) => {
+		setGraphOpenState(open);
+		if (!file) return;
+		if (open) openSessionGraphs.add(file.path);
+		else openSessionGraphs.delete(file.path);
+	};
 	const [questsOpen, setQuestsOpen] = useState<{ active: boolean; finished: boolean }>({
 		active: true,
 		finished: false,
@@ -212,7 +230,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		setReward(record.reward);
 		setDate(record.date?.raw ?? '');
 		setRelationships(record.relationships.map((r) => ({ type: r.type, target: r.linkpath })));
-		setSessionNotes(record.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text, places: n.places })));
+		setSessionNotes(record.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved })));
 	}, [record]);
 
 	useEffect(() => {
@@ -399,7 +417,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sessionChip = (s: EntityRecord, clear: () => void) => (
 		<div className="loom-tag-row">
 			<span className="loom-chip loom-session-chip">
-				{recordLabel(s, project)}
+				<button className="loom-subloc-link" onClick={() => view.openEntity(s.path)}>
+					{recordLabel(s, project)}
+				</button>
 				<button className="loom-chip-remove" aria-label="Clear session" onClick={clear}>
 					✕
 				</button>
@@ -536,7 +556,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	const locEntries: LocNoteEntry[] = isLocation
 		? [record, ...locDescendants].flatMap((owner) =>
 				owner.sessionNotes
-					.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq }))
+					.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq, involved: n.involved }))
 					.filter((e) => e.session !== null)
 			)
 		: [];
@@ -627,7 +647,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				.getAll(undefined, record.project)
 				.flatMap((owner) =>
 					owner.sessionNotes
-						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq }))
+						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq, involved: n.involved }))
 						.filter(
 							(e) =>
 								e.session !== null &&
@@ -643,20 +663,31 @@ function EntityPage({ view }: { view: EntityView }) {
 					.filter((r) => r.type !== 'session' && r.type !== 'event')
 					.sort((a, b) => a.name.localeCompare(b.name))
 			: [];
-	const isInvolvedType = (t: string) => {
-		const lower = t.trim().toLowerCase();
-		return lower === 'involved' || lower === 'involves';
-	};
-	const involvedOf = (owner: EntityRecord) =>
-		owner.relationships
-			.filter((r) => isInvolvedType(r.type))
-			.map((r) => ({ rel: r, target: plugin.indexer.resolve(r.linkpath, owner.path) }))
+	/** The note's involved entities, resolved and grouped by type then name. */
+	const involvedOfEntry = (en: LocNoteEntry) =>
+		en.involved
+			.map((lp) => ({ lp, target: plugin.indexer.resolve(lp, en.owner.path) }))
 			.sort(
 				(a, b) =>
 					(a.target ? ENTITY_TYPES.indexOf(a.target.type) : 99) -
 						(b.target ? ENTITY_TYPES.indexOf(b.target.type) : 99) ||
-					(a.target?.name ?? a.rel.linkpath).localeCompare(b.target?.name ?? b.rel.linkpath)
+					(a.target?.name ?? a.lp).localeCompare(b.target?.name ?? b.lp)
 			);
+	const writeEntryInvolved = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) => {
+		writeOwnerNotes(en.owner, (arr) => {
+			const item = arr[en.idx];
+			if (typeof item === 'object' && item !== null) {
+				const cur = (item as { involved?: unknown }).involved;
+				(item as { involved?: unknown }).involved = apply(Array.isArray(cur) ? cur : []);
+			}
+		});
+	};
+	const involveTargets = project
+		? plugin.indexer
+				.getAll(undefined, project.root)
+				.filter((r) => r.type !== 'session' && r.type !== 'event' && r.type !== 'location' && r.path !== record.path)
+				.sort((a, b) => a.name.localeCompare(b.name))
+		: [];
 	const writeOwnerRels = (owner: EntityRecord, apply: (rels: unknown[]) => unknown[]) => {
 		const f = plugin.app.vault.getFileByPath(owner.path);
 		if (!f) return;
@@ -883,7 +914,9 @@ function EntityPage({ view }: { view: EntityView }) {
 					{picked && picked.type === 'session' ? (
 						<div className="loom-tag-row">
 							<span className="loom-chip loom-session-chip">
-								{shortSessionLabel(picked)}
+							<button className="loom-subloc-link" onClick={() => view.openEntity(picked.path)}>
+									{shortSessionLabel(picked)}
+								</button>
 								<button
 									className="loom-chip-remove"
 									aria-label="Clear session"
@@ -914,7 +947,47 @@ function EntityPage({ view }: { view: EntityView }) {
 						/>
 					)}
 				</div>
-				<button
+			<div className="loom-hub-involve">
+						<SearchableSelect
+							placeholder="Involve…"
+							options={involveTargets
+								.filter((t) => !note.involved.includes(t.name))
+								.filter((t) => !hubFilter['row:' + String(i)] || t.type === hubFilter['row:' + String(i)])
+								.map((t) => ({ value: t.name, label: t.name }))}
+							onPick={(name) => setNote({ involved: [...note.involved, name] }, true)}
+						/>
+						<button
+							className="loom-rel-filter"
+							aria-label="Filter suggestions by entity type"
+							onClick={(e) => {
+								const menu = new Menu();
+								const fkey = 'row:' + String(i);
+								const current = hubFilter[fkey] ?? null;
+								menu.addItem((item) =>
+									item
+										.setTitle('All entities')
+										.setIcon('filter')
+										.setChecked(current === null)
+										.onClick(() => setHubFilter({ ...hubFilter, [fkey]: null }))
+								);
+								for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event' && t !== 'location')) {
+									menu.addItem((item) =>
+										item
+											.setTitle(ENTITY_META[t].plural)
+											.setIcon(ENTITY_META[t].icon)
+											.setChecked(current === t)
+											.onClick(() => setHubFilter({ ...hubFilter, [fkey]: t }))
+									);
+								}
+								menu.showAtMouseEvent(e.nativeEvent);
+							}}
+						>
+							<Icon
+								name={hubFilter['row:' + String(i)] ? ENTITY_META[hubFilter['row:' + String(i)] as EntityType].icon : 'filter'}
+							/>
+						</button>
+					</div>
+								<button
 					className="loom-nav-btn loom-note-remove"
 					aria-label="Remove session note"
 					onClick={() => {
@@ -957,6 +1030,50 @@ function EntityPage({ view }: { view: EntityView }) {
 								.map((l) => ({ value: l.name, label: l.name }))}
 							onPick={(name) => setNote({ places: [...note.places, name] }, true)}
 						/>
+					</div>
+				
+				) : null}
+				{note.involved.length > 0 ? (
+					<div className="loom-hub-involved loom-tag-row">
+						{note.involved
+							.map((lp) => ({ lp, target: plugin.indexer.resolve(lp, record.path) }))
+							.sort(
+								(a, b) =>
+									(a.target ? ENTITY_TYPES.indexOf(a.target.type) : 99) -
+										(b.target ? ENTITY_TYPES.indexOf(b.target.type) : 99) ||
+									(a.target?.name ?? a.lp).localeCompare(b.target?.name ?? b.lp)
+							)
+							.map(({ lp, target }, ii) => (
+								<span
+									key={lp + String(ii)}
+									className="loom-chip loom-session-chip"
+									style={
+										target
+											? {
+													background: plugin.settings.nodeColors[target.type] + '40',
+													borderColor: plugin.settings.nodeColors[target.type],
+												}
+											: undefined
+									}
+								>
+								{target ? (
+										<button className="loom-subloc-link" onClick={() => view.openEntity(target.path)}>
+											{target.name}
+										</button>
+									) : (
+										lp
+									)}
+									<button
+										className="loom-chip-remove"
+										aria-label="Remove involved entity"
+										onClick={() =>
+											setNote({ involved: note.involved.filter((v) => v !== lp) }, true)
+										}
+									>
+										✕
+									</button>
+								</span>
+							))}
 					</div>
 				) : null}
 				<div className="loom-note-text">
@@ -1003,14 +1120,15 @@ function EntityPage({ view }: { view: EntityView }) {
 						Turn to a sublocation
 					</button>
 				) : null}
-				<button
-					className="loom-nav-btn"
+			<button
+					className="loom-rel-filter"
+					aria-label="Open as markdown"
 					onClick={() => view.navigateTo('markdown', { file: file.path })}
 				>
-					Open as markdown
+					<Icon name="file-type" />
 				</button>
-				<button
-					className="loom-nav-btn loom-entity-delete"
+			<button
+					className="loom-rel-filter loom-entity-delete"
 					aria-label="Delete"
 					onClick={() =>
 						new ConfirmModal(
@@ -1153,20 +1271,105 @@ function EntityPage({ view }: { view: EntityView }) {
 									<span className="loom-section-count">{list.length}</span>
 								</button>
 								{open
-									? list.map(({ quest }) => (
-											<div key={quest.path} className="loom-locnote-head">
-												<button
-													className="loom-subloc-link"
+									? (
+									<div className="loom-quest-cards">
+									{list.map(({ quest }) => {
+											const givers = quest.questGivers
+												.map((lp) => plugin.indexer.resolve(lp, quest.path))
+												.filter((r): r is EntityRecord => r != null && r.type === 'character');
+											const received =
+												quest.questReceived !== null
+													? plugin.indexer.resolve(quest.questReceived, quest.path)
+													: null;
+											const outcomeSes =
+												quest.questOutcomeSession !== null
+													? plugin.indexer.resolve(quest.questOutcomeSession, quest.path)
+													: null;
+											return (
+												<div key={quest.path} className="loom-quest-card">
+													<button
+														className="loom-subloc-link loom-quest-card-title"
 													onClick={() => view.openEntity(quest.path)}
-												>
-													{quest.name}
-												</button>
-												{state === 'finished' ? (
-													<span className="loom-row-count">{quest.questOutcome}</span>
-												) : null}
-											</div>
-										))
-									: null}
+													>
+														<Truncated className="loom-clip" text={quest.name} />
+													</button>
+													<div className="loom-quest-card-row">
+														<span className="loom-quest-card-label">
+															{givers.length > 1 ? 'Quest givers:' : 'Quest giver:'}
+														</span>
+<span className="loom-quest-card-value">														{givers.length > 0 ? (
+															givers.map((g) => (
+																<button
+																	key={g.path}
+																	className="loom-subloc-link"
+																onClick={() => view.openEntity(g.path)}
+																>
+																	<Truncated className="loom-clip" text={g.name} />
+																</button>
+															))
+														) : (
+															<span>—</span>
+														)}</span>
+													</div>
+													<div className="loom-quest-card-row">
+													<span className="loom-quest-card-label">Received on:</span>
+<span className="loom-quest-card-value">														{received && received.type === 'session' ? (
+															received.path === record.path ? (
+																<span>This session</span>
+															) : (
+																<button
+																	className="loom-subloc-link"
+																	onClick={() => view.openEntity(received.path)}
+																>
+																	{shortSessionLabel(received)}
+																</button>
+															)
+														) : (
+															<span>—</span>
+														)}</span>
+													</div>
+													
+													{state === 'finished' ? (
+														<>
+															<div className="loom-quest-card-row">
+															<span className="loom-quest-card-label">Completed on:</span>
+<span className="loom-quest-card-value">																{outcomeSes && outcomeSes.type === 'session' ? (
+																	outcomeSes.path === record.path ? (
+																		<span>This session</span>
+																	) : (
+																		<button
+																			className="loom-subloc-link"
+																			onClick={() => view.openEntity(outcomeSes.path)}
+																		>
+																			{shortSessionLabel(outcomeSes)}
+																		</button>
+																	)
+																) : (
+																	<span>—</span>
+																)}</span>
+															</div>
+															<div className="loom-quest-card-row">
+																<span className="loom-quest-card-label">Outcome:</span>
+<span className="loom-quest-card-value">																<span>
+																	{quest.questOutcome !== ''
+																		? quest.questOutcome[0].toUpperCase() + quest.questOutcome.slice(1)
+																		: '—'}
+																</span></span>
+															</div>
+														</>
+													) : null}
+													<div className="loom-quest-card-row">
+													<span className="loom-quest-card-label">Reward:</span>
+<span className="loom-quest-card-value">														<Truncated
+															className="loom-clip"
+															text={quest.reward !== '' ? quest.reward : 'Not specified'}
+														/></span>
+													</div>
+												</div>
+											);
+										})}
+									</div>
+								) : null}
 							</div>
 						);
 					})}
@@ -1191,8 +1394,17 @@ function EntityPage({ view }: { view: EntityView }) {
 						{questGiverRecords.length > 0 ? (
 							<div className="loom-tag-row">
 								{questGiverRecords.map((c) => (
-									<span key={c.path} className="loom-chip loom-session-chip">
+									<span
+									key={c.path}
+									className="loom-chip loom-session-chip"
+									style={{
+										background: plugin.settings.nodeColors.character + '40',
+										borderColor: plugin.settings.nodeColors.character,
+									}}
+								>
+										<button className="loom-subloc-link" onClick={() => view.openEntity(c.path)}>
 										{c.name}
+									</button>
 										<button
 											className="loom-chip-remove"
 											aria-label="Remove quest giver"
@@ -1269,7 +1481,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			<label className="loom-field">
+		<label className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
 				<span className="loom-field-label">Description</span>
 				<div className="loom-resizable">
 					<textarea
@@ -1289,6 +1501,25 @@ function EntityPage({ view }: { view: EntityView }) {
 					/>
 				</div>
 			</label>
+
+		{isSession && project ? (
+				<div className="loom-field loom-graph-under">
+					<button className="loom-section-header" onClick={() => setGraphOpen(!graphOpen)}>
+						<span className={graphOpen ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
+						Session graph
+					</button>
+					{graphOpen ? (
+						<MiniGraph
+							plugin={plugin}
+							project={project}
+							focusId={record.path}
+							version={version}
+						onOpen={(path) => view.openEntity(path)}
+							onCollapse={() => setGraphOpen(false)}
+						/>
+					) : null}
+				</div>
+			) : null}
 
 			{isSession && project ? (
 				<div className="loom-field loom-field-sep">
@@ -1324,7 +1555,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
 							{hubEntries.filter((e) => e.owner.type === t).map((en) => {
 						const menuKey = en.owner.path + String(en.idx);
-						const involved = involvedOf(en.owner);
+						const involved = involvedOfEntry(en);
 						return (
 							<div key={menuKey} className="loom-locnote">
 								<div className="loom-locnote-head">
@@ -1468,14 +1699,15 @@ function EntityPage({ view }: { view: EntityView }) {
 									<div className="loom-hub-involve">
 										<SearchableSelect
 										placeholder="Involve…"
-										options={hubTargets
+								options={hubTargets
+											.filter((t) => t.type !== 'location')
 											.filter((t) => !involved.some((iv) => iv.target?.path === t.path))
 											.filter((t) => !hubFilter[menuKey] || t.type === hubFilter[menuKey])
 											.map((t) => ({ value: t.name, label: t.name }))}
 										onPick={(name) =>
-											writeOwnerRels(en.owner, (rels) => {
-												rels.push({ type: 'involved', target: `[[${name}]]` });
-												return rels;
+											writeEntryInvolved(en, (list) => {
+												list.push(`[[${name}]]`);
+												return list;
 											})
 										}
 									/>
@@ -1492,7 +1724,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													.setChecked(current === null)
 													.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: null }))
 											);
-											for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
+											for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event' && t !== 'location')) {
 												menu.addItem((item) =>
 													item
 														.setTitle(ENTITY_META[t].plural)
@@ -1512,9 +1744,9 @@ function EntityPage({ view }: { view: EntityView }) {
 								</div>
 								{involved.length > 0 ? (
 									<div className="loom-hub-involved loom-tag-row">
-										{involved.map(({ rel, target }, ii) => (
+										{involved.map(({ lp, target }, ii) => (
 											<span
-												key={rel.linkpath + String(ii)}
+												key={lp + String(ii)}
 												className="loom-chip loom-session-chip"
 												style={
 													target
@@ -1525,22 +1757,26 @@ function EntityPage({ view }: { view: EntityView }) {
 														: undefined
 												}
 											>
-												{target?.name ?? rel.linkpath}
+											{target ? (
+													<button
+														className="loom-subloc-link"
+														onClick={() => view.openEntity(target.path)}
+													>
+														{target.name}
+													</button>
+												) : (
+													lp
+												)}
 												<button
 													className="loom-chip-remove"
 													aria-label="Remove involved entity"
 													onClick={() =>
-														writeOwnerRels(en.owner, (rels) => {
-															const i = rels.findIndex(
-																(r) =>
-																	typeof r === 'object' &&
-																	r !== null &&
-																	(r as { target?: unknown }).target === rel.targetRaw &&
-																	typeof (r as { type?: unknown }).type === 'string' &&
-																	isInvolvedType((r as { type: string }).type)
+														writeEntryInvolved(en, (list) => {
+															const ri = list.findIndex(
+																(r) => typeof r === 'string' && extractLinkpath(r) === lp
 															);
-															if (i >= 0) rels.splice(i, 1);
-															return rels;
+															if (ri >= 0) list.splice(ri, 1);
+															return list;
 														})
 													}
 												>
@@ -1607,8 +1843,17 @@ function EntityPage({ view }: { view: EntityView }) {
 					{memberRecords.length > 0 ? (
 						<div className="loom-tag-row">
 							{memberRecords.map((c) => (
-								<span key={c.path} className="loom-chip loom-session-chip">
-									{c.name}
+								<span
+									key={c.path}
+									className="loom-chip loom-session-chip"
+									style={{
+										background: plugin.settings.nodeColors.character + '40',
+										borderColor: plugin.settings.nodeColors.character,
+									}}
+								>
+									<button className="loom-subloc-link" onClick={() => view.openEntity(c.path)}>
+										{c.name}
+									</button>
 									<button
 										className="loom-chip-remove"
 										aria-label="Remove member"
@@ -1709,7 +1954,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					{sessionNotes.length > 0 ? <span className="loom-field-label">Session notes</span> : null}
 					<button
 						className="loom-rel-add"
-						onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [] }])}
+						onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [] }])}
 					>
 						+ Add a session note
 					</button>
@@ -2024,4 +2269,4 @@ function EntityPage({ view }: { view: EntityView }) {
 			</div>
 		</div>
 	);
-}
+}										

@@ -13,6 +13,7 @@ import {
 	ENTITY_META,
 	ENTITY_TYPES,
 	EntityRecord,
+	EntityType,
 	GraphCamera,
 	QUEST_OUTCOMES,
 	TimelineDef,
@@ -162,7 +163,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const [manualVersion, setManualVersion] = useState(0);
 	/** Transient manual-x override while a reorder drag is in flight — the
 	 *  layout reflows live under the cursor instead of only after the drop. */
-	const liveManual = useRef<{ id: string; x: number } | null>(null);
+	const liveManual = useRef<{ id: string; x: number; y: number } | null>(null);
 	const liveLayoutRaf = useRef(0);
 	const scheduleLiveLayout = () => {
 		if (liveLayoutRaf.current) return;
@@ -182,9 +183,13 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					...Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {}),
 					...(liveManual.current ? [[liveManual.current.id, liveManual.current.x] as const] : []),
 				]),
-				plugin.settings.graphTrunkGap,
+			plugin.settings.graphTrunkGap,
 				LABEL_FONT_PX[plugin.settings.textSize],
-				liveManual.current?.id
+				liveManual.current?.id,
+				new Map<string, number>([
+					...Object.entries(project ? plugin.settings.graphManualY[project.root] ?? {} : {}),
+					...(liveManual.current ? [[liveManual.current.id, liveManual.current.y] as const] : []),
+				])
 			),
 		// layerKey stands in for the order array (mutated in place by settings).
 		[
@@ -200,6 +205,21 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	);
 
 	const [selected, setSelected] = useState<string | null>(null);
+	// Esc clears the selection (right-click focus otherwise needs an
+	// empty-space click to dismiss).
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === 'Escape') setSelected(null);
+		};
+		document.addEventListener('keydown', onKey);
+		return () => document.removeEventListener('keydown', onKey);
+	}, []);
+	/** Graph search: matching nodes highlight, everything else dims. */
+	const [search, setSearch] = useState('');
+	/** Graph filter: unticked types are dimmed or hidden per the eye mode. */
+	const [filterOpen, setFilterOpen] = useState(false);
+	const [filterTypes, setFilterTypes] = useState<ReadonlySet<EntityType>>(new Set(ENTITY_TYPES));
+	const [filterMode, setFilterMode] = useState<'dim' | 'hide'>('dim');
 	const [camera, setCamera] = useState<Camera>(
 		() =>
 			view.restored.camera ??
@@ -468,8 +488,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			dropRef.current = target;
 			// Live reflow: everything the drop would rearrange (row reorder,
 			// free-event repel, edge routing) follows the drag in real time.
-			if (isReorderDrag(drag.node) && project) {
-				liveManual.current = { id: drag.id, x: cx };
+		if (isReorderDrag(drag.node) && project) {
+				liveManual.current = { id: drag.id, x: cx, y: cy };
 				scheduleLiveLayout();
 			}
 			setTick((t) => t + 1);
@@ -522,8 +542,12 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				// timeline-anchored ones ease back home (their forces win).
 				// The live preview already reflowed everything; this makes it
 				// stick.
-				const forProject = (plugin.settings.graphManualX[project.root] ??= {});
+			const forProject = (plugin.settings.graphManualX[project.root] ??= {});
 				forProject[drag.id] = drag.worldX;
+				// Fully-unconnected nodes hold their vertical spot too.
+				if ((layout.neighbors.get(drag.id)?.size ?? 0) === 0) {
+					(plugin.settings.graphManualY[project.root] ??= {})[drag.id] = drag.worldY;
+				}
 				void plugin.saveSettings();
 				pendingReorder.current = { id: drag.id, x: drag.worldX, y: drag.worldY };
 				setManualVersion((v) => v + 1);
@@ -824,6 +848,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		return set;
 	}, [selected, layout]);
 
+	const filterActive = filterTypes.size < ENTITY_TYPES.length;
+	const passesFilter = (n: LayoutNode) => filterTypes.has(n.record.type);
+
+	const searchMatches = useMemo(() => {
+		const q = search.trim().toLowerCase();
+		if (q === '') return null;
+		return new Set(
+			layout.nodes
+				.filter((n) => recordLabel(n.record, project).toLowerCase().includes(q))
+				.map((n) => n.id)
+		);
+	}, [search, layout, project]);
+
 	const viewRange = useMemo(
 		() => ({
 			min: (0 - camera.tx) / camera.k - CULL_MARGIN,
@@ -1000,10 +1037,73 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			project={project}
 			title="Loom"
 			railActive="graph"
-			titleExtra={
-				<button className="loom-nav-btn" onClick={fitAll}>
-					Fit view
-				</button>
+		titleExtra={
+				<>
+			<div className="loom-graph-search">
+						
+						<input
+							type="search"
+							className="loom-search"
+							placeholder="Search nodes…"
+							value={search}
+							onChange={(e) => setSearch(e.target.value)}
+						/>
+						{search !== '' ? (
+							<button
+								className="loom-chip-remove loom-search-clear"
+								aria-label="Clear search"
+								onClick={() => setSearch('')}
+							>
+								✕
+							</button>
+						) : null}
+					</div>
+				<div className="loom-graph-filter">
+							<button
+								className={
+									filterActive ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
+								}
+								aria-label="Filter graph"
+								onClick={() => setFilterOpen(!filterOpen)}
+							>
+								<Icon name="filter" />
+							</button>
+							{filterOpen ? (
+								<div className="loom-filter-pop">
+									<div className="loom-filter-mode">
+										<Icon name={filterMode === 'dim' ? 'eye-off' : 'eye-closed'} />
+										<span>{filterMode === 'dim' ? 'Dimmed' : 'Hidden'}</span>
+										<div
+											className={
+												filterMode === 'hide' ? 'checkbox-container is-enabled' : 'checkbox-container'
+											}
+											role="switch"
+											aria-checked={filterMode === 'hide'}
+											onClick={() => setFilterMode(filterMode === 'dim' ? 'hide' : 'dim')}
+										/>
+									</div>
+									{ENTITY_TYPES.map((t) => (
+										<label key={t} className="loom-check">
+											<input
+												type="checkbox"
+												checked={filterTypes.has(t)}
+												onChange={() => {
+													const next = new Set(filterTypes);
+													if (next.has(t)) next.delete(t);
+													else next.add(t);
+													setFilterTypes(next);
+												}}
+											/>
+											{ENTITY_META[t].plural}
+										</label>
+									))}
+								</div>
+							) : null}
+						</div>
+					<button className="loom-rel-filter" aria-label="Fit view" onClick={fitAll}>
+						<Icon name="scan" />
+					</button>
+				</>
 			}
 		>
 			<div className="loom-graph-stack">
@@ -1028,6 +1128,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							>
 								<Icon name="trash-2" />
 							</div>
+					
 						);
 					})()}
 					<svg
@@ -1042,19 +1143,37 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								const a = nodeById.get(edge.a);
 								const b = nodeById.get(edge.b);
 								if (!a || !b) return null;
+					const endpointVisible = (n: LayoutNode) =>
+									passesFilter(n) || searchMatches?.has(n.id) === true;
+								if (
+									filterActive &&
+									filterMode === 'hide' &&
+									(!endpointVisible(a) || !endpointVisible(b))
+								) {
+									return null;
+								}
 								const pa = pos(a);
 								const pb = pos(b);
+								// Bends follow their endpoint's displacement.
+								const da = { x: pa.x - a.x, y: pa.y - a.y };
+								const db = { x: pb.x - b.x, y: pb.y - b.y };
 								// Cull on the full route extent, so a long trunk
 								// stays visible while both endpoints are off-screen.
 								const [minX, maxX] = edgeXRange(edge.route, pa, pb);
 								if (maxX < viewRange.min || minX > viewRange.max) return null;
-								const dim = connectedTo !== null && edge.a !== selected && edge.b !== selected;
+								const dim =
+									(searchMatches
+										? !searchMatches.has(edge.a) && !searchMatches.has(edge.b)
+										: connectedTo !== null && edge.a !== selected && edge.b !== selected) ||
+								(filterActive &&
+										filterMode === 'dim' &&
+										(!endpointVisible(a) || !endpointVisible(b)));
 								const key = edge.a + '|' + edge.b + '|' + edge.relType;
 								// Declaration arrowheads, tips at the node rims.
 								const arrowSize = plugin.settings.graphArrowSize;
 								let arrows: ReactElement | null = null;
 								if (edge.arrowA || edge.arrowB) {
-									const dirs = edgeEndDirs(edge.route, pa, pb);
+									const dirs = edgeEndDirs(edge.route, pa, pb, da, db);
 									arrows = (
 										<g className={dim ? 'loom-edge-arrows loom-dim' : 'loom-edge-arrows'}>
 											{edge.arrowA ? (
@@ -1088,16 +1207,31 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 									<g key={key}>
 										<path
 											className={dim ? 'loom-edge loom-dim' : 'loom-edge'}
-											d={edgePath(edge.route, pa, pb)}
+											d={edgePath(edge.route, pa, pb, da, db)}
 										/>
 										{arrows}
 									</g>
 								);
 							})}
-							{layout.nodes.map((node) => {
+						{layout.nodes.map((node) => {
 								if (!visible.has(node.id)) return null;
+								if (
+									filterActive &&
+									filterMode === 'hide' &&
+									!passesFilter(node) &&
+									searchMatches?.has(node.id) !== true
+								) {
+									return null;
+								}
 								const p = pos(node);
-								const dim = connectedTo !== null && !connectedTo.has(node.id);
+								const dim =
+									(searchMatches
+										? !searchMatches.has(node.id)
+										: connectedTo !== null && !connectedTo.has(node.id)) ||
+								(filterActive &&
+										filterMode === 'dim' &&
+										!passesFilter(node) &&
+										searchMatches?.has(node.id) !== true);
 								const classes = ['loom-node', `loom-node-${node.kind}`];
 								if (dim) classes.push('loom-dim');
 								if (node.id === selected) classes.push('loom-node-selected');

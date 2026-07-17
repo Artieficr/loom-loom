@@ -158,7 +158,10 @@ export function computeGraphLayout(
 	labelFontPx: number = 12.8,
 	/** Node being live-dragged, if any: excluded from the checker pass so its
 	 *  transient label position can't toggle neighbors' stagger every frame. */
-	liveDragId?: string
+	liveDragId?: string,
+	/** Drag-dropped y positions — honored for fully-unconnected nodes only,
+	 *  so they can sit anywhere within their layer's space. */
+	manualY?: ReadonlyMap<string, number>
 ): GraphLayout {
 	const { raw, neighbors } = collectEdges(indexer, projectRoot);
 
@@ -171,6 +174,18 @@ export function computeGraphLayout(
 	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX, liveDragId);
 	const classified = classifyEdges(raw, placed);
 	const bottom = routeEdges(classified, placed, lineGap, trunkGap);
+
+	// Free y-placement: a fully-unconnected node holds its dragged vertical
+	// spot, clamped to its own layer's band — it may float within its entity
+	// type's space but never into another layer. Applied after routing so the
+	// clamp is relative to the final row y.
+	if (manualY) {
+		for (const [path, y] of manualY) {
+			const node = placed.nodes.get(path);
+			if (!node || (neighbors.get(path)?.size ?? 0) > 0) continue;
+			node.y = Math.max(node.y - 55, Math.min(node.y + 55, y));
+		}
+	}
 
 	// Checker pass (after routing, so row membership and bands were computed
 	// from the flat rows): row neighbors whose labels would overlap alternate
@@ -494,8 +509,12 @@ function placeNodes(
 		}
 		if (anchored) anchoredComps.add(id);
 	}
+	// Manual x only ever positions fully-unconnected nodes: a node with real
+	// neighbors follows its connections (stale drag spots used to act as
+	// permanent pseudo-edges and kept connected clusters from pulling
+	// together — chars sharing a location stayed stretched across the row).
 	const manualPull = (path: string): number | undefined =>
-		manualX !== undefined && !anchoredComps.has(compOf.get(path) ?? -1)
+		manualX !== undefined && !anchoredComps.has(compOf.get(path) ?? -1) && !isConnected(path)
 			? manualX.get(path)
 			: undefined;
 

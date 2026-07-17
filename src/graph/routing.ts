@@ -52,24 +52,42 @@ export const CORNER_RADIUS = 6;
 /** Fan/lane x differences below this collapse into one vertical (no run). */
 export const LANE_EPSILON = 4;
 
-/** Waypoints of a route given the endpoints' live (displaced) positions. */
-export function edgePoints(route: EdgeRoute, a: Pt, b: Pt): Pt[] {
+const NO_SHIFT: Pt = { x: 0, y: 0 };
+
+/**
+ * Waypoints of a route given the endpoints' live (displaced) positions.
+ * `da`/`db` are the endpoints' displacements from their layout homes: bends
+ * near each endpoint ride along with it (the trunk slants between the two
+ * shifts), so dragging a node carries its connection angles instead of
+ * leaving them pinned at the old geometry.
+ */
+export function edgePoints(route: EdgeRoute, a: Pt, b: Pt, da: Pt = NO_SHIFT, db: Pt = NO_SHIFT): Pt[] {
 	switch (route.kind) {
 		case 'direct':
 			return [a, b];
 		case 'fan': {
+			// The trunk lives beside the UPPER node's column: both its ends
+			// follow da.x. Only the approach line's y and the fan foot follow
+			// the lower node — otherwise dragging the target dragged the
+			// far-away vertical along with it.
+			const trunkX = route.laneX + da.x;
 			const fanX = b.x + route.fanOffset;
 			const pts: Pt[] = [
 				a,
-				{ x: route.laneX, y: route.departY },
-				{ x: route.laneX, y: route.approachY },
+				{ x: trunkX, y: route.departY + da.y },
+				{ x: trunkX, y: route.approachY + db.y },
 			];
-			if (Math.abs(fanX - route.laneX) > LANE_EPSILON) pts.push({ x: fanX, y: route.approachY });
+			if (Math.abs(fanX - trunkX) > LANE_EPSILON) pts.push({ x: fanX, y: route.approachY + db.y });
 			pts.push(b);
 			return dedupe(pts);
 		}
 		case 'rowU':
-			return dedupe([a, { x: a.x + route.offA, y: route.uY }, { x: b.x + route.offB, y: route.uY }, b]);
+			return dedupe([
+				a,
+				{ x: a.x + route.offA, y: route.uY + da.y },
+				{ x: b.x + route.offB, y: route.uY + db.y },
+				b,
+			]);
 	}
 }
 
@@ -112,16 +130,16 @@ export function roundedPath(pts: Pt[], r: number): string {
 }
 
 /** Full path of an edge from its endpoints' live positions. */
-export function edgePath(route: EdgeRoute, a: Pt, b: Pt): string {
-	return roundedPath(edgePoints(route, a, b), CORNER_RADIUS);
+export function edgePath(route: EdgeRoute, a: Pt, b: Pt, da?: Pt, db?: Pt): string {
+	return roundedPath(edgePoints(route, a, b, da, db), CORNER_RADIUS);
 }
 
 /**
  * Unit directions of a route's first segment (leaving `a`) and last segment
  * (entering `b`) — used to place declaration arrowheads at the node rims.
  */
-export function edgeEndDirs(route: EdgeRoute, a: Pt, b: Pt): { start: Pt; end: Pt } {
-	const pts = edgePoints(route, a, b);
+export function edgeEndDirs(route: EdgeRoute, a: Pt, b: Pt, da?: Pt, db?: Pt): { start: Pt; end: Pt } {
+	const pts = edgePoints(route, a, b, da, db);
 	const norm = (from: Pt, to: Pt): Pt => {
 		const dx = to.x - from.x;
 		const dy = to.y - from.y;

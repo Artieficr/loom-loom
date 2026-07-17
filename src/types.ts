@@ -90,6 +90,9 @@ export interface SessionNoteDecl {
 	/** Creation/reorder stamp: group entries sort by it, so appending lands at
 	 *  the end and drag-reorder persists identically on every ancestor page. */
 	seq: number | null;
+	/** Linkpaths of entities involved in this note — the note (not a
+	 *  relationship) is the home of involvement. */
+	involved: string[];
 }
 
 /** A typed relationship as declared in one note's frontmatter. */
