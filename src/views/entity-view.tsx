@@ -173,6 +173,14 @@ function EntityPage({ view }: { view: EntityView }) {
 	const project = record ? plugin.indexer.getProjectByRoot(record.project) ?? null : null;
 	const writeFm = useFrontmatterWriter(plugin, file);
 
+	/** Label a record is searched/shown by in free-text draft inputs: the
+	 *  display name — for sessions, their formatted date (their file name is
+	 *  managed and never user-facing). */
+	const draftLabel = (r: EntityRecord) =>
+		r.type === 'session'
+			? recordLabel(r, plugin.indexer.getProjectByRoot(r.project) ?? null)
+			: r.name;
+
 	// Drafts are seeded once per file (component is keyed by path) so index
 	// updates triggered by our own saves never clobber what's being typed.
 	const [name, setName] = useState(record?.name ?? '');
@@ -180,10 +188,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [reward, setReward] = useState(record?.reward ?? '');
 	const [date, setDate] = useState(record?.date?.raw ?? '');
 	const [relationships, setRelationships] = useState<RelationshipDraft[]>(
-		record?.relationships.map((r) => ({
-			type: r.type,
-			target: plugin.indexer.resolve(r.linkpath, record.path)?.name ?? r.linkpath,
-		})) ?? []
+		record?.relationships.map((r) => {
+			const target = plugin.indexer.resolve(r.linkpath, record.path);
+			return { type: r.type, target: target ? draftLabel(target) : r.linkpath };
+		}) ?? []
 	);
 	const [sessionNotes, setSessionNotes] = useState<SessionNoteDraft[]>(
 		record?.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, seq: n.seq, idx })) ?? []
@@ -200,6 +208,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	);
 	/** Characters: a pending "+ Add faction" row awaiting its faction pick. */
 	const [factionDraft, setFactionDraft] = useState(false);
+	/** Pending alias text (committed via + / Enter into native `aliases`). */
+	const [aliasDraft, setAliasDraft] = useState('');
 	/** Session graph section, collapsed by default; remembered per file. */
 	const [graphOpen, setGraphOpenState] = useState(() => openSessionGraphs.has(file?.path ?? ''));
 	const setGraphOpen = (open: boolean) => {
@@ -231,10 +241,10 @@ function EntityPage({ view }: { view: EntityView }) {
 		setReward(record.reward);
 		setDate(record.date?.raw ?? '');
 		setRelationships(
-			record.relationships.map((r) => ({
-				type: r.type,
-				target: plugin.indexer.resolve(r.linkpath, record.path)?.name ?? r.linkpath,
-			}))
+			record.relationships.map((r) => {
+				const target = plugin.indexer.resolve(r.linkpath, record.path);
+				return { type: r.type, target: target ? draftLabel(target) : r.linkpath };
+			})
 		);
 		setSessionNotes(record.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, seq: n.seq, idx })));
 	}, [record]);
@@ -251,24 +261,18 @@ function EntityPage({ view }: { view: EntityView }) {
 	}, [plugin, file]);
 
 
-	// Project entities first (alphabetical, searched by display name; inserted
-	// as `target|display` so the raw link resolves AND reads well), then the
-	// rest of the vault by plain basename.
+	// Link completions offer only this project's entities, searched by their
+	// short (user-entered) name — sessions by their date. Inserted as
+	// `target|short name` so the raw link resolves AND reads well.
 	const linkNames = useMemo(() => {
 		const records = record ? plugin.indexer.getAll(undefined, record.project) : [];
-		const entities = records
+		return records
 			.map((r) => {
 				const target = linkTargetOf(r);
-				return { label: r.name, insert: target === r.name ? r.name : `${target}|${r.name}` };
+				const label = draftLabel(r);
+				return { label, insert: target === label ? label : `${target}|${label}` };
 			})
 			.sort((a, b) => a.label.localeCompare(b.label));
-		const seenTargets = new Set(records.map((r) => linkTargetOf(r)));
-		const rest = plugin.app.vault
-			.getMarkdownFiles()
-			.map((f) => f.basename)
-			.filter((n) => !seenTargets.has(n))
-			.map((n) => ({ label: n, insert: n }));
-		return [...entities, ...rest];
 	}, [plugin, record, version]);
 
 	const saveBody = useMemo(() => {
@@ -311,6 +315,27 @@ function EntityPage({ view }: { view: EntityView }) {
 		const resolved = plugin.indexer.resolve(target, record.path);
 		if (resolved) view.openEntity(resolved.path);
 		else void plugin.app.workspace.openLinkText(target, record.path);
+	};
+
+	/** "+ Create …" from a [[ completion: type picker → creation modal with
+	 *  the short name prefilled; the finished entity links back in place. */
+	const createLinkEntity = (entered: string, insert: (linkInsert: string) => void) => {
+		const proj = record ? plugin.indexer.getProjectByRoot(record.project) ?? null : null;
+		if (!proj) return;
+		new EntityTypeSuggestModal(plugin, (type) =>
+			new CreateEntityModal(plugin, type, proj, {
+				initialName: entered,
+				onCreated: (created) => {
+					// Short name = managed basename minus its prefix (the index
+					// may not have caught the new file yet).
+					const prefix = `${proj.name} ${ENTITY_META[type].label} `;
+					const label = created.basename.startsWith(prefix)
+						? created.basename.slice(prefix.length)
+						: entered;
+					insert(created.basename === label ? label : `${created.basename}|${label}`);
+				},
+			}).open()
+		).open();
 	};
 
 	if (!file || !record) {
@@ -380,6 +405,31 @@ function EntityPage({ view }: { view: EntityView }) {
 		await plugin.app.fileManager.renameFile(file, newPath);
 	};
 
+	// Aliases live in Obsidian's native `aliases` frontmatter — that's what
+	// link suggestions read — so edits here go straight to that key. The alias
+	// equal to the display name is plugin-managed (kept in sync by renames)
+	// and hidden from the chip list.
+	const fileAliases = (() => {
+		const raw = plugin.app.metadataCache.getFileCache(file)?.frontmatter?.aliases as unknown;
+		return Array.isArray(raw) ? raw.filter((a): a is string => typeof a === 'string') : [];
+	})();
+	const extraAliases = fileAliases.filter((a) => a !== record.name);
+	const addAlias = () => {
+		const alias = aliasDraft.trim();
+		setAliasDraft('');
+		if (alias === '' || fileAliases.includes(alias)) return;
+		writeFm((fm) => {
+			const cur: unknown[] = Array.isArray(fm.aliases) ? (fm.aliases as unknown[]) : [];
+			fm.aliases = [...cur, alias];
+		});
+	};
+	const removeAlias = (alias: string) => {
+		writeFm((fm) => {
+			const cur: unknown[] = Array.isArray(fm.aliases) ? (fm.aliases as unknown[]) : [];
+			fm.aliases = cur.filter((a) => a !== alias);
+		});
+	};
+
 	const commitDate = async (raw: string = date) => {
 		const value = raw.trim();
 		writeFm((fm) => {
@@ -400,7 +450,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		const trimmed = value.trim();
 		if (trimmed === '') return null;
 		return (
-			targetRecords.find((r) => r.name === trimmed) ?? plugin.indexer.resolve(trimmed, record.path)
+			targetRecords.find((r) => draftLabel(r) === trimmed || r.name === trimmed) ??
+			plugin.indexer.resolve(trimmed, record.path)
 		);
 	};
 	/** Resolves a picker/draft value (display name or basename) to a link target. */
@@ -1020,7 +1071,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				value={rel.target}
 				options={targetRecords
 					.filter((r) => !rel.filter || r.type === rel.filter)
-					.map((r) => r.name)
+					.map((r) => draftLabel(r))
 					.sort((a, b) => a.localeCompare(b))}
 				onChange={(v) => {
 					const next = [...relationships];
@@ -1611,18 +1662,53 @@ function EntityPage({ view }: { view: EntityView }) {
 			</div>
 
 			{!isSession ? (
-				<label className="loom-field">
-					<span className="loom-field-label">Name</span>
-					<input
-						type="text"
-						value={name}
-						onChange={(e) => setName(e.target.value)}
-						onBlur={() => void commitName()}
-						onKeyDown={(e) => {
-							if (e.key === 'Enter') void commitName();
-						}}
-					/>
-				</label>
+				<div className="loom-field">
+					<div className="loom-name-alias-row">
+						<label className="loom-name-col">
+							<span className="loom-field-label">Name</span>
+							<input
+								type="text"
+								value={name}
+								onChange={(e) => setName(e.target.value)}
+								onBlur={() => void commitName()}
+								onKeyDown={(e) => {
+									if (e.key === 'Enter') void commitName();
+								}}
+							/>
+						</label>
+						<div className="loom-alias-col">
+							<span className="loom-field-label">Aliases</span>
+							<div className="loom-alias-box">
+								<input
+									type="text"
+									placeholder="Add alias"
+									value={aliasDraft}
+									onChange={(e) => setAliasDraft(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === 'Enter') addAlias();
+									}}
+								/>
+								<button className="loom-rel-filter loom-alias-add" aria-label="Add alias" onClick={addAlias}>
+									<Icon name="plus" />
+								</button>
+							</div>
+						</div>
+					</div>
+					{extraAliases.length > 0 ? (
+						<div className="loom-tag-row">
+							{extraAliases.map((alias) => (
+								<EntityChip
+									key={alias}
+									plugin={plugin}
+									record={null}
+									label={alias}
+									onRemove={() => removeAlias(alias)}
+									removeLabel="Remove alias"
+								/>
+							))}
+						</div>
+					) : null}
+				</div>
 			) : null}
 
 			{/* Plain link, no detach here — a sublocation is released from its
@@ -1929,10 +2015,44 @@ function EntityPage({ view }: { view: EntityView }) {
 
 		<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
 				<span className="loom-field-label">Description</span>
+				{isPc ? (
+					<label className="loom-check">
+						<input type="checkbox" checked={record.alive} onChange={(e) => setAlive(e.target.checked)} />
+						Alive
+					</label>
+				) : null}
+				{isPc && !record.alive ? (
+					<div className="loom-death-row">
+						<span className="loom-field-label">Death session</span>
+						{deathSession && deathSession.type === 'session' ? (
+							<div className="loom-tag-row">
+								<EntityChip
+									plugin={plugin}
+									record={deathSession}
+									label={recordLabel(deathSession, project)}
+									onOpen={() => view.openEntity(deathSession.path)}
+									onRemove={() => setDeathSession(null)}
+									removeLabel="Clear death session"
+								/>
+							</div>
+						) : (
+							<SearchableSelect
+								placeholder="Pick the session…"
+								options={sessions
+									.slice()
+									.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
+									.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
+								onPick={(name) => setDeathSession(name)}
+							/>
+						)}
+					</div>
+				) : null}
 				<MarkdownField
+					app={plugin.app}
 					value={description}
 					names={linkNames}
 					onOpenLink={openLinkTarget}
+					onCreateEntity={createLinkEntity}
 					onChange={(v) => {
 						setDescription(v);
 						saveDescription(v);
@@ -2132,49 +2252,15 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{isPc ? (
-				<div className="loom-field">
-					<label className="loom-check">
-						<input type="checkbox" checked={record.alive} onChange={(e) => setAlive(e.target.checked)} />
-						Alive
-					</label>
-				</div>
-			) : null}
-
-			{isPc && !record.alive ? (
-				<div className="loom-field">
-					<span className="loom-field-label">Death session</span>
-					{deathSession && deathSession.type === 'session' ? (
-						<div className="loom-tag-row">
-							<EntityChip
-								plugin={plugin}
-								record={deathSession}
-								label={recordLabel(deathSession, project)}
-								onOpen={() => view.openEntity(deathSession.path)}
-								onRemove={() => setDeathSession(null)}
-								removeLabel="Clear death session"
-							/>
-						</div>
-					) : (
-						<SearchableSelect
-							placeholder="Pick the session…"
-							options={sessions
-								.slice()
-								.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
-								.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
-							onPick={(name) => setDeathSession(name)}
-						/>
-					)}
-				</div>
-			) : null}
-
 			{!isSession ? (
 <div className="loom-field loom-field-body">
 				<span className="loom-field-label">Notes</span>
 				<MarkdownField
+					app={plugin.app}
 					value={body ?? ''}
 					names={linkNames}
 					onOpenLink={openLinkTarget}
+					onCreateEntity={createLinkEntity}
 					onChange={(v) => {
 						setBody(v);
 						saveBody(v);

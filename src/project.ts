@@ -294,6 +294,8 @@ export interface CreateEntityOptions {
 	/** Events only: names pre-added to the involved list (still removable) —
 	 *  e.g. the character whose page spawned the event. */
 	defaultInvolved?: string[];
+	/** Prefills the Name field (e.g. "+ Create …" from a [[link completion). */
+	initialName?: string;
 }
 
 export class CreateEntityModal extends Modal {
@@ -318,6 +320,7 @@ export class CreateEntityModal extends Modal {
 		if (options.defaultInvolved && options.defaultInvolved.length > 0) {
 			this.fields.involved = [...options.defaultInvolved];
 		}
+		if (options.initialName) this.fields.name = options.initialName.trim();
 	}
 
 	/** Standard entity tag (see EntityChip in views/common.tsx) for modal chip rows. */
@@ -352,7 +355,10 @@ export class CreateEntityModal extends Modal {
 
 		if (this.type !== 'session') {
 			new Setting(this.contentEl).setName('Name').addText((text) => {
-				text.setPlaceholder(meta.label + ' name').onChange((v) => (this.fields.name = v.trim()));
+				text
+					.setPlaceholder(meta.label + ' name')
+					.setValue(this.fields.name)
+					.onChange((v) => (this.fields.name = v.trim()));
 				text.inputEl.addEventListener('keydown', (e) => {
 					if (e.key === 'Enter') void this.submit();
 				});

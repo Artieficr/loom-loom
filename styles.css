@@ -1224,11 +1224,18 @@ span.loom-row-caret {
 	background: var(--text-highlight-bg);
 }
 
-.loom-md-quote {
+/* Matches the .loom-md-field .cm-line padding reset in specificity — without
+   the .cm-line part the reset wins and the indent after the bar vanishes. */
+.loom-md-field .cm-line.loom-md-quote {
 	border-left: var(--blockquote-border-thickness, 2px) solid
 		var(--blockquote-border-color, var(--interactive-accent));
-	padding-left: var(--size-4-2);
+	padding-left: var(--size-4-4);
+	background-color: var(--background-secondary);
 	color: var(--blockquote-color, inherit);
+}
+
+.loom-md-underline {
+	text-decoration: underline;
 }
 
 .loom-md-bullet {
@@ -1367,6 +1374,54 @@ span.loom-row-caret {
 	display: flex;
 	align-items: center;
 	gap: var(--size-2-2);
+}
+
+/* Death session inline in the Description section (under the Alive tick). */
+.loom-death-row {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+/* Name + Aliases share one row (70/30); overlong content wraps the aliases
+   column to its own row instead of overflowing. */
+.loom-name-alias-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+}
+
+.loom-name-col {
+	flex: 7 1 240px;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+.loom-alias-col {
+	flex: 3 1 150px;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+/* The + sits inside the alias input's right edge (same overlap trick as the
+   Involve filter button). */
+.loom-alias-box {
+	display: flex;
+	align-items: center;
+}
+
+.loom-alias-box input {
+	width: 100%;
+	padding-right: 34px;
+}
+
+.loom-alias-box .loom-rel-filter {
+	margin-left: -32px;
+	z-index: 1;
 }
 
 /* Faction membership rows on character pages reuse the relationship layout:
