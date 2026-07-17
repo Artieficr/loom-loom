@@ -14,6 +14,13 @@ import { autoGrowTextarea, startTextareaResize } from './common';
  * note names while the cursor sits inside an unclosed `[[`. Insertion keeps
  * the caret after the closing brackets, matching the native editor feel.
  */
+/** One [[link]] completion: matched/shown by `label`, `insert` goes between
+ *  the brackets (a full `target|display` pair when they differ). */
+export interface LinkOption {
+	label: string;
+	insert: string;
+}
+
 export function LinkTextarea({
 	value,
 	onChange,
@@ -24,7 +31,7 @@ export function LinkTextarea({
 }: {
 	value: string;
 	onChange: (value: string) => void;
-	names: string[];
+	names: LinkOption[];
 	rows?: number;
 	placeholder?: string;
 	/** Exposes the underlying textarea node to the parent (e.g. for a resize-memory hook). */
@@ -51,8 +58,10 @@ export function LinkTextarea({
 	const matches = useMemo(() => {
 		if (!suggest) return [];
 		const q = suggest.query.toLowerCase();
-		const starts = names.filter((n) => n.toLowerCase().startsWith(q));
-		const contains = names.filter((n) => !n.toLowerCase().startsWith(q) && n.toLowerCase().includes(q));
+		const starts = names.filter((n) => n.label.toLowerCase().startsWith(q));
+		const contains = names.filter(
+			(n) => !n.label.toLowerCase().startsWith(q) && n.label.toLowerCase().includes(q)
+		);
 		return [...starts, ...contains].slice(0, 8);
 	}, [suggest, names]);
 
@@ -74,10 +83,10 @@ export function LinkTextarea({
 		detect(next, caret);
 	};
 
-	const insertName = (name: string) => {
+	const insertName = (option: LinkOption) => {
 		const el = taRef.current;
 		if (!el || !suggest) return;
-		const head = value.slice(0, suggest.start) + name;
+		const head = value.slice(0, suggest.start) + option.insert;
 		const tail = value.slice(el.selectionStart);
 		const next = tail.startsWith(']]') ? head + tail : head + ']]' + tail.replace(/^\]/, '');
 		applyEdit(next, head.length + 2);
@@ -141,18 +150,18 @@ export function LinkTextarea({
 			<div className="loom-resize-edge" onMouseDown={(e) => startTextareaResize(taRef.current, e)} />
 			{suggest && matches.length > 0 ? (
 				<div className="suggestion-container loom-suggest" style={{ left: suggest.x, top: suggest.y }}>
-					{matches.map((name, i) => (
+					{matches.map((option, i) => (
 						<div
-							key={name}
+							key={option.insert}
 							className={i === selected ? 'suggestion-item is-selected' : 'suggestion-item'}
 							// mousedown (not click) so the textarea keeps focus
 							onMouseDown={(e) => {
 								e.preventDefault();
-								insertName(name);
+								insertName(option);
 							}}
 							onMouseMove={() => setSelected(i)}
 						>
-							{name}
+							{option.label}
 						</div>
 					))}
 				</div>

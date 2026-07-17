@@ -114,7 +114,12 @@ export default class LoomLoomPlugin extends Plugin {
 		);
 
 		this.app.workspace.onLayoutReady(() => {
-			void this.migrateLegacyProject().then(() => this.indexer.rebuild());
+			void this.migrateLegacyProject().then(() => {
+				this.indexer.rebuild();
+				// Frontmatter-key + managed-file-name migration of existing notes;
+				// idempotent, so running it on every load is safe and cheap.
+				void this.indexer.migrateFiles();
+			});
 		});
 	}
 

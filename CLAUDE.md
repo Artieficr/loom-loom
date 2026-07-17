@@ -13,15 +13,17 @@ and a custom layered graph view.
 
 | Path | Purpose |
 | --- | --- |
-| `src/main.ts` | Plugin entry: view/command/settings registration, .loom extension, legacy migration, context-aware project resolution for commands (active view/file, else single-project/picker) |
-| `src/types.ts` | Entity types + metadata, record/connection/timeline/date shapes, view type IDs |
+| `src/main.ts` | Plugin entry: view/command/settings registration, .loom extension, legacy + frontmatter/file-name migrations on load, context-aware project resolution for commands (active view/file, else single-project/picker) |
+| `src/types.ts` | Entity types + metadata, record/connection/timeline/date shapes, `FM` frontmatter-key registry (+ legacy spellings), view type IDs |
+| `src/fm.ts` | Shared frontmatter read/write helpers: case-insensitive reads with legacy-key fallback, loom-key writes that clean stale spellings |
+| `src/naming.ts` | Managed file-name construction (`<Project> <Type label> <name>`), dependency-free for indexer + project use |
 | `src/settings.ts` | Global settings: text size, tag vocabulary, graph node colors, collapse threshold, global layer order; tabbed settings UI (General/Entities/Graph, per-project timeline settings under Graph) |
 | `src/indexer.ts` | Index cache: project discovery (.loom files), frontmatter → in-memory records, vault event handling, connection queries (incl. native links), JSON snapshot persistence |
 | `src/calendar.ts` | Date model: parsing (Gregorian + custom in-game calendars), display formats, per-project `ProjectConfig` (de)serialization |
 | `src/columns.ts` | Chronological column layout shared by timeline and graph (sessions anchor columns, session-connected events stack beneath) |
 | `src/project.ts` | Project scaffolding (.loom + folders), entity creation (managed session file names), setup/create/pick modals |
 | `src/timeline-settings.ts` | Per-project timeline settings editor (date format + custom calendar), embedded in the settings tab's Graph tab, writes to the .loom file |
-| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph, focused per-session mini graph (`mini-graph.tsx`) + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`). Entity pages embed collapsible connected-entity sections with in-place editing (`connected-entities.tsx`) |
+| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph, focused per-session mini graph (`mini-graph.tsx`) + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`). Entity pages embed collapsible connected-entity sections with in-place editing (`connected-entities.tsx`). Notes/Description use a CodeMirror live-preview field (`markdown-field.tsx`: rendered links/bold/quotes/bullets/hr, raw at the cursor, [[ pairing + completion) |
 | `src/graph/` | Graph-only logic: layered layout (timeline rows + per-type global layers), orthogonal edge routing (trunk lanes/bands in `routing.ts`; every endpoint attaches via diagonal fans with per-side capacity), connections side panel |
 | `scripts/deploy.mjs` | Builds are copied to the test vault with `pnpm run deploy` |
 | `docs/ARCHITECTURE.md` | Data flow, relationship model, calendar abstraction, design tradeoffs |
@@ -44,9 +46,18 @@ and a custom layered graph view.
 - **Views**: all custom UI is React 18 mounted inside `ItemView`/`FileView` subclasses
   (`LoomReactView` / `LoomFileReactView` bases). Loom-internal clicks open the structured
   entity page view; opening the same .md from the file explorer gives the raw editor.
-- **Names**: display name = file basename (renames propagate); no `name` frontmatter.
-  Session file names are managed (`<Project> Session <date>`) and never shown in-app —
-  sessions display their date.
+- **Names**: the user-entered name lives in `loomName` frontmatter (source of truth
+  for display); every file name is managed — `<Project> <Type label> <name>`,
+  sessions `<Project> Session <date>` (no loomName; they display their date). Editing
+  the name renames the file (Obsidian updates links); `aliases` gets the display name
+  so native `[[…]]` autocomplete finds notes by it. Plugin-written links always
+  target the file basename (`linkTargetOf`); every picker searches/labels by display
+  name. A startup migration (`LoomIndexer.migrateFiles`) converts old files.
+- **Frontmatter keys are all loom-prefixed** (`FM` registry in types.ts: `loomType`,
+  `loomName`, `loomDate`, `loomRelationships`, `loomSessionNotes`, `loomMembers`, …).
+  Reads fall back to legacy un-prefixed spellings; writes go through `src/fm.ts`
+  helpers which clean legacy keys up; the startup migration rewrites old notes.
+  Nested keys inside list entries stay unprefixed; `aliases` is deliberately native.
 - **Connections**: typed frontmatter relationships + `sessionNotes` (session-pinned
   note entries `{session, text}`; the picked session becomes a `session note`
   connection) + `parentLocation` on locations (sublocation parent — dedicated field

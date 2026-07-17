@@ -15,6 +15,7 @@ import {
 	EntityOrigin,
 	EntityRecord,
 	EntityType,
+	FM,
 	PC_TAG,
 	QUEST_OUTCOMES,
 	VIEW_ENTITY,
@@ -25,7 +26,7 @@ import {
 	CreateEntityModal,
 	EntityTypeSuggestModal,
 	RecordSuggestModal,
-	sanitizeFileName,
+	entityFileName,
 	sessionFileName,
 } from '../project';
 import { formatLoomDateShort, todayRaw } from '../calendar';
@@ -41,11 +42,12 @@ import {
 	SuggestInput,
 	Truncated,
 	recordLabel,
-	useBoxSizeMemory,
 } from './common';
 import { ConnectedEntities } from './connected-entities';
 import { LinkTextarea } from './link-textarea';
-import { extractLinkpath, memberEntryLinkpath } from '../indexer';
+import { MarkdownField } from './markdown-field';
+import { extractLinkpath, linkTargetOf, memberEntryLinkpath } from '../indexer';
+import { fmLoomValue, setLoomKey } from '../fm';
 import { MiniGraph } from './mini-graph';
 import { useIndexVersion } from './hooks';
 import type LoomLoomPlugin from '../main';
@@ -127,24 +129,6 @@ function useFrontmatterWriter(plugin: LoomLoomPlugin, file: TFile | null) {
  * Properties UI treats names case-insensitively and may have rewritten ours —
  * plus any listed legacy keys.
  */
-function setFmKey(fm: Record<string, unknown>, key: string, value: unknown, legacy: string[] = []) {
-	const lowers = new Set([key, ...legacy].map((k) => k.toLowerCase()));
-	for (const k of Object.keys(fm)) {
-		if (k !== key && lowers.has(k.toLowerCase())) delete fm[k];
-	}
-	fm[key] = value;
-}
-
-/** Case-insensitive frontmatter read (Obsidian's Properties UI can rewrite key casing). */
-function fmValue(fm: Record<string, unknown>, key: string): unknown {
-	if (fm[key] !== undefined) return fm[key];
-	const lower = key.toLowerCase();
-	for (const k of Object.keys(fm)) {
-		if (k.toLowerCase() === lower) return fm[k];
-	}
-	return undefined;
-}
-
 interface RelationshipDraft {
 	type: string;
 	target: string;
@@ -162,6 +146,10 @@ interface SessionNoteDraft {
 	involved: string[];
 	/** Creation/reorder stamp — carried through commits so ordering survives. */
 	seq: number | null;
+	/** Index of the stored frontmatter entry this draft was seeded from, or
+	 *  null for a not-yet-saved new note. Commits merge into that entry so
+	 *  fields this editor doesn't know about survive the round-trip. */
+	idx: number | null;
 }
 
 /** Session-graph sections left open, by file path — survives page re-opens
@@ -189,17 +177,16 @@ function EntityPage({ view }: { view: EntityView }) {
 	// updates triggered by our own saves never clobber what's being typed.
 	const [name, setName] = useState(record?.name ?? '');
 	const [description, setDescription] = useState(record?.description ?? '');
-	const descriptionRef = useRef<HTMLTextAreaElement>(null);
-	const notesRef = useRef<HTMLTextAreaElement | null>(null);
-	useBoxSizeMemory(plugin, file?.path ?? '', 'description', descriptionRef, !!record);
-	useBoxSizeMemory(plugin, file?.path ?? '', 'notes', notesRef, !!record);
 	const [reward, setReward] = useState(record?.reward ?? '');
 	const [date, setDate] = useState(record?.date?.raw ?? '');
 	const [relationships, setRelationships] = useState<RelationshipDraft[]>(
-		record?.relationships.map((r) => ({ type: r.type, target: r.linkpath })) ?? []
+		record?.relationships.map((r) => ({
+			type: r.type,
+			target: plugin.indexer.resolve(r.linkpath, record.path)?.name ?? r.linkpath,
+		})) ?? []
 	);
 	const [sessionNotes, setSessionNotes] = useState<SessionNoteDraft[]>(
-		record?.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, seq: n.seq })) ?? []
+		record?.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, seq: n.seq, idx })) ?? []
 	);
 	const [body, setBody] = useState<string | null>(null);
 	/** Live sublocation reorder: rows slide in real time while the grip is
@@ -243,8 +230,13 @@ function EntityPage({ view }: { view: EntityView }) {
 		setDescription(record.description);
 		setReward(record.reward);
 		setDate(record.date?.raw ?? '');
-		setRelationships(record.relationships.map((r) => ({ type: r.type, target: r.linkpath })));
-		setSessionNotes(record.sessionNotes.map((n) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, seq: n.seq })));
+		setRelationships(
+			record.relationships.map((r) => ({
+				type: r.type,
+				target: plugin.indexer.resolve(r.linkpath, record.path)?.name ?? r.linkpath,
+			}))
+		);
+		setSessionNotes(record.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, seq: n.seq, idx })));
 	}, [record]);
 
 	useEffect(() => {
@@ -258,26 +250,25 @@ function EntityPage({ view }: { view: EntityView }) {
 		};
 	}, [plugin, file]);
 
-	// Description fits its content — no natural scrolling (the notes box does
-	// the same inside LinkTextarea); a manual resize turns auto-grow off.
-	useEffect(() => {
-		autoGrowTextarea(descriptionRef.current);
-	}, [description]);
 
-	// Project entities first (alphabetical), then the rest of the vault.
+	// Project entities first (alphabetical, searched by display name; inserted
+	// as `target|display` so the raw link resolves AND reads well), then the
+	// rest of the vault by plain basename.
 	const linkNames = useMemo(() => {
-		const entityNames = record
-			? plugin.indexer
-					.getAll(undefined, record.project)
-					.map((r) => r.name)
-					.sort((a, b) => a.localeCompare(b))
-			: [];
-		const seen = new Set(entityNames);
+		const records = record ? plugin.indexer.getAll(undefined, record.project) : [];
+		const entities = records
+			.map((r) => {
+				const target = linkTargetOf(r);
+				return { label: r.name, insert: target === r.name ? r.name : `${target}|${r.name}` };
+			})
+			.sort((a, b) => a.label.localeCompare(b.label));
+		const seenTargets = new Set(records.map((r) => linkTargetOf(r)));
 		const rest = plugin.app.vault
 			.getMarkdownFiles()
 			.map((f) => f.basename)
-			.filter((n) => !seen.has(n));
-		return [...entityNames, ...rest];
+			.filter((n) => !seenTargets.has(n))
+			.map((n) => ({ label: n, insert: n }));
+		return [...entities, ...rest];
 	}, [plugin, record, version]);
 
 	const saveBody = useMemo(() => {
@@ -294,10 +285,38 @@ function EntityPage({ view }: { view: EntityView }) {
 		};
 	}, [plugin, file]);
 
+	// Description commits on idle (the markdown field has no blur-style
+	// moment that reliably fires before navigation).
+	const saveDescription = useMemo(() => {
+		let timer = 0;
+		return (value: string) => {
+			window.clearTimeout(timer);
+			timer = window.setTimeout(() => {
+				if (!file) return;
+				plugin.app.fileManager
+					.processFrontMatter(file, (fm: Record<string, unknown>) => {
+						setLoomKey(fm, FM.description, value);
+					})
+					.catch((e) => {
+						console.error('Loom Loom: failed to save description', e);
+					});
+			}, 600);
+		};
+	}, [plugin, file]);
+
+	/** Opens a wikilink target from the markdown fields: loom entities get
+	 *  their entity page, anything else Obsidian's normal link opening. */
+	const openLinkTarget = (target: string) => {
+		if (!record) return;
+		const resolved = plugin.indexer.resolve(target, record.path);
+		if (resolved) view.openEntity(resolved.path);
+		else void plugin.app.workspace.openLinkText(target, record.path);
+	};
+
 	if (!file || !record) {
 		return (
 			<div className="loom-entity loom-empty">
-				<p>Loading… If this note is not a Loom Loom entity (no `type` frontmatter), it has no entity page.</p>
+				<p>Loading… If this note is not a Loom Loom entity (no `loomType` frontmatter), it has no entity page.</p>
 				<button onClick={() => view.navigateTo('markdown', { file: file?.path })}>Open as markdown</button>
 			</div>
 		);
@@ -309,17 +328,53 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sessions = project ? plugin.indexer.getAll('session', project.root) : [];
 	const targetRecords = project ? plugin.indexer.getAll(undefined, project.root) : [];
 
+	/**
+	 * THE write path for a loom frontmatter list on any file: reads the raw
+	 * array (legacy spellings included), hands it to `apply`, writes the loom
+	 * key back. `apply` may mutate in place or return a replacement. All
+	 * cross-file edits (members, other notes' session notes/relationships) go
+	 * through here so unknown fields survive and legacy keys get cleaned up.
+	 */
+	const editFmList = (
+		path: string,
+		key: string,
+		apply: (arr: unknown[]) => unknown[] | void
+	) => {
+		const f = plugin.app.vault.getFileByPath(path);
+		if (!f) return;
+		plugin.app.fileManager
+			.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				const cur = fmLoomValue(fm, key);
+				const arr = Array.isArray(cur) ? cur : [];
+				setLoomKey(fm, key, apply(arr) ?? arr);
+			})
+			.catch((e) => {
+				console.error(`Loom Loom: failed to update ${key}`, e);
+				new Notice('Could not save the change.');
+			});
+	};
+
+	/** Renames the file to its managed name and stores the entered display
+	 *  name (`loomName` + a native alias so [[…]] autocomplete finds it). */
 	const commitName = async () => {
-		const base = sanitizeFileName(name);
-		if (base === '' || base === record.name) {
+		const entered = name.trim();
+		if (entered === '' || entered === record.name || !project) {
 			setName(record.name);
 			return;
 		}
+		await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+			setLoomKey(fm, FM.name, entered);
+			const aliases: unknown[] = Array.isArray(fm.aliases)
+				? (fm.aliases as unknown[]).filter((a) => a !== record.name && a !== entered)
+				: [];
+			fm.aliases = [entered, ...aliases];
+		});
+		const base = entityFileName(project, record.type, entered);
 		const parent = file.parent?.path ?? '';
 		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+		if (newPath === file.path) return;
 		if (plugin.app.vault.getAbstractFileByPath(newPath)) {
 			new Notice('A note with that name already exists.');
-			setName(record.name);
 			return;
 		}
 		await plugin.app.fileManager.renameFile(file, newPath);
@@ -328,7 +383,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	const commitDate = async (raw: string = date) => {
 		const value = raw.trim();
 		writeFm((fm) => {
-			fm.date = value;
+			setLoomKey(fm, FM.date, value);
 		});
 		if (isSession && project && value !== '') {
 			const base = sessionFileName(project, value);
@@ -340,44 +395,69 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 	};
 
+	/** Resolves a draft value — display name or link target — to its record. */
+	const resolveDraftTarget = (value: string): EntityRecord | null => {
+		const trimmed = value.trim();
+		if (trimmed === '') return null;
+		return (
+			targetRecords.find((r) => r.name === trimmed) ?? plugin.indexer.resolve(trimmed, record.path)
+		);
+	};
+	/** Resolves a picker/draft value (display name or basename) to a link target. */
+	const linkTargetFor = (value: string): string => {
+		const rec = resolveDraftTarget(value);
+		return rec ? linkTargetOf(rec) : value.trim();
+	};
+
 	const commitRelationships = (next: RelationshipDraft[]) => {
 		setRelationships(next);
 		writeFm((fm) => {
-			fm.relationships = next
-				.filter((r) => r.target.trim() !== '')
-				.map((r) => ({ type: r.type.trim() === '' ? 'related' : r.type.trim(), target: `[[${r.target.trim()}]]` }));
+			setLoomKey(
+				fm,
+				FM.relationships,
+				next
+					.filter((r) => r.target.trim() !== '')
+					.map((r) => ({
+						type: r.type.trim() === '' ? 'related' : r.type.trim(),
+						target: `[[${linkTargetFor(r.target)}]]`,
+					}))
+			);
 		});
 	};
 
 	const commitSessionNotes = (next: SessionNoteDraft[]) => {
 		setSessionNotes(next);
 		const asLink = (v: string) => (v.startsWith('[[') ? v : `[[${v}]]`);
-		writeFm((fm) => {
-			setFmKey(
-				fm,
-				'sessionNotes',
-				next
-					.filter(
-						(n) =>
-							n.session.trim() !== '' ||
-							n.text.trim() !== '' ||
-							n.involved.length > 0 ||
-							n.places.length > 0
-					)
-					.map((n) => {
-						// Every field survives the round-trip — dropping one here
-						// silently erases it from the note's frontmatter.
-						const out: Record<string, unknown> = {
-							session: n.session.trim() === '' ? '' : `[[${n.session.trim()}]]`,
-							text: n.text,
-						};
-						if (n.places.length > 0) out.places = n.places.map(asLink);
-						if (n.involved.length > 0) out.involved = n.involved.map(asLink);
-						if (n.seq !== null) out.seq = n.seq;
-						return out;
-					})
-			);
-		});
+		editFmList(record.path, FM.sessionNotes, (arr) =>
+			next
+				.filter(
+					(n) =>
+						n.session.trim() !== '' ||
+						n.text.trim() !== '' ||
+						n.involved.length > 0 ||
+						n.places.length > 0
+				)
+				.map((n) => {
+					// Merge over the stored entry (matched by seeded index) so
+					// fields this editor doesn't know about survive; every field
+					// it does know is written — dropping one silently erases it.
+					const prev =
+						n.idx !== null && typeof arr[n.idx] === 'object' && arr[n.idx] !== null
+							? { ...(arr[n.idx] as Record<string, unknown>) }
+							: {};
+					const out: Record<string, unknown> = {
+						...prev,
+						session: n.session.trim() === '' ? '' : `[[${n.session.trim()}]]`,
+						text: n.text,
+					};
+					if (n.places.length > 0) out.places = n.places.map(asLink);
+					else delete out.places;
+					if (n.involved.length > 0) out.involved = n.involved.map(asLink);
+					else delete out.involved;
+					if (n.seq !== null) out.seq = n.seq;
+					return out;
+				})
+		);
 	};
 
 	// Session attendance: PC characters offered as toggle chips. A PC who died
@@ -402,9 +482,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const toggleAttendance = (c: EntityRecord) => {
 		const next = attendingPaths.has(c.path)
 			? record.attendance.filter((lp) => plugin.indexer.resolve(lp, record.path)?.path !== c.path)
-			: [...record.attendance, c.name];
+			: [...record.attendance, linkTargetOf(c)];
 		writeFm((fm) => {
-			setFmKey(fm, 'attendance', next.map((n) => `[[${n}]]`));
+			setLoomKey(fm, FM.attendance, next.map((n) => `[[${n}]]`));
 		});
 	};
 
@@ -416,9 +496,9 @@ function EntityPage({ view }: { view: EntityView }) {
 				.filter((r): r is EntityRecord => r !== null && r !== undefined)
 		: [];
 	const characters = isQuest && project ? plugin.indexer.getAll('character', project.root) : [];
-	const writeQuestGivers = (names: string[]) => {
+	const writeQuestGivers = (targets: string[]) => {
 		writeFm((fm) => {
-			setFmKey(fm, 'questGiver', names.map((n) => `[[${n}]]`));
+			setLoomKey(fm, FM.questGiver, targets.map((n) => `[[${n}]]`));
 		});
 	};
 	const questReceived =
@@ -429,15 +509,15 @@ function EntityPage({ view }: { view: EntityView }) {
 		isQuest && record.questOutcomeSession !== null
 			? plugin.indexer.resolve(record.questOutcomeSession, record.path)
 			: null;
-	const setQuestSession = (key: 'questReceived' | 'questOutcomeSession', name: string | null) => {
+	const setQuestSession = (key: 'questReceived' | 'questOutcomeSession', target: string | null) => {
 		writeFm((fm) => {
-			setFmKey(fm, key, name === null ? '' : `[[${name}]]`);
+			setLoomKey(fm, key === 'questReceived' ? FM.questReceived : FM.questOutcomeSession, target === null ? '' : `[[${target}]]`);
 		});
 	};
 	const setQuestOutcome = (outcome: string) => {
 		writeFm((fm) => {
-			setFmKey(fm, 'questOutcome', outcome);
-			if (outcome === '') setFmKey(fm, 'questOutcomeSession', '');
+			setLoomKey(fm, FM.questOutcome, outcome);
+			if (outcome === '') setLoomKey(fm, FM.questOutcomeSession, '');
 		});
 	};
 	const sessionsByDate = sessions
@@ -483,7 +563,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		);
 	const writeSublocationOrder = (ordered: EntityRecord[]) => {
 		writeFm((fm) => {
-			setFmKey(fm, 'sublocationOrder', ordered.map((s) => `[[${s.name}]]`));
+			setLoomKey(fm, FM.sublocationOrder, ordered.map((s) => `[[${linkTargetOf(s)}]]`));
 		});
 	};
 	const sublocSlotHeight = (): number => {
@@ -520,7 +600,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		plugin.app.fileManager
 			.processFrontMatter(childFile, (fm: Record<string, unknown>) => {
 				for (const k of Object.keys(fm)) {
-					if (k.toLowerCase() === 'parentlocation') delete fm[k];
+					const lower = k.toLowerCase();
+					if (lower === 'loomparentlocation' || lower === 'parentlocation') delete fm[k];
 				}
 			})
 			.catch((e) => {
@@ -539,9 +620,9 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 		return false;
 	};
-	const setParentLocation = (name: string) => {
+	const setParentLocation = (target: string) => {
 		writeFm((fm) => {
-			setFmKey(fm, 'parentLocation', `[[${name}]]`);
+			setLoomKey(fm, FM.parentLocation, `[[${target}]]`);
 		});
 	};
 	/** "Turn to a sublocation": fuzzy-searchable picker over every other
@@ -555,7 +636,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		new RecordSuggestModal(
 			plugin.app,
 			candidates,
-			(l) => setParentLocation(l.name),
+			(l) => setParentLocation(linkTargetOf(l)),
 			'Pick the parent location…'
 		).open();
 	};
@@ -573,19 +654,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			: [];
 	const projectCharacters =
 		record.type === 'faction' && project ? plugin.indexer.getAll('character', project.root) : [];
-	const editMembersOf = (faction: EntityRecord, apply: (arr: unknown[]) => unknown[]) => {
-		const f = plugin.app.vault.getFileByPath(faction.path);
-		if (!f) return;
-		plugin.app.fileManager
-			.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				const cur = fmValue(fm, 'members');
-				setFmKey(fm, 'members', apply(Array.isArray(cur) ? cur : []));
-			})
-			.catch((e) => {
-				console.error('Loom Loom: failed to update members', e);
-				new Notice('Could not save the change.');
-			});
-	};
+	const editMembersOf = (faction: EntityRecord, apply: (arr: unknown[]) => unknown[]) =>
+		editFmList(faction.path, FM.members, apply);
 	/** Drops every raw entry that resolves to the given character. */
 	const removeMemberEntry = (faction: EntityRecord, character: EntityRecord) =>
 		editMembersOf(faction, (arr) =>
@@ -659,7 +729,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				if (lp === null || plugin.indexer.resolve(lp, faction.path)?.path !== record.path) return item;
 				const obj = typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : null;
 				const rawCharacter = typeof item === 'string' ? item : obj?.character;
-				const character = typeof rawCharacter === 'string' ? rawCharacter : `[[${record.name}]]`;
+				const character = typeof rawCharacter === 'string' ? rawCharacter : `[[${linkTargetOf(record)}]]`;
 				const role = (
 					patch.role ??
 					(typeof obj?.role === 'string' ? obj.role : DEFAULT_MEMBER_ROLE)
@@ -749,20 +819,10 @@ function EntityPage({ view }: { view: EntityView }) {
 			});
 		}
 	};
-	const writeOwnerNotes = (owner: EntityRecord, apply: (arr: unknown[]) => void) => {
-		const f = plugin.app.vault.getFileByPath(owner.path);
-		if (!f) return;
-		plugin.app.fileManager
-			.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				const arr = Array.isArray(fm.sessionNotes) ? fm.sessionNotes : [];
-				apply(arr);
-				fm.sessionNotes = arr;
-			})
-			.catch((e) => {
-				console.error('Loom Loom: failed to update session notes', e);
-				new Notice('Could not save the change.');
-			});
-	};
+	const writeOwnerNotes = (owner: EntityRecord, apply: (arr: unknown[]) => void) =>
+		editFmList(owner.path, FM.sessionNotes, (arr) => {
+			apply(arr);
+		});
 	const commitLocDraft = () => {
 		if (!locDraft || locDraft.session.trim() === '') return;
 		const target =
@@ -824,30 +884,35 @@ function EntityPage({ view }: { view: EntityView }) {
 				.filter((r) => r.type !== 'session' && r.type !== 'event' && r.type !== 'location' && r.path !== record.path)
 				.sort((a, b) => a.name.localeCompare(b.name))
 		: [];
-	const writeOwnerRels = (owner: EntityRecord, apply: (rels: unknown[]) => unknown[]) => {
-		const f = plugin.app.vault.getFileByPath(owner.path);
-		if (!f) return;
-		plugin.app.fileManager
-			.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				fm.relationships = apply(Array.isArray(fm.relationships) ? fm.relationships : []);
-			})
-			.catch((e) => {
-				console.error('Loom Loom: failed to update relationships', e);
-				new Notice('Could not save the change.');
-			});
-	};
+	const writeOwnerRels = (owner: EntityRecord, apply: (rels: unknown[]) => unknown[]) =>
+		editFmList(owner.path, FM.relationships, apply);
+	/** Renames another entity in place (hub rows): stores the entered name as
+	 *  its loomName + alias and moves the file to its managed name. */
 	const renameEntity = (owner: EntityRecord, raw: string) => {
-		const base = sanitizeFileName(raw);
-		if (base === '' || base === owner.name) return;
+		const entered = raw.trim();
+		if (entered === '' || entered === owner.name || !project) return;
 		const f = plugin.app.vault.getFileByPath(owner.path);
 		if (!f) return;
+		const base = entityFileName(project, owner.type, entered);
 		const parent = f.parent?.path ?? '';
 		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
-		if (plugin.app.vault.getAbstractFileByPath(newPath)) {
+		if (newPath !== f.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
 			new Notice('A note with that name already exists.');
 			return;
 		}
-		void plugin.app.fileManager.renameFile(f, newPath);
+		void plugin.app.fileManager
+			.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.name, entered);
+				const aliases: unknown[] = Array.isArray(fm.aliases)
+					? (fm.aliases as unknown[]).filter((a) => a !== owner.name && a !== entered)
+					: [];
+				fm.aliases = [entered, ...aliases];
+			})
+			.then(() => (newPath !== f.path ? plugin.app.fileManager.renameFile(f, newPath) : undefined))
+			.catch((e) => {
+				console.error('Loom Loom: failed to rename entity', e);
+				new Notice('Could not rename the entity.');
+			});
 	};
 	const asOf = record.date?.sortKey ?? Number.MAX_SAFE_INTEGER;
 	const sessionQuests = (isSession && project ? plugin.indexer.getAll('quest', project.root) : [])
@@ -870,19 +935,20 @@ function EntityPage({ view }: { view: EntityView }) {
 		record.deathSession !== null ? plugin.indexer.resolve(record.deathSession, record.path) : null;
 	const clearDeathKey = (fm: Record<string, unknown>) => {
 		for (const k of Object.keys(fm)) {
-			if (k.toLowerCase() === 'deathsession') delete fm[k];
+			const lower = k.toLowerCase();
+			if (lower === 'loomdeathsession' || lower === 'deathsession') delete fm[k];
 		}
 	};
 	const setAlive = (alive: boolean) => {
 		writeFm((fm) => {
-			setFmKey(fm, 'alive', alive);
+			setLoomKey(fm, FM.alive, alive);
 			if (alive) clearDeathKey(fm);
 		});
 	};
-	const setDeathSession = (sessionName: string | null) => {
+	const setDeathSession = (target: string | null) => {
 		writeFm((fm) => {
-			if (sessionName === null) clearDeathKey(fm);
-			else setFmKey(fm, 'deathSession', `[[${sessionName}]]`);
+			if (target === null) clearDeathKey(fm);
+			else setLoomKey(fm, FM.deathSession, `[[${target}]]`);
 		});
 	};
 
@@ -892,7 +958,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			: [...record.loomTags, tag];
 		writeFm((fm) => {
 			// Also migrates notes still carrying the key's pre-rename spelling.
-			setFmKey(fm, 'loomTags', next, ['pluginTags']);
+			setLoomKey(fm, FM.tags, next);
 		});
 	};
 
@@ -902,10 +968,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	const relEntries = relationships.map((rel, i) => ({
 		rel,
 		i,
-		entityType:
-			rel.target.trim() === ''
-				? null
-				: plugin.indexer.resolve(rel.target.trim(), record.path)?.type ?? null,
+		entityType: resolveDraftTarget(rel.target)?.type ?? null,
 	}));
 
 	const setRowFilter = (i: number, filter: EntityType | null) => {
@@ -1033,12 +1096,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		const hasNoteLocation = record.type === 'quest' || record.type === 'event';
 		const noteLocs = hasNoteLocation
 			? relationships
-					.map((rel, ri) => ({
-						rel,
-						ri,
-						target:
-							rel.target.trim() !== '' ? plugin.indexer.resolve(rel.target.trim(), record.path) : null,
-					}))
+					.map((rel, ri) => ({ rel, ri, target: resolveDraftTarget(rel.target) }))
 					.filter((e) => e.rel.type.trim().toLowerCase() === 'location' && e.target?.type === 'location')
 			: [];
 		// A session already carrying a note isn't offered again.
@@ -1076,7 +1134,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							placeholder="Pick a session…"
 							options={sessionsByDate
 								.filter((s) => s.path !== record.path && !takenSessions.has(s.path))
-								.map((s) => ({ value: s.name, label: shortSessionLabel(s) }))}
+								.map((s) => ({ value: linkTargetOf(s), label: shortSessionLabel(s) }))}
 							onPick={(name) => setNote({ session: name }, true)}
 							action={
 								project
@@ -1097,9 +1155,9 @@ function EntityPage({ view }: { view: EntityView }) {
 						<SearchableSelect
 							placeholder="Involve…"
 							options={involveTargets
-								.filter((t) => !note.involved.includes(t.name))
+								.filter((t) => !note.involved.includes(linkTargetOf(t)))
 								.filter((t) => !hubFilter['row:' + String(i)] || t.type === hubFilter['row:' + String(i)])
-								.map((t) => ({ value: t.name, label: t.name }))}
+								.map((t) => ({ value: linkTargetOf(t), label: t.name }))}
 							onPick={(name) => setNote({ involved: [...note.involved, name] }, true)}
 						/>
 						<button
@@ -1165,7 +1223,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								options={(project ? plugin.indexer.getAll('location', project.root) : [])
 									.filter((l) => !noteLocs.some((q) => q.target?.path === l.path))
 									.sort((a, b) => a.name.localeCompare(b.name))
-									.map((l) => ({ value: l.name, label: l.name }))}
+									.map((l) => ({ value: linkTargetOf(l), label: l.name }))}
 								onPick={(name) =>
 									commitRelationships([...relationships, { type: 'location', target: name }])
 								}
@@ -1224,9 +1282,9 @@ function EntityPage({ view }: { view: EntityView }) {
 						<SearchableSelect
 							placeholder="Add a place…"
 							options={projectLocations
-								.filter((l) => l.path !== record.path && !note.places.includes(l.name))
+								.filter((l) => l.path !== record.path && !note.places.includes(linkTargetOf(l)))
 								.sort((a, b) => a.name.localeCompare(b.name))
-								.map((l) => ({ value: l.name, label: l.name }))}
+								.map((l) => ({ value: linkTargetOf(l), label: l.name }))}
 							onPick={(name) => setNote({ places: [...note.places, name] }, true)}
 						/>
 					</div>
@@ -1337,7 +1395,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								.filter((t) => t.type !== 'location')
 								.filter((t) => !involved.some((iv) => iv.target?.path === t.path))
 								.filter((t) => !hubFilter[menuKey] || t.type === hubFilter[menuKey])
-								.map((t) => ({ value: t.name, label: t.name }))}
+								.map((t) => ({ value: linkTargetOf(t), label: t.name }))}
 							onPick={(name) =>
 								writeEntryInvolved(en, (list) => {
 									list.push(`[[${name}]]`);
@@ -1420,7 +1478,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									(t) =>
 										t.type === 'location' && !locs.some((l) => l.target?.path === t.path)
 								)
-								.map((t) => ({ value: t.name, label: t.name }))}
+								.map((t) => ({ value: linkTargetOf(t), label: t.name }))}
 							onPick={(name) =>
 								writeOwnerRels(en.owner, (rels) => {
 									rels.push({ type: 'location', target: `[[${name}]]` });
@@ -1787,8 +1845,8 @@ function EntityPage({ view }: { view: EntityView }) {
 							options={characters
 								.filter((c) => !questGiverRecords.some((g) => g.path === c.path))
 								.sort((a, b) => a.name.localeCompare(b.name))
-								.map((c) => ({ value: c.name, label: c.name }))}
-							onPick={(name) => writeQuestGivers([...questGiverRecords.map((g) => g.name), name])}
+								.map((c) => ({ value: linkTargetOf(c), label: c.name }))}
+							onPick={(target) => writeQuestGivers([...questGiverRecords.map((g) => linkTargetOf(g)), target])}
 						/>
 						{questGiverRecords.length > 0 ? (
 							<div className="loom-tag-row">
@@ -1818,7 +1876,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								) : (
 									<SearchableSelect
 										placeholder="Pick the session…"
-										options={sessionsByDate.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+										options={sessionsByDate.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 										onPick={(name) => setQuestSession('questReceived', name)}
 									/>
 								)}
@@ -1833,7 +1891,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									) : (
 										<SearchableSelect
 											placeholder="Pick the session…"
-											options={sessionsByDate.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+											options={sessionsByDate.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 											onPick={(name) => setQuestSession('questOutcomeSession', name)}
 										/>
 									)}
@@ -1860,7 +1918,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								onChange={(e) => setReward(e.target.value)}
 								onBlur={() =>
 									writeFm((fm) => {
-										fm.reward = reward;
+										setLoomKey(fm, FM.reward, reward);
 									})
 								}
 							/>
@@ -1869,26 +1927,18 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-		<label className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
+		<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
 				<span className="loom-field-label">Description</span>
-				<div className="loom-resizable">
-					<textarea
-						ref={descriptionRef}
-						rows={1}
-						value={description}
-						onChange={(e) => setDescription(e.target.value)}
-						onBlur={() =>
-							writeFm((fm) => {
-								fm.description = description;
-							})
-						}
-					/>
-					<div
-						className="loom-resize-edge"
-						onMouseDown={(e) => startTextareaResize(descriptionRef.current, e)}
-					/>
-				</div>
-			</label>
+				<MarkdownField
+					value={description}
+					names={linkNames}
+					onOpenLink={openLinkTarget}
+					onChange={(v) => {
+						setDescription(v);
+						saveDescription(v);
+					}}
+				/>
+			</div>
 
 		{isSession && project ? (
 				<div className="loom-field loom-graph-under">
@@ -1973,7 +2023,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						options={projectCharacters
 							.filter((c) => !memberRecords.some((m) => m.path === c.path))
 							.sort((a, b) => a.name.localeCompare(b.name))
-							.map((c) => ({ value: c.name, label: c.name }))}
+							.map((c) => ({ value: linkTargetOf(c), label: c.name }))}
 						onPick={(name) => editMembersOf(record, (arr) => [...arr, `[[${name}]]`])}
 					/>
 					{memberRecords.length > 0 ? (
@@ -2003,10 +2053,10 @@ function EntityPage({ view }: { view: EntityView }) {
 								options={projectFactions
 									.filter((f) => !membershipRows.some((m) => m.faction.path === f.path))
 									.sort((a, b) => a.name.localeCompare(b.name))
-									.map((f) => ({ value: f.name, label: f.name }))}
+									.map((f) => ({ value: linkTargetOf(f), label: f.name }))}
 								onPick={(name) => {
 									const faction = projectFactions.find((f) => f.name === name);
-									if (faction) editMembersOf(faction, (arr) => [...arr, `[[${record.name}]]`]);
+									if (faction) editMembersOf(faction, (arr) => [...arr, `[[${linkTargetOf(record)}]]`]);
 									setFactionDraft(false);
 								}}
 							/>
@@ -2057,7 +2107,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										options={membershipLocations
 											.slice()
 											.sort((a, b) => a.name.localeCompare(b.name))
-											.map((l) => ({ value: l.name, label: l.name }))}
+											.map((l) => ({ value: linkTargetOf(l), label: l.name }))}
 										onPick={(name) => setMembershipField(m.faction, { location: name })}
 									/>
 								)}
@@ -2111,7 +2161,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							options={sessions
 								.slice()
 								.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
-								.map((s) => ({ value: s.name, label: recordLabel(s, project) }))}
+								.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 							onPick={(name) => setDeathSession(name)}
 						/>
 					)}
@@ -2121,11 +2171,10 @@ function EntityPage({ view }: { view: EntityView }) {
 			{!isSession ? (
 <div className="loom-field loom-field-body">
 				<span className="loom-field-label">Notes</span>
-				<LinkTextarea
-					rows={1}
+				<MarkdownField
 					value={body ?? ''}
 					names={linkNames}
-					textareaRef={notesRef}
+					onOpenLink={openLinkTarget}
 					onChange={(v) => {
 						setBody(v);
 						saveBody(v);
@@ -2140,7 +2189,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					{sessionNotes.length > 0 ? <span className="loom-field-label">Session notes</span> : null}
 					<button
 						className="loom-rel-add"
-						onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [], seq: Date.now() }])}
+						onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [], seq: Date.now(), idx: null }])}
 					>
 						+ Add a session note
 					</button>
@@ -2160,7 +2209,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						onClick={() =>
 							new CreateEntityModal(plugin, 'event', project, {
 								sessionPicker: true,
-								defaultInvolved: [record.name],
+								defaultInvolved: [linkTargetOf(record)],
 								onCreated: () => {},
 							}).open()
 						}
@@ -2195,7 +2244,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							<div className="loom-note-session">
 								<SearchableSelect
 									placeholder="Pick a session…"
-									options={sessionsByDate.map((se) => ({ value: se.name, label: shortSessionLabel(se) }))}
+									options={sessionsByDate.map((se) => ({ value: linkTargetOf(se), label: shortSessionLabel(se) }))}
 									onPick={(v) => setLocDraft({ ...locDraft, session: v })}
 								/>
 							</div>
@@ -2409,8 +2458,8 @@ function EntityPage({ view }: { view: EntityView }) {
 									// Append at the END of the order and stay on this page.
 									onCreated: (created) =>
 										writeFm((fm) => {
-											setFmKey(fm, 'sublocationOrder', [
-												...sublocations.map((s) => `[[${s.name}]]`),
+											setLoomKey(fm, FM.sublocationOrder, [
+												...sublocations.map((s) => `[[${linkTargetOf(s)}]]`),
 												`[[${created.basename}]]`,
 											]);
 										}),

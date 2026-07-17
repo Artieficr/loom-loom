@@ -60,6 +60,47 @@ export const TIMELINES_FOLDER = 'Timelines';
 /** File extension of project home files (shown in the file explorer like .canvas/.base). */
 export const LOOM_EXTENSION = 'loom';
 
+/**
+ * Frontmatter keys owned by the plugin — every key is loom-prefixed so
+ * plugin-managed properties are recognizable at a glance in any note.
+ * Reads fall back to the legacy un-prefixed spellings (see `legacyFmKeys`);
+ * the startup migration rewrites old files to these keys. Nested keys inside
+ * list entries (session/text/involved…, type/target, character/role) stay
+ * unprefixed — they only exist inside a loom-prefixed parent. `aliases` is
+ * deliberately Obsidian's native key, written so the core [[link]]
+ * autocomplete finds notes by their user-entered name.
+ */
+export const FM = {
+	type: 'loomType',
+	name: 'loomName',
+	tags: 'loomTags',
+	description: 'loomDescription',
+	relationships: 'loomRelationships',
+	sessionNotes: 'loomSessionNotes',
+	date: 'loomDate',
+	attendance: 'loomAttendance',
+	parentLocation: 'loomParentLocation',
+	sublocationOrder: 'loomSublocationOrder',
+	members: 'loomMembers',
+	alive: 'loomAlive',
+	deathSession: 'loomDeathSession',
+	questGiver: 'loomQuestGiver',
+	questReceived: 'loomQuestReceived',
+	questOutcome: 'loomQuestOutcome',
+	questOutcomeSession: 'loomQuestOutcomeSession',
+	reward: 'loomReward',
+	/** Timeline definition files. */
+	timelineTypes: 'loomTypes',
+} as const;
+
+/** Legacy spelling(s) of a loom frontmatter key, still read and migrated. */
+export function legacyFmKeys(key: string): string[] {
+	if (key === FM.tags) return ['pluginTags'];
+	if (key === FM.name) return []; // never existed un-prefixed
+	const stripped = key.replace(/^loom/, '');
+	return [stripped[0].toLowerCase() + stripped.slice(1)];
+}
+
 export type CalendarId = 'gregorian' | 'custom';
 
 /**
