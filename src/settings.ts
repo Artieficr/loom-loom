@@ -33,6 +33,8 @@ export interface LoomLoomSettings {
 	 *  ('target' — dropping A on B adds A into B) or the dragged one
 	 *  ('dragged' — connecting A to B). Field fills always edit the owner. */
 	graphDropEdits: 'target' | 'dragged';
+	/** Ask before a timeline drag moves an event from one session to another. */
+	confirmTimelineMove: boolean;
 	/** Top-to-bottom row order of the global entity layers in the graph. */
 	globalLayerOrder: EntityType[];
 	/** Graph node fill color per entity type. */
@@ -47,6 +49,9 @@ export interface LoomLoomSettings {
 	graphManualX: Record<string, Record<string, number>>;
 	/** Drag-dropped y of fully-unconnected graph nodes, per project root then note path. */
 	graphManualY: Record<string, Record<string, number>>;
+	/** Manual vertical order of timeline event bubbles, per project root then
+	 *  note path (rank within its column/drawer) — not user-facing. */
+	timelineManualOrder: Record<string, Record<string, number>>;
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
@@ -67,6 +72,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphTrunkGap: 10,
 	graphArrowSize: 8,
 	graphDropEdits: 'target',
+	confirmTimelineMove: true,
 	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location'],
 	nodeColors: {
 		session: '#7c5cff',
@@ -81,6 +87,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	entityBoxSizes: {},
 	graphManualX: {},
 	graphManualY: {},
+	timelineManualOrder: {},
 };
 
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
@@ -93,6 +100,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		entityBoxSizes: {},
 		graphManualX: {},
 		graphManualY: {},
+		timelineManualOrder: {},
 	};
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
@@ -117,6 +125,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (data.graphDropEdits === 'target' || data.graphDropEdits === 'dragged') {
 		base.graphDropEdits = data.graphDropEdits;
+	}
+	if (typeof data.confirmTimelineMove === 'boolean') {
+		base.confirmTimelineMove = data.confirmTimelineMove;
 	}
 	if (typeof data.tagVocabulary === 'object' && data.tagVocabulary !== null) {
 		for (const type of ENTITY_TYPES) {
@@ -183,6 +194,16 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 				if (typeof y === 'number' && Number.isFinite(y)) ys[path] = y;
 			}
 			if (Object.keys(ys).length > 0) base.graphManualY[root] = ys;
+		}
+	}
+	if (typeof data.timelineManualOrder === 'object' && data.timelineManualOrder !== null) {
+		for (const [root, entries] of Object.entries(data.timelineManualOrder)) {
+			if (typeof entries !== 'object' || entries === null) continue;
+			const ranks: Record<string, number> = {};
+			for (const [path, rank] of Object.entries(entries)) {
+				if (typeof rank === 'number' && Number.isFinite(rank)) ranks[path] = rank;
+			}
+			if (Object.keys(ranks).length > 0) base.timelineManualOrder[root] = ranks;
 		}
 	}
 	return base;
@@ -363,6 +384,16 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		this.addReset(dropSetting, () => {
 			this.plugin.settings.graphDropEdits = DEFAULT_SETTINGS.graphDropEdits;
 		});
+
+		new Setting(containerEl)
+			.setName('Confirm timeline moves')
+			.setDesc('Ask before a drag in the timeline moves an event from one session to another.')
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.confirmTimelineMove).onChange(async (value) => {
+					this.plugin.settings.confirmTimelineMove = value;
+					await this.plugin.saveSettings();
+				})
+			);
 
 		this.slider(
 			containerEl,

@@ -1343,8 +1343,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						style={{ height: drawerOpen ? drawerHeight : 0 }}
 					>
 						{/* Inner keeps its full height while the outer collapses, so
-						    closing slides the content away instead of squishing it. */}
-						<div className="loom-drawer-inner" style={{ height: drawerHeight }}>
+						    closing slides the content away instead of squishing it.
+						    The strip manages its own scrolling + No-date side panel. */}
+						<div className="loom-drawer-timeline" style={{ height: drawerHeight }}>
 							<TimelineStrip navigator={view} project={project} def={activeDef} />
 						</div>
 					</div>
