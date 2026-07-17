@@ -14,6 +14,7 @@ import {
 	ENTITY_TYPES,
 	EntityRecord,
 	EntityType,
+	FM,
 	GraphCamera,
 	QUEST_OUTCOMES,
 	TimelineDef,
@@ -21,7 +22,8 @@ import {
 } from '../types';
 import type { LoomTextSize } from '../settings';
 import { ConfirmModal, CreateEntityModal, RelationshipPromptModal } from '../project';
-import { extractLinkpath } from '../indexer';
+import { extractLinkpath, linkTargetOf } from '../indexer';
+import { fmLoomValue, setLoomKey } from '../fm';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { Pt, edgeEndDirs, edgePath, edgeXRange } from '../graph/routing';
 import { GraphSidePanel, PANEL_MAX, PANEL_MIN } from '../graph/side-panel';
@@ -611,7 +613,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					title: 'Add as quest giver',
 					action: () =>
 						writeNodeFm(quest, (fm) => {
-							fm.questGiver = [...linkList(fm.questGiver), `[[${char.record.name}]]`];
+							setLoomKey(fm, FM.questGiver, [
+								...linkList(fmLoomValue(fm, FM.questGiver)),
+								`[[${linkTargetOf(char.record)}]]`,
+							]);
 						}),
 				});
 			}
@@ -621,7 +626,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (questSession) {
 			const { a: quest, b: session } = questSession;
 			const resolve = resolvesFrom(quest);
-			const link = `[[${session.record.name}]]`;
+			const link = `[[${linkTargetOf(session.record)}]]`;
 			if (
 				quest.record.questReceived === null ||
 				resolve(quest.record.questReceived) !== session.id
@@ -630,7 +635,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					title: 'Set as received session',
 					action: () =>
 						writeNodeFm(quest, (fm) => {
-							fm.questReceived = link;
+							setLoomKey(fm, FM.questReceived, link);
 						}),
 				});
 			}
@@ -644,8 +649,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					title: `${outcome[0].toUpperCase() + outcome.slice(1)} in this session`,
 					action: () =>
 						writeNodeFm(quest, (fm) => {
-							fm.questOutcome = outcome;
-							fm.questOutcomeSession = link;
+							setLoomKey(fm, FM.questOutcome, outcome);
+							setLoomKey(fm, FM.questOutcomeSession, link);
 						}),
 				});
 			}
@@ -669,9 +674,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					title: 'Add session note',
 					action: () =>
 						writeNodeFm(other, (fm) => {
-							const notes = Array.isArray(fm.sessionNotes) ? fm.sessionNotes : [];
-							notes.push({ session: `[[${session.record.name}]]`, text: '' });
-							fm.sessionNotes = notes;
+							const cur = fmLoomValue(fm, FM.sessionNotes);
+							const notes = Array.isArray(cur) ? cur : [];
+							notes.push({ session: `[[${linkTargetOf(session.record)}]]`, text: '', seq: Date.now() });
+							setLoomKey(fm, FM.sessionNotes, notes);
 						}),
 				});
 			}
@@ -703,10 +709,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					title: `Make sublocation of ${toLabel}`,
 					action: () =>
 						writeNodeFm(from, (fm) => {
-							for (const k of Object.keys(fm)) {
-								if (k.toLowerCase() === 'parentlocation') delete fm[k];
-							}
-							fm.parentLocation = `[[${to.record.name}]]`;
+							setLoomKey(fm, FM.parentLocation, `[[${linkTargetOf(to.record)}]]`);
 						}),
 				});
 			}
@@ -737,9 +740,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				action: () =>
 					new RelationshipPromptModal(plugin.app, declarerLabel, otherLabel, (relType) => {
 						writeNodeFm(declarer, (fm) => {
-							const rels = Array.isArray(fm.relationships) ? fm.relationships : [];
-							rels.push({ type: relType, target: `[[${other.record.name}]]` });
-							fm.relationships = rels;
+							const cur = fmLoomValue(fm, FM.relationships);
+							const rels = Array.isArray(cur) ? cur : [];
+							rels.push({ type: relType, target: `[[${linkTargetOf(other.record)}]]` });
+							setLoomKey(fm, FM.relationships, rels);
 						});
 					}).open(),
 			});
@@ -766,14 +770,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (!file) return;
 		try {
 			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				if (Array.isArray(fm.relationships)) {
-					fm.relationships = fm.relationships.filter((rel: unknown) => {
-						if (typeof rel !== 'object' || rel === null) return true;
-						const target = (rel as { target?: unknown }).target;
-						if (typeof target !== 'string') return true;
-						const linkpath = extractLinkpath(target);
-						return linkpath === null || !resolvesToOther(linkpath);
-					});
+				const cur = fmLoomValue(fm, FM.relationships);
+				if (Array.isArray(cur)) {
+					setLoomKey(
+						fm,
+						FM.relationships,
+						cur.filter((rel: unknown) => {
+							if (typeof rel !== 'object' || rel === null) return true;
+							const target = (rel as { target?: unknown }).target;
+							if (typeof target !== 'string') return true;
+							const linkpath = extractLinkpath(target);
+							return linkpath === null || !resolvesToOther(linkpath);
+						})
+					);
 				}
 			});
 		} catch (err) {

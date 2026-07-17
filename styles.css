@@ -1168,6 +1168,109 @@ span.loom-row-caret {
    look on its own, so it renders identically in any container — no
    .loom-tag-row wrapper needed. All entity references rendered as tags go
    through it; node colors come inline from settings. */
+/* Live-preview markdown fields (Notes / Description): a CodeMirror editor
+   skinned like the plugin's textareas, with reading-mode-style rendering. */
+.loom-md-field {
+	width: 100%;
+}
+
+.loom-md-field .cm-editor {
+	background: var(--background-modifier-form-field);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--input-radius);
+	padding: var(--size-2-2) var(--size-4-2);
+}
+
+.loom-md-field .cm-editor.cm-focused {
+	outline: none;
+	border-color: var(--background-modifier-border-focus);
+}
+
+.loom-md-field .cm-content {
+	padding: 0;
+	font-family: inherit;
+	caret-color: var(--caret-color);
+}
+
+.loom-md-field .cm-line {
+	padding: 0;
+}
+
+.loom-md-link {
+	color: var(--link-color);
+	cursor: var(--cursor-link);
+}
+
+.loom-md-link:hover {
+	color: var(--link-color-hover);
+	text-decoration: underline;
+}
+
+.loom-md-bold {
+	font-weight: var(--bold-weight, 600);
+	color: var(--bold-color, inherit);
+}
+
+.loom-md-italic {
+	font-style: italic;
+	color: var(--italic-color, inherit);
+}
+
+.loom-md-strike {
+	text-decoration: line-through;
+}
+
+.loom-md-mark {
+	background: var(--text-highlight-bg);
+}
+
+.loom-md-quote {
+	border-left: var(--blockquote-border-thickness, 2px) solid
+		var(--blockquote-border-color, var(--interactive-accent));
+	padding-left: var(--size-4-2);
+	color: var(--blockquote-color, inherit);
+}
+
+.loom-md-bullet {
+	color: var(--list-marker-color, var(--text-faint));
+}
+
+.loom-md-hr {
+	display: inline-block;
+	width: 100%;
+	border: none;
+	border-top: var(--hr-thickness, 2px) solid var(--hr-color, var(--background-modifier-border));
+	margin: 0;
+	vertical-align: middle;
+}
+
+/* The [[link]] completion popup, styled like Obsidian's suggestion menus. */
+.loom-md-field .cm-tooltip.cm-tooltip-autocomplete {
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+}
+
+.loom-md-field .cm-tooltip-autocomplete ul {
+	margin: 0;
+	padding: var(--size-2-1);
+	list-style: none;
+	max-height: 200px;
+	font-family: inherit;
+}
+
+.loom-md-field .cm-tooltip-autocomplete ul li {
+	padding: var(--size-2-1) var(--size-2-3);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+
+.loom-md-field .cm-tooltip-autocomplete ul li[aria-selected] {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
 /* Chip rows and single-pick slots inside creation modals. */
 .loom-modal-chips {
 	display: flex;

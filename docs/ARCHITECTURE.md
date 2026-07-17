@@ -109,14 +109,56 @@ relationships:
   reading and writing the *faction's* file, so a change on either page is the same
   edit and both always agree. Each entry contributes a typed `member` connection.
 
+## Storage registry — where each fact lives
+
+Every cross-cutting fact has exactly **one frontmatter home**; everything else is
+derived at query time. New features must pick their single home from this table's
+pattern (one owner note, bidirectional visibility via the indexer) rather than
+storing a second copy:
+
+| Fact | Home (frontmatter key, on which note) | Surfaces elsewhere via |
+| --- | --- | --- |
+| Entity type | `loomType` on the entity | index discovery |
+| Display name | `loomName` on the entity (sessions: derived from `loomDate`) | `record.name` everywhere |
+| Relationship | `loomRelationships` on the declaring side | `getIncoming` reverse map |
+| Faction membership (+role, location) | `loomMembers` on the faction | character page "Faction(s)" edits the faction's file |
+| Session note (+involved, places, seq) | `loomSessionNotes` on the owning entity | session-page hub, character Events, location ancestors |
+| Sublocation parent | `loomParentLocation` on the child | parent's Sublocations list, graph nesting |
+| Sublocation display order | `loomSublocationOrder` on the parent (hidden links) | — |
+| Attendance | `loomAttendance` on the session (hidden links, typed connection) | PC pages via connections |
+| Death | `loomAlive` + `loomDeathSession` on the character (hidden link) | session attendance offering |
+| Quest lifecycle | `loomQuestGiver/Received/Outcome/OutcomeSession/Reward` on the quest | session-page quest cards |
+| Plain mention | `[[wikilink]]` anywhere in the note | relType `link` |
+
+**Write-path rule**: never rebuild a stored list from UI draft state — edit the raw
+frontmatter array in place (`editFmList` in entity-view; `fm.ts` helpers), or merge
+drafts over the stored entries by seeded index (`commitSessionNotes`). Rebuilding
+from drafts silently erases any field the editor doesn't enumerate.
+
 ## Names
 
-Display name = file basename, full stop. There is no `name` frontmatter field: an
-earlier version had one and it silently diverged from the file name on rename. The
-entity page's Name field *renames the file* (via `fileManager.renameFile`, so links
-update). Session file names are managed — `<Project name> Session <date>` — and never
-shown inside the plugin; sessions display their formatted date everywhere (timeline,
-graph, lists, side panel).
+The user-entered name lives in `loomName` frontmatter — the source of truth for
+display, mirroring how sessions derive everything from their date. File names are
+managed: `<Project> <Type label> <name>` (`<Project> Session <date>` for sessions),
+built by `src/naming.ts`. The entity page's Name field writes `loomName`, refreshes
+the native `aliases` entry (so Obsidian's own `[[…]]` autocomplete finds the note by
+its user-entered name), and renames the file (via `fileManager.renameFile`, so links
+update). Plugin-written links always target the file basename (`linkTargetOf`);
+plugin pickers search and label by display name only, and the Notes-field link
+autocomplete inserts `[[basename|display]]` so raw markdown stays readable. A missing
+`loomName` falls back to the basename, so foreign notes still work.
+
+## Frontmatter conventions
+
+Every plugin-owned key is loom-prefixed (`FM` registry in `src/types.ts`) so a
+note's properties make obvious what belongs to the plugin. Reads fall back to legacy
+un-prefixed spellings (`fmLoom`/`fmLoomValue`); writes go through `src/fm.ts` and
+clean legacy spellings up. `LoomIndexer.migrateFiles` runs once per load
+(idempotent) and rewrites old notes: legacy keys → loom keys, seeds `loomName` +
+alias from the basename, renames files to the managed convention. Nested keys inside
+list entries (`session`/`text`/`involved`, `type`/`target`, `character`/`role`) stay
+unprefixed — they only exist inside a loom-prefixed parent. `aliases` is
+deliberately Obsidian's native key.
 
 ## Calendar & date formats (src/calendar.ts)
 

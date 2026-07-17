@@ -18,12 +18,14 @@ import {
 	EntityOrigin,
 	EntityRecord,
 	EntityType,
+	FM,
 	LOOM_EXTENSION,
 	TIMELINES_FOLDER,
 	VIEW_LIST,
 } from './types';
 import { defaultProjectConfig, formatLoomDate, serializeProjectConfig, todayRaw } from './calendar';
-import { ProjectDef } from './indexer';
+import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
+import { ProjectDef, linkTargetOf } from './indexer';
 import type LoomLoomPlugin from './main';
 
 const PROJECT_SUBFOLDERS = [
@@ -66,13 +68,13 @@ export async function scaffoldProject(app: App, rootPath: string): Promise<TFile
 			timelinePath,
 			[
 				'---',
-				'name: Main timeline',
-				'types: [session, event]',
-				'tags: []',
+				`${FM.name}: Main timeline`,
+				`${FM.timelineTypes}: [session, event]`,
+				`${FM.tags}: []`,
 				'---',
 				'',
-				'Timeline definition. `types` lists which entity types populate it',
-				'(session, event); `tags` optionally filters to entities carrying one',
+				`Timeline definition. \`${FM.timelineTypes}\` lists which entity types populate it`,
+				`(session, event); \`${FM.tags}\` optionally filters to entities carrying one`,
 				'of those plugin tags.',
 				'',
 			].join('\n')
@@ -85,9 +87,7 @@ export async function scaffoldProject(app: App, rootPath: string): Promise<TFile
 	return app.vault.create(loomPath, serializeProjectConfig(defaultProjectConfig()));
 }
 
-export function sanitizeFileName(name: string): string {
-	return name.replace(/[\\/:*?"<>|#^[\]]/g, ' ').replace(/\s+/g, ' ').trim();
-}
+export { sanitizeFileName } from './naming';
 
 function yamlQuote(value: string): string {
 	return JSON.stringify(value);
@@ -118,18 +118,25 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	const rels = fields.relationship ? [fields.relationship] : [];
 	const lines = [
 		'---',
-		`type: ${type}`,
-		`loomTags: [${fields.tag === '' ? '' : yamlQuote(fields.tag)}]`,
-		`description: ${yamlQuote(fields.description ?? '')}`,
+		`${FM.type}: ${type}`,
+		// Sessions have no user-entered name — their display is the date and
+		// their file name is managed from it. Everyone else stores the entered
+		// name (`loomName`, the display source of truth) plus a native alias so
+		// Obsidian's own [[link]] autocomplete finds the note by that name.
+		...(type !== 'session'
+			? [`${FM.name}: ${yamlQuote(fields.name)}`, `aliases: [${yamlQuote(fields.name)}]`]
+			: []),
+		`${FM.tags}: [${fields.tag === '' ? '' : yamlQuote(fields.tag)}]`,
+		`${FM.description}: ${yamlQuote(fields.description ?? '')}`,
 		...(rels.length > 0
 			? [
-					'relationships:',
+					`${FM.relationships}:`,
 					...rels.flatMap((r) => [
 						`  - type: ${yamlQuote(r.type)}`,
 						`    target: ${yamlQuote(`[[${r.target}]]`)}`,
 					]),
 				]
-			: ['relationships: []']),
+			: [`${FM.relationships}: []`]),
 	];
 	// A starting session note carries the birth session and/or the involved
 	// entities. Involvement without a session (a lore event) writes a
@@ -137,7 +144,7 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	const involved = fields.involved ?? [];
 	if ((fields.noteSession && fields.noteSession !== '') || involved.length > 0) {
 		lines.push(
-			'sessionNotes:',
+			`${FM.sessionNotes}:`,
 			`  - session: ${
 				fields.noteSession && fields.noteSession !== '' ? yamlQuote(`[[${fields.noteSession}]]`) : '""'
 			}`,
@@ -150,22 +157,22 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 		}
 	}
 	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
-		lines.push(`parentLocation: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
+		lines.push(`${FM.parentLocation}: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
 	}
-	if (type === 'character') lines.push('alive: true');
-	if (type === 'event' || type === 'session') lines.push(`date: ${yamlQuote(fields.date)}`);
-	if (type === 'session') lines.push('attendance: []');
+	if (type === 'character') lines.push(`${FM.alive}: true`);
+	if (type === 'event' || type === 'session') lines.push(`${FM.date}: ${yamlQuote(fields.date)}`);
+	if (type === 'session') lines.push(`${FM.attendance}: []`);
 	if (type === 'quest') {
 		const link = (name?: string) => (name && name !== '' ? yamlQuote(`[[${name}]]`) : '""');
 		const givers = (fields.questGivers ?? []).filter((n) => n !== '');
 		lines.push(
 			givers.length > 0
-				? `questGiver: [${givers.map((n) => yamlQuote(`[[${n}]]`)).join(', ')}]`
-				: 'questGiver: []',
-			`questReceived: ${link(fields.questReceived)}`,
-			'questOutcome: ""',
-			'questOutcomeSession: ""',
-			`reward: ${yamlQuote(fields.reward ?? '')}`
+				? `${FM.questGiver}: [${givers.map((n) => yamlQuote(`[[${n}]]`)).join(', ')}]`
+				: `${FM.questGiver}: []`,
+			`${FM.questReceived}: ${link(fields.questReceived)}`,
+			`${FM.questOutcome}: ""`,
+			`${FM.questOutcomeSession}: ""`,
+			`${FM.reward}: ${yamlQuote(fields.reward ?? '')}`
 		);
 	}
 	lines.push('---', '', '');
@@ -236,7 +243,17 @@ class RecordInputSuggest extends AbstractInputSuggest<EntityRecord> {
 
 /** Session file names are managed, never user-facing inside the plugin. */
 export function sessionFileName(project: ProjectDef, dateRaw: string): string {
-	return sanitizeFileName(`${project.name} Session ${dateRaw}`.trim()) || `Session ${dateRaw}`;
+	return managedSessionFileName(project.name, dateRaw);
+}
+
+/**
+ * Managed entity file name: `<Project> <Type label> <name>` (sessions use
+ * `sessionFileName` with their date instead). The user-entered name lives in
+ * `loomName` frontmatter and is what every plugin surface displays and
+ * searches; the file name exists for the file explorer and link targets.
+ */
+export function entityFileName(project: ProjectDef, type: EntityType, name: string): string {
+	return managedEntityFileName(project.name, type, name);
 }
 
 export async function createEntity(
@@ -248,9 +265,7 @@ export async function createEntity(
 	const folder = projectPath(project, ENTITY_META[type].folder);
 	await ensureFolder(plugin.app, folder);
 	const base =
-		type === 'session'
-			? sessionFileName(project, fields.date)
-			: sanitizeFileName(fields.name) || `New ${ENTITY_META[type].label.toLowerCase()}`;
+		type === 'session' ? sessionFileName(project, fields.date) : entityFileName(project, type, fields.name);
 	let path = normalizePath(`${folder}/${base}.md`);
 	for (let i = 2; plugin.app.vault.getAbstractFileByPath(path) !== null; i++) {
 		path = normalizePath(`${folder}/${base} ${i}.md`);
@@ -386,9 +401,9 @@ export class CreateEntityModal extends Modal {
 				new RecordInputSuggest(
 					this.app,
 					text.inputEl,
-					() => characters.filter((c) => !(this.fields.questGivers ?? []).includes(c.name)),
+					() => characters.filter((c) => !(this.fields.questGivers ?? []).includes(linkTargetOf(c))),
 					(r) => {
-						(this.fields.questGivers ??= []).push(r.name);
+						(this.fields.questGivers ??= []).push(linkTargetOf(r));
 						refreshGivers();
 					}
 				);
@@ -396,9 +411,10 @@ export class CreateEntityModal extends Modal {
 			const giverChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
 			const refreshGivers = () => {
 				giverChips.empty();
-				for (const name of this.fields.questGivers ?? []) {
-					this.renderChip(giverChips, this.resolveName(name), name, () => {
-						this.fields.questGivers = (this.fields.questGivers ?? []).filter((n) => n !== name);
+				for (const target of this.fields.questGivers ?? []) {
+					const rec = this.resolveName(target);
+					this.renderChip(giverChips, rec, rec?.name ?? target, () => {
+						this.fields.questGivers = (this.fields.questGivers ?? []).filter((n) => n !== target);
 						refreshGivers();
 					});
 				}
@@ -506,14 +522,14 @@ export class CreateEntityModal extends Modal {
 					.getAll(undefined, this.project.root)
 					.filter((r) => r.type !== 'session' && r.type !== 'event')
 					.filter((r) => involveFilter === null || r.type === involveFilter)
-					.filter((r) => !(this.fields.involved ?? []).includes(r.name))
+					.filter((r) => !(this.fields.involved ?? []).includes(linkTargetOf(r)))
 					.sort((a, b) => a.name.localeCompare(b.name));
 			new Setting(this.contentEl)
 				.setName('Involved entities')
 				.addText((text) => {
 					text.setPlaceholder('Involve…');
 					new RecordInputSuggest(this.app, text.inputEl, candidates, (r) => {
-						(this.fields.involved ??= []).push(r.name);
+						(this.fields.involved ??= []).push(linkTargetOf(r));
 						refreshInvolved();
 					});
 				})
@@ -549,9 +565,10 @@ export class CreateEntityModal extends Modal {
 			const involvedChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
 			const refreshInvolved = () => {
 				involvedChips.empty();
-				for (const name of this.fields.involved ?? []) {
-					this.renderChip(involvedChips, this.resolveName(name), name, () => {
-						this.fields.involved = (this.fields.involved ?? []).filter((n) => n !== name);
+				for (const target of this.fields.involved ?? []) {
+					const rec = this.resolveName(target);
+					this.renderChip(involvedChips, rec, rec?.name ?? target, () => {
+						this.fields.involved = (this.fields.involved ?? []).filter((n) => n !== target);
 						refreshInvolved();
 					});
 				}
@@ -616,13 +633,14 @@ export class CreateEntityModal extends Modal {
 		if (connectTo) {
 			this.fields.relationship = {
 				type: this.relComment === '' ? 'related' : this.relComment,
-				target: connectTo.record.name,
+				target: linkTargetOf(connectTo.record),
 			};
 		}
-	if (this.options.parentLocation) this.fields.parentLocation = this.options.parentLocation.name;
-		if (this.options.noteSession) this.fields.noteSession = this.options.noteSession.name;
-		else if (this.pickedSession) this.fields.noteSession = this.pickedSession.name;
-		if (this.type === 'quest') this.fields.questReceived = this.receivedSession?.name ?? '';
+	if (this.options.parentLocation) this.fields.parentLocation = linkTargetOf(this.options.parentLocation);
+		if (this.options.noteSession) this.fields.noteSession = linkTargetOf(this.options.noteSession);
+		else if (this.pickedSession) this.fields.noteSession = linkTargetOf(this.pickedSession);
+		if (this.type === 'quest')
+			this.fields.questReceived = this.receivedSession ? linkTargetOf(this.receivedSession) : '';
 		try {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
 			this.close();

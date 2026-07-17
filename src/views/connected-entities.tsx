@@ -1,6 +1,7 @@
 import { Notice } from 'obsidian';
 import { useEffect, useState } from 'react';
-import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
+import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType, FM } from '../types';
+import { setLoomKey } from '../fm';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
 import { FRONTMATTER_RE, Icon, Truncated, autoGrowTextarea, recordLabel } from './common';
@@ -124,7 +125,7 @@ function Entry({
 		if (!file) return;
 		try {
 			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				fm.description = descDraft;
+				setLoomKey(fm, FM.description, descDraft);
 			});
 			await plugin.app.vault.process(file, (data) => {
 				const m = FRONTMATTER_RE.exec(data);
