@@ -321,6 +321,150 @@ span.loom-row-caret {
 .loom-timeline {
 	position: relative;
 	min-height: 100%;
+	width: max-content;
+	min-width: 100%;
+}
+
+/* The whole drawer body: [No date panel][vertical toggle bar][scrolling
+   strip], all full height from the drawer bar down to the bottom. */
+.loom-drawer-timeline {
+	overflow: hidden;
+}
+
+.loom-timeline-split {
+	display: flex;
+	align-items: stretch;
+	height: 100%;
+}
+
+/* "No date" side panel: slides out of the strip's left edge like the timeline
+   drawer slides out of the workspace bottom — flush edges, width animates,
+   the fixed-width inner keeps content from squishing during the slide. Also
+   the drop zone that unpins a dragged event and clears its date. */
+.loom-nodate-panel {
+	flex-shrink: 0;
+	overflow: hidden;
+	background: rgba(128, 128, 128, 0.05);
+}
+
+.loom-nodate-anim {
+	transition: width 220ms ease;
+}
+
+.loom-nodate-inner {
+	height: 100%;
+	overflow-y: auto;
+	overflow-x: hidden;
+	padding: var(--size-4-3);
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--size-2-3);
+}
+
+.loom-nodate-label {
+	color: var(--text-muted);
+	font-size: 0.9em;
+	font-weight: var(--font-medium);
+}
+
+.loom-nodate-empty {
+	color: var(--text-faint);
+	font-size: 0.85em;
+}
+
+/* The toggle bar: the timeline drawer's bar rotated vertical — the whole bar
+   toggles, a centered chevron is its only hint, the edge strip resizes. */
+.loom-nodate-bar {
+	position: relative;
+	flex-shrink: 0;
+	width: 22px;
+	cursor: pointer;
+	border-right: 1px solid var(--background-modifier-border);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.loom-nodate-bar:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.loom-nodate-chevron {
+	display: flex;
+	color: var(--text-muted);
+	pointer-events: none;
+}
+
+.loom-nodate-chevron .loom-icon svg {
+	display: block;
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+/* Window-edge-style resize strip on the bar's panel side. */
+.loom-nodate-handle {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 8px;
+	cursor: ew-resize;
+}
+
+/* The strip's own scroll container (pans, wheel, right-click create). */
+.loom-timeline-scroll {
+	flex: 1;
+	min-width: 0;
+	height: 100%;
+	overflow: auto;
+	padding: var(--size-4-3);
+}
+
+/* Pointer-drag reordering: the dragged bubble rides the cursor untransitioned;
+   every other bubble transitions its transform, so gaps slide in real time. */
+.loom-timeline-dragging {
+	user-select: none;
+}
+
+.loom-timeline-dragging .loom-bubble {
+	cursor: grabbing;
+}
+
+.loom-bubble-slide {
+	transition: transform 150ms ease;
+}
+
+/* The carried bubble follows the cursor and must not intercept the hit test
+   (elementFromPoint) that reads which column/panel is underneath — otherwise
+   the drop target always resolves to its own origin column. */
+.loom-bubble-dragging {
+	position: relative;
+	z-index: 5;
+	opacity: 0.85;
+	box-shadow: var(--shadow-s);
+	pointer-events: none;
+}
+
+/* Landing preview at the target slot: a dashed, translucent copy of the
+   bubble showing exactly where it drops (portalled to the body, so it floats
+   above the scroll container un-clipped). */
+.loom-bubble-ghost {
+	position: fixed;
+	z-index: var(--layer-tooltip);
+	pointer-events: none;
+	opacity: 0.7;
+	border-style: dashed;
+	background: var(--background-secondary);
+}
+
+/* Tooltip header: the full name, above the (optional) description. */
+.loom-tooltip-name {
+	font-weight: var(--font-medium);
+}
+
+.loom-tooltip-name + div {
+	margin-top: var(--size-2-1);
 }
 
 .loom-timeline-columns {
@@ -1527,8 +1671,24 @@ span.loom-row-caret {
 	display: flex;
 	align-items: center;
 	gap: var(--size-2-2);
-	/* Rows slide into place live during a grip drag. */
+}
+
+.loom-subloc-dragging {
+	user-select: none;
+}
+
+/* Non-dragged rows slide into place live during a grip drag. */
+.loom-subloc-row-slide {
 	transition: transform 120ms ease;
+}
+
+/* The grabbed row rides the cursor directly — no transition lag — and lifts. */
+.loom-subloc-row-dragging {
+	position: relative;
+	z-index: 3;
+	box-shadow: var(--shadow-s);
+	background: var(--background-primary);
+	border-radius: var(--radius-s);
 }
 
 .loom-subloc-grip {

@@ -199,7 +199,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [body, setBody] = useState<string | null>(null);
 	/** Live sublocation reorder: rows slide in real time while the grip is
 	 *  held; the row itself is never carried by the cursor. */
-	const [sublocDrag, setSublocDrag] = useState<{ from: number; over: number } | null>(null);
+	const [sublocDrag, setSublocDrag] = useState<{ from: number; over: number; dy: number } | null>(
+		null
+	);
 	const sublocDragRef = useRef<{ startY: number; slot: number } | null>(null);
 	const sublocListRef = useRef<HTMLDivElement | null>(null);
 	/** Locations: pending "new session note" draft (place defaults to Self). */
@@ -624,11 +626,12 @@ function EntityPage({ view }: { view: EntityView }) {
 		const b = list.children[1] as HTMLElement;
 		return b.offsetTop - a.offsetTop || 28;
 	};
-	/** How many slots row `i` is displaced by the drag in progress. */
+	/** Slots a non-dragged row `i` slides to open/close the gap. The dragged
+	 *  row itself rides the cursor (raw dy) instead — see the row style. */
 	const sublocShift = (i: number): number => {
 		if (!sublocDrag) return 0;
 		const { from, over } = sublocDrag;
-		if (i === from) return over - from;
+		if (i === from) return 0;
 		if (from < i && i <= over) return -1;
 		if (over <= i && i < from) return 1;
 		return 0;
@@ -2556,16 +2559,31 @@ function EntityPage({ view }: { view: EntityView }) {
 						</button>
 					</div>
 {sublocations.length > 0 ? (
-						<div className="loom-subloc-list" ref={sublocListRef}>
-							{sublocations.map((s, i) => (
+						<div
+							className={sublocDrag ? 'loom-subloc-list loom-subloc-dragging' : 'loom-subloc-list'}
+							ref={sublocListRef}
+						>
+							{sublocations.map((s, i) => {
+								const isDragged = sublocDrag?.from === i;
+								const slot = sublocDragRef.current?.slot ?? 28;
+								// The grabbed row follows the cursor (raw dy); the rest slide
+								// by whole slots to open the gap where it will land.
+								const style = isDragged
+									? { transform: `translateY(${sublocDrag?.dy ?? 0}px)` }
+									: sublocShift(i) !== 0
+										? { transform: `translateY(${sublocShift(i) * slot}px)` }
+										: undefined;
+								return (
 								<div
 									key={s.path}
-									className="loom-subloc-row"
-									style={
-										sublocShift(i) !== 0
-											? { transform: `translateY(${sublocShift(i) * (sublocDragRef.current?.slot ?? 28)}px)` }
-											: undefined
+									className={
+										isDragged
+											? 'loom-subloc-row loom-subloc-row-dragging'
+											: sublocDrag
+												? 'loom-subloc-row loom-subloc-row-slide'
+												: 'loom-subloc-row'
 									}
+									style={style}
 								>
 									<span
 										className="loom-subloc-grip"
@@ -2573,19 +2591,19 @@ function EntityPage({ view }: { view: EntityView }) {
 											e.preventDefault();
 											e.currentTarget.setPointerCapture(e.pointerId);
 											sublocDragRef.current = { startY: e.clientY, slot: sublocSlotHeight() };
-											setSublocDrag({ from: i, over: i });
+											setSublocDrag({ from: i, over: i, dy: 0 });
 										}}
 										onPointerMove={(e) => {
 											const start = sublocDragRef.current;
 											if (!start) return;
+											const dy = e.clientY - start.startY;
 											const over = Math.max(
 												0,
-												Math.min(
-													sublocations.length - 1,
-													i + Math.round((e.clientY - start.startY) / start.slot)
-												)
+												Math.min(sublocations.length - 1, i + Math.round(dy / start.slot))
 											);
-											setSublocDrag((cur) => (cur && cur.over !== over ? { ...cur, over } : cur));
+											setSublocDrag((cur) =>
+												cur && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur
+											);
 										}}
 										onPointerUp={() => endSublocDrag(true)}
 										onPointerCancel={() => endSublocDrag(false)}
@@ -2603,7 +2621,8 @@ function EntityPage({ view }: { view: EntityView }) {
 										✕
 									</button>
 								</div>
-							))}
+								);
+							})}
 						</div>
 					) : null}
 				</div>

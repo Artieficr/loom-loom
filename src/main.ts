@@ -82,6 +82,7 @@ export default class LoomLoomPlugin extends Plugin {
 			for (const entries of [
 					...Object.values(this.settings.graphManualX),
 					...Object.values(this.settings.graphManualY),
+					...Object.values(this.settings.timelineManualOrder),
 				]) {
 					if (oldPath in entries) {
 						entries[file.path] = entries[oldPath];
@@ -103,6 +104,7 @@ export default class LoomLoomPlugin extends Plugin {
 			for (const entries of [
 					...Object.values(this.settings.graphManualX),
 					...Object.values(this.settings.graphManualY),
+					...Object.values(this.settings.timelineManualOrder),
 				]) {
 					if (file.path in entries) {
 						delete entries[file.path];
