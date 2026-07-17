@@ -16,6 +16,7 @@ import {
 	autocompletion,
 	completionKeymap,
 } from '@codemirror/autocomplete';
+import { App, Scope } from 'obsidian';
 import { useEffect, useRef } from 'react';
 import type { LinkOption } from './link-textarea';
 
@@ -49,14 +50,16 @@ interface InlineToken {
 const INLINE_RULES: {
 	re: RegExp;
 	cls: string;
-	/** Marker length on each side. */
-	marker: number;
+	/** Marker lengths before/after the content. */
+	open: number;
+	close: number;
 }[] = [
-	{ re: /\*\*([^*\n]+)\*\*/g, cls: 'loom-md-bold', marker: 2 },
-	{ re: /~~([^~\n]+)~~/g, cls: 'loom-md-strike', marker: 2 },
-	{ re: /==([^=\n]+)==/g, cls: 'loom-md-mark', marker: 2 },
-	{ re: /(^|[^*])\*([^*\n]+)\*(?!\*)/g, cls: 'loom-md-italic', marker: 1 },
-	{ re: /(^|[^_])_([^_\n]+)_(?!_)/g, cls: 'loom-md-italic', marker: 1 },
+	{ re: /\*\*([^*\n]+)\*\*/g, cls: 'loom-md-bold', open: 2, close: 2 },
+	{ re: /~~([^~\n]+)~~/g, cls: 'loom-md-strike', open: 2, close: 2 },
+	{ re: /==([^=\n]+)==/g, cls: 'loom-md-mark', open: 2, close: 2 },
+	{ re: /<u>([^<\n]+)<\/u>/g, cls: 'loom-md-underline', open: 3, close: 4 },
+	{ re: /(^|[^*])\*([^*\n]+)\*(?!\*)/g, cls: 'loom-md-italic', open: 1, close: 1 },
+	{ re: /(^|[^_])_([^_\n]+)_(?!_)/g, cls: 'loom-md-italic', open: 1, close: 1 },
 ];
 
 const WIKILINK_RE = /\[\[([^[\]\n|]+)(?:\|([^[\]\n]*))?\]\]/g;
@@ -99,10 +102,10 @@ function lineTokens(text: string, lineFrom: number): InlineToken[] {
 				from,
 				to,
 				hide: [
-					{ from, to: from + rule.marker },
-					{ from: to - rule.marker, to },
+					{ from, to: from + rule.open },
+					{ from: to - rule.close, to },
 				],
-				content: { from: from + rule.marker, to: to - rule.marker, cls: rule.cls },
+				content: { from: from + rule.open, to: to - rule.close, cls: rule.cls },
 			});
 		}
 	}
@@ -184,7 +187,9 @@ function buildDecorations(view: EditorView): DecorationSet {
 			}
 
 			for (const token of lineTokens(text, line.from).sort((a, b) => a.from - b.from)) {
-				if (touches(token.from, token.to)) continue; // raw while editing
+				// Raw only while the cursor sits strictly inside the token, so a
+				// just-completed `**bold**` renders the moment it's closed.
+				if (sel.ranges.some((r) => r.from < token.to && r.to > token.from)) continue;
 				for (const h of token.hide) {
 					entries.push({ from: h.from, to: h.to, deco: Decoration.replace({}) });
 				}
@@ -264,12 +269,120 @@ const pairDeletion = Prec.high(
 	])
 );
 
-/** Inline `[[…` completion over the same options the LinkTextarea offered. */
-function linkCompletion(names: () => LinkOption[]) {
+/** Enter continues list/quote formatting; Enter on a marker-only line exits. */
+const formatContinuation = Prec.high(
+	keymap.of([
+		{
+			key: 'Enter',
+			run: (view) => {
+				const range = view.state.selection.main;
+				if (!range.empty) return false;
+				const line = view.state.doc.lineAt(range.head);
+				const quote = /^((?:>\s?)+)/.exec(line.text);
+				const bullet = /^(\s*[-*+]\s)/.exec(line.text);
+				const ordered = /^(\s*)(\d+)([.)]\s)/.exec(line.text);
+				let markerLen: number;
+				let continuation: string;
+				if (quote) {
+					markerLen = quote[1].length;
+					continuation = quote[1];
+				} else if (bullet) {
+					markerLen = bullet[1].length;
+					continuation = bullet[1];
+				} else if (ordered) {
+					markerLen = ordered[0].length;
+					continuation = `${ordered[1]}${Number(ordered[2]) + 1}${ordered[3]}`;
+				} else {
+					return false;
+				}
+				if (range.head < line.from + markerLen) return false;
+				// A marker with no content: Enter clears it instead of stacking.
+				if (line.text.slice(markerLen).trim() === '') {
+					view.dispatch({ changes: { from: line.from, to: line.to } });
+					return true;
+				}
+				view.dispatch({
+					changes: { from: range.head, insert: '\n' + continuation },
+					selection: { anchor: range.head + 1 + continuation.length },
+				});
+				return true;
+			},
+		},
+	])
+);
+
+/** Wraps the selection (or cursor) in inline markers, or unwraps in place. */
+function toggleWrap(view: EditorView, open: string, close: string): boolean {
+	const range = view.state.selection.main;
+	const before = view.state.sliceDoc(Math.max(0, range.from - open.length), range.from);
+	const after = view.state.sliceDoc(range.to, range.to + close.length);
+	if (before === open && after === close) {
+		view.dispatch({
+			changes: [
+				{ from: range.from - open.length, to: range.from },
+				{ from: range.to, to: range.to + close.length },
+			],
+			selection: { anchor: range.from - open.length, head: range.to - open.length },
+		});
+		return true;
+	}
+	const inner = view.state.sliceDoc(range.from, range.to);
+	if (
+		inner.length >= open.length + close.length &&
+		inner.startsWith(open) &&
+		inner.endsWith(close)
+	) {
+		view.dispatch({
+			changes: {
+				from: range.from,
+				to: range.to,
+				insert: inner.slice(open.length, inner.length - close.length),
+			},
+			selection: { anchor: range.from, head: range.to - open.length - close.length },
+		});
+		return true;
+	}
+	view.dispatch({
+		changes: [
+			{ from: range.from, insert: open },
+			{ from: range.to, insert: close },
+		],
+		selection: { anchor: range.from + open.length, head: range.to + open.length },
+	});
+	return true;
+}
+
+/** Obsidian's editing shortcuts: bold / italic / underline. Mod-b/Mod-i are
+ *  also global Obsidian hotkeys captured at the window before CodeMirror runs,
+ *  so a focused field additionally pushes a keymap Scope (see MarkdownField)
+ *  that takes precedence over them; this CM keymap covers unbound keys. */
+const formattingKeys = keymap.of([
+	{ key: 'Mod-b', run: (view) => toggleWrap(view, '**', '**') },
+	{ key: 'Mod-i', run: (view) => toggleWrap(view, '*', '*') },
+	{ key: 'Mod-u', run: (view) => toggleWrap(view, '<u>', '</u>') },
+]);
+
+/** Inserts a picked link at the completion range, reusing/adding the `]]`. */
+function insertLink(view: EditorView, from: number, to: number, insert: string) {
+	const closed = view.state.sliceDoc(to, to + 2) === ']]';
+	view.dispatch({
+		changes: { from, to, insert: insert + (closed ? '' : ']]') },
+		selection: { anchor: from + insert.length + 2 },
+	});
+}
+
+/** Inline `[[…` completion over the same options the LinkTextarea offered,
+ *  plus a "+ Create …" entry that spawns a new entity from the typed short
+ *  name and links it once created. */
+function linkCompletion(
+	names: () => LinkOption[],
+	createEntity: () => ((name: string, insert: (linkInsert: string) => void) => void) | undefined
+) {
 	return (ctx: CompletionContext): CompletionResult | null => {
 		const m = ctx.matchBefore(/\[\[[^[\]\n]*/);
 		if (!m) return null;
-		const query = ctx.state.sliceDoc(m.from + 2, m.to).toLowerCase();
+		const typed = ctx.state.sliceDoc(m.from + 2, m.to);
+		const query = typed.toLowerCase();
 		const all = names();
 		const starts = all.filter((n) => n.label.toLowerCase().startsWith(query));
 		const contains = all.filter(
@@ -278,31 +391,46 @@ function linkCompletion(names: () => LinkOption[]) {
 		const options = [...starts, ...contains].slice(0, 8).map((n) => ({
 			label: n.label,
 			apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
-				const closed = view.state.sliceDoc(to, to + 2) === ']]';
-				view.dispatch({
-					changes: { from, to, insert: n.insert + (closed ? '' : ']]') },
-					selection: { anchor: from + n.insert.length + 2 },
-				});
+				insertLink(view, from, to, n.insert);
 			},
 		}));
+		const create = createEntity();
+		if (create && typed.trim() !== '' && !all.some((n) => n.label.toLowerCase() === query)) {
+			options.push({
+				label: `+ Create "${typed.trim()}"…`,
+				apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
+					create(typed.trim(), (linkInsert) => {
+						if (!view.dom.isConnected) return;
+						insertLink(view, from, to, linkInsert);
+					});
+				},
+			});
+		}
 		if (options.length === 0) return null;
 		return { from: m.from + 2, options, filter: false };
 	};
 }
 
 export function MarkdownField({
+	app,
 	value,
 	onChange,
 	names,
 	placeholder,
 	onOpenLink,
+	onCreateEntity,
 }: {
+	/** Needed to outrank Obsidian's global Ctrl+B/I hotkeys while focused. */
+	app: App;
 	value: string;
 	onChange: (value: string) => void;
 	names: LinkOption[];
 	placeholder?: string;
 	/** Opens a clicked rendered wikilink (receives the raw link target). */
 	onOpenLink: (target: string) => void;
+	/** Offered as "+ Create …" in the [[ completion: create an entity from the
+	 *  typed short name, then call back with the link text to insert. */
+	onCreateEntity?: (name: string, insert: (linkInsert: string) => void) => void;
 }) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
 	const viewRef = useRef<EditorView | null>(null);
@@ -312,9 +440,36 @@ export function MarkdownField({
 	onChangeRef.current = onChange;
 	const onOpenRef = useRef(onOpenLink);
 	onOpenRef.current = onOpenLink;
+	const onCreateRef = useRef(onCreateEntity);
+	onCreateRef.current = onCreateEntity;
 
 	useEffect(() => {
 		if (!hostRef.current) return;
+		// While the field is focused, this scope outranks Obsidian's global
+		// hotkeys (Ctrl+B/I are bound app-wide and captured before CodeMirror).
+		const scope = new Scope(app.scope);
+		const wrapKey = (key: string, open: string, close: string) =>
+			scope.register(['Mod'], key, () => {
+				const v = viewRef.current;
+				if (v) toggleWrap(v, open, close);
+				return false;
+			});
+		wrapKey('b', '**', '**');
+		wrapKey('i', '*', '*');
+		wrapKey('u', '<u>', '</u>');
+		let scopePushed = false;
+		const pushScope = () => {
+			if (!scopePushed) {
+				app.keymap.pushScope(scope);
+				scopePushed = true;
+			}
+		};
+		const popScope = () => {
+			if (scopePushed) {
+				app.keymap.popScope(scope);
+				scopePushed = false;
+			}
+		};
 		const view = new EditorView({
 			parent: hostRef.current,
 			state: EditorState.create({
@@ -326,13 +481,24 @@ export function MarkdownField({
 					livePreview,
 					bracketPairing,
 					pairDeletion,
+					formatContinuation,
+					formattingKeys,
 					autocompletion({
-						override: [linkCompletion(() => namesRef.current)],
+						override: [
+							linkCompletion(
+								() => namesRef.current,
+								() => onCreateRef.current
+							),
+						],
 						icons: false,
 					}),
 					keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap]),
 					EditorView.updateListener.of((update) => {
 						if (update.docChanged) onChangeRef.current(update.state.doc.toString());
+						if (update.focusChanged) {
+							if (update.view.hasFocus) pushScope();
+							else popScope();
+						}
 					}),
 					EditorView.domEventHandlers({
 						mousedown: (event) => {
@@ -351,6 +517,7 @@ export function MarkdownField({
 		});
 		viewRef.current = view;
 		return () => {
+			popScope();
 			view.destroy();
 			viewRef.current = null;
 		};
