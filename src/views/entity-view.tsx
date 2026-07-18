@@ -9,6 +9,7 @@ import {
 	useRef,
 	useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
 	DEFAULT_MEMBER_ROLE,
 	ENTITY_META,
@@ -238,7 +239,24 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [seqDrag, setSeqDrag] = useState<{ group: string; from: number; over: number; dy: number } | null>(
 		null
 	);
-	const seqDragRef = useRef<{ startY: number; slot: number } | null>(null);
+	/** `mids` = each row's viewport-Y center, snapshotted at grab time so the
+	 *  target index reads off the *static* layout (immune to the live slide). */
+	const seqDragRef = useRef<{ startY: number; slot: number; mids: number[] } | null>(null);
+	/** Quest-card grid reorder (timeline-style): the grabbed card rides the
+	 *  cursor while the rest stay put; a portalled bar previews the drop slot.
+	 *  `over` is the insertion index among the *other* cards, read from a static
+	 *  rect snapshot so it's immune to any layout shift. */
+	type QuestRect = { path: string; left: number; top: number; width: number; height: number };
+	const [questDrag, setQuestDrag] = useState<{
+		gkey: string;
+		active: string;
+		over: number;
+		dx: number;
+		dy: number;
+	} | null>(null);
+	const questDragRef = useRef<{ startX: number; startY: number; rects: QuestRect[]; over: number } | null>(
+		null
+	);
 
 	// A freshly created note opens before metadataCache has indexed it, so the
 	// record can arrive one tick after mount — seed the drafts then.
@@ -886,9 +904,19 @@ function EntityPage({ view }: { view: EntityView }) {
 			apply(arr);
 		});
 
-	// --- Generic loomSeq drag-reorder (session-page events + quests) ----------
+	// --- loomSeq drag-reorder (session-page events + quests) ------------------
 	// Order lives in each entity's `loomSeq`, shared with the timeline, so a drop
 	// re-stamps the whole list and re-indexing re-sorts every view that reads it.
+	const writeRecordSeq = (path: string, seq: number) => {
+		const f = plugin.app.vault.getFileByPath(path);
+		if (!f) return;
+		plugin.app.fileManager
+			.processFrontMatter(f, (fm: Record<string, unknown>) => setLoomKey(fm, FM.seq, seq))
+			.catch((e) => {
+				console.error('Loom Loom: failed to save order', e);
+				new Notice('Could not save the new order.');
+			});
+	};
 	const seqShift = (group: string, i: number): number => {
 		if (!seqDrag || seqDrag.group !== group) return 0;
 		const { from, over } = seqDrag;
@@ -914,16 +942,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		const [moved] = next.splice(drag.from, 1);
 		next.splice(drag.over, 0, moved);
 		const base = Date.now();
-		next.forEach((r, i) => {
-			const f = plugin.app.vault.getFileByPath(r.path);
-			if (!f) return;
-			plugin.app.fileManager
-				.processFrontMatter(f, (fm: Record<string, unknown>) => setLoomKey(fm, FM.seq, base + i))
-				.catch((e) => {
-					console.error('Loom Loom: failed to save order', e);
-					new Notice('Could not save the new order.');
-				});
-		});
+		next.forEach((r, i) => writeRecordSeq(r.path, base + i));
 	};
 	/** The 6-dot grab handle placed before an entry's title. */
 	const seqGrip = (group: string, i: number, records: EntityRecord[]) => (
@@ -934,26 +953,97 @@ function EntityPage({ view }: { view: EntityView }) {
 				e.currentTarget.setPointerCapture(e.pointerId);
 				const rowEl = e.currentTarget.closest('[data-seq-row]');
 				const row = rowEl instanceof HTMLElement ? rowEl : null;
-				const parent = row?.parentElement;
-				const slot =
-					parent && parent.children.length >= 2
-						? Math.abs(
-								(parent.children[1] as HTMLElement).offsetTop -
-									(parent.children[0] as HTMLElement).offsetTop
-							) || row?.offsetHeight || 40
-						: row?.offsetHeight || 40;
-				seqDragRef.current = { startY: e.clientY, slot };
+				// Snapshot every row's center now, before anything slides; the target
+				// index is then the count of centers the cursor has passed — the
+				// sublocation trick, but per-row so it copes with varying heights.
+				const rows = row?.parentElement
+					? [...row.parentElement.querySelectorAll(':scope > [data-seq-row]')]
+					: [];
+				const mids = rows.map((r) => {
+					const b = r.getBoundingClientRect();
+					return b.top + b.height / 2;
+				});
+				// Slide distance = the grabbed block's own height + the inter-card gap
+				// (--size-4-2), so neighbours open a gap that matches this row.
+				seqDragRef.current = { startY: e.clientY, slot: (row?.offsetHeight ?? 40) + 8, mids };
 				setSeqDrag({ group, from: i, over: i, dy: 0 });
 			}}
 			onPointerMove={(e) => {
 				const start = seqDragRef.current;
 				if (!start) return;
 				const dy = e.clientY - start.startY;
-				const over = Math.max(0, Math.min(records.length - 1, i + Math.round(dy / start.slot)));
+				const over = Math.max(
+					0,
+					Math.min(records.length - 1, start.mids.filter((m) => m < e.clientY).length)
+				);
 				setSeqDrag((cur) => (cur && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur));
 			}}
 			onPointerUp={() => endSeqDrag(group, records, true)}
 			onPointerCancel={() => endSeqDrag(group, records, false)}
+		>
+			<Icon name="grip-vertical" />
+		</span>
+	);
+	/** Grip for the quest-card grid (timeline-style). The grabbed card rides the
+	 *  cursor; the drop slot is the reading-order index (grid read as one
+	 *  continuous row) counted from a static rect snapshot. */
+	const questGrip = (gkey: string, path: string, records: EntityRecord[]) => (
+		<span
+			className="loom-subloc-grip"
+			onPointerDown={(e) => {
+				e.preventDefault();
+				e.currentTarget.setPointerCapture(e.pointerId);
+				const card = e.currentTarget.closest('[data-quest-card]');
+				const cards = card?.parentElement
+					? [...card.parentElement.querySelectorAll(':scope > [data-quest-card]')]
+					: [];
+				const rects: QuestRect[] = cards.map((c) => {
+					const b = c.getBoundingClientRect();
+					return { path: c.getAttribute('data-quest-path') ?? '', left: b.left, top: b.top, width: b.width, height: b.height };
+				});
+				const activeIdx = rects.findIndex((r) => r.path === path);
+				const over = Math.max(0, activeIdx);
+				questDragRef.current = { startX: e.clientX, startY: e.clientY, rects, over };
+				setQuestDrag({ gkey, active: path, over, dx: 0, dy: 0 });
+			}}
+			onPointerMove={(e) => {
+				const start = questDragRef.current;
+				if (!start) return;
+				const dx = e.clientX - start.startX;
+				const dy = e.clientY - start.startY;
+				const self = start.rects.find((r) => r.path === path);
+				const rowH = self?.height ?? 120;
+				// Grid read as one continuous row: count the other cards (row-major)
+				// whose center the cursor has passed → linear insertion index.
+				let over = 0;
+				for (const r of start.rects) {
+					if (r.path === path) continue;
+					const cx = r.left + r.width / 2;
+					const cy = r.top + r.height / 2;
+					const sameRow = Math.abs(cy - e.clientY) <= rowH * 0.5;
+					if (cy < e.clientY - rowH * 0.5 || (sameRow && cx < e.clientX)) over++;
+				}
+				start.over = over;
+				setQuestDrag((cur) =>
+					cur && cur.gkey === gkey && (cur.over !== over || cur.dx !== dx || cur.dy !== dy)
+						? { ...cur, over, dx, dy }
+						: cur
+				);
+			}}
+			onPointerUp={() => {
+				const ref = questDragRef.current;
+				questDragRef.current = null;
+				setQuestDrag(null);
+				if (!ref) return;
+				const rest = records.map((r) => r.path).filter((p) => p !== path);
+				rest.splice(Math.max(0, Math.min(rest.length, ref.over)), 0, path);
+				const base = Date.now();
+				rest.forEach((p, i) => writeRecordSeq(p, base + i));
+			}}
+			onPointerCancel={() => {
+				questDragRef.current = null;
+				setQuestDrag(null);
+			}}
 		>
 			<Icon name="grip-vertical" />
 		</span>
@@ -1449,7 +1539,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		en: LocNoteEntry,
 		grip?: ReactNode,
 		style?: CSSProperties,
-		dragging?: boolean
+		dragging?: boolean,
+		index?: number
 	) => {
 		const menuKey = en.owner.path + String(en.idx);
 		const involved = involvedOfEntry(en);
@@ -1461,10 +1552,11 @@ function EntityPage({ view }: { view: EntityView }) {
 				key={menuKey}
 				className={dragging ? 'loom-locnote loom-locnote-dragging' : 'loom-locnote'}
 				style={style}
-				{...(grip ? { 'data-seq-row': '' } : {})}
+				{...(grip ? { 'data-seq-row': '', 'data-seq-index': index } : {})}
 			>
+				{grip}
+				<div className="loom-locnote-body">
 				<div className="loom-locnote-head">
-					{grip}
 					<input
 						type="text"
 						className="loom-hub-name"
@@ -1688,6 +1780,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					/>
 					</div>
 				</div>
+				</div>
 			</div>
 		);
 	};
@@ -1897,8 +1990,23 @@ function EntityPage({ view }: { view: EntityView }) {
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Quests</span>
 					{(['active', 'finished'] as const).map((state) => {
-						const list = sessionQuests.filter((q) => q.state === state);
+						const outcomeKey = (q: EntityRecord) =>
+							q.questOutcomeSession
+								? plugin.indexer.resolve(q.questOutcomeSession, q.path)?.date?.sortKey ?? 0
+								: 0;
+						// Active: manual loomSeq order (from sessionQuests). Finished: most
+						// recently finished on top (by outcome session date) — no reorder.
+						const list =
+							state === 'finished'
+								? sessionQuests
+										.filter((q) => q.state === state)
+										.slice()
+										.sort((a, b) => outcomeKey(b.quest) - outcomeKey(a.quest))
+								: sessionQuests.filter((q) => q.state === state);
 						const open = questsOpen[state];
+						const gkey = 'quest-' + state;
+						const reorderable = state === 'active';
+						const questRecords = list.map((x) => x.quest);
 						return (
 							<div key={state} className="loom-section">
 								<button
@@ -1924,14 +2032,28 @@ function EntityPage({ view }: { view: EntityView }) {
 												quest.questOutcomeSession !== null
 													? plugin.indexer.resolve(quest.questOutcomeSession, quest.path)
 													: null;
+											const grabbed = questDrag?.gkey === gkey && questDrag.active === quest.path;
 											return (
-												<div key={quest.path} className="loom-quest-card">
-													<button
-														className="loom-subloc-link loom-quest-card-title"
-														onClick={() => view.openEntity(quest.path)}
-													>
-														<Truncated className="loom-clip" text={quest.name} />
-													</button>
+												<div
+													key={quest.path}
+													className={grabbed ? 'loom-quest-card loom-quest-card-grabbed' : 'loom-quest-card'}
+													style={
+														grabbed
+															? { transform: `translate(${questDrag.dx}px, ${questDrag.dy}px)` }
+															: undefined
+													}
+													data-quest-card=""
+													data-quest-path={quest.path}
+												>
+													<div className="loom-quest-card-titlerow">
+														{reorderable ? questGrip(gkey, quest.path, questRecords) : null}
+														<button
+															className="loom-subloc-link loom-quest-card-title"
+															onClick={() => view.openEntity(quest.path)}
+														>
+															<Truncated className="loom-clip" text={quest.name} />
+														</button>
+													</div>
 													<div className="loom-quest-card-row">
 														<span className="loom-quest-card-label">
 															{givers.length > 1 ? 'Quest givers:' : 'Quest giver:'}
@@ -2012,6 +2134,30 @@ function EntityPage({ view }: { view: EntityView }) {
 							</div>
 						);
 					})}
+					{/* Drop-slot preview: a bar at the insertion point (grid read as one
+					    continuous row), portalled so it's never clipped. */}
+					{questDrag && questDragRef.current
+						? (() => {
+								const rects = questDragRef.current.rects.filter((r) => r.path !== questDrag.active);
+								if (rects.length === 0) return null;
+								const over = Math.max(0, Math.min(rects.length, questDrag.over));
+								const bar =
+									over < rects.length
+										? { left: rects[over].left - 4, top: rects[over].top, height: rects[over].height }
+										: {
+												left: rects[rects.length - 1].left + rects[rects.length - 1].width + 4,
+												top: rects[rects.length - 1].top,
+												height: rects[rects.length - 1].height,
+											};
+								return createPortal(
+									<div
+										className="loom-quest-drop"
+										style={{ left: bar.left, top: bar.top, height: bar.height }}
+									/>,
+									document.body
+								);
+							})()
+						: null}
 				</div>
 			) : null}
 
@@ -2233,7 +2379,8 @@ function EntityPage({ view }: { view: EntityView }) {
 										en,
 										seqGrip(t, i, owners),
 										seqRowStyle(t, i),
-										seqDrag?.group === t && seqDrag.from === i
+										seqDrag?.group === t && seqDrag.from === i,
+										i
 									)
 								)}
 							</div>

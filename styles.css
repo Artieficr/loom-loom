@@ -1892,11 +1892,45 @@ span.loom-row-caret {
 	transition: transform 120ms ease;
 }
 
+/* The grabbed block rides the cursor (no transition) and only lifts — it keeps
+   its own tint. */
 .loom-subloc-dragging [data-seq-row].loom-locnote-dragging {
 	transition: none;
-	box-shadow: var(--shadow-s);
-	border-radius: var(--radius-s);
-	background: var(--background-primary);
+	box-shadow: var(--shadow-m);
+	z-index: 2;
+}
+
+/* Grip rows: the 6-dot handle sits in a left gutter while the title, the
+   involve/location pickers, and the note text share one left edge (the grip
+   replaces the old nesting indent). */
+.loom-locnote-body {
+	display: contents;
+}
+
+.loom-locnote[data-seq-row] {
+	flex-direction: row;
+	align-items: flex-start;
+	gap: var(--size-2-3);
+}
+
+.loom-locnote[data-seq-row] > .loom-locnote-body {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-width: 0;
+	gap: var(--size-2-2);
+}
+
+/* Nudge the handle down to sit centred on the title row. */
+.loom-locnote[data-seq-row] > .loom-subloc-grip {
+	margin-top: var(--size-2-2);
+}
+
+/* No nesting indent: title, pickers, and note text all flush-left (beats the
+   later `.loom-locnote .loom-note-text` 26px rule on specificity). */
+.loom-locnote[data-seq-row] .loom-hub-involve-row,
+.loom-locnote[data-seq-row] .loom-note-text {
+	margin-left: 0;
 }
 
 .loom-view button.loom-subloc-link {
@@ -2536,13 +2570,41 @@ span.loom-row-caret {
 	min-width: 0;
 }
 
-/* Quest cards flow 4-up; anything long clips with … + tooltip when cut. */
+/* Quest cards flow 3-up; anything long clips with … + tooltip when cut. They
+   drag-reorder by reflowing to a new grid slot (grip in the title row). */
 .loom-quest-cards {
 	display: grid;
 	grid-template-columns: repeat(3, minmax(0, 1fr));
 	gap: var(--size-4-2);
 	margin-top: var(--size-4-2);
 	align-self: stretch;
+}
+
+/* Grip sits before the quest title. */
+.loom-quest-card-titlerow {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-3);
+	width: 100%;
+	min-width: 0;
+}
+
+/* The grabbed card rides the cursor and lifts above the rest. */
+.loom-quest-card-grabbed {
+	box-shadow: var(--shadow-l);
+	opacity: 0.9;
+	position: relative;
+	z-index: 3;
+}
+
+/* Insertion-point bar shown at the drop slot while dragging a quest card. */
+.loom-quest-drop {
+	position: fixed;
+	width: 3px;
+	border-radius: 2px;
+	background: var(--interactive-accent);
+	z-index: var(--layer-tooltip);
+	pointer-events: none;
 }
 
 .loom-quest-cards .loom-quest-card {
