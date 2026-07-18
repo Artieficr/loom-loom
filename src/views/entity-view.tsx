@@ -2579,8 +2579,11 @@ function EntityPage({ view }: { view: EntityView }) {
 					>
 						+ Add a session note
 					</button>
-{sessionNotes.map((note, i) => sessionNoteRow(note, i))}
-
+					{sessionNotes.length > 0 ? (
+						<div className="loom-note-list">
+							{sessionNotes.map((note, i) => sessionNoteRow(note, i))}
+						</div>
+					) : null}
 				</div>
 			) : null}
 
