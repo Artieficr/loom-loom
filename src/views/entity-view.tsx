@@ -1603,25 +1603,44 @@ function EntityPage({ view }: { view: EntityView }) {
 								✕
 							</button>
 						) : (
-							// Entity page: this deletes the session note entry outright.
+							// Entity page: drop this page's entity from the note — from the
+							// note's `involved`, or its `places` for a location page — so the
+							// event stops showing here while the note itself survives.
 							<button
-								className="loom-nav-btn loom-entity-delete"
-								aria-label="Delete session note"
-								onClick={() => {
-									const remove = () => writeOwnerNotes(en.owner, (arr) => arr.splice(en.idx, 1));
-									if (en.text.trim() === '') remove();
-									else {
-										new ConfirmModal(
-											plugin.app,
-											'Delete this session note?',
-											'The note text will be lost.',
-											remove,
-											'Delete'
-										).open();
-									}
-								}}
+								className="loom-nav-btn"
+								aria-label="Remove from this note"
+								onClick={() =>
+									new ConfirmModal(
+										plugin.app,
+										'Remove from this note?',
+										`If you remove ${record.name} from ${en.owner.name}, this event won't be displayed here anymore.`,
+										() => {
+											if (isLocation) {
+												writeEntryPlaces(en, (list) =>
+													list.filter((x) => {
+														if (typeof x !== 'string') return true;
+														const loc = plugin.indexer.resolve(extractLinkpath(x) ?? '', en.owner.path);
+														return !(loc && (loc.path === record.path || descendsFromThis(loc)));
+													})
+												);
+											} else {
+												writeEntryInvolved(en, (list) =>
+													list.filter(
+														(x) =>
+															!(
+																typeof x === 'string' &&
+																plugin.indexer.resolve(extractLinkpath(x) ?? '', en.owner.path)?.path ===
+																	record.path
+															)
+													)
+												);
+											}
+										},
+										'Remove'
+									).open()
+								}
 							>
-								<Icon name="trash-2" />
+								✕
 							</button>
 						)}
 					</div>
@@ -2587,7 +2606,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					</button>
 					{pageEventGroups.map((g) => (
 						<div key={g.session?.path ?? 'none'} className="loom-locnote-group loom-char-event-group">
-							<div className="loom-tag-row">
+							<div className="loom-tag-row loom-event-group-session">
 								{g.session ? (
 									<EntityChip
 										plugin={plugin}
@@ -2599,7 +2618,9 @@ function EntityPage({ view }: { view: EntityView }) {
 									<EntityChip plugin={plugin} record={null} label="No session" />
 								)}
 							</div>
-							{g.entries.map((en) => hubEntryRow(en))}
+							<div className="loom-event-nest">
+								{g.entries.map((en) => hubEntryRow(en))}
+							</div>
 						</div>
 					))}
 				</div>

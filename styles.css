@@ -2219,6 +2219,48 @@ span.loom-row-caret {
 	font-size: 1em;
 }
 
+/* Space each session group away from the add button and from each other. */
+.loom-char-event-group {
+	margin-top: var(--size-4-5);
+}
+
+/* Entity-page Events: each event is a tinted box, nested under the session
+   chip by a vertical rail. The rail starts at the chip's bottom edge (the chip
+   is transparent, so it must not run up underneath it). */
+.loom-event-nest {
+	position: relative;
+	margin-top: var(--size-4-3);
+	margin-left: var(--size-4-3);
+	padding-left: var(--size-4-4);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
+.loom-event-nest::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: calc(-1 * var(--size-4-3));
+	bottom: var(--size-4-3);
+	width: 2px;
+	border-radius: 1px;
+	background: var(--background-modifier-border);
+}
+
+.loom-char-event-group .loom-locnote {
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-3);
+	margin-top: 0;
+}
+
+.loom-char-event-group .loom-locnote input[type='text'],
+.loom-char-event-group .loom-locnote textarea,
+.loom-char-event-group .loom-locnote select {
+	background: var(--background-primary);
+}
+
 /* Hub row action drawer: trash + unlink slide out right-to-left behind <. */
 .loom-hub-actions {
 	display: flex;
