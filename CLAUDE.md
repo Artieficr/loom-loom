@@ -58,9 +58,18 @@ and a custom layered graph view.
   Reads fall back to legacy un-prefixed spellings; writes go through `src/fm.ts`
   helpers which clean legacy keys up; the startup migration rewrites old notes.
   Nested keys inside list entries stay unprefixed; `aliases` is deliberately native.
+- **Events section (entity pages)**: character/item/faction/location pages show the
+  events they take part in instead of their own session notes. A note's `involved`
+  list surfaces the event on each involved entity's page; a note's `places` list (the
+  event's per-note location, stored on the event, replacing the old event-level
+  `location` relationship) surfaces it on that location **and every ancestor location**
+  (city ⊇ tavern ⊇ secret room). Removing the page's own entity from a note warns first
+  ("… this event won't be displayed here anymore"). Only event/quest pages keep an
+  editable own-`sessionNotes` section; "+ Add an event" pre-links the page's entity
+  (`defaultInvolved` / `defaultPlace`).
 - **Connections**: typed frontmatter relationships + `sessionNotes` (session-pinned
-  note entries `{session, text}`; the picked session becomes a `session note`
-  connection) + `parentLocation` on locations (sublocation parent — dedicated field
+  note entries `{session, text, involved, places}`; the picked session becomes a
+  `session note` connection, `involved`→`involved`, event/quest `places`→`location`) + `parentLocation` on locations (sublocation parent — dedicated field
   with its own page/list/graph UI, never a relationship; typed `sublocation`
   connection) + `members` on factions (member characters, plain links or
   `{ character, role, location }` objects; typed `member` connection; mirrored on

@@ -106,6 +106,9 @@ export interface NewEntityFields {
 	/** Event only: entity names involved — written into the starting session
 	 *  note's `involved` list (session-less for lore events). */
 	involved?: string[];
+	/** Event only: location names for the starting note's `places` (events
+	 *  created from a location page). */
+	places?: string[];
 	/** Session name to prefill a session note for (events created from a session page). */
 	noteSession?: string;
 	/** Quest only (all optional): note names, not links. New quests are always
@@ -143,7 +146,8 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	// entities. Involvement without a session (a lore event) writes a
 	// session-less note — involved links still connect (relType `involved`).
 	const involved = fields.involved ?? [];
-	if ((fields.noteSession && fields.noteSession !== '') || involved.length > 0) {
+	const places = fields.places ?? [];
+	if ((fields.noteSession && fields.noteSession !== '') || involved.length > 0 || places.length > 0) {
 		lines.push(
 			`${FM.sessionNotes}:`,
 			`  - session: ${
@@ -155,6 +159,10 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 		if (involved.length > 0) {
 			lines.push('    involved:');
 			for (const n of involved) lines.push(`      - ${yamlQuote(`[[${n}]]`)}`);
+		}
+		if (places.length > 0) {
+			lines.push('    places:');
+			for (const p of places) lines.push(`      - ${yamlQuote(`[[${p}]]`)}`);
 		}
 	}
 	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
@@ -298,6 +306,9 @@ export interface CreateEntityOptions {
 	/** Events only: names pre-added to the involved list (still removable) —
 	 *  e.g. the character whose page spawned the event. */
 	defaultInvolved?: string[];
+	/** Events only: location name pre-added to the starting note's places —
+	 *  e.g. the location whose page spawned the event. */
+	defaultPlace?: string;
 	/** Prefills the Name field (e.g. "+ Create …" from a [[link completion). */
 	initialName?: string;
 }
@@ -327,6 +338,7 @@ export class CreateEntityModal extends Modal {
 		if (options.defaultInvolved && options.defaultInvolved.length > 0) {
 			this.fields.involved = [...options.defaultInvolved];
 		}
+		if (options.defaultPlace) this.fields.places = [options.defaultPlace];
 		if (options.initialName) this.fields.name = options.initialName.trim();
 	}
 
