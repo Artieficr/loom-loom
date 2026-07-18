@@ -1318,13 +1318,28 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sessionNoteRow = (note: SessionNoteDraft, i: number) => {
 		const picked =
 			note.session.trim() !== '' ? plugin.indexer.resolve(note.session.trim(), record.path) : null;
-		// Quests and events carry a location like session-page rows do —
-		// `location` relationships on the note itself, picked right of Involve.
+		// Quests and events carry a per-note location in the note's own `places`
+		// (picked right of Involve). Legacy event-level `location` relationships
+		// are still shown (and removable) so older notes don't lose their place.
 		const hasNoteLocation = record.type === 'quest' || record.type === 'event';
-		const noteLocs = hasNoteLocation
-			? relationships
-					.map((rel, ri) => ({ rel, ri, target: resolveDraftTarget(rel.target) }))
-					.filter((e) => e.rel.type.trim().toLowerCase() === 'location' && e.target?.type === 'location')
+		const noteLocs: { key: string; target: EntityRecord | null; remove: () => void }[] = hasNoteLocation
+			? [
+					...note.places
+						.map((lp) => ({
+							key: 'p:' + lp,
+							target: plugin.indexer.resolve(lp, record.path),
+							remove: () => setNote({ places: note.places.filter((v) => v !== lp) }, true),
+						}))
+						.filter((e) => e.target?.type === 'location'),
+					...relationships
+						.map((rel, ri) => ({ rel, ri, target: resolveDraftTarget(rel.target) }))
+						.filter((e) => e.rel.type.trim().toLowerCase() === 'location' && e.target?.type === 'location')
+						.map(({ rel, ri, target }) => ({
+							key: 'r:' + rel.target + String(ri),
+							target,
+							remove: () => commitRelationships(relationships.filter((_, j) => j !== ri)),
+						})),
+				]
 			: [];
 		// A session already carrying a note isn't offered again.
 		const takenSessions = new Set(
@@ -1451,21 +1466,19 @@ function EntityPage({ view }: { view: EntityView }) {
 									.filter((l) => !noteLocs.some((q) => q.target?.path === l.path))
 									.sort((a, b) => a.name.localeCompare(b.name))
 									.map((l) => ({ value: linkTargetOf(l), label: l.name }))}
-								onPick={(name) =>
-									commitRelationships([...relationships, { type: 'location', target: name }])
-								}
+								onPick={(name) => setNote({ places: [...note.places, name] }, true)}
 							/>
 						</div>
 						{noteLocs.length > 0 ? (
 							<div className="loom-tag-row">
-								{noteLocs.map(({ rel, ri, target }) => (
+								{noteLocs.map(({ key, target, remove }) => (
 									<EntityChip
-										key={rel.target + String(ri)}
+										key={key}
 										plugin={plugin}
 										record={target}
-										label={target?.name ?? rel.target}
+										label={target?.name ?? key}
 										onOpen={target ? () => view.openEntity(target.path) : undefined}
-										onRemove={() => commitRelationships(relationships.filter((_, j) => j !== ri))}
+										onRemove={remove}
 										removeLabel="Remove location"
 									/>
 								))}
