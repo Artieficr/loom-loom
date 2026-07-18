@@ -12,6 +12,7 @@ import {
 	normalizePath,
 } from 'obsidian';
 import {
+	DEFAULT_MEMBER_ROLE,
 	ENTITY_META,
 	ENTITY_TAGS,
 	ENTITY_TYPES,
@@ -116,6 +117,11 @@ export interface NewEntityFields {
 	questGivers?: string[];
 	questReceived?: string;
 	reward?: string;
+	/** Character only: faction memberships to add after creation (written into
+	 *  each faction's `members`, not the character's own file). Names, not links. */
+	factions?: { faction: string; role: string; location: string }[];
+	/** Faction only: member characters written into this faction's own `members`. */
+	members?: { character: string; role: string; location: string }[];
 }
 
 export function buildEntityContent(type: EntityType, fields: NewEntityFields): string {
@@ -167,6 +173,24 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	}
 	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
 		lines.push(`${FM.parentLocation}: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
+	}
+	if (type === 'faction') {
+		const members = (fields.members ?? []).filter((m) => m.character !== '');
+		if (members.length > 0) {
+			lines.push(`${FM.members}:`);
+			for (const m of members) {
+				const roleIsDefault = m.role === '' || m.role.toLowerCase() === DEFAULT_MEMBER_ROLE.toLowerCase();
+				if (roleIsDefault && m.location === '') {
+					lines.push(`  - ${yamlQuote(`[[${m.character}]]`)}`);
+				} else {
+					lines.push(`  - character: ${yamlQuote(`[[${m.character}]]`)}`);
+					if (!roleIsDefault) lines.push(`    role: ${yamlQuote(m.role)}`);
+					if (m.location !== '') lines.push(`    location: ${yamlQuote(`[[${m.location}]]`)}`);
+				}
+			}
+		} else {
+			lines.push(`${FM.members}: []`);
+		}
 	}
 	if (type === 'character') lines.push(`${FM.alive}: true`);
 	if (type === 'event' || type === 'session') lines.push(`${FM.date}: ${yamlQuote(fields.date)}`);
@@ -342,6 +366,29 @@ export class CreateEntityModal extends Modal {
 		if (options.initialName) this.fields.name = options.initialName.trim();
 	}
 
+	/** Segmented tag pills (— + the type's vocab), like the character-page tags. */
+	private renderTagPills(): void {
+		const vocab = ENTITY_TAGS[this.type];
+		if (vocab.length === 0) return;
+		const setting = new Setting(this.contentEl).setName('Tag');
+		const seg = setting.controlEl.createDiv({ cls: 'loom-seg' });
+		const buttons: HTMLButtonElement[] = [];
+		const refresh = () => {
+			for (const b of buttons) b.classList.toggle('loom-seg-on', this.fields.tag === b.dataset.tag);
+		};
+		for (const opt of [{ v: '', label: '—' }, ...vocab.map((t) => ({ v: t, label: t }))]) {
+			const b = seg.createEl('button', { text: opt.label, cls: 'loom-seg-btn' });
+			b.dataset.tag = opt.v;
+			b.addEventListener('click', (e) => {
+				e.preventDefault();
+				this.fields.tag = opt.v;
+				refresh();
+			});
+			buttons.push(b);
+		}
+		refresh();
+	}
+
 	/** Standard entity tag (see EntityChip in views/common.tsx) for modal chip rows. */
 	private renderChip(
 		container: HTMLElement,
@@ -410,27 +457,9 @@ export class CreateEntityModal extends Modal {
 			});
 		}
 
-	const vocab = ENTITY_TAGS[this.type];
-		if (vocab.length > 0) {
-			// Segmented pills: outer corners rounded, shared borders between.
-			const setting = new Setting(this.contentEl).setName('Tag');
-			const seg = setting.controlEl.createDiv({ cls: 'loom-seg' });
-			const buttons: HTMLButtonElement[] = [];
-			const refresh = () => {
-				for (const b of buttons) b.classList.toggle('loom-seg-on', this.fields.tag === b.dataset.tag);
-			};
-			for (const opt of [{ v: '', label: '—' }, ...vocab.map((t) => ({ v: t, label: t }))]) {
-				const b = seg.createEl('button', { text: opt.label, cls: 'loom-seg-btn' });
-				b.dataset.tag = opt.v;
-				b.addEventListener('click', (e) => {
-					e.preventDefault();
-					this.fields.tag = opt.v;
-					refresh();
-				});
-				buttons.push(b);
-			}
-			refresh();
-		}
+		// Quests place their tag pills after "Received in session"; everyone else
+		// right below the name.
+		if (this.type !== 'quest') this.renderTagPills();
 
 		if (this.type === 'quest') {
 			// New quests are always active — no outcome fields here; they live
@@ -500,6 +529,9 @@ export class CreateEntityModal extends Modal {
 				}
 			};
 			refreshReceived();
+
+			// Quest tags (main / important / side) sit right after the session.
+			this.renderTagPills();
 
 			new Setting(this.contentEl)
 				.setName('Reward')
@@ -652,6 +684,194 @@ export class CreateEntityModal extends Modal {
 				);
 		}
 
+		if (this.type === 'character') {
+			// Faction memberships: "+ Add faction" reveals a row — role (default
+			// Member) of <faction> at <location> — applied to the faction's members
+			// after the character is created.
+			this.fields.factions = [];
+			const factions = this.plugin.indexer
+				.getAll('faction', this.project.root)
+				.sort((a, b) => a.name.localeCompare(b.name));
+			const locations = this.plugin.indexer
+				.getAll('location', this.project.root)
+				.sort((a, b) => a.name.localeCompare(b.name));
+			// Row list lives BELOW the add button (created after it).
+			let rowsEl: HTMLElement;
+			const render = () => {
+				rowsEl.empty();
+				(this.fields.factions ?? []).forEach((m, i) => {
+					const row = rowsEl.createDiv({ cls: 'loom-modal-faction-row' });
+					const roleInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Member' } });
+					roleInput.value = m.role;
+					roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
+					row.createSpan({ text: 'of', cls: 'loom-modal-faction-lbl' });
+					const factionInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Faction…' } });
+					new RecordInputSuggest(
+						this.app,
+						factionInput,
+						() => factions.filter((f) => !(this.fields.factions ?? []).some((x) => x.faction === linkTargetOf(f))),
+						(r) => {
+							m.faction = linkTargetOf(r);
+							factionInput.value = r.name;
+						},
+						(r) => r.name,
+						false
+					);
+					row.createSpan({ text: 'at', cls: 'loom-modal-faction-lbl' });
+					const locInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Location…' } });
+					new RecordInputSuggest(
+						this.app,
+						locInput,
+						() => locations,
+						(r) => {
+							m.location = linkTargetOf(r);
+							locInput.value = r.name;
+						},
+						(r) => r.name,
+						false
+					);
+					const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
+					rm.addEventListener('click', (e) => {
+						e.preventDefault();
+						this.fields.factions = (this.fields.factions ?? []).filter((_, j) => j !== i);
+						render();
+					});
+				});
+			};
+			new Setting(this.contentEl).setName('Faction').addButton((btn) => {
+				// "Add faction" (sentence case) + a separate "+ " so it reads
+				// "+ Add faction" like the character page without tripping the lint.
+				btn.setButtonText('Add faction');
+				btn.buttonEl.prepend('+ ');
+				btn.onClick(() => {
+					(this.fields.factions ??= []).push({ faction: '', role: 'Member', location: '' });
+					render();
+				});
+			});
+			rowsEl = this.contentEl.createDiv({ cls: 'loom-modal-factions' });
+			render();
+			const charDesc = new Setting(this.contentEl)
+				.setName('Description')
+				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
+			charDesc.setClass('loom-modal-wide');
+		}
+
+		if (this.type === 'faction') {
+			// Member characters written straight into this faction's own `members`.
+			this.fields.members = [];
+			const characters = this.plugin.indexer
+				.getAll('character', this.project.root)
+				.sort((a, b) => a.name.localeCompare(b.name));
+			const locations = this.plugin.indexer
+				.getAll('location', this.project.root)
+				.sort((a, b) => a.name.localeCompare(b.name));
+			let rowsEl: HTMLElement;
+			const render = () => {
+				rowsEl.empty();
+				(this.fields.members ?? []).forEach((m, i) => {
+					const row = rowsEl.createDiv({ cls: 'loom-modal-faction-row' });
+					const roleInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Member' } });
+					roleInput.value = m.role;
+					roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
+					const charInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Character…' } });
+					new RecordInputSuggest(
+						this.app,
+						charInput,
+						() =>
+							characters.filter(
+								(c) => !(this.fields.members ?? []).some((x) => x.character === linkTargetOf(c))
+							),
+						(r) => {
+							m.character = linkTargetOf(r);
+							charInput.value = r.name;
+						},
+						(r) => r.name,
+						false
+					);
+					row.createSpan({ text: 'at', cls: 'loom-modal-faction-lbl' });
+					const locInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Location…' } });
+					new RecordInputSuggest(
+						this.app,
+						locInput,
+						() => locations,
+						(r) => {
+							m.location = linkTargetOf(r);
+							locInput.value = r.name;
+						},
+						(r) => r.name,
+						false
+					);
+					const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
+					rm.addEventListener('click', (e) => {
+						e.preventDefault();
+						this.fields.members = (this.fields.members ?? []).filter((_, j) => j !== i);
+						render();
+					});
+				});
+			};
+			new Setting(this.contentEl).setName('Members').addButton((btn) => {
+				btn.setButtonText('Add member');
+				btn.buttonEl.prepend('+ ');
+				btn.onClick(() => {
+					(this.fields.members ??= []).push({ character: '', role: 'Member', location: '' });
+					render();
+				});
+			});
+			rowsEl = this.contentEl.createDiv({ cls: 'loom-modal-factions' });
+			render();
+			const facDesc = new Setting(this.contentEl)
+				.setName('Description')
+				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
+			facDesc.setClass('loom-modal-wide');
+		}
+
+		if (this.type === 'item') {
+			const itemDesc = new Setting(this.contentEl)
+				.setName('Description')
+				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
+			itemDesc.setClass('loom-modal-wide');
+		}
+
+		if (this.type === 'location') {
+			// Sublocation of (optional) + a full-width Description.
+			const locations = this.plugin.indexer
+				.getAll('location', this.project.root)
+				.sort((a, b) => a.name.localeCompare(b.name));
+			let pickedParent: EntityRecord | null = this.options.parentLocation ?? null;
+			if (pickedParent) this.fields.parentLocation = linkTargetOf(pickedParent);
+			const parentSetting = new Setting(this.contentEl).setName('Sublocation of');
+			const parentEl = parentSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
+			const refreshParent = () => {
+				parentEl.empty();
+				if (pickedParent) {
+					this.renderChip(parentEl, pickedParent, pickedParent.name, () => {
+						pickedParent = null;
+						this.fields.parentLocation = '';
+						refreshParent();
+					});
+				} else {
+					const input = parentEl.createEl('input', { type: 'text', attr: { placeholder: '(Optional)' } });
+					new RecordInputSuggest(this.app, input, () => locations, (r) => {
+						pickedParent = r;
+						this.fields.parentLocation = linkTargetOf(r);
+						refreshParent();
+					});
+				}
+			};
+			refreshParent();
+			const locDesc = new Setting(this.contentEl)
+				.setName('Description')
+				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
+			locDesc.setClass('loom-modal-wide');
+		}
+
+		if (this.type === 'event') {
+			const evDesc = new Setting(this.contentEl)
+				.setName('Description')
+				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
+			evDesc.setClass('loom-modal-wide');
+		}
+
 		const connectTo = this.options.connectTo;
 		if (connectTo) {
 			new Setting(this.contentEl)
@@ -699,6 +919,7 @@ export class CreateEntityModal extends Modal {
 			this.fields.questReceived = this.receivedSession ? linkTargetOf(this.receivedSession) : '';
 		try {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
+			await this.applyFactions(file.basename);
 			this.close();
 			if (this.options.onCreated) this.options.onCreated(file);
 			else if (!connectTo) {
@@ -718,6 +939,31 @@ export class CreateEntityModal extends Modal {
 
 	/** Pins an existing entity to `session` via a session note (skips if it's
 	 *  already there), then closes — the session-page hub picks it up. */
+	/** Writes the just-created character into each chosen faction's `members`
+	 *  (a plain link for a default-role/no-location membership, else an object). */
+	private async applyFactions(charBasename: string): Promise<void> {
+		const charLink = `[[${charBasename}]]`;
+		for (const m of this.fields.factions ?? []) {
+			if (m.faction === '') continue;
+			const factionFile = this.plugin.app.metadataCache.getFirstLinkpathDest(m.faction, '');
+			if (!factionFile) continue;
+			const roleIsDefault = m.role === '' || m.role.toLowerCase() === DEFAULT_MEMBER_ROLE.toLowerCase();
+			let entry: unknown = charLink;
+			if (!roleIsDefault || m.location !== '') {
+				const o: Record<string, unknown> = { character: charLink };
+				if (!roleIsDefault) o.role = m.role;
+				if (m.location !== '') o.location = `[[${m.location}]]`;
+				entry = o;
+			}
+			await this.plugin.app.fileManager.processFrontMatter(factionFile, (fm: Record<string, unknown>) => {
+				const cur = fmLoomValue(fm, FM.members);
+				const arr = Array.isArray(cur) ? cur : [];
+				arr.push(entry);
+				setLoomKey(fm, FM.members, arr);
+			});
+		}
+	}
+
 	private async pinExisting(entity: EntityRecord, session: EntityRecord): Promise<void> {
 		const already = entity.sessionNotes.some(
 			(n) => n.session !== null && this.plugin.indexer.resolve(n.session, entity.path)?.path === session.path

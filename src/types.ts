@@ -42,7 +42,7 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 	location: [],
 	faction: [],
 	item: [],
-	quest: [],
+	quest: ['main', 'important', 'side'],
 	event: [],
 	session: [],
 };

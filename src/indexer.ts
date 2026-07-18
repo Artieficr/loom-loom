@@ -541,6 +541,13 @@ export class LoomIndexer extends Component {
 		this.events.trigger('changed');
 	}
 
+	/** Re-render subscribed views without re-indexing — for settings changes
+	 *  that affect rendering (e.g. quest tag colors) but not the index data. */
+	refreshViews(): void {
+		this.version++;
+		this.events.trigger('changed');
+	}
+
 	// --- Queries -----------------------------------------------------------
 
 	get(path: string): EntityRecord | undefined {
