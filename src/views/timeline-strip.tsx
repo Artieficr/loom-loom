@@ -204,8 +204,11 @@ export function TimelineStrip({
 			string,
 			{ mids: number[]; tops: number[]; left: number; fallbackTop: number; slot: number }
 		>;
-		/** Dragged bubble's own size + document body (ghost portal target). */
+		/** Dragged bubble's own size + start position (viewport coords) so a
+		 *  portalled copy can ride the cursor above every clip/stack context. */
 		ghostWidth: number;
+		startLeft: number;
+		startTop: number;
 		body: HTMLElement;
 	} | null>(null);
 	const dragRafRef = useRef(0);
@@ -419,6 +422,7 @@ export function TimelineStrip({
 	) => {
 		if (e.button !== 0) return;
 		e.currentTarget.setPointerCapture(e.pointerId);
+		const rect = e.currentTarget.getBoundingClientRect();
 		pressRef.current = {
 			pointerId: e.pointerId,
 			startX: e.clientX,
@@ -428,7 +432,9 @@ export function TimelineStrip({
 			originKey,
 			originIndex,
 			snapshot: new Map(),
-			ghostWidth: e.currentTarget.getBoundingClientRect().width,
+			ghostWidth: rect.width,
+			startLeft: rect.left,
+			startTop: rect.top,
 			body: e.currentTarget.doc.body,
 		};
 	};
@@ -546,8 +552,11 @@ export function TimelineStrip({
 	const bubbleDragProps = (record: EntityRecord, originKey: string | null, originIndex: number) => {
 		const isDragged = drag?.path === record.path;
 		const shift = originKey !== null ? shiftFor(originKey, originIndex, record.path) : 0;
+		// The dragged bubble keeps its layout slot but goes invisible; a portalled
+		// copy (below) rides the cursor above every clip/stack context (so it can
+		// float over the "No date" panel instead of vanishing behind it).
 		const style: CSSProperties | undefined = isDragged
-			? { transform: `translate(${drag.dx}px, ${drag.dy}px)` }
+			? { visibility: 'hidden' }
 			: shift !== 0
 				? { transform: `translateY(${shift}px)` }
 				: undefined;
@@ -758,6 +767,24 @@ export function TimelineStrip({
 					</div>
 				</div>
 			</div>
+			{drag !== null && pressRef.current !== null
+				? // The carried bubble: a solid copy stuck to the cursor, portalled to
+					// the body so it floats above the scroll clip and the "No date"
+					// panel (the in-flow original stays hidden in its slot).
+					createPortal(
+						<div
+							className="loom-bubble loom-bubble-event loom-bubble-carried"
+							style={{
+								left: pressRef.current.startLeft + drag.dx,
+								top: pressRef.current.startTop + drag.dy,
+								width: pressRef.current.ghostWidth,
+							}}
+						>
+							<span className="loom-bubble-name">{indexer.get(drag.path)?.name ?? ''}</span>
+						</div>,
+						pressRef.current.body
+					)
+				: null}
 			{drag !== null && drag.ghost !== null && pressRef.current !== null
 				? // Landing preview: a translucent copy of the dragged bubble at the
 					// exact slot it would occupy on drop (replaces the old drop-zone
