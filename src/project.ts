@@ -291,8 +291,13 @@ export function sessionFileName(project: ProjectDef, dateRaw: string): string {
  * `loomName` frontmatter and is what every plugin surface displays and
  * searches; the file name exists for the file explorer and link targets.
  */
-export function entityFileName(project: ProjectDef, type: EntityType, name: string): string {
-	return managedEntityFileName(project.name, type, name);
+export function entityFileName(
+	project: ProjectDef,
+	type: EntityType,
+	name: string,
+	parentName?: string
+): string {
+	return managedEntityFileName(project.name, type, name, parentName);
 }
 
 export async function createEntity(
@@ -303,8 +308,15 @@ export async function createEntity(
 ): Promise<TFile> {
 	const folder = projectPath(project, ENTITY_META[type].folder);
 	await ensureFolder(plugin.app, folder);
+	// A new sublocation embeds its parent's name in the file name.
+	const parentName =
+		type === 'location' && fields.parentLocation && fields.parentLocation !== ''
+			? plugin.indexer.resolve(fields.parentLocation, '')?.name
+			: undefined;
 	const base =
-		type === 'session' ? sessionFileName(project, fields.date) : entityFileName(project, type, fields.name);
+		type === 'session'
+			? sessionFileName(project, fields.date)
+			: entityFileName(project, type, fields.name, parentName);
 	let path = normalizePath(`${folder}/${base}.md`);
 	for (let i = 2; plugin.app.vault.getAbstractFileByPath(path) !== null; i++) {
 		path = normalizePath(`${folder}/${base} ${i}.md`);
@@ -413,6 +425,15 @@ export class CreateEntityModal extends Modal {
 	/** Resolves a picked name back to its record (for chip colors). */
 	private resolveName(name: string): EntityRecord | null {
 		return this.plugin.indexer.resolve(name, this.project.loomPath);
+	}
+
+	/** "Tavern, City A" for a sublocation, else the plain name. */
+	private locLabel(r: EntityRecord): string {
+		if (r.type === 'location' && r.parentLocation !== null) {
+			const parent = this.plugin.indexer.resolve(r.parentLocation, r.path);
+			if (parent?.type === 'location') return `${r.name}, ${parent.name}`;
+		}
+		return r.name;
 	}
 
 	onOpen(): void {
@@ -727,7 +748,7 @@ export class CreateEntityModal extends Modal {
 							m.location = linkTargetOf(r);
 							locInput.value = r.name;
 						},
-						(r) => r.name,
+						(r) => this.locLabel(r),
 						false
 					);
 					const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
@@ -798,7 +819,7 @@ export class CreateEntityModal extends Modal {
 							m.location = linkTargetOf(r);
 							locInput.value = r.name;
 						},
-						(r) => r.name,
+						(r) => this.locLabel(r),
 						false
 					);
 					const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
@@ -851,11 +872,17 @@ export class CreateEntityModal extends Modal {
 					});
 				} else {
 					const input = parentEl.createEl('input', { type: 'text', attr: { placeholder: '(Optional)' } });
-					new RecordInputSuggest(this.app, input, () => locations, (r) => {
-						pickedParent = r;
-						this.fields.parentLocation = linkTargetOf(r);
-						refreshParent();
-					});
+					new RecordInputSuggest(
+						this.app,
+						input,
+						() => locations,
+						(r) => {
+							pickedParent = r;
+							this.fields.parentLocation = linkTargetOf(r);
+							refreshParent();
+						},
+						(r) => this.locLabel(r)
+					);
 				}
 			};
 			refreshParent();

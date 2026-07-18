@@ -48,11 +48,16 @@ and a custom layered graph view.
   entity page view; opening the same .md from the file explorer gives the raw editor.
 - **Names**: the user-entered name lives in `loomName` frontmatter (source of truth
   for display); every file name is managed — `<Project> <Type label> <name>`,
-  sessions `<Project> Session <date>` (no loomName; they display their date). Editing
-  the name renames the file (Obsidian updates links); `aliases` gets the display name
-  so native `[[…]]` autocomplete finds notes by it. Plugin-written links always
-  target the file basename (`linkTargetOf`); every picker searches/labels by display
-  name. A startup migration (`LoomIndexer.migrateFiles`) converts old files.
+  sessions `<Project> Session <date>` (no loomName; they display their date),
+  **sublocations `<Project> Sublocation of <parent name> — <name>`** (embeds the
+  parent's name so same-named places under different parents stay distinct; setting/
+  clearing `parentLocation` renames the file, migration reconciles the whole tree by
+  precomputing parent names). Editing the name renames the file (Obsidian updates
+  links); `aliases` gets the display name so native `[[…]]` autocomplete finds notes
+  by it. Plugin-written links always target the file basename (`linkTargetOf`); every
+  picker searches/labels by display name — sublocations label as `Tavern, City A`
+  (`locationLabel` in common.tsx). A startup migration (`LoomIndexer.migrateFiles`)
+  converts old files.
 - **Frontmatter keys are all loom-prefixed** (`FM` registry in types.ts: `loomType`,
   `loomName`, `loomDate`, `loomRelationships`, `loomSessionNotes`, `loomMembers`, …).
   Reads fall back to legacy un-prefixed spellings; writes go through `src/fm.ts`

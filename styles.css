@@ -1511,6 +1511,12 @@ span.loom-row-caret {
 	border-color: var(--background-modifier-border-focus);
 }
 
+/* Note editors sit inside tinted boxes — match their sibling inputs' page
+   background so they don't stand out. */
+.loom-note-text .loom-md-field .cm-editor {
+	background: var(--background-primary);
+}
+
 .loom-md-field .cm-content {
 	padding: 0;
 	font-family: inherit;
@@ -1557,6 +1563,36 @@ span.loom-row-caret {
 	padding-left: var(--size-4-4);
 	background-color: var(--background-secondary);
 	color: var(--blockquote-color, inherit);
+}
+
+.loom-md-field .cm-line.loom-md-h1 {
+	font-size: 1.6em;
+	font-weight: var(--font-bold, 700);
+	line-height: 1.3;
+}
+
+.loom-md-field .cm-line.loom-md-h2 {
+	font-size: 1.4em;
+	font-weight: var(--font-bold, 700);
+}
+
+.loom-md-field .cm-line.loom-md-h3 {
+	font-size: 1.2em;
+	font-weight: var(--font-semibold, 600);
+}
+
+.loom-md-field .cm-line.loom-md-h4 {
+	font-size: 1.1em;
+	font-weight: var(--font-semibold, 600);
+}
+
+.loom-md-field .cm-line.loom-md-h5 {
+	font-weight: var(--font-semibold, 600);
+}
+
+.loom-md-field .cm-line.loom-md-h6 {
+	font-weight: var(--font-semibold, 600);
+	color: var(--text-muted);
 }
 
 .loom-md-underline {
@@ -2390,6 +2426,27 @@ span.loom-row-caret {
 .loom-hub-add-row {
 	display: flex;
 	gap: var(--size-4-2);
+	align-items: center;
+}
+
+/* Newest/oldest-first order toggle sits at the right of the add row. Fixed
+   width so "New on top" and "New on bottom" don't jump size when toggled. */
+.loom-order-toggle {
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: flex-start;
+	gap: var(--size-2-2);
+	min-width: 10em;
+}
+
+.loom-order-toggle .loom-icon {
+	display: flex;
+}
+
+.loom-order-toggle .loom-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
 }
 
 /* Each add-a-note search shares the row width. */

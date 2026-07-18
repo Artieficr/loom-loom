@@ -16,10 +16,18 @@ export function managedSessionFileName(projectName: string, dateRaw: string): st
 	return sanitizeFileName(`${projectName} Session ${dateRaw}`.trim()) || `Session ${dateRaw}`;
 }
 
-export function managedEntityFileName(projectName: string, type: EntityType, name: string): string {
+export function managedEntityFileName(
+	projectName: string,
+	type: EntityType,
+	name: string,
+	/** Locations only: the parent location's display name, so sublocations of
+	 *  same-named places stay distinct (`<Project> Sublocation of <parent> — <name>`). */
+	parentName?: string
+): string {
 	if (type === 'session') return managedSessionFileName(projectName, name);
-	return (
-		sanitizeFileName(`${projectName} ${ENTITY_META[type].label} ${name}`.trim()) ||
-		`New ${ENTITY_META[type].label.toLowerCase()}`
-	);
+	const fallback = `New ${ENTITY_META[type].label.toLowerCase()}`;
+	if (type === 'location' && parentName !== undefined && parentName.trim() !== '') {
+		return sanitizeFileName(`${projectName} Sublocation of ${parentName} — ${name}`.trim()) || fallback;
+	}
+	return sanitizeFileName(`${projectName} ${ENTITY_META[type].label} ${name}`.trim()) || fallback;
 }

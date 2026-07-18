@@ -35,6 +35,9 @@ export interface LoomLoomSettings {
 	graphDropEdits: 'target' | 'dragged';
 	/** Ask before a timeline drag moves an event from one session to another. */
 	confirmTimelineMove: boolean;
+	/** Session-grouped lists (event/quest session notes, entity-page events) put
+	 *  the newest session on top when true, oldest when false. */
+	notesNewestFirst: boolean;
 	/** Top-to-bottom row order of the global entity layers in the graph. */
 	globalLayerOrder: EntityType[];
 	/** Graph node fill color per entity type. */
@@ -67,6 +70,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphArrowSize: 8,
 	graphDropEdits: 'target',
 	confirmTimelineMove: true,
+	notesNewestFirst: true,
 	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location'],
 	nodeColors: {
 		session: '#7c5cff',
@@ -124,6 +128,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.confirmTimelineMove === 'boolean') {
 		base.confirmTimelineMove = data.confirmTimelineMove;
+	}
+	if (typeof data.notesNewestFirst === 'boolean') {
+		base.notesNewestFirst = data.notesNewestFirst;
 	}
 	if (typeof data.timelineDrawerHeight === 'number' && data.timelineDrawerHeight > 0) {
 		base.timelineDrawerHeight = data.timelineDrawerHeight;

@@ -288,6 +288,15 @@ export class LoomIndexer extends Component {
 	 * it runs on load, no command, since no released vaults predate it.
 	 */
 	async migrateFiles(): Promise<void> {
+		// Resolve each sublocation's parent name up front (links are stable now,
+		// before any rename moves files around).
+		const parentNameOf = new Map<string, string>();
+		for (const record of this.records.values()) {
+			if (record.type === 'location' && record.parentLocation !== null) {
+				const parent = this.resolve(record.parentLocation, record.path);
+				if (parent?.type === 'location') parentNameOf.set(record.path, parent.name);
+			}
+		}
 		for (const record of [...this.records.values()]) {
 			const project = this.getProjectByRoot(record.project);
 			const file = this.app.vault.getFileByPath(record.path);
@@ -328,7 +337,12 @@ export class LoomIndexer extends Component {
 			}
 			// Sessions already follow their own managed scheme (from the date).
 			if (isSession) continue;
-			const base = managedEntityFileName(project.name, record.type, displayName);
+			const base = managedEntityFileName(
+				project.name,
+				record.type,
+				displayName,
+				parentNameOf.get(record.path)
+			);
 			if (file.basename === base) continue;
 			const parent = file.parent?.path ?? '';
 			let newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
@@ -547,6 +561,7 @@ export class LoomIndexer extends Component {
 		this.version++;
 		this.events.trigger('changed');
 	}
+
 
 	// --- Queries -----------------------------------------------------------
 

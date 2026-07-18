@@ -32,8 +32,8 @@ import type { LinkOption } from './link-textarea';
  *   backspacing an empty `[[]]` removes the whole pair.
  * - `**bold**`, `*italic*`/`_italic_`, `~~strike~~`, `==highlight==` render
  *   styled with hidden markers.
- * - `> ` blockquotes, `-`/`*`/`+` bullets, `1.` ordered lists, and `---`
- *   separators render like Obsidian's live preview.
+ * - `# ` … `###### ` headings, `> ` blockquotes, `-`/`*`/`+` bullets, `1.`
+ *   ordered lists, and `---` separators render like Obsidian's live preview.
  */
 
 interface InlineToken {
@@ -165,6 +165,25 @@ function buildDecorations(view: EditorView): DecorationSet {
 					entries.push({
 						from: line.from,
 						to: line.from + quote[1].length,
+						deco: Decoration.replace({}),
+					});
+				}
+			}
+
+			const heading = /^(#{1,6})\s/.exec(text);
+			if (heading) {
+				const level = heading[1].length;
+				entries.push({
+					from: line.from,
+					to: line.from,
+					deco: Decoration.line({ class: `loom-md-h${level}` }),
+				});
+				if (!lineActive) {
+					// Hide the "# " markers (the styled text stays; inline tokens
+					// below still render).
+					entries.push({
+						from: line.from,
+						to: line.from + heading[0].length,
 						deco: Decoration.replace({}),
 					});
 				}
