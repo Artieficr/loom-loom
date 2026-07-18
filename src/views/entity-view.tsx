@@ -1474,8 +1474,8 @@ function EntityPage({ view }: { view: EntityView }) {
 						</div>
 					) : null}
 								<button
-					className="loom-nav-btn loom-note-remove"
-					aria-label="Remove session note"
+					className="loom-nav-btn loom-note-remove loom-entity-delete"
+					aria-label="Delete session note"
 					onClick={() => {
 						const remove = () => commitSessionNotes(sessionNotes.filter((_, j) => j !== i));
 						// Only a note that actually holds text needs a confirmation.
@@ -1491,7 +1491,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						}
 					}}
 				>
-					✕
+					<Icon name="trash-2" />
 				</button>
 				</div>
 			{isLocation ? (
@@ -1598,25 +1598,51 @@ function EntityPage({ view }: { view: EntityView }) {
 						>
 							<Icon name="trash-2" />
 						</button>
-						<button
-							className="loom-nav-btn"
-							aria-label="Remove this session note"
-							onClick={() => {
-								const remove = () => writeOwnerNotes(en.owner, (arr) => arr.splice(en.idx, 1));
-								if (en.text.trim() === '') remove();
-								else {
+						{isSession ? (
+							// Session page: unpin the note from THIS session (clears its
+							// session link) — the note itself stays, just dateless.
+							<button
+								className="loom-nav-btn"
+								aria-label="Remove from this note"
+								onClick={() =>
 									new ConfirmModal(
 										plugin.app,
-										'Delete this session note?',
-										'The note text will be lost.',
-										remove,
-										'Delete'
-									).open();
+										'Remove this note from the session?',
+										"It will clear the current session date in the note and it won't be displayed here anymore.",
+										() =>
+											writeOwnerNotes(en.owner, (arr) => {
+												const item = arr[en.idx];
+												if (typeof item === 'object' && item !== null)
+													(item as { session?: unknown }).session = '';
+											}),
+										'Remove'
+									).open()
 								}
-							}}
-						>
-							✕
-						</button>
+							>
+								✕
+							</button>
+						) : (
+							// Entity page: this deletes the session note entry outright.
+							<button
+								className="loom-nav-btn loom-entity-delete"
+								aria-label="Delete session note"
+								onClick={() => {
+									const remove = () => writeOwnerNotes(en.owner, (arr) => arr.splice(en.idx, 1));
+									if (en.text.trim() === '') remove();
+									else {
+										new ConfirmModal(
+											plugin.app,
+											'Delete this session note?',
+											'The note text will be lost.',
+											remove,
+											'Delete'
+										).open();
+									}
+								}}
+							>
+								<Icon name="trash-2" />
+							</button>
+						)}
 					</div>
 					<button
 						className="loom-nav-btn"
