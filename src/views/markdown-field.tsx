@@ -445,8 +445,8 @@ export function MarkdownField({
 	onChange: (value: string) => void;
 	names: LinkOption[];
 	placeholder?: string;
-	/** Opens a clicked rendered wikilink (receives the raw link target). */
-	onOpenLink: (target: string) => void;
+	/** Opens a clicked rendered wikilink (raw target; `newTab` on middle-click). */
+	onOpenLink: (target: string, newTab?: boolean) => void;
 	/** Offered as "+ Create …" in the [[ completion: create an entity from the
 	 *  typed short name, then call back with the link text to insert. */
 	onCreateEntity?: (name: string, insert: (linkInsert: string) => void) => void;
@@ -521,11 +521,13 @@ export function MarkdownField({
 					}),
 					EditorView.domEventHandlers({
 						mousedown: (event) => {
+							// Left opens in place; middle opens in a new tab.
+							if (event.button !== 0 && event.button !== 1) return false;
 							const target = event.target instanceof HTMLElement ? event.target : null;
 							const link = target?.closest('[data-loom-link]');
 							if (link instanceof HTMLElement && link.dataset.loomLink) {
 								event.preventDefault();
-								onOpenRef.current(link.dataset.loomLink);
+								onOpenRef.current(link.dataset.loomLink, event.button === 1);
 								return true;
 							}
 							return false;

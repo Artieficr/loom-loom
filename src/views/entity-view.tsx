@@ -383,11 +383,11 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	/** Opens a wikilink target from the markdown fields: loom entities get
 	 *  their entity page, anything else Obsidian's normal link opening. */
-	const openLinkTarget = (target: string) => {
+	const openLinkTarget = (target: string, newTab = false) => {
 		if (!record) return;
 		const resolved = plugin.indexer.resolve(target, record.path);
-		if (resolved) view.openEntity(resolved.path);
-		else void plugin.app.workspace.openLinkText(target, record.path);
+		if (resolved) view.openEntity(resolved.path, newTab);
+		else void plugin.app.workspace.openLinkText(target, record.path, newTab ? 'tab' : false);
 	};
 
 	/** "+ Create …" from a [[ completion: type picker → creation modal with

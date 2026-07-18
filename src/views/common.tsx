@@ -388,7 +388,17 @@ export function EntityChip({
 			}
 		>
 			{onOpen && record ? (
-				<button className="loom-subloc-link" onClick={onOpen}>
+				<button
+					className="loom-subloc-link"
+					onClick={onOpen}
+					onAuxClick={(e) => {
+						// Middle click opens the linked entity in a new tab.
+						if (e.button === 1) {
+							e.preventDefault();
+							plugin.openEntityInTab(record.path);
+						}
+					}}
+				>
 					{text}
 				</button>
 			) : (

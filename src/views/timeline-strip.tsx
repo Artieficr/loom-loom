@@ -53,7 +53,7 @@ interface TooltipState {
 	y: number;
 	/** Rendered above the chip when there's no room below it. */
 	above: boolean;
-	/** Portal target — the chip's own document (supports pop-out windows). */
+	/** Portal target — the chip's own document (supports tabs). */
 	body: HTMLElement;
 }
 
@@ -121,6 +121,13 @@ function Bubble({
 			onClick={() => {
 				if (clickSuppressed?.()) return;
 				navigator.openEntity(record.path);
+			}}
+			onAuxClick={(e) => {
+				// Middle click opens the node in a new tab.
+				if (e.button === 1) {
+					e.preventDefault();
+					navigator.openEntity(record.path, true);
+				}
 			}}
 			onMouseEnter={(e) => {
 				if (suppressTooltip) return;

@@ -195,6 +195,15 @@ export default class LoomLoomPlugin extends Plugin {
 		});
 	}
 
+	/** Opens an entity page in a fresh tab (for middle-click). */
+	openEntityInTab(path: string): void {
+		void this.app.workspace.getLeaf('tab').setViewState({
+			type: VIEW_ENTITY,
+			active: true,
+			state: { file: path },
+		});
+	}
+
 	async activateView(viewType: string, state?: Record<string, unknown>): Promise<void> {
 		const wanted = state?.project;
 		const existing = this.app.workspace.getLeavesOfType(viewType).find((leaf: WorkspaceLeaf) => {

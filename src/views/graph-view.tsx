@@ -424,10 +424,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (e.button !== 0) {
 			// Keep right/middle presses on a node away from the pan handler.
 			e.stopPropagation();
-			// Middle click: zoom + center (edit moved to right click).
+			// Middle click opens the node in a new tab (right click zoom-focuses).
 			if (e.button === 1) {
 				e.preventDefault();
-				focusNode(node);
+				view.openEntity(node.id, true);
 			}
 			return;
 		}
@@ -1282,9 +1282,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										onPointerCancel={abortDrag}
 										onDoubleClick={() => view.openEntity(node.id)}
 										onContextMenu={(e) => {
+											// Right click zoom-focuses the node (open moved to double-click).
 											e.preventDefault();
 											e.stopPropagation();
-											view.openEntity(node.id);
+											focusNode(node);
 										}}
 									>
 										{/* Native SVG tooltip carries the full name when truncated. */}

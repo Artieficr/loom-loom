@@ -10,7 +10,8 @@ import type LoomLoomPlugin from '../main';
  * from the file explorer still yields the normal markdown editor.
  */
 export interface LoomNavigator {
-	openEntity(path: string): void;
+	/** Opens the entity page in this leaf, or in a new tab when `newTab`. */
+	openEntity(path: string, newTab?: boolean): void;
 	navigateTo(viewType: string, state?: Record<string, unknown>): void;
 	openLoomFile(path: string): void;
 	plugin: LoomLoomPlugin;
@@ -18,10 +19,12 @@ export interface LoomNavigator {
 
 /**
  * Navigates the current leaf to an entity page, recording the current view
- * as the origin so the page's Back button returns exactly there.
+ * as the origin so the page's Back button returns exactly there. `newTab`
+ * opens it in a fresh tab instead (for middle-click).
  */
-function openEntityFrom(view: View, path: string): void {
-	void view.leaf.setViewState({
+function openEntityFrom(view: View, path: string, newTab = false): void {
+	const leaf = newTab ? view.app.workspace.getLeaf('tab') : view.leaf;
+	void leaf.setViewState({
 		type: VIEW_ENTITY,
 		active: true,
 		state: {
@@ -63,8 +66,8 @@ export abstract class LoomReactView extends ItemView implements LoomNavigator {
 		this.root = null;
 	}
 
-	openEntity(path: string): void {
-		openEntityFrom(this, path);
+	openEntity(path: string, newTab = false): void {
+		openEntityFrom(this, path, newTab);
 	}
 
 	/** Navigates this leaf to another plugin view (history-friendly). */
@@ -113,8 +116,8 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 		await super.onClose();
 	}
 
-	openEntity(path: string): void {
-		openEntityFrom(this, path);
+	openEntity(path: string, newTab = false): void {
+		openEntityFrom(this, path, newTab);
 	}
 
 	navigateTo(viewType: string, state?: Record<string, unknown>): void {
