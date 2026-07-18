@@ -9,11 +9,11 @@ import {
 	useState,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { EntityRecord, FM, TimelineDef } from '../types';
+import { ENTITY_META, EntityRecord, FM, TimelineDef } from '../types';
 import { buildColumns } from '../columns';
 import { ProjectDef, extractLinkpath, linkTargetOf } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
-import { ConfirmModal, CreateEntityModal } from '../project';
+import { ConfirmModal, CreateEntityModal, RecordSuggestModal } from '../project';
 import { LoomNavigator } from './react-view';
 import { Icon, recordDate, recordLabel } from './common';
 import { useIndexVersion } from './hooks';
@@ -31,6 +31,12 @@ const NODATE_MAX = 400;
 const DRAG_THRESHOLD = 5;
 /** Fallback slide distance when a list has too few bubbles to measure. */
 const DEFAULT_SLOT = 34;
+/** CSS geometry of `.loom-col-events`, in unzoomed px (scaled by `zoom` when
+ *  estimating positions for columns with too few bubbles to measure). */
+const RAIL_INSET = 12; // padding-left: bubble edge → nesting rail
+const EVENTS_INDENT = 36; // margin-left(24) + padding-left(12): column edge → bubble
+const COL_GAP = 4; // .loom-col gap: header bottom → events top
+const EVENTS_GAP = 6; // .loom-col-events gap: between event bubbles
 
 function truncateWords(text: string, max: number): string {
 	const words = text.split(/\s+/).filter((w) => w !== '');
@@ -100,10 +106,13 @@ function Bubble({
 	/** Reads-and-clears the "that press was a drag" flag. */
 	clickSuppressed?: () => boolean;
 }) {
+	// Node color (session/event) as a translucent fill + solid border, exactly
+	// like EntityChip; incoming style (drag transform / visibility) wins.
+	const nodeColor = navigator.plugin.settings.nodeColors[record.type];
 	return (
 		<button
 			className={['loom-bubble', `loom-bubble-${kind}`, className ?? ''].filter(Boolean).join(' ')}
-			style={style}
+			style={{ background: nodeColor + '40', borderColor: nodeColor, ...style }}
 			data-bubble-path={record.path}
 			onPointerDown={onDragDown}
 			onPointerMove={onDragMove}
@@ -159,10 +168,13 @@ export function TimelineStrip({
 	navigator,
 	project,
 	def,
+	zoom = 1,
 }: {
 	navigator: LoomNavigator;
 	project: ProjectDef;
 	def: TimelineDef | null;
+	/** Camera scale for the whole strip (< 1 zooms out to fit more). */
+	zoom?: number;
 }) {
 	const plugin = navigator.plugin;
 	const indexer = plugin.indexer;
@@ -180,8 +192,6 @@ export function TimelineStrip({
 	};
 	const [panelResizing, setPanelResizing] = useState(false);
 	const resizeRef = useRef<{ id: number; x: number; w: number } | null>(null);
-	/** Bumped after a manual reorder (settings changes don't bump the index). */
-	const [orderBump, setOrderBump] = useState(0);
 	/** Left-button pan over empty strip space; scrollLeft/Top clamp for free. */
 	const panRef = useRef<{ id: number; x: number; y: number; moved: boolean } | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -198,15 +208,16 @@ export function TimelineStrip({
 		path: string;
 		originKey: string | null;
 		originIndex: number;
-		/** Untransformed bubble geometry per list, snapshotted at drag start —
-		 *  measuring live rects would chase the sliding bubbles in a loop. */
-		snapshot: Map<
-			string,
-			{ mids: number[]; tops: number[]; left: number; fallbackTop: number; slot: number }
-		>;
+		/** Per-list geometry snapshotted at drag start (measuring live rects would
+		 *  chase the sliding bubbles): a uniform slot grid — `areaTop` is slot 0's
+		 *  top (the topmost bubble incl. the hidden dragged one, or just below an
+		 *  empty column's header), `slot` the row pitch, `left` the bubble x,
+		 *  `otherCount` the non-dragged bubbles in the list. */
+		snapshot: Map<string, { areaTop: number; left: number; slot: number; otherCount: number }>;
 		/** Dragged bubble's own size + start position (viewport coords) so a
 		 *  portalled copy can ride the cursor above every clip/stack context. */
 		ghostWidth: number;
+		ghostHeight: number;
 		startLeft: number;
 		startTop: number;
 		body: HTMLElement;
@@ -214,9 +225,10 @@ export function TimelineStrip({
 	const dragRafRef = useRef(0);
 	const suppressClickRef = useRef(false);
 
-	const rankOf = (r: EntityRecord) =>
-		plugin.settings.timelineManualOrder[project.root]?.[r.path] ?? Number.MAX_SAFE_INTEGER;
-	const applyOrder = (list: EntityRecord[]) => list.slice().sort((a, b) => rankOf(a) - rankOf(b));
+	// Manual order lives in each event's `loomSeq` frontmatter (shared with the
+	// session page); unstamped events stay chronological via their ctime.
+	const seqOf = (r: EntityRecord) => r.seq ?? r.created;
+	const applyOrder = (list: EntityRecord[]) => list.slice().sort((a, b) => seqOf(a) - seqOf(b));
 
 	const { columns, undated } = useMemo(() => {
 		const all = buildColumns(indexer, def, project.root);
@@ -230,8 +242,8 @@ export function TimelineStrip({
 				all.filter((c) => c.anchor.type === 'event' && c.anchor.date === null).map((c) => c.anchor)
 			),
 		};
-		// orderBump re-sorts after manual reorders (rank lookups read settings).
-	}, [indexer, version, def, project, orderBump]);
+		// A reorder rewrites loomSeq, bumping the index version → re-sorts here.
+	}, [indexer, version, def, project]);
 
 	const listByKey = (key: string): EntityRecord[] =>
 		key === 'nodate' ? undated : columns.find((c) => c.anchor.path === key)?.events ?? [];
@@ -394,25 +406,14 @@ export function TimelineStrip({
 		if (!dragged) return;
 		const next = list.filter((r) => r.path !== draggedPath);
 		next.splice(Math.max(0, Math.min(next.length, insertIndex)), 0, dragged);
-		const ranks = (plugin.settings.timelineManualOrder[project.root] ??= {});
-		next.forEach((r, i) => {
-			ranks[r.path] = i;
-		});
-		void plugin.saveSettings();
-		setOrderBump((b) => b + 1);
+		// Re-stamp the whole list's loomSeq in its new order; the shared frontmatter
+		// makes the session page reflect the same order (and vice versa). The vault
+		// change re-indexes and re-sorts, so no local order bump is needed.
+		const base = Date.now();
+		next.forEach((r, i) => setKey(r.path, FM.seq, base + i));
 	};
 
 	// --- Pointer drag ---------------------------------------------------------
-
-	/** Measures the slide distance of a list from its first two bubbles. */
-	const slotOf = (listEl: Element | null): number => {
-		if (!listEl) return DEFAULT_SLOT;
-		const items = listEl.querySelectorAll('.loom-bubble');
-		if (items.length < 2) return DEFAULT_SLOT;
-		const a = items[0].getBoundingClientRect();
-		const b = items[1].getBoundingClientRect();
-		return Math.abs(b.top - a.top) || DEFAULT_SLOT;
-	};
 
 	const onBubbleDown = (
 		e: ReactPointerEvent<HTMLButtonElement>,
@@ -433,6 +434,7 @@ export function TimelineStrip({
 			originIndex,
 			snapshot: new Map(),
 			ghostWidth: rect.width,
+			ghostHeight: rect.height,
 			startLeft: rect.left,
 			startTop: rect.top,
 			body: e.currentTarget.doc.body,
@@ -450,25 +452,39 @@ export function TimelineStrip({
 			press.active = true;
 			suppressClickRef.current = true;
 			setTooltip(null);
-			// Snapshot every list's bubble geometry before anything slides.
+			// Snapshot every list as a uniform slot grid before anything slides.
 			for (const zone of doc.querySelectorAll('[data-dropzone]')) {
 				if (!zone.instanceOf(HTMLElement)) continue;
 				const key = zone.dataset.dropzone;
 				if (key === undefined) continue;
 				const listEl = zone.querySelector('[data-bubble-list]');
-				const rects = listEl
-					? [...listEl.querySelectorAll('.loom-bubble')]
-							.filter((el) => el.getAttribute('data-bubble-path') !== press.path)
-							.map((el) => el.getBoundingClientRect())
-					: [];
-				const zoneRect = (listEl ?? zone).getBoundingClientRect();
-				press.snapshot.set(key, {
-					mids: rects.map((r) => r.top + r.height / 2),
-					tops: rects.map((r) => r.top),
-					left: rects.length > 0 ? rects[0].left : zoneRect.left + 26,
-					fallbackTop: zoneRect.top + (listEl ? 0 : 48),
-					slot: slotOf(listEl),
-				});
+				const bubbles = listEl ? [...listEl.querySelectorAll('.loom-bubble')] : [];
+				// All bubbles (incl. the hidden dragged one, which keeps its slot)
+				// define the grid; only the non-dragged ones are the reorder targets.
+				const rects = bubbles.map((el) => el.getBoundingClientRect());
+				const otherCount = bubbles.filter(
+					(el) => el.getAttribute('data-bubble-path') !== press.path
+				).length;
+				// Row pitch: measured between the first two bubbles, else the dragged
+				// bubble's own height + the gap (covers 0- and 1-bubble columns).
+				const slot =
+					rects.length >= 2
+						? Math.abs(rects[1].top - rects[0].top) || DEFAULT_SLOT
+						: press.ghostHeight + EVENTS_GAP * zoom;
+				let areaTop: number;
+				let left: number;
+				if (rects.length > 0) {
+					areaTop = Math.min(...rects.map((r) => r.top));
+					left = rects[0].left;
+				} else {
+					// Empty session column: no events container — place slot 0 just
+					// below the header, indented like the events would be.
+					const header = zone.querySelector('.loom-col-header');
+					const base = (header ?? zone).getBoundingClientRect();
+					areaTop = (header ? base.bottom : base.top) + COL_GAP * zoom;
+					left = zone.getBoundingClientRect().left + EVENTS_INDENT * zoom;
+				}
+				press.snapshot.set(key, { areaTop, left, slot, otherCount });
 			}
 		}
 		// The dragged bubble is pointer-events:none, so the hit test lands on
@@ -477,18 +493,16 @@ export function TimelineStrip({
 		const zoneEl = under?.closest('[data-dropzone]') ?? null;
 		const overKey = zoneEl?.instanceOf(HTMLElement) ? zoneEl.dataset.dropzone ?? null : null;
 		const overSnap = overKey !== null ? press.snapshot.get(overKey) : undefined;
-		const insertIndex = overSnap ? overSnap.mids.filter((m) => m < e.clientY).length : 0;
+		// Which slot the cursor sits over, snapped to the grid and clamped to the
+		// list's ends; the ghost lands exactly on that slot.
+		const insertIndex = overSnap
+			? Math.max(
+					0,
+					Math.min(overSnap.otherCount, Math.floor((e.clientY - overSnap.areaTop) / overSnap.slot + 0.5))
+				)
+			: 0;
 		const ghost = overSnap
-			? {
-					x: overSnap.left,
-					y:
-						insertIndex < overSnap.tops.length
-							? overSnap.tops[insertIndex]
-							: overSnap.tops.length > 0
-								? overSnap.tops[overSnap.tops.length - 1] + overSnap.slot
-								: overSnap.fallbackTop,
-					width: press.ghostWidth,
-				}
+			? { x: overSnap.left, y: overSnap.areaTop + insertIndex * overSnap.slot, width: press.ghostWidth }
 			: null;
 		const next: LiveDrag = {
 			path: press.path,
@@ -629,23 +643,79 @@ export function TimelineStrip({
 		return () => el.removeEventListener('wheel', onWheel);
 	}, []);
 
-	/** Right-click: create menu — an event pinned to the clicked session, or a
-	 *  free one (the modal offers the session search) on empty space. */
+	/**
+	 * Right-click menu (graph-style, timeline-scoped):
+	 * - on an event node → "Move to…" a session (searchable picker);
+	 * - on a session node / its column → "New event in <session>";
+	 * - on empty space → create a session or an event.
+	 */
 	const onStripContextMenu = (e: ReactMouseEvent<HTMLDivElement>) => {
 		e.preventDefault();
-		const colEl = (e.target as HTMLElement).closest('[data-dropzone]');
-		const key = colEl instanceof HTMLElement ? colEl.dataset.dropzone : undefined;
-		const session = key && key !== 'nodate' ? indexer.get(key) : undefined;
+		const target = e.target as HTMLElement;
+		const bubbleEl = target.closest('[data-bubble-path]');
+		const bubblePath = bubbleEl instanceof HTMLElement ? bubbleEl.dataset.bubblePath : undefined;
+		const bubble = bubblePath ? indexer.get(bubblePath) : undefined;
 		const menu = new Menu();
+
+		if (bubble?.type === 'event') {
+			// Event node: move it to a session picked from a fuzzy search.
+			menu.addItem((item) =>
+				item
+					.setTitle('Move to…')
+					.setIcon('move')
+					.onClick(() => {
+						const sessions = indexer
+							.getAll('session', project.root)
+							.slice()
+							.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
+						new RecordSuggestModal(
+							plugin.app,
+							sessions,
+							(session) => handleDropPath(bubble.path, session),
+							'Move event to session…',
+							(s) => recordLabel(s, project)
+						).open();
+					})
+			);
+			menu.showAtMouseEvent(e.nativeEvent);
+			return;
+		}
+
+		// Session node → new event pinned there. Detection is the bubble itself,
+		// not the column dropzone (which extends over the empty area below the
+		// events, where a right-click should offer creation instead).
+		if (bubble?.type === 'session') {
+			menu.addItem((item) =>
+				item
+					.setTitle(`New event in ${recordLabel(bubble, project)}`)
+					.setIcon(ENTITY_META.event.icon)
+					.onClick(() =>
+						new CreateEntityModal(plugin, 'event', project, {
+							noteSession: bubble,
+							onCreated: () => {},
+						}).open()
+					)
+			);
+			menu.showAtMouseEvent(e.nativeEvent);
+			return;
+		}
+
+		// Empty space (including the area below a session's events): create a
+		// session or a session-less event.
 		menu.addItem((item) =>
 			item
-				.setTitle(session ? `New event in ${recordLabel(session, project)}` : 'New event…')
-				.setIcon('calendar-plus')
+				.setTitle('New session')
+				.setIcon(ENTITY_META.session.icon)
 				.onClick(() =>
-					new CreateEntityModal(plugin, 'event', project, {
-						...(session ? { noteSession: session } : { sessionPicker: true }),
-						onCreated: () => {},
-					}).open()
+					new CreateEntityModal(plugin, 'session', project, { onCreated: () => {} }).open()
+				)
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle('New event')
+				.setIcon(ENTITY_META.event.icon)
+				.onClick(() =>
+					new CreateEntityModal(plugin, 'event', project, { onCreated: () => {} }).open()
 				)
 		);
 		menu.showAtMouseEvent(e.nativeEvent);
@@ -695,6 +765,9 @@ export function TimelineStrip({
 				<div className="loom-nodate-chevron">
 					<Icon name={open ? 'chevron-left' : 'chevron-right'} />
 				</div>
+				{/* Count pinned to the bar's bottom, so a collapsed panel still shows
+				    there are undated events waiting inside. */}
+				{undated.length > 0 ? <div className="loom-nodate-count">{undated.length}</div> : null}
 			</div>
 			<div
 				className="loom-timeline-scroll"
@@ -705,9 +778,9 @@ export function TimelineStrip({
 				onPointerCancel={onStripPointerUp}
 				onContextMenu={onStripContextMenu}
 			>
-				<div className="loom-timeline">
+				<div className="loom-timeline" style={{ zoom }}>
 					<div className="loom-timeline-columns">
-						{columns.map((col) => {
+						{columns.map((col, ci) => {
 							const isSession = col.anchor.type === 'session';
 							return (
 								<div
@@ -722,13 +795,20 @@ export function TimelineStrip({
 										className={isSession ? 'loom-col-header' : 'loom-col-header loom-col-header-date'}
 									>
 										{isSession ? (
-											<Bubble
-												record={col.anchor}
-												kind="session"
-												label={recordLabel(col.anchor, project) || 'No date'}
-												suppressTooltip={drag !== null}
-												{...bubbleProps}
-											/>
+											<>
+												<Bubble
+													record={col.anchor}
+													kind="session"
+													label={recordLabel(col.anchor, project) || 'No date'}
+													suppressTooltip={drag !== null}
+													{...bubbleProps}
+												/>
+												{/* Thread to the next node; skip the last column (nothing
+												    to its right to connect to). */}
+												{ci < columns.length - 1 ? (
+													<div className="loom-session-connector" />
+												) : null}
+											</>
 										) : (
 											<div className="loom-col-date">
 												{recordDate(col.anchor, project) || 'No date'}
@@ -737,7 +817,14 @@ export function TimelineStrip({
 									</div>
 									{isSession ? (
 										col.events.length > 0 ? (
-											<div className="loom-col-events" data-bubble-list>
+											<div
+												className={
+													drag?.overKey === col.anchor.path
+														? 'loom-col-events loom-col-events-active'
+														: 'loom-col-events'
+												}
+												data-bubble-list
+											>
 												{col.events.map((ev, i) => (
 													<Bubble
 														key={ev.path}
@@ -767,6 +854,33 @@ export function TimelineStrip({
 					</div>
 				</div>
 			</div>
+			{(() => {
+				// Drop-target nesting rail: while an event hovers a session column, a
+				// rail spanning that column's events (plus the new slot) animates in,
+				// growing to embrace the incoming node. Portalled to the body so it's
+				// never clipped; keyed by target so re-entering a column replays the
+				// grow. Skips the "No date" panel (no nesting there).
+				const press = pressRef.current;
+				if (!drag || !press || !drag.ghost || drag.overKey === null || drag.overKey === 'nodate') {
+					return null;
+				}
+				// Same column it was picked up from: the real nesting rail already
+				// shows there (a pure reorder), so a preview would just double it.
+				if (drag.overKey === drag.originKey) return null;
+				const snap = press.snapshot.get(drag.overKey);
+				if (!snap) return null;
+				// Rail spans slot 0 down through the incoming node (the existing
+				// others plus one), minus the trailing inter-bubble gap.
+				const height = (snap.otherCount + 1) * snap.slot - EVENTS_GAP * zoom;
+				return createPortal(
+					<div
+						key={drag.overKey}
+						className="loom-drop-rail"
+						style={{ left: drag.ghost.x - RAIL_INSET * zoom, top: snap.areaTop, height }}
+					/>,
+					press.body
+				);
+			})()}
 			{drag !== null && pressRef.current !== null
 				? // The carried bubble: a solid copy stuck to the cursor, portalled to
 					// the body so it floats above the scroll clip and the "No date"
@@ -778,6 +892,8 @@ export function TimelineStrip({
 								left: pressRef.current.startLeft + drag.dx,
 								top: pressRef.current.startTop + drag.dy,
 								width: pressRef.current.ghostWidth,
+								background: plugin.settings.nodeColors.event + '40',
+								borderColor: plugin.settings.nodeColors.event,
 							}}
 						>
 							<span className="loom-bubble-name">{indexer.get(drag.path)?.name ?? ''}</span>
@@ -800,8 +916,10 @@ export function TimelineStrip({
 						pressRef.current.body
 					)
 				: null}
-			{tooltip && (tooltip.truncated || tooltip.record.description !== '')
-				? // Portalled to the body: inside the workspace leaf, `contain`
+			{tooltip
+				? // Always shown (even a full, description-less name), so a missing
+					// tooltip always reads as a bug, never as intentional suppression.
+					// Portalled to the body: inside the workspace leaf, `contain`
 					// re-bases position:fixed and the tooltip lands away from the chip.
 					createPortal(
 						<div

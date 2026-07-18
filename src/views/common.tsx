@@ -106,11 +106,17 @@ export function useBoxSizeMemory(
 }
 
 /** Renders a Lucide icon by name. */
-export function Icon({ name }: { name: string }) {
+export function Icon({ name, fallback }: { name: string; fallback?: string }) {
 	const ref = useRef<HTMLSpanElement>(null);
 	useEffect(() => {
-		if (ref.current) setIcon(ref.current, name);
-	}, [name]);
+		const el = ref.current;
+		if (!el) return;
+		setIcon(el, name);
+		// Lucide renames icons across versions (e.g. shield-question ->
+		// shield-question-mark); if the primary name isn't registered, setIcon
+		// inserts nothing — fall back to a name the running version does have.
+		if (fallback && !el.firstChild) setIcon(el, fallback);
+	}, [name, fallback]);
 	return <span className="loom-icon" ref={ref} />;
 }
 

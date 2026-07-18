@@ -80,6 +80,11 @@ and a custom layered graph view.
 - **Dates**: `LoomDate` = raw string + packed sortable number + y/m/d + calendar id.
   Sessions always Gregorian; other entities use the project calendar (custom in-game
   months when enabled). Formatting is per-project config, never JS `Date`.
+- **Manual order**: events and quests carry a `loomSeq` frontmatter stamp (falling
+  back to file ctime). The timeline event bubbles and the session page's session-note
+  hub rows (event + quest groups) both sort by it and both drag-reorder by re-stamping
+  the whole list, so a reorder in either place shows in the other. (The old
+  settings-based `timelineManualOrder` is superseded and unused.)
 - **Entity chips**: every entity reference rendered as a tag/pill goes through
   `EntityChip` (`src/views/common.tsx`) — node-colored, clickable name, optional ✕.
   Never hand-roll chip spans; in non-React surfaces (modals) replicate its exact

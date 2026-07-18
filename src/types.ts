@@ -89,6 +89,9 @@ export const FM = {
 	questOutcome: 'loomQuestOutcome',
 	questOutcomeSession: 'loomQuestOutcomeSession',
 	reward: 'loomReward',
+	/** Manual order stamp: events (timeline + session page) and quests (session
+	 *  page) sort by it, so drag-reordering persists in the file. */
+	seq: 'loomSeq',
 	/** Timeline definition files. */
 	timelineTypes: 'loomTypes',
 } as const;
@@ -206,6 +209,9 @@ export interface EntityRecord {
 	questGivers: string[];
 	/** Quest only: reward text (free-form). */
 	reward: string;
+	/** Manual order stamp (events + quests). Null = never reordered; callers
+	 *  fall back to `created` so unstamped entries stay chronological. */
+	seq: number | null;
 	created: number;
 	modified: number;
 }
