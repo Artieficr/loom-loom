@@ -2278,6 +2278,16 @@ span.loom-row-caret {
 	gap: var(--size-4-2);
 }
 
+/* Each add-a-note search shares the row width. */
+.loom-hub-add-col {
+	flex: 1;
+	min-width: 0;
+}
+
+.loom-hub-add-col .loom-combo {
+	width: 100%;
+}
+
 /* Section headings breathe before their first entry (Overview and all
    loom-field-sep sections alike). */
 .loom-connected > .loom-field-label,

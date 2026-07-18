@@ -904,6 +904,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			apply(arr);
 		});
 
+
 	// --- loomSeq drag-reorder (session-page events + quests) ------------------
 	// Order lives in each entity's `loomSeq`, shared with the timeline, so a drop
 	// re-stamps the whole list and re-indexing re-sorts every view that reads it.
@@ -2324,9 +2325,10 @@ function EntityPage({ view }: { view: EntityView }) {
 			{isSession && project ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Session notes</span>
-					{/* Creation first, as always. An event born here starts with a
-					    session note already pinned to this session. */}
-				<div className="loom-hub-add-row">
+					{/* Creation first, as always. The modal's Name field searches
+					    existing events/quests — picking one pins it here instead of
+					    creating a duplicate. */}
+					<div className="loom-hub-add-row">
 						<button
 							className="loom-rel-add"
 							onClick={() =>
