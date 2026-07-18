@@ -1999,10 +1999,28 @@ span.loom-row-caret {
 
 /* Session notes: session picker/chip in a header row (remove button at its
    right edge), the note text below using the full width. */
+/* Entity-page session notes: spaced below the add button, each a tinted box. */
+.loom-note-list {
+	margin-top: var(--size-4-4);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
 .loom-note-row {
 	display: flex;
 	flex-direction: column;
 	gap: var(--size-2-2);
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-3);
+}
+
+/* Fields keep the page background so they stand out against the tinted box. */
+.loom-note-row input[type='text'],
+.loom-note-row textarea,
+.loom-note-row select {
+	background: var(--background-primary);
 }
 
 /* Top-aligned: the involve/location columns grow downward with their chips. */
