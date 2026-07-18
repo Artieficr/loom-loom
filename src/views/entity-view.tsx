@@ -1,7 +1,9 @@
 import { Menu, Notice, TFile, ViewStateResult, normalizePath } from 'obsidian';
 import {
+	CSSProperties,
 	MouseEvent as ReactMouseEvent,
 	ReactElement,
+	ReactNode,
 	useEffect,
 	useMemo,
 	useRef,
@@ -231,6 +233,12 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** Live reorder of a session group's note rows (same slide as sublocations). */
 	const [noteDrag, setNoteDrag] = useState<{ gkey: string; from: number; over: number } | null>(null);
 	const noteDragRef = useRef<{ startY: number; slot: number } | null>(null);
+	/** Live reorder of entity lists by loomSeq (session-page events + quests);
+	 *  `group` scopes the slide so only the dragged list moves. */
+	const [seqDrag, setSeqDrag] = useState<{ group: string; from: number; over: number; dy: number } | null>(
+		null
+	);
+	const seqDragRef = useRef<{ startY: number; slot: number } | null>(null);
 
 	// A freshly created note opens before metadataCache has indexed it, so the
 	// record can arrive one tick after mount — seed the drafts then.
@@ -877,6 +885,79 @@ function EntityPage({ view }: { view: EntityView }) {
 		editFmList(owner.path, FM.sessionNotes, (arr) => {
 			apply(arr);
 		});
+
+	// --- Generic loomSeq drag-reorder (session-page events + quests) ----------
+	// Order lives in each entity's `loomSeq`, shared with the timeline, so a drop
+	// re-stamps the whole list and re-indexing re-sorts every view that reads it.
+	const seqShift = (group: string, i: number): number => {
+		if (!seqDrag || seqDrag.group !== group) return 0;
+		const { from, over } = seqDrag;
+		if (i === from) return 0;
+		if (from < i && i <= over) return -1;
+		if (over <= i && i < from) return 1;
+		return 0;
+	};
+	const seqRowStyle = (group: string, i: number): CSSProperties | undefined => {
+		if (!seqDrag || seqDrag.group !== group) return undefined;
+		const slot = seqDragRef.current?.slot ?? 40;
+		if (seqDrag.from === i)
+			return { transform: `translateY(${seqDrag.dy}px)`, position: 'relative', zIndex: 2 };
+		const sh = seqShift(group, i);
+		return sh !== 0 ? { transform: `translateY(${sh * slot}px)` } : undefined;
+	};
+	const endSeqDrag = (group: string, records: EntityRecord[], commit: boolean) => {
+		seqDragRef.current = null;
+		const drag = seqDrag;
+		setSeqDrag(null);
+		if (!commit || !drag || drag.group !== group || drag.from === drag.over) return;
+		const next = [...records];
+		const [moved] = next.splice(drag.from, 1);
+		next.splice(drag.over, 0, moved);
+		const base = Date.now();
+		next.forEach((r, i) => {
+			const f = plugin.app.vault.getFileByPath(r.path);
+			if (!f) return;
+			plugin.app.fileManager
+				.processFrontMatter(f, (fm: Record<string, unknown>) => setLoomKey(fm, FM.seq, base + i))
+				.catch((e) => {
+					console.error('Loom Loom: failed to save order', e);
+					new Notice('Could not save the new order.');
+				});
+		});
+	};
+	/** The 6-dot grab handle placed before an entry's title. */
+	const seqGrip = (group: string, i: number, records: EntityRecord[]) => (
+		<span
+			className="loom-subloc-grip"
+			onPointerDown={(e) => {
+				e.preventDefault();
+				e.currentTarget.setPointerCapture(e.pointerId);
+				const rowEl = e.currentTarget.closest('[data-seq-row]');
+				const row = rowEl instanceof HTMLElement ? rowEl : null;
+				const parent = row?.parentElement;
+				const slot =
+					parent && parent.children.length >= 2
+						? Math.abs(
+								(parent.children[1] as HTMLElement).offsetTop -
+									(parent.children[0] as HTMLElement).offsetTop
+							) || row?.offsetHeight || 40
+						: row?.offsetHeight || 40;
+				seqDragRef.current = { startY: e.clientY, slot };
+				setSeqDrag({ group, from: i, over: i, dy: 0 });
+			}}
+			onPointerMove={(e) => {
+				const start = seqDragRef.current;
+				if (!start) return;
+				const dy = e.clientY - start.startY;
+				const over = Math.max(0, Math.min(records.length - 1, i + Math.round(dy / start.slot)));
+				setSeqDrag((cur) => (cur && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur));
+			}}
+			onPointerUp={() => endSeqDrag(group, records, true)}
+			onPointerCancel={() => endSeqDrag(group, records, false)}
+		>
+			<Icon name="grip-vertical" />
+		</span>
+	);
 	const commitLocDraft = () => {
 		if (!locDraft || locDraft.session.trim() === '') return;
 		const target =
@@ -981,7 +1062,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			return { quest: q, state: finished ? 'finished' : 'active' };
 		})
 		.filter((e): e is { quest: EntityRecord; state: string } => e !== null)
-		.sort((a, b) => a.quest.name.localeCompare(b.quest.name));
+		// Manual order (drag-reorderable), then chronological for the unstamped.
+		.sort((a, b) => (a.quest.seq ?? a.quest.created) - (b.quest.seq ?? b.quest.created));
 
 	// PC life state: unticking Alive reveals the death-session picker.
 	const isPc = record.type === 'character' && record.loomTags.includes(PC_TAG);
@@ -1363,15 +1445,26 @@ function EntityPage({ view }: { view: EntityView }) {
 	// character, nested under per-session group chips). Removing the page's
 	// own character from involved warns first: the event disappears from the
 	// page with it.
-	const hubEntryRow = (en: LocNoteEntry) => {
+	const hubEntryRow = (
+		en: LocNoteEntry,
+		grip?: ReactNode,
+		style?: CSSProperties,
+		dragging?: boolean
+	) => {
 		const menuKey = en.owner.path + String(en.idx);
 		const involved = involvedOfEntry(en);
 		const locs = en.owner.relationships
 			.map((r) => ({ rel: r, target: plugin.indexer.resolve(r.linkpath, en.owner.path) }))
 			.filter((e) => e.rel.type.trim().toLowerCase() === 'location' && e.target?.type === 'location');
 		return (
-			<div key={menuKey} className="loom-locnote">
+			<div
+				key={menuKey}
+				className={dragging ? 'loom-locnote loom-locnote-dragging' : 'loom-locnote'}
+				style={style}
+				{...(grip ? { 'data-seq-row': '' } : {})}
+			>
 				<div className="loom-locnote-head">
+					{grip}
 					<input
 						type="text"
 						className="loom-hub-name"
@@ -1835,7 +1928,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												<div key={quest.path} className="loom-quest-card">
 													<button
 														className="loom-subloc-link loom-quest-card-title"
-													onClick={() => view.openEntity(quest.path)}
+														onClick={() => view.openEntity(quest.path)}
 													>
 														<Truncated className="loom-clip" text={quest.name} />
 													</button>
@@ -2111,12 +2204,41 @@ function EntityPage({ view }: { view: EntityView }) {
 							+ Add a quest
 						</button>
 					</div>
-					{ENTITY_TYPES.filter((t) => hubEntries.some((e) => e.owner.type === t)).map((t) => (
-						<div key={t} className="loom-hub-section">
-							<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
-							{hubEntries.filter((e) => e.owner.type === t).map((en) => hubEntryRow(en))}
-						</div>
-					))}
+					{ENTITY_TYPES.filter((t) => hubEntries.some((e) => e.owner.type === t)).map((t) => {
+						const entries = hubEntries.filter((e) => e.owner.type === t);
+						// Event and quest notes are drag-reorderable by loomSeq (events
+						// share it with the timeline); other hub groups keep note order.
+						if (t !== 'event' && t !== 'quest') {
+							return (
+								<div key={t} className="loom-hub-section">
+									<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
+									{entries.map((en) => hubEntryRow(en))}
+								</div>
+							);
+						}
+						const ordered = entries
+							.slice()
+							.sort((a, b) => (a.owner.seq ?? a.owner.created) - (b.owner.seq ?? b.owner.created));
+						const owners = ordered.map((e) => e.owner);
+						return (
+							<div
+								key={t}
+								className={
+									seqDrag?.group === t ? 'loom-hub-section loom-subloc-dragging' : 'loom-hub-section'
+								}
+							>
+								<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
+								{ordered.map((en, i) =>
+									hubEntryRow(
+										en,
+										seqGrip(t, i, owners),
+										seqRowStyle(t, i),
+										seqDrag?.group === t && seqDrag.from === i
+									)
+								)}
+							</div>
+						);
+					})}
 				</div>
 			) : null}
 
@@ -2297,7 +2419,6 @@ function EntityPage({ view }: { view: EntityView }) {
 						className="loom-rel-add"
 						onClick={() =>
 							new CreateEntityModal(plugin, 'event', project, {
-								sessionPicker: true,
 								defaultInvolved: [linkTargetOf(record)],
 								onCreated: () => {},
 							}).open()

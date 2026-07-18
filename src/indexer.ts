@@ -528,6 +528,7 @@ export class LoomIndexer extends Component {
 				typeof outcomeSessionValue === 'string' ? extractLinkpath(outcomeSessionValue) : null,
 			questGivers: parseLinkList(fmLoom(fm, FM.questGiver)),
 			reward: typeof rewardValue === 'string' ? rewardValue : '',
+			seq: typeof fmLoom(fm, FM.seq) === 'number' ? (fmLoom(fm, FM.seq) as number) : null,
 			created: file.stat.ctime,
 			modified: file.stat.mtime,
 		};

@@ -386,10 +386,26 @@ span.loom-row-caret {
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	/* Rests at what used to be the hover tint so the toggle reads as a control. */
+	background-color: var(--background-modifier-hover);
 }
 
+/* One tint stronger on hover: the same modifier painted over itself (a filled
+   inset shadow) darkens on light themes and lightens on dark, no theme var. */
 .loom-nodate-bar:hover {
-	background-color: var(--background-modifier-hover);
+	box-shadow: inset 0 0 0 999px var(--background-modifier-hover);
+}
+
+/* Undated-event count pinned to the bar's bottom. */
+.loom-nodate-count {
+	position: absolute;
+	bottom: var(--size-2-3);
+	left: 0;
+	right: 0;
+	text-align: center;
+	font-size: 0.75em;
+	color: var(--text-muted);
+	pointer-events: none;
 }
 
 .loom-nodate-chevron {
@@ -448,6 +464,30 @@ span.loom-row-caret {
 	pointer-events: none;
 }
 
+/* Drop-target nesting rail: grows in (scaleY from the top) when a dragged
+   event enters a session column, previewing the rail embracing the new node;
+   height changes ease as the insertion slot moves. Portalled to the body. */
+@keyframes loom-drop-rail-grow {
+	from {
+		transform: scaleY(0);
+	}
+	to {
+		transform: scaleY(1);
+	}
+}
+
+.loom-drop-rail {
+	position: fixed;
+	width: 2px;
+	border-radius: 1px;
+	background: var(--background-modifier-border-hover);
+	pointer-events: none;
+	transform-origin: top;
+	animation: loom-drop-rail-grow 160ms ease;
+	transition: height 120ms ease, top 120ms ease;
+	z-index: var(--layer-tooltip);
+}
+
 /* The carried bubble stuck to the cursor: a solid copy portalled to the body,
    so it clears the scroll container's clip and floats above the "No date"
    panel instead of vanishing behind it (the in-flow original stays hidden in
@@ -500,14 +540,46 @@ span.loom-row-caret {
 	flex-direction: column;
 	align-items: flex-start;
 	gap: var(--size-2-2);
+	/* Every column is the same fixed width (fits a max-width event plus its
+	   nesting indent), so session-to-session spacing is uniform whether or not
+	   a session has events. */
+	width: calc(204px + var(--size-4-6) + var(--size-4-3));
+	flex-shrink: 0;
 }
 
 /* Fixed-height header band shared by session bubbles and date labels, so
    every column's events start on the same line. */
 .loom-col-header {
+	position: relative;
 	display: flex;
 	align-items: center;
 	min-height: 36px;
+	/* Fill the whole column so the connector's flex-grow spans the empty space
+	   between the session bubble and the next node (the column left-aligns its
+	   other children, which would otherwise shrink the header to the bubble). */
+	align-self: stretch;
+}
+
+/* Continuity connector: fills the header from the session bubble's right edge
+   and its line runs on across the gap to the next session node, tying the
+   thread together. Sits beside the node (never through it). */
+.loom-session-connector {
+	flex: 1;
+	align-self: stretch;
+	position: relative;
+}
+
+.loom-session-connector::after {
+	content: '';
+	position: absolute;
+	top: 50%;
+	left: 0;
+	right: calc(-1 * var(--size-4-4));
+	height: 2px;
+	border-radius: 1px;
+	/* Same 2px as the nesting rail but a stronger tone (and full opacity), so
+	   the thread between sessions stands out. */
+	background: var(--background-modifier-border-hover);
 }
 
 /* Date labels center over the event bubble that sets the column width. */
@@ -528,17 +600,41 @@ span.loom-row-caret {
 	display: flex;
 	flex-direction: column;
 	gap: var(--size-2-3);
+	position: relative;
 	margin-left: var(--size-4-6);
-	border-left: 2px solid var(--background-modifier-border);
 	padding-left: var(--size-4-3);
+}
+
+/* The nesting rail: a pseudo-element (not a border) so its ends round off,
+   and a touch more transparent than a plain border. */
+.loom-col-events::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 2px;
+	border-radius: 1px;
+	background: var(--background-modifier-border);
+	opacity: 0.55;
+}
+
+/* Active drop target: the real rail darkens to the connector tone (matching
+   the drag preview) to signal the column will receive the event. */
+.loom-col-events-active::before {
+	background: var(--background-modifier-border-hover);
+	opacity: 1;
 }
 
 /* A sessionless event is not nested — no indent, no tree line — but starts
    on the same line as the first nested event of session columns. */
 .loom-col-events-root {
 	margin-left: 0;
-	border-left: none;
 	padding-left: 0;
+}
+
+.loom-col-events-root::before {
+	display: none;
 }
 
 .loom-bubble {
@@ -550,26 +646,24 @@ span.loom-row-caret {
 	min-width: 110px;
 	max-width: 170px;
 	padding: var(--size-2-3) var(--size-4-2);
-	border-radius: var(--radius-l);
+	border-radius: 5px;
 	cursor: pointer;
+	color: var(--text-normal);
+	/* Fill + border come inline per entity color (see Bubble); these are the
+	   fallback for the portalled carried/ghost copies. */
+	background: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
 }
 
-.loom-bubble-session {
-	background: var(--interactive-accent);
-	color: var(--text-on-accent);
+/* Node color is inline; hover lifts it one tint (works over any fill/theme). */
+.loom-bubble:hover {
+	filter: brightness(1.08);
 }
 
-.loom-bubble-session:hover {
-	background: var(--interactive-accent-hover);
-}
-
+/* Events clamp ~20% wider than sessions so more of the title fits. */
 .loom-bubble-event {
-	background: var(--background-secondary);
-}
-
-.loom-bubble-event:hover {
-	background: var(--background-modifier-hover);
+	min-width: 132px;
+	max-width: 204px;
 }
 
 .loom-bubble-name {
@@ -578,6 +672,12 @@ span.loom-row-caret {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* Event titles: not bold, slightly smaller than the session date label. */
+.loom-bubble-event .loom-bubble-name {
+	font-weight: var(--font-normal);
+	font-size: 0.85em;
 }
 
 .loom-bubble-date {
@@ -682,6 +782,68 @@ span.loom-row-caret {
 	display: flex;
 	color: var(--text-muted);
 	pointer-events: none;
+}
+
+/* Binoculars + zoom slider, grouped with the toggle at the bar's right edge. */
+.loom-timeline-zoom-wrap {
+	margin-left: auto;
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-3);
+}
+
+.loom-timeline-zoom-icon {
+	display: flex;
+	color: var(--text-muted);
+	pointer-events: none;
+}
+
+.loom-timeline-zoom-icon .loom-icon svg {
+	display: block;
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.loom-timeline-zoom {
+	width: 90px;
+}
+
+/* "No confirmation mode" toggle, pinned to the bar's right edge (the centered
+   chevron floats above it via position:absolute). */
+.loom-drawer-noconfirm {
+	/* Extra breathing room from the zoom slider. */
+	margin-left: var(--size-4-4);
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+	cursor: pointer;
+}
+
+/* The pencil rides inside the pill when enabled, in the track half the knob
+   has left empty (the left, on the accent fill). */
+.loom-drawer-noconfirm .checkbox-container {
+	position: relative;
+}
+
+.loom-noconfirm-icon {
+	position: absolute;
+	top: 50%;
+	transform: translateY(-50%);
+	display: flex;
+	align-items: center;
+	pointer-events: none;
+}
+
+.loom-noconfirm-icon-left {
+	left: 4px;
+	color: var(--text-on-accent);
+}
+
+.loom-noconfirm-icon .loom-icon svg {
+	display: block;
+	width: 12px;
+	height: 12px;
 }
 
 .loom-drawer-chevron .loom-icon svg {
@@ -1722,6 +1884,19 @@ span.loom-row-caret {
 	display: block;
 	width: var(--icon-s);
 	height: var(--icon-s);
+}
+
+/* loomSeq drag-reorder of session-page hub rows (events + quests): non-dragged
+   rows slide into place; the grabbed row rides the cursor and lifts. */
+.loom-subloc-dragging [data-seq-row] {
+	transition: transform 120ms ease;
+}
+
+.loom-subloc-dragging [data-seq-row].loom-locnote-dragging {
+	transition: none;
+	box-shadow: var(--shadow-s);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
 }
 
 .loom-view button.loom-subloc-link {

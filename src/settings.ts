@@ -52,6 +52,8 @@ export interface LoomLoomSettings {
 	/** Manual vertical order of timeline event bubbles, per project root then
 	 *  note path (rank within its column/drawer) — not user-facing. */
 	timelineManualOrder: Record<string, Record<string, number>>;
+	/** Last timeline-drawer height (px) — remembered across sessions/restarts. */
+	timelineDrawerHeight: number;
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
@@ -88,6 +90,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphManualX: {},
 	graphManualY: {},
 	timelineManualOrder: {},
+	timelineDrawerHeight: 240,
 };
 
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
@@ -101,6 +104,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		graphManualX: {},
 		graphManualY: {},
 		timelineManualOrder: {},
+		timelineDrawerHeight: 240,
 	};
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
@@ -128,6 +132,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.confirmTimelineMove === 'boolean') {
 		base.confirmTimelineMove = data.confirmTimelineMove;
+	}
+	if (typeof data.timelineDrawerHeight === 'number' && data.timelineDrawerHeight > 0) {
+		base.timelineDrawerHeight = data.timelineDrawerHeight;
 	}
 	if (typeof data.tagVocabulary === 'object' && data.tagVocabulary !== null) {
 		for (const type of ENTITY_TYPES) {

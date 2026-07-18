@@ -9,6 +9,7 @@ import {
 	useRef,
 	useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
 	ENTITY_META,
 	ENTITY_TYPES,
@@ -230,12 +231,25 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const [size, setSize] = useState({ w: 1200, h: 700 });
 	const [, setTick] = useState(0);
 	const [drawerOpen, setDrawerOpen] = useState(view.restored.drawerOpen ?? false);
-	const [drawerHeight, setDrawerHeight] = useState(view.restored.drawerHeight ?? 240);
+	// Restored via Back navigation (view state) or, across restarts, from settings.
+	const [drawerHeight, setDrawerHeight] = useState(
+		view.restored.drawerHeight ?? plugin.settings.timelineDrawerHeight ?? 240
+	);
 	const [panelWidth, setPanelWidth] = useState(
 		clamp(view.restored.panelWidth ?? PANEL_MIN, PANEL_MIN, PANEL_MAX)
 	);
 	const [drawerResizing, setDrawerResizing] = useState(false);
 	const [defPath, setDefPath] = useState('');
+	/** "No confirmation mode": mirror of the inverse of confirmTimelineMove, so
+	 *  the drawer-bar toggle re-renders. TimelineStrip reads the setting live. */
+	const [noConfirm, setNoConfirm] = useState(!plugin.settings.confirmTimelineMove);
+	/** Timeline camera scale (1 = full; lower zooms the strip out). */
+	const [timelineZoom, setTimelineZoom] = useState(1);
+	/** Instant, bubble-styled tooltip for the no-confirm toggle (Obsidian's
+	 *  setTooltip lags on hover; this mirrors the event tooltip). */
+	const [confirmTip, setConfirmTip] = useState<{ x: number; y: number; body: HTMLElement } | null>(
+		null
+	);
 	const drawerDrag = useRef<{ pointerId: number; startY: number; startH: number } | null>(null);
 	/** True once a bar drag resized the drawer — the click that follows must not toggle. */
 	const drawerBarMoved = useRef(false);
@@ -264,10 +278,21 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			}, 800, true),
 		[plugin]
 	);
+	// Persist the drawer height to settings so it survives an Obsidian restart
+	// (view state alone only covers same-session Back navigation).
+	const persistDrawerHeight = useMemo(
+		() =>
+			debounce((h: number) => {
+				plugin.settings.timelineDrawerHeight = h;
+				void plugin.saveSettings();
+			}, 500, true),
+		[plugin]
+	);
 	useEffect(() => {
 		view.current = { camera, drawerOpen, drawerHeight, panelWidth };
 		if (project) persistCamera(project.root, camera);
-	}, [view, camera, drawerOpen, drawerHeight, panelWidth, project, persistCamera]);
+		persistDrawerHeight(drawerHeight);
+	}, [view, camera, drawerOpen, drawerHeight, panelWidth, project, persistCamera, persistDrawerHeight]);
 	const dispRef = useRef(new Map<string, Displacement>());
 	const dragRef = useRef<DragState | null>(null);
 	/** Node id the currently dragged node hovers over (drop-to-connect target). */
@@ -1337,6 +1362,65 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						<div className="loom-drawer-chevron">
 							<Icon name={drawerOpen ? 'chevron-down' : 'chevron-up'} />
 						</div>
+						{drawerOpen ? (
+							// Left of the toggle: binoculars + a slider that zooms the strip
+							// out (scales every element). Reversed: rests at full (left),
+							// zooms out toward the right (value = 1.4 − zoom).
+							<div
+								className="loom-timeline-zoom-wrap"
+								onPointerDown={(e) => e.stopPropagation()}
+								onClick={(e) => e.stopPropagation()}
+							>
+								<span className="loom-timeline-zoom-icon">
+									<Icon name="binoculars" fallback="search" />
+								</span>
+								<input
+									type="range"
+									className="slider loom-timeline-zoom"
+									min={0.4}
+									max={1}
+									step={0.05}
+									value={1.4 - timelineZoom}
+									aria-label="Zoom timeline"
+									onChange={(e) => setTimelineZoom(1.4 - parseFloat(e.target.value))}
+								/>
+							</div>
+						) : null}
+						{drawerOpen ? (
+							// Rightmost of the bar: toggles "no confirmation mode" (skip the
+							// move-confirm prompt). The state icon sits opposite the knob —
+							// pencil (left) when enabled, shield-question (right) when off.
+							// Its own click must not toggle the drawer.
+							<div
+								className="loom-drawer-noconfirm"
+								onPointerDown={(e) => e.stopPropagation()}
+								onClick={(e) => {
+									e.stopPropagation();
+									const next = !noConfirm;
+									setNoConfirm(next);
+									plugin.settings.confirmTimelineMove = !next;
+									void plugin.saveSettings();
+								}}
+								onMouseEnter={(e) => {
+									const rect = e.currentTarget.getBoundingClientRect();
+									setConfirmTip({
+										x: rect.left + rect.width / 2,
+										y: rect.top,
+										body: e.currentTarget.doc.body,
+									});
+								}}
+								onMouseLeave={() => setConfirmTip(null)}
+							>
+								<div className={noConfirm ? 'checkbox-container is-enabled' : 'checkbox-container'}>
+									<input type="checkbox" tabIndex={-1} readOnly checked={noConfirm} />
+									{noConfirm ? (
+										<span className="loom-noconfirm-icon loom-noconfirm-icon-left">
+											<Icon name="pencil" />
+										</span>
+									) : null}
+								</div>
+							</div>
+						) : null}
 					</div>
 					<div
 						className={drawerResizing ? 'loom-drawer-body' : 'loom-drawer-body loom-drawer-anim'}
@@ -1346,11 +1430,27 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						    closing slides the content away instead of squishing it.
 						    The strip manages its own scrolling + No-date side panel. */}
 						<div className="loom-drawer-timeline" style={{ height: drawerHeight }}>
-							<TimelineStrip navigator={view} project={project} def={activeDef} />
+							<TimelineStrip navigator={view} project={project} def={activeDef} zoom={timelineZoom} />
 						</div>
 					</div>
 				</div>
 			</div>
+			{confirmTip
+				? // Bubble-styled instant tooltip, portalled to the body so it isn't
+					// clipped by the drawer; sits above the toggle.
+					createPortal(
+						<div
+							className="loom-tooltip loom-tooltip-above"
+							style={{ left: confirmTip.x, top: confirmTip.y }}
+						>
+							<div className="loom-tooltip-name">
+								No confirmation mode is {noConfirm ? 'enabled' : 'disabled'}
+							</div>
+							<div>Make adjustments in the timeline without a confirmation prompt.</div>
+						</div>,
+						confirmTip.body
+					)
+				: null}
 		</ViewShell>
 	);
 }

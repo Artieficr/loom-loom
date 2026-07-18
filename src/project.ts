@@ -188,7 +188,10 @@ export class RecordSuggestModal extends FuzzySuggestModal<EntityRecord> {
 		app: App,
 		private records: EntityRecord[],
 		private onPick: (record: EntityRecord) => void,
-		placeholder?: string
+		placeholder?: string,
+		/** Display/search text; defaults to the record name (sessions have no
+		 *  name, so pass recordLabel to search them by date). */
+		private label: (record: EntityRecord) => string = (r) => r.name
 	) {
 		super(app);
 		if (placeholder) this.setPlaceholder(placeholder);
@@ -199,7 +202,7 @@ export class RecordSuggestModal extends FuzzySuggestModal<EntityRecord> {
 	}
 
 	getItemText(record: EntityRecord): string {
-		return record.name;
+		return this.label(record);
 	}
 
 	onChooseItem(record: EntityRecord): void {
@@ -288,9 +291,6 @@ export interface CreateEntityOptions {
 	parentLocation?: EntityRecord;
 	/** The new entity starts with a session note pinned to this session. */
 	noteSession?: EntityRecord;
-	/** Events only: offer a session search in the modal (optional pick — a
-	 *  lore event stays session-less). Ignored when `noteSession` is set. */
-	sessionPicker?: boolean;
 	/** Events only: names pre-added to the involved list (still removable) —
 	 *  e.g. the character whose page spawned the event. */
 	defaultInvolved?: string[];
@@ -480,10 +480,10 @@ export class CreateEntityModal extends Modal {
 		}
 
 	if (this.type === 'event') {
-			// Optional birth session (skipped when the session page already
-			// provides it): search over sessions, the pick becomes a session tag
-			// with ✕. Left unspecified = a lore event with no session.
-			if (this.options.sessionPicker && !this.options.noteSession) {
+			// Birth session (skipped only when the session page already provides
+			// it): search over sessions, the pick becomes a session tag with ✕.
+			// Every event is created through this one session flow.
+			if (!this.options.noteSession) {
 				const sessionLabel = (s: EntityRecord) =>
 					s.date ? formatLoomDate(s.date, this.project.config) : s.name;
 				const sessions = this.plugin.indexer
@@ -491,7 +491,7 @@ export class CreateEntityModal extends Modal {
 					.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
 				const sessionSetting = new Setting(this.contentEl)
 					.setName('Session')
-					.setDesc('When it happened; leave unspecified for lore events.');
+					.setDesc('When it happened; leave unspecified for a lore event with no session.');
 				const sessionEl = sessionSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 				const refreshSession = () => {
 					sessionEl.empty();
