@@ -332,6 +332,16 @@ export function recordLabel(record: EntityRecord, project: ProjectDef | null): s
 	return record.name;
 }
 
+/** Search/display label for a location: sublocations read "Tavern, City A" so
+ *  same-named places under different parents stay distinguishable. */
+export function locationLabel(record: EntityRecord, plugin: LoomLoomPlugin): string {
+	if (record.type === 'location' && record.parentLocation !== null) {
+		const parent = plugin.indexer.resolve(record.parentLocation, record.path);
+		if (parent?.type === 'location') return `${record.name}, ${parent.name}`;
+	}
+	return record.name;
+}
+
 /** Formatted date of a record, or empty string. */
 export function recordDate(record: EntityRecord, project: ProjectDef | null): string {
 	if (!record.date || !project) return record.date?.raw ?? '';

@@ -1,4 +1,4 @@
-import { Menu, Notice, TFile, ViewStateResult, normalizePath } from 'obsidian';
+import { App, Menu, Notice, TFile, ViewStateResult, normalizePath } from 'obsidian';
 import {
 	CSSProperties,
 	MouseEvent as ReactMouseEvent,
@@ -40,14 +40,13 @@ import {
 	Icon,
 	NavRail,
 	SearchableSelect,
-	autoGrowTextarea,
-	startTextareaResize,
 	SuggestInput,
 	Truncated,
+	locationLabel,
 	recordLabel,
 } from './common';
 import { ConnectedEntities } from './connected-entities';
-import { LinkTextarea } from './link-textarea';
+import { LinkOption } from './link-textarea';
 import { MarkdownField } from './markdown-field';
 import { extractLinkpath, linkTargetOf, memberEntryLinkpath } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
@@ -166,6 +165,42 @@ const QUEST_TAG_ICONS: Record<string, string> = {
 	side: 'shapes',
 };
 const QUEST_TAG_KEYS = ['main', 'important', 'side'] as const;
+
+/** Live-preview markdown note editor for a hub row (whose note has no draft
+ *  state): keeps its own value and commits to the owner's frontmatter on idle. */
+function HubNoteText({
+	app,
+	initial,
+	names,
+	onOpenLink,
+	onCreateEntity,
+	onCommit,
+}: {
+	app: App;
+	initial: string;
+	names: LinkOption[];
+	onOpenLink: (target: string) => void;
+	onCreateEntity?: (name: string, insert: (linkInsert: string) => void) => void;
+	onCommit: (value: string) => void;
+}) {
+	const [value, setValue] = useState(initial);
+	const timer = useRef(0);
+	useEffect(() => setValue(initial), [initial]);
+	return (
+		<MarkdownField
+			app={app}
+			value={value}
+			names={names}
+			onOpenLink={onOpenLink}
+			onCreateEntity={onCreateEntity}
+			onChange={(v) => {
+				setValue(v);
+				window.clearTimeout(timer.current);
+				timer.current = window.setTimeout(() => onCommit(v), 600);
+			}}
+		/>
+	);
+}
 /** Black or white, whichever reads better on the given #rrggbb background. */
 function readableOn(hex: string): string {
 	const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
@@ -432,7 +467,11 @@ function EntityPage({ view }: { view: EntityView }) {
 				: [];
 			fm.aliases = [entered, ...aliases];
 		});
-		const base = entityFileName(project, record.type, entered);
+		const parentName =
+			record.type === 'location' && record.parentLocation !== null
+				? plugin.indexer.resolve(record.parentLocation, record.path)?.name
+				: undefined;
+		const base = entityFileName(project, record.type, entered, parentName);
 		const parent = file.parent?.path ?? '';
 		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
 		if (newPath === file.path) return;
@@ -687,17 +726,21 @@ function EntityPage({ view }: { view: EntityView }) {
 	const detachSublocation = (s: EntityRecord) => {
 		const childFile = plugin.app.vault.getFileByPath(s.path);
 		if (!childFile) return;
-		plugin.app.fileManager
-			.processFrontMatter(childFile, (fm: Record<string, unknown>) => {
-				for (const k of Object.keys(fm)) {
-					const lower = k.toLowerCase();
-					if (lower === 'loomparentlocation' || lower === 'parentlocation') delete fm[k];
-				}
-			})
-			.catch((e) => {
+		void (async () => {
+			try {
+				await plugin.app.fileManager.processFrontMatter(childFile, (fm: Record<string, unknown>) => {
+					for (const k of Object.keys(fm)) {
+						const lower = k.toLowerCase();
+						if (lower === 'loomparentlocation' || lower === 'parentlocation') delete fm[k];
+					}
+				});
+				// Back to the top-level name (no parent).
+				await renameLocationFile(s, undefined);
+			} catch (e) {
 				console.error('Loom Loom: failed to detach sublocation', e);
 				new Notice('Could not detach the sublocation.');
-			});
+			}
+		})();
 		writeSublocationOrder(sublocations.filter((o) => o.path !== s.path));
 	};
 	const descendsFromThis = (l: EntityRecord): boolean => {
@@ -710,10 +753,35 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 		return false;
 	};
+	/** Renames a location's file to its managed name for `parentName` (undefined
+	 *  = top-level). Obsidian updates the links. */
+	const renameLocationFile = async (rec: EntityRecord, parentName: string | undefined) => {
+		if (!project) return;
+		const f = plugin.app.vault.getFileByPath(rec.path);
+		if (!f) return;
+		const base = entityFileName(project, 'location', rec.name, parentName);
+		if (f.basename === base) return;
+		const dir = f.parent?.path ?? '';
+		let newPath = normalizePath(dir === '' ? `${base}.md` : `${dir}/${base}.md`);
+		for (let i = 2; plugin.app.vault.getAbstractFileByPath(newPath) !== null; i++) {
+			newPath = normalizePath(dir === '' ? `${base} ${i}.md` : `${dir}/${base} ${i}.md`);
+		}
+		try {
+			await plugin.app.fileManager.renameFile(f, newPath);
+		} catch (e) {
+			console.error('Loom Loom: location rename failed', e);
+		}
+	};
 	const setParentLocation = (target: string) => {
-		writeFm((fm) => {
-			setLoomKey(fm, FM.parentLocation, `[[${target}]]`);
-		});
+		const f = plugin.app.vault.getFileByPath(record.path);
+		if (!f) return;
+		void (async () => {
+			await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.parentLocation, `[[${target}]]`);
+			});
+			const parent = plugin.indexer.resolve(target, record.path);
+			await renameLocationFile(record, parent?.type === 'location' ? parent.name : undefined);
+		})();
 	};
 	/** "Turn to a sublocation": fuzzy-searchable picker over every other
 	 *  location (including sublocations — the whole child hierarchy moves
@@ -798,27 +866,44 @@ function EntityPage({ view }: { view: EntityView }) {
 								: e.involved.some((lp) => plugin.indexer.resolve(lp, owner.path)?.path === record.path)
 						)
 				)
-				.sort((a, b) => {
-					const date = (e: LocNoteEntry) =>
-						(e.session !== null
-							? plugin.indexer.resolve(e.session, e.owner.path)?.date?.sortKey
-							: undefined) ?? 0;
-					return date(b) - date(a) || a.owner.name.localeCompare(b.owner.name);
-				})
-		: [];
-	// Grouped under one session chip per session (lore events last, no chip),
-	// so simultaneous events nest together instead of repeating the session.
-	const pageEventGroups = (() => {
-		const map = new Map<string, { session: EntityRecord | null; entries: LocNoteEntry[] }>();
-		for (const e of pageEventEntries) {
-			const ses = e.session !== null ? plugin.indexer.resolve(e.session, e.owner.path) : null;
-			const session = ses?.type === 'session' ? ses : null;
-			const key = session?.path ?? 'none';
-			if (!map.has(key)) map.set(key, { session, entries: [] });
-			map.get(key)?.entries.push(e);
-		}
-		return [...map.values()];
-	})();
+			: [];
+		// Grouped under one session chip per session; groups sort by session date
+		// (newest/oldest first per the global setting, lore events always last),
+		// and within a group events follow their loomSeq — the manual order shared
+		// with the timeline and session page.
+		const newestFirst = plugin.settings.notesNewestFirst;
+		const pageEventGroups = (() => {
+			const map = new Map<string, { session: EntityRecord | null; entries: LocNoteEntry[] }>();
+			for (const e of pageEventEntries) {
+				const ses = e.session !== null ? plugin.indexer.resolve(e.session, e.owner.path) : null;
+				const session = ses?.type === 'session' ? ses : null;
+				const key = session?.path ?? 'none';
+				if (!map.has(key)) map.set(key, { session, entries: [] });
+				map.get(key)?.entries.push(e);
+			}
+			for (const g of map.values())
+				g.entries.sort((a, b) => (a.owner.seq ?? a.owner.created) - (b.owner.seq ?? b.owner.created));
+			return [...map.values()].sort((a, b) => {
+				const ka = a.session?.date?.sortKey;
+				const kb = b.session?.date?.sortKey;
+				if (ka === undefined && kb === undefined) return 0;
+				if (ka === undefined) return 1; // lore last
+				if (kb === undefined) return -1;
+				return newestFirst ? kb - ka : ka - kb;
+			});
+		})();
+		/** Flips the global newest/oldest-first order and refreshes open views. */
+		const toggleNotesOrder = () => {
+			plugin.settings.notesNewestFirst = !plugin.settings.notesNewestFirst;
+			void plugin.saveSettings();
+			plugin.indexer.refreshViews();
+		};
+		const orderToggle = (
+			<button className="loom-rel-add loom-order-toggle" onClick={toggleNotesOrder}>
+				<Icon name={newestFirst ? 'arrow-up-wide-narrow' : 'arrow-down-narrow-wide'} />
+				{newestFirst ? 'New on top' : 'New on bottom'}
+			</button>
+		);
 	const setMembershipField = (
 		faction: EntityRecord,
 		patch: { role?: string; location?: string | null }
@@ -1433,7 +1518,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								options={(project ? plugin.indexer.getAll('location', project.root) : [])
 									.filter((l) => !noteLocs.some((q) => q.target?.path === l.path))
 									.sort((a, b) => a.name.localeCompare(b.name))
-									.map((l) => ({ value: linkTargetOf(l), label: l.name }))}
+									.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 								onPick={(name) => setNote({ places: [...note.places, name] }, true)}
 								action={
 									project
@@ -1504,17 +1589,19 @@ function EntityPage({ view }: { view: EntityView }) {
 							options={projectLocations
 								.filter((l) => l.path !== record.path && !note.places.includes(linkTargetOf(l)))
 								.sort((a, b) => a.name.localeCompare(b.name))
-								.map((l) => ({ value: linkTargetOf(l), label: l.name }))}
+								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 							onPick={(name) => setNote({ places: [...note.places, name] }, true)}
 						/>
 					</div>
 				
 				) : null}
 				<div className="loom-note-text">
-					<LinkTextarea
-						rows={1}
+					<MarkdownField
+						app={plugin.app}
 						value={note.text}
 						names={linkNames}
+						onOpenLink={openLinkTarget}
+						onCreateEntity={createLinkEntity}
 						onChange={(v) => setNote({ text: v }, false)}
 					/>
 				</div>
@@ -1798,7 +1885,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							options={(project ? plugin.indexer.getAll('location', project.root) : [])
 								.filter((t) => !locs.some((l) => l.target?.path === t.path))
 								.sort((a, b) => a.name.localeCompare(b.name))
-								.map((t) => ({ value: linkTargetOf(t), label: t.name }))}
+								.map((t) => ({ value: linkTargetOf(t), label: locationLabel(t, plugin) }))}
 							onPick={(name) => writeEntryPlaces(en, (list) => [...list, `[[${name}]]`])}
 							action={
 								project
@@ -1849,29 +1936,21 @@ function EntityPage({ view }: { view: EntityView }) {
 					</div>
 				</div>
 				<div className="loom-note-text">
-					<div className="loom-resizable">
-					<textarea
-						ref={(el) => autoGrowTextarea(el)}
-						onInput={(ev) => autoGrowTextarea(ev.currentTarget)}
-						rows={1}
-						defaultValue={en.text}
-						onBlur={(e) =>
+					<HubNoteText
+						app={plugin.app}
+						initial={en.text}
+						names={linkNames}
+						onOpenLink={openLinkTarget}
+						onCreateEntity={createLinkEntity}
+						onCommit={(v) =>
 							writeOwnerNotes(en.owner, (arr) => {
 								const item = arr[en.idx];
 								if (typeof item === 'object' && item !== null) {
-									(item as { text?: unknown }).text = e.target.value;
+									(item as { text?: unknown }).text = v;
 								}
 							})
 						}
 					/>
-					<div
-						className="loom-resize-edge"
-						onMouseDown={(ev) => {
-							const prev = ev.currentTarget.previousElementSibling;
-							if (prev instanceof HTMLTextAreaElement) startTextareaResize(prev, ev);
-						}}
-					/>
-					</div>
 				</div>
 				</div>
 			</div>
@@ -2618,7 +2697,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										options={membershipLocations
 											.slice()
 											.sort((a, b) => a.name.localeCompare(b.name))
-											.map((l) => ({ value: linkTargetOf(l), label: l.name }))}
+											.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 										onPick={(name) => setMembershipField(m.faction, { location: name })}
 									/>
 								)}
@@ -2664,15 +2743,32 @@ function EntityPage({ view }: { view: EntityView }) {
 			{record.type === 'event' || record.type === 'quest' ? (
 				<div className="loom-field loom-field-sep">
 					{sessionNotes.length > 0 ? <span className="loom-field-label">Session notes</span> : null}
-					<button
-						className="loom-rel-add"
-						onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [], seq: Date.now(), idx: null }])}
-					>
-						+ Add a session note
-					</button>
+					<div className="loom-hub-add-row">
+						<button
+							className="loom-rel-add"
+							onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [], seq: Date.now(), idx: null }])}
+						>
+							+ Add a session note
+						</button>
+						{sessionNotes.length > 0 ? orderToggle : null}
+					</div>
 					{sessionNotes.length > 0 ? (
 						<div className="loom-note-list">
-							{sessionNotes.map((note, i) => sessionNoteRow(note, i))}
+							{sessionNotes
+								.map((note, i) => ({ note, i }))
+								.sort((a, b) => {
+									const da = a.note.session
+										? plugin.indexer.resolve(a.note.session, record.path)?.date?.sortKey
+										: undefined;
+									const db = b.note.session
+										? plugin.indexer.resolve(b.note.session, record.path)?.date?.sortKey
+										: undefined;
+									if (da === undefined && db === undefined) return 0;
+									if (da === undefined) return 1;
+									if (db === undefined) return -1;
+									return newestFirst ? db - da : da - db;
+								})
+								.map(({ note, i }) => sessionNoteRow(note, i))}
 						</div>
 					) : null}
 				</div>
@@ -2684,38 +2780,60 @@ function EntityPage({ view }: { view: EntityView }) {
 			{showsEvents && project ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Events</span>
-					<button
-						className="loom-rel-add"
-						onClick={() =>
-							new CreateEntityModal(plugin, 'event', project, {
-								...(isLocation
-									? { defaultPlace: linkTargetOf(record) }
-									: { defaultInvolved: [linkTargetOf(record)] }),
-								onCreated: () => {},
-							}).open()
-						}
-					>
-						+ Add an event
-					</button>
-					{pageEventGroups.map((g) => (
-						<div key={g.session?.path ?? 'none'} className="loom-locnote-group loom-char-event-group">
-							<div className="loom-tag-row loom-event-group-session">
-								{g.session ? (
-									<EntityChip
-										plugin={plugin}
-										record={g.session}
-										label={shortSessionLabel(g.session)}
-										onOpen={() => g.session && view.openEntity(g.session.path)}
-									/>
-								) : (
-									<EntityChip plugin={plugin} record={null} label="No session" />
-								)}
+					<div className="loom-hub-add-row">
+						<button
+							className="loom-rel-add"
+							onClick={() =>
+								new CreateEntityModal(plugin, 'event', project, {
+									...(isLocation
+										? { defaultPlace: linkTargetOf(record) }
+										: { defaultInvolved: [linkTargetOf(record)] }),
+									onCreated: () => {},
+								}).open()
+							}
+						>
+							+ Add an event
+						</button>
+						{orderToggle}
+					</div>
+					{pageEventGroups.map((g) => {
+						// Events within a session group are drag-reorderable (loomSeq,
+						// shared with the session page); the slide is scoped to the group,
+						// so it never crosses sessions.
+						const gkey = 'pgevents-' + (g.session?.path ?? 'none');
+						const owners = g.entries.map((e) => e.owner);
+						return (
+							<div key={g.session?.path ?? 'none'} className="loom-locnote-group loom-char-event-group">
+								<div className="loom-tag-row loom-event-group-session">
+									{g.session ? (
+										<EntityChip
+											plugin={plugin}
+											record={g.session}
+											label={shortSessionLabel(g.session)}
+											onOpen={() => g.session && view.openEntity(g.session.path)}
+										/>
+									) : (
+										<EntityChip plugin={plugin} record={null} label="No session" />
+									)}
+								</div>
+								<div
+									className={
+										seqDrag?.group === gkey ? 'loom-event-nest loom-subloc-dragging' : 'loom-event-nest'
+									}
+								>
+									{g.entries.map((en, i) =>
+										hubEntryRow(
+											en,
+											seqGrip(gkey, i, owners),
+											seqRowStyle(gkey, i),
+											seqDrag?.group === gkey && seqDrag.from === i,
+											i
+										)
+									)}
+								</div>
 							</div>
-							<div className="loom-event-nest">
-								{g.entries.map((en) => hubEntryRow(en))}
-							</div>
-						</div>
-					))}
+						);
+					})}
 				</div>
 			) : null}
 
