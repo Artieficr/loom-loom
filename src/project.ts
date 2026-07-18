@@ -26,6 +26,7 @@ import {
 import { defaultProjectConfig, formatLoomDate, serializeProjectConfig, todayRaw } from './calendar';
 import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
 import { ProjectDef, linkTargetOf } from './indexer';
+import { fmLoomValue, setLoomKey } from './fm';
 import type LoomLoomPlugin from './main';
 
 const PROJECT_SUBFOLDERS = [
@@ -221,7 +222,10 @@ class RecordInputSuggest extends AbstractInputSuggest<EntityRecord> {
 		private input: HTMLInputElement,
 		private records: () => EntityRecord[],
 		private pick: (r: EntityRecord) => void,
-		private label: (r: EntityRecord) => string = (r) => r.name
+		private label: (r: EntityRecord) => string = (r) => r.name,
+		/** Multi-pick inputs (involved, givers) clear after each pick; a single-
+		 *  value field (the searchable Name) keeps the pick's text instead. */
+		private clearOnPick = true
 	) {
 		super(app, input);
 	}
@@ -239,7 +243,7 @@ class RecordInputSuggest extends AbstractInputSuggest<EntityRecord> {
 
 	selectSuggestion(r: EntityRecord): void {
 		this.pick(r);
-		this.input.value = '';
+		if (this.clearOnPick) this.input.value = '';
 		this.close();
 	}
 }
@@ -305,6 +309,9 @@ export class CreateEntityModal extends Modal {
 	private pickedSession: EntityRecord | null = null;
 	/** Quest only: session the quest was received in. */
 	private receivedSession: EntityRecord | null = null;
+	/** Event/quest from a session page: an existing entity chosen in the Name
+	 *  search — submit pins it to the session instead of creating a duplicate. */
+	private pickedExisting: EntityRecord | null = null;
 
 	constructor(
 		private plugin: LoomLoomPlugin,
@@ -354,11 +361,36 @@ export class CreateEntityModal extends Modal {
 		this.setTitle(this.options.parentLocation ? 'New sublocation' : `New ${meta.label.toLowerCase()}`);
 
 		if (this.type !== 'session') {
+			// From a session page (noteSession set), the event/quest Name is a
+			// search over existing ones: picking a match pins it to the session on
+			// submit; typing a new name just creates it.
+			const searchable =
+				(this.type === 'event' || this.type === 'quest') && this.options.noteSession !== undefined;
+			const noun = meta.label.toLowerCase();
+			const article = /^[aeiou]/.test(noun) ? 'an' : 'a';
 			new Setting(this.contentEl).setName('Name').addText((text) => {
 				text
-					.setPlaceholder(meta.label + ' name')
+					.setPlaceholder(searchable ? `Search or name ${article} ${noun}` : meta.label + ' name')
 					.setValue(this.fields.name)
-					.onChange((v) => (this.fields.name = v.trim()));
+					.onChange((v) => {
+						this.fields.name = v.trim();
+						// Typing after a pick means "make a new one with this name".
+						this.pickedExisting = null;
+					});
+				if (searchable) {
+					new RecordInputSuggest(
+						this.app,
+						text.inputEl,
+						() => this.plugin.indexer.getAll(this.type, this.project.root),
+						(r) => {
+							this.pickedExisting = r;
+							this.fields.name = r.name;
+							text.inputEl.value = r.name;
+						},
+						(r) => r.name,
+						false
+					);
+				}
 				text.inputEl.addEventListener('keydown', (e) => {
 					if (e.key === 'Enter') void this.submit();
 				});
@@ -627,6 +659,12 @@ export class CreateEntityModal extends Modal {
 	}
 
 	private async submit(): Promise<void> {
+		// Name search matched an existing event/quest: pin it to the session
+		// rather than creating a duplicate.
+		if (this.pickedExisting && this.options.noteSession) {
+			await this.pinExisting(this.pickedExisting, this.options.noteSession);
+			return;
+		}
 		if (this.type !== 'session' && this.fields.name === '') {
 			new Notice('Name is required.');
 			return;
@@ -663,6 +701,34 @@ export class CreateEntityModal extends Modal {
 		} catch (e) {
 			console.error('Loom Loom: failed to create entity', e);
 			new Notice('Could not create the note. See console for details.');
+		}
+	}
+
+	/** Pins an existing entity to `session` via a session note (skips if it's
+	 *  already there), then closes — the session-page hub picks it up. */
+	private async pinExisting(entity: EntityRecord, session: EntityRecord): Promise<void> {
+		const already = entity.sessionNotes.some(
+			(n) => n.session !== null && this.plugin.indexer.resolve(n.session, entity.path)?.path === session.path
+		);
+		if (already) {
+			new Notice(`"${entity.name}" is already in this session.`);
+			this.close();
+			return;
+		}
+		const f = this.plugin.app.vault.getFileByPath(entity.path);
+		if (!f) return;
+		try {
+			await this.plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				const cur = fmLoomValue(fm, FM.sessionNotes);
+				const arr = Array.isArray(cur) ? cur : [];
+				arr.push({ session: `[[${linkTargetOf(session)}]]`, text: '', seq: Date.now() });
+				setLoomKey(fm, FM.sessionNotes, arr);
+			});
+			this.close();
+			if (this.options.onCreated) this.options.onCreated(f);
+		} catch (e) {
+			console.error('Loom Loom: failed to pin existing entity', e);
+			new Notice('Could not add it to the session.');
 		}
 	}
 
