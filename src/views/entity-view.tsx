@@ -159,6 +159,22 @@ interface SessionNoteDraft {
  *  within the session (not persisted to disk). */
 const openSessionGraphs = new Set<string>();
 
+/** Lucide icon per quest tag. */
+const QUEST_TAG_ICONS: Record<string, string> = {
+	main: 'star',
+	important: 'triangle-alert',
+	side: 'shapes',
+};
+const QUEST_TAG_KEYS = ['main', 'important', 'side'] as const;
+/** Black or white, whichever reads better on the given #rrggbb background. */
+function readableOn(hex: string): string {
+	const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+	if (!m) return 'var(--text-normal)';
+	const n = parseInt(m[1], 16);
+	const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+	return lum > 0.6 ? '#000000' : '#ffffff';
+}
+
 interface LocNoteEntry {
 	owner: EntityRecord;
 	idx: number;
@@ -1339,6 +1355,20 @@ function EntityPage({ view }: { view: EntityView }) {
 								.filter((t) => !hubFilter['row:' + String(i)] || t.type === hubFilter['row:' + String(i)])
 								.map((t) => ({ value: linkTargetOf(t), label: t.name }))}
 							onPick={(name) => setNote({ involved: [...note.involved, name] }, true)}
+							action={
+								project
+									? {
+											label: '+ Create new entity',
+											onPick: () =>
+												new EntityTypeSuggestModal(plugin, (type) =>
+													new CreateEntityModal(plugin, type, project, {
+														onCreated: (created) =>
+															setNote({ involved: [...note.involved, created.basename] }, true),
+													}).open()
+												).open(),
+										}
+									: undefined
+							}
 						/>
 						<button
 							className="loom-rel-filter"
@@ -1405,6 +1435,18 @@ function EntityPage({ view }: { view: EntityView }) {
 									.sort((a, b) => a.name.localeCompare(b.name))
 									.map((l) => ({ value: linkTargetOf(l), label: l.name }))}
 								onPick={(name) => setNote({ places: [...note.places, name] }, true)}
+								action={
+									project
+										? {
+												label: '+ Create new location',
+												onPick: () =>
+													new CreateEntityModal(plugin, 'location', project, {
+														onCreated: (created) =>
+															setNote({ places: [...note.places, created.basename] }, true),
+													}).open(),
+											}
+										: undefined
+								}
 							/>
 						</div>
 						{noteLocs.length > 0 ? (
@@ -1668,6 +1710,20 @@ function EntityPage({ view }: { view: EntityView }) {
 									return list;
 								})
 							}
+							action={
+								project
+									? {
+											label: '+ Create new entity',
+											onPick: () =>
+												new EntityTypeSuggestModal(plugin, (type) =>
+													new CreateEntityModal(plugin, type, project, {
+														onCreated: (created) =>
+															writeEntryInvolved(en, (list) => [...list, `[[${created.basename}]]`]),
+													}).open()
+												).open(),
+										}
+									: undefined
+							}
 						/>
 							<button
 							className="loom-rel-filter"
@@ -1744,6 +1800,18 @@ function EntityPage({ view }: { view: EntityView }) {
 								.sort((a, b) => a.name.localeCompare(b.name))
 								.map((t) => ({ value: linkTargetOf(t), label: t.name }))}
 							onPick={(name) => writeEntryPlaces(en, (list) => [...list, `[[${name}]]`])}
+							action={
+								project
+									? {
+											label: '+ Create new location',
+											onPick: () =>
+												new CreateEntityModal(plugin, 'location', project, {
+													onCreated: (created) =>
+														writeEntryPlaces(en, (list) => [...list, `[[${created.basename}]]`]),
+												}).open(),
+										}
+									: undefined
+							}
 					/>
 						</div>
 						{locs.length > 0 ? (
@@ -2114,7 +2182,32 @@ function EntityPage({ view }: { view: EntityView }) {
 															<span>—</span>
 														)}</span>
 													</div>
-													
+													{quest.loomTags.length > 0 ? (
+														<div className="loom-quest-card-row">
+															<span className="loom-quest-card-label">
+																{quest.loomTags.length > 1 ? 'Tags:' : 'Tag:'}
+															</span>
+															<span className="loom-quest-card-value">
+																{quest.loomTags.map((t) => {
+																	const key = (QUEST_TAG_KEYS as readonly string[]).includes(t)
+																		? (t as (typeof QUEST_TAG_KEYS)[number])
+																		: null;
+																	const bg = key ? plugin.settings.questTagColors[key] : null;
+																	return (
+																		<span
+																			key={t}
+																			className="loom-chip loom-quest-tag"
+																			style={bg ? { background: bg, borderColor: bg, color: readableOn(bg) } : undefined}
+																		>
+																			{QUEST_TAG_ICONS[t] ? <Icon name={QUEST_TAG_ICONS[t]} /> : null}
+																			{t}
+																		</span>
+																	);
+																})}
+															</span>
+														</div>
+													) : null}
+
 													{state === 'finished' ? (
 														<>
 															<div className="loom-quest-card-row">

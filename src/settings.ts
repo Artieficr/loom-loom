@@ -17,8 +17,8 @@ export interface LoomLoomSettings {
 	projectRoot: string;
 	/** Base text size of all plugin views (applied as a body class). */
 	textSize: LoomTextSize;
-	/** Plugin-specific tag vocabulary per entity type (distinct from Obsidian #tags). */
-	tagVocabulary: Record<EntityType, string[]>;
+	/** Background colors for the built-in quest tags (main / important / side). */
+	questTagColors: { main: string; important: string; side: string };
 	/** Graph side panel: sections with more entries than this start collapsed. */
 	graphCollapseThreshold: number;
 	/** Zoom level a right-clicked node is focused at (both directions — can zoom in or out to reach it). */
@@ -59,15 +59,7 @@ export interface LoomLoomSettings {
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	projectRoot: '',
 	textSize: 'normal',
-	tagVocabulary: {
-		character: ['PC', 'NPC', 'Cast'],
-		location: [],
-		faction: [],
-		item: [],
-		quest: [],
-		event: [],
-		session: [],
-	},
+	questTagColors: { main: '#b48b0e', important: '#c95f5f', side: '#58b478' },
 	graphCollapseThreshold: 5,
 	graphFocusZoom: 1,
 	graphLineGap: 10,
@@ -96,7 +88,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	const base: LoomLoomSettings = {
 		...DEFAULT_SETTINGS,
-		tagVocabulary: { ...DEFAULT_SETTINGS.tagVocabulary },
+		questTagColors: { ...DEFAULT_SETTINGS.questTagColors },
 		nodeColors: { ...DEFAULT_SETTINGS.nodeColors },
 		globalLayerOrder: [...DEFAULT_SETTINGS.globalLayerOrder],
 		graphCameras: {},
@@ -136,11 +128,11 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof data.timelineDrawerHeight === 'number' && data.timelineDrawerHeight > 0) {
 		base.timelineDrawerHeight = data.timelineDrawerHeight;
 	}
-	if (typeof data.tagVocabulary === 'object' && data.tagVocabulary !== null) {
-		for (const type of ENTITY_TYPES) {
-			const tags = (data.tagVocabulary as Record<string, unknown>)[type];
-			if (Array.isArray(tags)) {
-				base.tagVocabulary[type] = tags.filter((t): t is string => typeof t === 'string');
+	if (typeof data.questTagColors === 'object' && data.questTagColors !== null) {
+		for (const k of ['main', 'important', 'side'] as const) {
+			const color = (data.questTagColors as Record<string, unknown>)[k];
+			if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) {
+				base.questTagColors[k] = color;
 			}
 		}
 	}
@@ -231,7 +223,7 @@ const SETTINGS_TABS: [SettingsTabId, string][] = [
  */
 const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 	general: ['textSize'],
-	entities: ['tagVocabulary'],
+	entities: ['questTagColors'],
 	graph: [
 		'graphCollapseThreshold',
 		'graphFocusZoom',
@@ -309,6 +301,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			void (async () => {
 				onReset();
 				await this.plugin.saveSettings();
+				this.plugin.indexer.refreshViews();
 				this.redisplay();
 			})()
 		);
@@ -325,24 +318,24 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	}
 
 	private renderEntities(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Quests').setHeading();
 		containerEl.createEl('p', {
-			text: 'Comma-separated tags offered for each entity type. These live in their own frontmatter field and are independent from Obsidian tags.',
+			text: 'Background color for each quest tag.',
 			cls: 'setting-item-description',
 		});
-
-		for (const type of ENTITY_TYPES) {
-			new Setting(containerEl).setName(`${ENTITY_META[type].label} tags`).addText((text) =>
-				text
-					.setPlaceholder('Tags, separated by commas')
-					.setValue(this.plugin.settings.tagVocabulary[type].join(', '))
-					.onChange(async (value) => {
-						this.plugin.settings.tagVocabulary[type] = value
-							.split(',')
-							.map((t) => t.trim())
-							.filter((t) => t.length > 0);
+		for (const k of ['main', 'important', 'side'] as const) {
+			const setting = new Setting(containerEl)
+				.setName(k[0].toUpperCase() + k.slice(1))
+				.addColorPicker((picker) =>
+					picker.setValue(this.plugin.settings.questTagColors[k]).onChange(async (value) => {
+						this.plugin.settings.questTagColors[k] = value;
 						await this.plugin.saveSettings();
+						this.plugin.indexer.refreshViews();
 					})
-			);
+				);
+			this.addReset(setting, () => {
+				this.plugin.settings.questTagColors[k] = DEFAULT_SETTINGS.questTagColors[k];
+			});
 		}
 	}
 
@@ -428,6 +421,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 				picker.setValue(this.plugin.settings.nodeColors[type]).onChange(async (value) => {
 					this.plugin.settings.nodeColors[type] = value;
 					await this.plugin.saveSettings();
+					this.plugin.indexer.refreshViews();
 				})
 			);
 			this.addReset(setting, () => {

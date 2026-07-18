@@ -1787,6 +1787,60 @@ span.loom-row-caret {
 	flex: 1;
 }
 
+/* Character-page faction membership rows: each a tinted box. */
+.loom-member-row {
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+	padding: var(--size-2-3) var(--size-4-2);
+	flex-wrap: wrap;
+}
+
+.loom-member-row + .loom-member-row {
+	margin-top: var(--size-2-2);
+}
+
+/* New-entity modal: faction membership rows (role of <faction> at <location>). */
+.loom-modal-factions {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	margin-bottom: var(--size-2-3);
+}
+
+.loom-modal-faction-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	flex-wrap: wrap;
+}
+
+.loom-modal-faction-row input {
+	flex: 1;
+	min-width: 6em;
+}
+
+.loom-modal-faction-lbl {
+	color: var(--text-muted);
+	flex: 0 0 auto;
+}
+
+/* Quest tag pill (icon + label) on session-page quest cards. */
+.loom-quest-tag {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-2-1);
+	text-transform: capitalize;
+}
+
+.loom-quest-tag .loom-icon {
+	display: flex;
+}
+
+.loom-quest-tag .loom-icon svg {
+	width: 13px;
+	height: 13px;
+}
+
 /* Full-width modal rows (e.g. the quest Description): label above, control
    using the whole window width. */
 .loom-modal-wide.setting-item {
