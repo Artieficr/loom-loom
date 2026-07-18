@@ -323,6 +323,8 @@ span.loom-row-caret {
 	min-height: 100%;
 	width: max-content;
 	min-width: 100%;
+	display: flex;
+	flex-direction: column;
 }
 
 /* The whole drawer body: [No date panel][vertical toggle bar][scrolling
@@ -446,6 +448,19 @@ span.loom-row-caret {
 	pointer-events: none;
 }
 
+/* The carried bubble stuck to the cursor: a solid copy portalled to the body,
+   so it clears the scroll container's clip and floats above the "No date"
+   panel instead of vanishing behind it (the in-flow original stays hidden in
+   its slot). */
+.loom-bubble-carried {
+	position: fixed;
+	z-index: calc(var(--layer-tooltip) + 1);
+	pointer-events: none;
+	opacity: 0.85;
+	box-shadow: var(--shadow-s);
+	cursor: grabbing;
+}
+
 /* Landing preview at the target slot: a dashed, translucent copy of the
    bubble showing exactly where it drops (portalled to the body, so it floats
    above the scroll container un-clipped). */
@@ -469,7 +484,11 @@ span.loom-row-caret {
 
 .loom-timeline-columns {
 	display: flex;
-	align-items: flex-start;
+	/* Columns stretch to the strip's full height so every column has a
+	   generous drop area below its last event (append) and empty session
+	   columns are droppable well past their header — no aiming at edges. */
+	align-items: stretch;
+	flex: 1;
 	gap: var(--size-4-4);
 	position: relative;
 	padding-bottom: var(--size-4-4);
