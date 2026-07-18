@@ -628,6 +628,16 @@ export class LoomIndexer extends Component {
 					linked.add(inv.path);
 				}
 			}
+			// Events/quests store a note's location per-note in `places`; connect it.
+			if (record.type === 'event' || record.type === 'quest') {
+				for (const lp of note.places) {
+					const loc = this.resolve(lp, record.path);
+					if (loc?.type === 'location' && loc.path !== record.path && !linked.has(loc.path)) {
+						out.push({ record: loc, relType: 'location', direction: 'outgoing' });
+						linked.add(loc.path);
+					}
+				}
+			}
 		}
 		const file = this.app.vault.getFileByPath(path);
 		const cache = file ? this.app.metadataCache.getFileCache(file) : null;
