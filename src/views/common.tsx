@@ -9,8 +9,17 @@ import {
 	useRef,
 	useState,
 } from 'react';
-import { ENTITY_META, ENTITY_TYPES, EntityRecord, VIEW_GRAPH, VIEW_LIST } from '../types';
-import { formatLoomDate } from '../calendar';
+import {
+	ENTITY_META,
+	ENTITY_TYPES,
+	EntityRecord,
+	PC_GROUP_ICON,
+	PC_GROUP_VALUE,
+	VIEW_GRAPH,
+	VIEW_GROUP,
+	VIEW_LIST,
+} from '../types';
+import { formatLoomDate, groupNameOf } from '../calendar';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
 import type LoomLoomPlugin from '../main';
@@ -375,17 +384,17 @@ export function EntityChip({
 	removeLabel?: string;
 }) {
 	const text = label ?? record?.name ?? '';
+	// The virtual Group is its own entity color-wise (stub records carry the
+	// sentinel path); everything real colors by its type.
+	const color = record
+		? record.path === PC_GROUP_VALUE
+			? plugin.settings.groupColor
+			: plugin.settings.nodeColors[record.type]
+		: null;
 	return (
 		<span
 			className="loom-chip loom-session-chip loom-entity-chip"
-			style={
-				record
-					? {
-							background: plugin.settings.nodeColors[record.type] + '40',
-							borderColor: plugin.settings.nodeColors[record.type],
-						}
-					: undefined
-			}
+			style={color !== null ? { background: color + '40', borderColor: color } : undefined}
 		>
 			{onOpen && record ? (
 				<button
@@ -415,11 +424,14 @@ export function EntityChip({
 
 function RailButton({
 	icon,
+	iconFallback,
 	label,
 	active,
 	onClick,
 }: {
 	icon: string;
+	/** Substitute icon for older Obsidian bundles missing `icon` (see Icon). */
+	iconFallback?: string;
 	label: string;
 	active?: boolean;
 	onClick: () => void;
@@ -435,7 +447,7 @@ function RailButton({
 			aria-label={label}
 			onClick={onClick}
 		>
-			<Icon name={icon} />
+			<Icon name={icon} fallback={iconFallback} />
 		</button>
 	);
 }
@@ -459,6 +471,23 @@ export function NavRail({
 		<nav className="loom-rail">
 			<RailButton icon="home" label="Home" onClick={() => navigator.openLoomFile(project.loomPath)} />
 			<div className="loom-rail-sep" />
+			<RailButton
+				icon={PC_GROUP_ICON}
+				iconFallback="star"
+				label={groupNameOf(project.config)}
+				active={active === 'group'}
+				onClick={() => {
+					// Navigators are views — record where the Group page was
+					// opened from so its Back button can return there.
+					const nav = navigator as LoomNavigator &
+						Partial<{ getViewType: () => string; getState: () => Record<string, unknown> }>;
+					const origin =
+						typeof nav.getViewType === 'function' && typeof nav.getState === 'function'
+							? { type: nav.getViewType(), state: nav.getState() }
+							: undefined;
+					navigator.navigateTo(VIEW_GROUP, { project: project.root, origin });
+				}}
+			/>
 			{ENTITY_TYPES.map((t) => (
 				<RailButton
 					key={t}

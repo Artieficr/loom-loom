@@ -19,10 +19,14 @@ import {
 	EntityRecord,
 	EntityType,
 	FM,
+	PC_GROUP_NAME,
+	PC_GROUP_VALUE,
 	PC_TAG,
 	QUEST_OUTCOMES,
 	VIEW_ENTITY,
+	VIEW_GROUP,
 	VIEW_LIST,
+	pcGroupStub,
 } from '../types';
 import {
 	ConfirmModal,
@@ -33,7 +37,7 @@ import {
 	entityFileName,
 	sessionFileName,
 } from '../project';
-import { formatLoomDateShort, todayRaw } from '../calendar';
+import { formatLoomDateShort, groupNameOf, todayRaw } from '../calendar';
 import { LoomFileReactView } from './react-view';
 import {
 	EntityChip,
@@ -147,6 +151,9 @@ interface SessionNoteDraft {
 	places: string[];
 	/** Linkpaths of involved entities (the note is their home). */
 	involved: string[];
+	/** Virtual-Group snapshot (PCs at pick time) — one "Group" chip, individual
+	 *  connections. */
+	group: string[];
 	/** Creation/reorder stamp — carried through commits so ordering survives. */
 	seq: number | null;
 	/** Index of the stored frontmatter entry this draft was seeded from, or
@@ -218,6 +225,8 @@ interface LocNoteEntry {
 	text: string;
 	seq: number | null;
 	involved: string[];
+	/** Virtual-Group snapshot on the note — see SessionNoteDecl.group. */
+	group: string[];
 	places: string[];
 }
 
@@ -250,7 +259,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		}) ?? []
 	);
 	const [sessionNotes, setSessionNotes] = useState<SessionNoteDraft[]>(
-		record?.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, seq: n.seq, idx })) ?? []
+		record?.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, group: n.group, seq: n.seq, idx })) ?? []
 	);
 	const [body, setBody] = useState<string | null>(null);
 	/** Live sublocation reorder: rows slide in real time while the grip is
@@ -320,7 +329,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				return { type: r.type, target: target ? draftLabel(target) : r.linkpath };
 			})
 		);
-		setSessionNotes(record.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, seq: n.seq, idx })));
+		setSessionNotes(record.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, group: n.group, seq: n.seq, idx })));
 	}, [record]);
 
 	useEffect(() => {
@@ -564,6 +573,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						n.session.trim() !== '' ||
 						n.text.trim() !== '' ||
 						n.involved.length > 0 ||
+						n.group.length > 0 ||
 						n.places.length > 0
 				)
 				.map((n) => {
@@ -583,6 +593,8 @@ function EntityPage({ view }: { view: EntityView }) {
 					else delete out.places;
 					if (n.involved.length > 0) out.involved = n.involved.map(asLink);
 					else delete out.involved;
+					if (n.group.length > 0) out.group = n.group.map(asLink);
+					else delete out.group;
 					if (n.seq !== null) out.seq = n.seq;
 					return out;
 				})
@@ -857,14 +869,16 @@ function EntityPage({ view }: { view: EntityView }) {
 				.getAll('event', record.project)
 				.flatMap((owner) =>
 					owner.sessionNotes
-						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq, involved: n.involved, places: n.places }))
+						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq, involved: n.involved, group: n.group, places: n.places }))
 						.filter((e) =>
 							isLocation
 								? e.places.some((lp) => {
 										const p = plugin.indexer.resolve(lp, owner.path);
 										return p?.type === 'location' && (p.path === record.path || descendsFromThis(p));
 									})
-								: e.involved.some((lp) => plugin.indexer.resolve(lp, owner.path)?.path === record.path)
+								: [...e.involved, ...e.group].some(
+										(lp) => plugin.indexer.resolve(lp, owner.path)?.path === record.path
+									)
 						)
 				)
 			: [];
@@ -1349,7 +1363,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				.getAll(undefined, record.project)
 				.flatMap((owner) =>
 					owner.sessionNotes
-						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq, involved: n.involved, places: n.places }))
+						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq, involved: n.involved, group: n.group, places: n.places }))
 						.filter(
 							(e) =>
 								e.session !== null &&
@@ -1387,6 +1401,17 @@ function EntityPage({ view }: { view: EntityView }) {
 			}
 		});
 	};
+	const writeEntryGroup = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) => {
+		writeOwnerNotes(en.owner, (arr) => {
+			const item = arr[en.idx];
+			if (typeof item === 'object' && item !== null) {
+				const cur = (item as { group?: unknown }).group;
+				const next = apply(Array.isArray(cur) ? cur : []);
+				if (next.length > 0) (item as { group?: unknown }).group = next;
+				else delete (item as { group?: unknown }).group;
+			}
+		});
+	};
 	const writeEntryPlaces = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) => {
 		writeOwnerNotes(en.owner, (arr) => {
 			const item = arr[en.idx];
@@ -1402,6 +1427,28 @@ function EntityPage({ view }: { view: EntityView }) {
 				.filter((r) => r.type !== 'session' && r.type !== 'event' && r.type !== 'location' && r.path !== record.path)
 				.sort((a, b) => a.name.localeCompare(b.name))
 		: [];
+	/** The current party (alive + active PCs, minus this page's own entity) —
+	 *  what the virtual "Group" picker entry snapshots in one pick. */
+	const groupPcs = project
+		? plugin.indexer.getGroupMembers(project.root).filter((c) => c.path !== record.path)
+		: [];
+	/** The project's (possibly custom) display name of the virtual Group. */
+	const groupName = project ? groupNameOf(project.config) : PC_GROUP_NAME;
+	/** The virtual "Group" option row, hidden when it wouldn't add anyone or
+	 *  the active type filter excludes characters. */
+	const groupOption = (missing: number, filter: EntityType | null | undefined) =>
+		missing > 0 && (filter == null || filter === 'character' || filter === 'faction')
+			? [{ value: PC_GROUP_VALUE, label: groupName }]
+			: [];
+	/** Group chips link to the Group page, like entity chips link to theirs
+	 *  (recording this page as the origin for the Group page's Back button). */
+	const openGroupPage = project
+		? () =>
+				view.navigateTo(VIEW_GROUP, {
+					project: project.root,
+					origin: { type: view.getViewType(), state: view.getState() },
+				})
+		: undefined;
 	const writeOwnerRels = (owner: EntityRecord, apply: (rels: unknown[]) => unknown[]) =>
 		editFmList(owner.path, FM.relationships, apply);
 	/** Renames another entity in place (hub rows): stores the entered name as
@@ -1468,6 +1515,13 @@ function EntityPage({ view }: { view: EntityView }) {
 		writeFm((fm) => {
 			if (target === null) clearDeathKey(fm);
 			else setLoomKey(fm, FM.deathSession, `[[${target}]]`);
+		});
+	};
+	/** Away from the party: inactive PCs are skipped by new virtual-Group picks
+	 *  (existing group snapshots keep them — history stays as it was). */
+	const setActive = (active: boolean) => {
+		writeFm((fm) => {
+			setLoomKey(fm, FM.active, active);
 		});
 	};
 
@@ -1537,10 +1591,15 @@ function EntityPage({ view }: { view: EntityView }) {
 				className="loom-rel-target"
 				placeholder={rel.filter ? `${ENTITY_META[rel.filter].label} note` : 'Target note'}
 				value={rel.target}
-				options={targetRecords
-					.filter((r) => !rel.filter || r.type === rel.filter)
-					.map((r) => draftLabel(r))
-					.sort((a, b) => a.localeCompare(b))}
+				options={[
+					...(groupPcs.length > 0 && (!rel.filter || rel.filter === 'character' || rel.filter === 'faction')
+						? [groupName]
+						: []),
+					...targetRecords
+						.filter((r) => !rel.filter || r.type === rel.filter)
+						.map((r) => draftLabel(r))
+						.sort((a, b) => a.localeCompare(b)),
+				]}
 				onChange={(v) => {
 					const next = [...relationships];
 					next[i] = { ...rel, target: v };
@@ -1548,7 +1607,18 @@ function EntityPage({ view }: { view: EntityView }) {
 				}}
 				onPick={(v) => {
 					const next = [...relationships];
-					next[i] = { ...rel, target: v };
+					if (v === groupName) {
+						// The virtual Group: this draft row becomes one relationship
+						// of the same type per PC not already targeted by another row.
+						const taken = new Set(relationships.filter((_, j) => j !== i).map((r) => r.target.trim()));
+						const rows = groupPcs
+							.filter((c) => !taken.has(draftLabel(c)))
+							.map((c) => ({ ...rel, target: draftLabel(c) }));
+						if (rows.length === 0) return;
+						next.splice(i, 1, ...rows);
+					} else {
+						next[i] = { ...rel, target: v };
+					}
 					commitRelationships(next);
 				}}
 				onBlur={() => commitRelationships(relationships)}
@@ -1688,11 +1758,33 @@ function EntityPage({ view }: { view: EntityView }) {
 					<div className="loom-hub-involve">
 						<SearchableSelect
 							placeholder="Involve…"
-							options={involveTargets
-								.filter((t) => !note.involved.includes(linkTargetOf(t)))
-								.filter((t) => !hubFilter['row:' + String(i)] || t.type === hubFilter['row:' + String(i)])
-								.map((t) => ({ value: linkTargetOf(t), label: t.name }))}
-							onPick={(name) => setNote({ involved: [...note.involved, name] }, true)}
+							options={[
+								...groupOption(
+									groupPcs.filter(
+										(c) =>
+											!note.involved.includes(linkTargetOf(c)) && !note.group.includes(linkTargetOf(c))
+									).length,
+									hubFilter['row:' + String(i)]
+								),
+								...involveTargets
+									.filter(
+										(t) =>
+											!note.involved.includes(linkTargetOf(t)) && !note.group.includes(linkTargetOf(t))
+									)
+									.filter((t) => !hubFilter['row:' + String(i)] || t.type === hubFilter['row:' + String(i)])
+									.map((t) => ({ value: linkTargetOf(t), label: t.name })),
+							]}
+							onPick={(name) => {
+								if (name === PC_GROUP_VALUE) {
+									// Snapshot the current party into the note's group list.
+									const adds = groupPcs
+										.map(linkTargetOf)
+										.filter((n) => !note.involved.includes(n) && !note.group.includes(n));
+									setNote({ group: [...note.group, ...adds] }, true);
+								} else {
+									setNote({ involved: [...note.involved, name] }, true);
+								}
+							}}
 							action={
 								project
 									? {
@@ -1739,8 +1831,18 @@ function EntityPage({ view }: { view: EntityView }) {
 							/>
 						</button>
 					</div>
-					{note.involved.length > 0 ? (
+					{note.involved.length > 0 || note.group.length > 0 ? (
 						<div className="loom-tag-row">
+							{note.group.length > 0 ? (
+								<EntityChip
+									plugin={plugin}
+									record={project ? pcGroupStub(project.root, groupName) : null}
+									label={groupName}
+									onOpen={openGroupPage}
+									onRemove={() => setNote({ group: [] }, true)}
+									removeLabel="Remove the group"
+								/>
+							) : null}
 							{note.involved
 								.map((lp) => ({ lp, target: plugin.indexer.resolve(lp, record.path) }))
 								.sort(
@@ -1878,6 +1980,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	) => {
 		const menuKey = en.owner.path + String(en.idx);
 		const involved = involvedOfEntry(en);
+		/** Resolved paths of the note's group-snapshot members (chip is collapsed,
+		 *  but they count as involved for picker dedupe/removal). */
+		const groupPaths = new Set(
+			en.group
+				.map((lp) => plugin.indexer.resolve(lp, en.owner.path)?.path)
+				.filter((p): p is string => p !== undefined)
+		);
 		// A note's location(s) live per-note in `places`; legacy event-level
 		// `location` relationships are still shown/removable for older notes.
 		const locs: { key: string; target: EntityRecord | null; remove: () => void }[] = [
@@ -2006,7 +2115,9 @@ function EntityPage({ view }: { view: EntityView }) {
 													})
 												);
 											} else {
-												writeEntryInvolved(en, (list) =>
+												// One write covering both lists — the entity may be in the
+												// note directly or via the group snapshot.
+												const strip = (list: unknown[]) =>
 													list.filter(
 														(x) =>
 															!(
@@ -2014,8 +2125,18 @@ function EntityPage({ view }: { view: EntityView }) {
 																plugin.indexer.resolve(extractLinkpath(x) ?? '', en.owner.path)?.path ===
 																	record.path
 															)
-													)
-												);
+													);
+												writeOwnerNotes(en.owner, (arr) => {
+													const item = arr[en.idx];
+													if (typeof item !== 'object' || item === null) return;
+													const it = item as { involved?: unknown; group?: unknown };
+													if (Array.isArray(it.involved)) it.involved = strip(it.involved);
+													if (Array.isArray(it.group)) {
+														const g = strip(it.group);
+														if (g.length > 0) it.group = g;
+														else delete it.group;
+													}
+												});
 											}
 										},
 										'Remove'
@@ -2039,17 +2160,34 @@ function EntityPage({ view }: { view: EntityView }) {
 						<div className="loom-hub-involve">
 							<SearchableSelect
 							placeholder="Involve…"
-					options={hubTargets
-								.filter((t) => t.type !== 'location')
-								.filter((t) => !involved.some((iv) => iv.target?.path === t.path))
-								.filter((t) => !hubFilter[menuKey] || t.type === hubFilter[menuKey])
-								.map((t) => ({ value: linkTargetOf(t), label: t.name }))}
-							onPick={(name) =>
-								writeEntryInvolved(en, (list) => {
-									list.push(`[[${name}]]`);
-									return list;
-								})
-							}
+					options={[
+								...groupOption(
+									groupPcs.filter(
+										(c) => !involved.some((iv) => iv.target?.path === c.path) && !groupPaths.has(c.path)
+									).length,
+									hubFilter[menuKey]
+								),
+								...hubTargets
+									.filter((t) => t.type !== 'location')
+									.filter(
+										(t) => !involved.some((iv) => iv.target?.path === t.path) && !groupPaths.has(t.path)
+									)
+									.filter((t) => !hubFilter[menuKey] || t.type === hubFilter[menuKey])
+									.map((t) => ({ value: linkTargetOf(t), label: t.name })),
+							]}
+							onPick={(name) => {
+								if (name === PC_GROUP_VALUE) {
+									// Snapshot the current party into the note's group list.
+									const adds = groupPcs
+										.filter(
+											(c) => !involved.some((iv) => iv.target?.path === c.path) && !groupPaths.has(c.path)
+										)
+										.map(linkTargetOf);
+									writeEntryGroup(en, (list) => [...list, ...adds.map((n) => `[[${n}]]`)]);
+								} else {
+									writeEntryInvolved(en, (list) => [...list, `[[${name}]]`]);
+								}
+							}}
 							action={
 								project
 									? {
@@ -2095,8 +2233,18 @@ function EntityPage({ view }: { view: EntityView }) {
 							/>
 						</button>
 						</div>
-						{involved.length > 0 ? (
+						{involved.length > 0 || en.group.length > 0 ? (
 							<div className="loom-tag-row">
+								{en.group.length > 0 ? (
+									<EntityChip
+										plugin={plugin}
+										record={project ? pcGroupStub(project.root, groupName) : null}
+										label={groupName}
+										onOpen={openGroupPage}
+										onRemove={() => writeEntryGroup(en, () => [])}
+										removeLabel="Remove the group"
+									/>
+								) : null}
 								{involved.map(({ lp, target }, ii) => (
 									<EntityChip
 										key={lp + String(ii)}
@@ -2770,6 +2918,19 @@ function EntityPage({ view }: { view: EntityView }) {
 						Alive
 					</label>
 				) : null}
+				{isPc ? (
+					<label
+						className="loom-check"
+						title="Inactive characters are not included when the Group is added (e.g. while away from the party)"
+					>
+						<input
+							type="checkbox"
+							checked={record.active}
+							onChange={(e) => setActive(e.target.checked)}
+						/>
+						Active
+					</label>
+				) : null}
 				{isPc && !record.alive ? (
 					<div className="loom-death-row">
 						<span className="loom-field-label">Death session</span>
@@ -2921,11 +3082,25 @@ function EntityPage({ view }: { view: EntityView }) {
 					<span className="loom-field-label">Members</span>
 					<SearchableSelect
 						placeholder="Add a member…"
-						options={projectCharacters
-							.filter((c) => !memberRecords.some((m) => m.path === c.path))
-							.sort((a, b) => a.name.localeCompare(b.name))
-							.map((c) => ({ value: linkTargetOf(c), label: c.name }))}
-						onPick={(name) => editMembersOf(record, (arr) => [...arr, `[[${name}]]`])}
+						options={[
+							...groupOption(
+								groupPcs.filter((c) => !memberRecords.some((m) => m.path === c.path)).length,
+								null
+							),
+							...projectCharacters
+								.filter((c) => !memberRecords.some((m) => m.path === c.path))
+								.sort((a, b) => a.name.localeCompare(b.name))
+								.map((c) => ({ value: linkTargetOf(c), label: c.name })),
+						]}
+						onPick={(name) => {
+							const adds =
+								name === PC_GROUP_VALUE
+									? groupPcs
+											.filter((c) => !memberRecords.some((m) => m.path === c.path))
+											.map(linkTargetOf)
+									: [name];
+							editMembersOf(record, (arr) => [...arr, ...adds.map((n) => `[[${n}]]`)]);
+						}}
 					/>
 					{memberRecords.length > 0 ? (
 						<div className="loom-tag-row">
@@ -3057,7 +3232,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<div className="loom-hub-add-row">
 						<button
 							className="loom-rel-add"
-							onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [], seq: Date.now(), idx: null }])}
+							onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [], group: [], seq: Date.now(), idx: null }])}
 						>
 							+ Add a session note
 						</button>

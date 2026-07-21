@@ -131,8 +131,12 @@ class HrWidget extends WidgetType {
 function buildDecorations(view: EditorView): DecorationSet {
 	const entries: { from: number; to: number; deco: Decoration }[] = [];
 	const sel = view.state.selection;
+	// Live preview reveals the raw markdown under the cursor/selection — an
+	// editing affordance. Read-only fields keep the rendered form even while
+	// text is selected, so selecting/copying never flashes to plain syntax.
+	const revealRaw = !view.state.readOnly;
 	const touches = (from: number, to: number) =>
-		sel.ranges.some((r) => r.from <= to && r.to >= from);
+		revealRaw && sel.ranges.some((r) => r.from <= to && r.to >= from);
 
 	for (const range of view.visibleRanges) {
 		let pos = range.from;
@@ -208,7 +212,7 @@ function buildDecorations(view: EditorView): DecorationSet {
 			for (const token of lineTokens(text, line.from).sort((a, b) => a.from - b.from)) {
 				// Raw only while the cursor sits strictly inside the token, so a
 				// just-completed `**bold**` renders the moment it's closed.
-				if (sel.ranges.some((r) => r.from < token.to && r.to > token.from)) continue;
+				if (revealRaw && sel.ranges.some((r) => r.from < token.to && r.to > token.from)) continue;
 				for (const h of token.hide) {
 					entries.push({ from: h.from, to: h.to, deco: Decoration.replace({}) });
 				}
@@ -232,6 +236,35 @@ function buildDecorations(view: EditorView): DecorationSet {
 		entries.map((e) => e.deco.range(e.from, e.to)),
 		true
 	);
+}
+
+/**
+ * The text as the rendered field shows it: wikilinks become their display
+ * text, inline markers and heading/quote markers vanish, bullets read "• ".
+ * Read-only fields put THIS on the clipboard (plain `copy` DOM event — no
+ * clipboard APIs/permissions), so copying matches what's on screen.
+ */
+function displayTextOf(text: string): string {
+	return text
+		.split('\n')
+		.map((line) => {
+			let out = line
+				.replace(/^#{1,6}\s/, '')
+				.replace(/^((?:\s*>\s?)+)/, '')
+				.replace(/^(\s*)([-*+])\s/, '$1• ');
+			out = out.replace(WIKILINK_RE, (_m, target: string, alias?: string) =>
+				alias !== undefined && alias !== '' ? alias : target
+			);
+			out = out
+				.replace(/\*\*([^*\n]+)\*\*/g, '$1')
+				.replace(/~~([^~\n]+)~~/g, '$1')
+				.replace(/==([^=\n]+)==/g, '$1')
+				.replace(/<u>([^<\n]+)<\/u>/g, '$1')
+				.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1$2')
+				.replace(/(^|[^_])_([^_\n]+)_(?!_)/g, '$1$2');
+			return out;
+		})
+		.join('\n');
 }
 
 const livePreview = ViewPlugin.fromClass(
@@ -493,52 +526,76 @@ export function MarkdownField({
 				scopePushed = false;
 			}
 		};
+		// Left opens a rendered link in place; middle opens it in a new tab.
+		const openLinkOnMousedown = (event: MouseEvent): boolean => {
+			if (event.button !== 0 && event.button !== 1) return false;
+			const target = event.target instanceof HTMLElement ? event.target : null;
+			const link = target?.closest('[data-loom-link]');
+			if (link instanceof HTMLElement && link.dataset.loomLink) {
+				event.preventDefault();
+				onOpenRef.current(link.dataset.loomLink, event.button === 1);
+				return true;
+			}
+			return false;
+		};
 		const view = new EditorView({
 			parent: hostRef.current,
 			state: EditorState.create({
 				doc: value,
-				extensions: [
-					...(readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
-					history(),
-					EditorView.lineWrapping,
-					cmPlaceholder(placeholder ?? ''),
-					livePreview,
-					bracketPairing,
-					pairDeletion,
-					formatContinuation,
-					formattingKeys,
-					autocompletion({
-						override: [
-							linkCompletion(
-								() => namesRef.current,
-								() => onCreateRef.current
-							),
+				// Read-only fields stay contenteditable (only `readOnly` blocks
+				// edits): the browser then owns selection and fires a real `copy`
+				// event — rewritten below to the display text — where a
+				// non-editable view would leave the native selection empty and
+				// Ctrl+C a no-op. All editing extensions are simply absent.
+				extensions: readOnly
+					? [
+							EditorState.readOnly.of(true),
+							EditorView.lineWrapping,
+							cmPlaceholder(placeholder ?? ''),
+							livePreview,
+							keymap.of(defaultKeymap),
+							EditorView.domEventHandlers({
+								mousedown: openLinkOnMousedown,
+								copy: (event, v) => {
+									const range = v.state.selection.main;
+									if (range.empty || !event.clipboardData) return false;
+									event.clipboardData.setData(
+										'text/plain',
+										displayTextOf(v.state.sliceDoc(range.from, range.to))
+									);
+									event.preventDefault();
+									return true;
+								},
+							}),
+						]
+					: [
+							history(),
+							EditorView.lineWrapping,
+							cmPlaceholder(placeholder ?? ''),
+							livePreview,
+							bracketPairing,
+							pairDeletion,
+							formatContinuation,
+							formattingKeys,
+							autocompletion({
+								override: [
+									linkCompletion(
+										() => namesRef.current,
+										() => onCreateRef.current
+									),
+								],
+								icons: false,
+							}),
+							keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap]),
+							EditorView.updateListener.of((update) => {
+								if (update.docChanged) onChangeRef.current(update.state.doc.toString());
+								if (update.focusChanged) {
+									if (update.view.hasFocus) pushScope();
+									else popScope();
+								}
+							}),
+							EditorView.domEventHandlers({ mousedown: openLinkOnMousedown }),
 						],
-						icons: false,
-					}),
-					keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap]),
-					EditorView.updateListener.of((update) => {
-						if (update.docChanged) onChangeRef.current(update.state.doc.toString());
-						if (update.focusChanged) {
-							if (update.view.hasFocus) pushScope();
-							else popScope();
-						}
-					}),
-					EditorView.domEventHandlers({
-						mousedown: (event) => {
-							// Left opens in place; middle opens in a new tab.
-							if (event.button !== 0 && event.button !== 1) return false;
-							const target = event.target instanceof HTMLElement ? event.target : null;
-							const link = target?.closest('[data-loom-link]');
-							if (link instanceof HTMLElement && link.dataset.loomLink) {
-								event.preventDefault();
-								onOpenRef.current(link.dataset.loomLink, event.button === 1);
-								return true;
-							}
-							return false;
-						},
-					}),
-				],
 			}),
 		});
 		viewRef.current = view;

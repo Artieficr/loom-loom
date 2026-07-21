@@ -17,13 +17,13 @@ and a custom layered graph view.
 | `src/types.ts` | Entity types + metadata, record/connection/timeline/date shapes, `FM` frontmatter-key registry (+ legacy spellings), view type IDs |
 | `src/fm.ts` | Shared frontmatter read/write helpers: case-insensitive reads with legacy-key fallback, loom-key writes that clean stale spellings |
 | `src/naming.ts` | Managed file-name construction (`<Project> <Type label> <name>`), dependency-free for indexer + project use |
-| `src/settings.ts` | Global settings: text size, tag vocabulary, graph node colors, collapse threshold, global layer order; tabbed settings UI (General/Entities/Graph, per-project timeline settings under Graph) |
+| `src/settings.ts` | Global settings: text size, tag vocabulary, entity colors, collapse threshold, global layer order; tabbed settings UI (General/Entities/Graph, per-project timeline settings under Graph). Entities tab holds "Entities colors" (Group first, then entity types, quest tag colors nested under Quest) and the Loom button colors ("Loom, original" — plum/cream pair that flips with the app theme via `body.theme-dark` CSS — or a custom bg+icon pair) |
 | `src/indexer.ts` | Index cache: project discovery (.loom files), frontmatter → in-memory records, vault event handling, connection queries (incl. native links), JSON snapshot persistence |
 | `src/calendar.ts` | Date model: parsing (Gregorian + custom in-game calendars), display formats, per-project `ProjectConfig` (de)serialization |
 | `src/columns.ts` | Chronological column layout shared by timeline and graph (sessions anchor columns, session-connected events stack beneath) |
 | `src/project.ts` | Project scaffolding (.loom + folders), entity creation (managed session file names), setup/create/pick modals |
 | `src/timeline-settings.ts` | Per-project timeline settings editor (date format + custom calendar), embedded in the settings tab's Graph tab, writes to the .loom file |
-| `src/views/` | React views: home (FileView over .loom), entity page (FileView over .md), list, graph, focused per-session mini graph (`mini-graph.tsx`) + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`; sticky "No date" drawer at its left, event bubbles drag between drawer and session columns to re-pin them). Entity pages embed collapsible connected-entity sections with in-place editing (`connected-entities.tsx`). Notes/Description use a CodeMirror live-preview field (`markdown-field.tsx`: rendered links/bold/quotes/bullets/hr, raw at the cursor, [[ pairing + completion) |
+| `src/views/` | React views: home (FileView over .loom; wheel layout — Loom button centered, circular node-colored satellite buttons on a ring, Group first at 12 o'clock then entity types clockwise, evenly redistributed by count; icon = full node color, background/border the same hue diluted via color-mix for readability), entity page (FileView over .md), list, graph, the virtual Group's page (`group-view.tsx`: faction-page layout, editable name → .loom `groupName`, Alive/Inactive/Dead member sub-sections, events hub with name+note search and multi-PC chip filter, read-only rows with clickable names and rendered note text; first rail entry, `circle-star` icon), focused per-session mini graph (`mini-graph.tsx`) + shared shell/hooks. The timeline is not a view — it's a resizable bottom drawer inside the graph (`timeline-strip.tsx`; sticky "No date" drawer at its left, event bubbles drag between drawer and session columns to re-pin them). Entity pages embed collapsible connected-entity sections with in-place editing (`connected-entities.tsx`). Notes/Description use a CodeMirror live-preview field (`markdown-field.tsx`: rendered links/bold/quotes/bullets/hr, raw at the cursor, [[ pairing + completion; `readOnly` keeps the field contenteditable — only `EditorState.readOnly`, no editing extensions — so native selection/copy work, never reveals raw under the selection, and a plain-DOM `copy` handler clipboards the display text instead of the markdown) |
 | `src/graph/` | Graph-only logic: layered layout (timeline rows + per-type global layers), orthogonal edge routing (trunk lanes/bands in `routing.ts`; every endpoint attaches via diagonal fans with per-side capacity), connections side panel |
 | `scripts/deploy.mjs` | Builds are copied to the test vault with `pnpm run deploy` |
 | `docs/ARCHITECTURE.md` | Data flow, relationship model, calendar abstraction, design tradeoffs |
@@ -125,11 +125,48 @@ and a custom layered graph view.
   notes still connect as plain frontmatter links). Entity tags
   live in `loomTags` (legacy `pluginTags` still read); the tag vocabulary is hardcoded
   (`ENTITY_TAGS` in types.ts), not user-configurable.
+- **Virtual "Group" faction**: entity-connecting pickers (Involve… on note rows,
+  faction Members, relationship targets, the create-modal's Involved field) offer a
+  file-less "Group" entry (`PC_GROUP_NAME`/`PC_GROUP_VALUE`/`pcGroupStub` in types.ts).
+  The party at pick time = `LoomIndexer.getGroupMembers`: PC-tagged AND `alive` AND
+  `active` (`loomActive`, a PC-page checkbox next to Alive — untick while a character
+  is away from the party, re-tick when they rejoin; new picks skip inactive PCs, old
+  snapshots keep them). In **involved pickers** the pick writes a `group` snapshot
+  list on the note entry (sibling of `involved`; frozen — later deaths don't rewrite
+  history) rendered as ONE faction-colored "Group" chip (✕ clears it), while each
+  member still connects individually (relType `involved`, individual graph edges).
+  In Members/relationship pickers the pick expands to individual entries immediately
+  (a relationship draft row becomes one row per member, same type). No entity named
+  "Group" ever exists — it never shows in the entity list or graph, the entry hides
+  when a type filter excludes characters/factions or nobody's missing, and creating/
+  renaming a real faction to "Group" is blocked with a Notice (reserved name). The
+  Group also has its own page (`VIEW_GROUP`, `src/views/group-view.tsx`,
+  `circle-star` icon): first entry in the nav rail and on the home wheel, laid out
+  like a faction page. Its name is editable — stored as `groupName` in the .loom
+  config (`groupNameOf` in calendar.ts; '' = the "Group" default, the name is NOT
+  reserved for real factions) and used by every picker label, chip, rail/home
+  entry. Group chips link to this page. The Group is its own entity color-wise:
+  `settings.groupColor` (first "Entities colors" picker, default `#46b5a5`) colors its chips
+  (EntityChip + the modal's renderChip special-case the stub's sentinel path),
+  home-wheel button, and page header — even though it never appears in the graph.
+  Layout: Name, then Members with Alive / Inactive / Dead sub-sections (dead PCs
+  pair their chip with the death session's chip), then the Events hub — every
+  event/quest where the Group or ANY PC (alive or not, active or not) is on a
+  note (snapshot or direct involvement). The hub has a search (event names +
+  note texts) and, folded behind a filter icon (accent-lit while active), a
+  filter panel: quick-toggle PC chips, an any-entity search with the standard
+  type-filter menu (an entry matches when every selected entity is on the note —
+  involved, in its group snapshot, or among its places), and a session-month
+  filter (year switcher + 3×4 Gregorian month grid, multi-select across years).
+  Rows are read-only mirrors of the entity-page event rows — the event NAME is
+  the link (no → button) and note text renders through the read-only
+  `MarkdownField` (links/bold/bullets). The create modal still accepts
+  `defaultGroup` (pre-filled group snapshot).
 - **Hidden connections**: links under the `deathSession`, `sublocationOrder`, and
   `itemOwner` (a copy's owning character — already connected via `loomItems`) keys
   never become connections or graph edges. `attendance` is hidden from the generic
   link pass but emits typed `attendance` connections (a ticked PC connects to the
-  session). Sessions list attending PCs (`PC` tag); PCs carry `alive` and
+  session). Sessions list attending PCs (`PC` tag); PCs carry `alive`, `active`, and
   `deathSession` — sessions dated after a PC's death session stop offering them.
 - **Dates**: `LoomDate` = raw string + packed sortable number + y/m/d + calendar id.
   Sessions always Gregorian; other entities use the project calendar (custom in-game

@@ -1,4 +1,4 @@
-import { CalendarId, LoomDate } from './types';
+import { CalendarId, LoomDate, PC_GROUP_NAME } from './types';
 
 /**
  * Calendar & date-format model.
@@ -38,13 +38,21 @@ export type DateFormat = (typeof DATE_FORMATS)[number];
 export interface ProjectConfig {
 	dateFormat: DateFormat;
 	customCalendar: CustomCalendarConfig;
+	/** Display name of the virtual Group (the party); '' = the default "Group". */
+	groupName: string;
 }
 
 export function defaultProjectConfig(): ProjectConfig {
 	return {
 		dateFormat: 'MMM Do, YYYY',
 		customCalendar: { enabled: false, monthCount: 12, months: [], useShortNames: false },
+		groupName: '',
 	};
+}
+
+/** The project's virtual-Group display name (custom, or the "Group" default). */
+export function groupNameOf(config: ProjectConfig): string {
+	return config.groupName.trim() !== '' ? config.groupName.trim() : PC_GROUP_NAME;
 }
 
 /** Tolerantly parses a .loom file's JSON content into a ProjectConfig. */
@@ -61,6 +69,7 @@ export function parseProjectConfig(text: string): ProjectConfig {
 	if (typeof d.dateFormat === 'string' && (DATE_FORMATS as readonly string[]).includes(d.dateFormat)) {
 		config.dateFormat = d.dateFormat;
 	}
+	if (typeof d.groupName === 'string') config.groupName = d.groupName;
 	const cc = d.customCalendar;
 	if (typeof cc === 'object' && cc !== null) {
 		if (typeof cc.enabled === 'boolean') config.customCalendar.enabled = cc.enabled;
