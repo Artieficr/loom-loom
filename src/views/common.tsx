@@ -422,6 +422,37 @@ export function EntityChip({
 	);
 }
 
+/** Lucide icon per quest tag (session-page cards, quest list). */
+export const QUEST_TAG_ICONS: Record<string, string> = {
+	main: 'star',
+	important: 'triangle-alert',
+	side: 'shapes',
+};
+
+/** Black or white, whichever reads better on the given #rrggbb background. */
+export function readableOn(hex: string): string {
+	const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+	if (!m) return 'var(--text-normal)';
+	const n = parseInt(m[1], 16);
+	const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+	return lum > 0.6 ? '#000000' : '#ffffff';
+}
+
+/** A quest tag chip: configured tag color + its icon, readable text. */
+export function QuestTagChip({ plugin, tag }: { plugin: LoomLoomPlugin; tag: string }) {
+	const colors = plugin.settings.questTagColors as Record<string, string>;
+	const bg = colors[tag] ?? null;
+	return (
+		<span
+			className="loom-chip loom-quest-tag"
+			style={bg !== null ? { background: bg, borderColor: bg, color: readableOn(bg) } : undefined}
+		>
+			{QUEST_TAG_ICONS[tag] ? <Icon name={QUEST_TAG_ICONS[tag]} /> : null}
+			{tag}
+		</span>
+	);
+}
+
 function RailButton({
 	icon,
 	iconFallback,

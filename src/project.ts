@@ -228,6 +228,313 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	return lines.join('\n');
 }
 
+/** One-line text prompt (rename, alias, date…). Enter or the CTA submits. */
+export class TextInputModal extends Modal {
+	constructor(
+		app: App,
+		private opts: {
+			title: string;
+			initial?: string;
+			placeholder?: string;
+			cta?: string;
+			onSubmit: (value: string) => void;
+		}
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.titleEl.setText(this.opts.title);
+		const input = this.contentEl.createEl('input', { type: 'text', cls: 'loom-modal-input' });
+		input.value = this.opts.initial ?? '';
+		if (this.opts.placeholder) input.placeholder = this.opts.placeholder;
+		const submit = () => {
+			const value = input.value.trim();
+			if (value === '') return;
+			this.close();
+			this.opts.onSubmit(value);
+		};
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') submit();
+		});
+		new Setting(this.contentEl).addButton((b) =>
+			b
+				.setButtonText(this.opts.cta ?? 'Save')
+				.setCta()
+				.onClick(submit)
+		);
+		window.setTimeout(() => {
+			input.focus();
+			input.select();
+		}, 0);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+/** Search/display label of a record in pickers: session dates, sublocations
+ *  as "Tavern, City A", everything else its name. */
+export function recordPickLabel(plugin: LoomLoomPlugin, project: ProjectDef, r: EntityRecord): string {
+	if (r.type === 'session' && r.date) return formatLoomDate(r.date, project.config);
+	if (r.type === 'location' && r.parentLocation !== null) {
+		const parent = plugin.indexer.resolve(r.parentLocation, r.path);
+		if (parent?.type === 'location') return `${r.name}, ${parent.name}`;
+	}
+	return r.name;
+}
+
+/**
+ * Renames an entity from outside its page: `loomName` + display alias +
+ * managed file name (sessions are date-named — not renameable here).
+ */
+export async function renameEntityRecord(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	record: EntityRecord,
+	rawName: string
+): Promise<void> {
+	const entered = rawName.trim();
+	if (entered === '' || entered === record.name || record.type === 'session') return;
+	const file = plugin.app.vault.getFileByPath(record.path);
+	if (!file) return;
+	const parentName =
+		record.type === 'location' && record.parentLocation !== null
+			? plugin.indexer.resolve(record.parentLocation, record.path)?.name
+			: undefined;
+	const base = managedEntityFileName(project.name, record.type, entered, parentName);
+	const parent = file.parent?.path ?? '';
+	const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+	if (newPath !== file.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
+		new Notice('A note with that name already exists.');
+		return;
+	}
+	await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+		setLoomKey(fm, FM.name, entered);
+		const aliases: unknown[] = Array.isArray(fm.aliases)
+			? (fm.aliases as unknown[]).filter((a) => a !== record.name && a !== entered)
+			: [];
+		fm.aliases = [entered, ...aliases];
+	});
+	if (newPath !== file.path) await plugin.app.fileManager.renameFile(file, newPath);
+}
+
+/**
+ * Duplicates an entity as "<name> 1" (2, 3, … — first free number). Sessions
+ * have no name: their copy keeps the date under a numbered file. Returns the
+ * new file, or null when the source is missing.
+ */
+export async function copyEntityRecord(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	record: EntityRecord
+): Promise<TFile | null> {
+	const file = plugin.app.vault.getFileByPath(record.path);
+	if (!file) return null;
+	const content = await plugin.app.vault.read(file);
+	const folder = file.parent?.path ?? '';
+	const pathFor = (base: string, i: number) =>
+		normalizePath(`${folder === '' ? '' : folder + '/'}${base}${i > 1 ? ` ${i}` : ''}.md`);
+	if (record.type === 'session') {
+		const base = sessionFileName(project, record.date?.raw ?? '');
+		let i = 2; // "… 2" — the original occupies the plain name.
+		while (plugin.app.vault.getAbstractFileByPath(pathFor(base, i)) !== null) i++;
+		return plugin.app.vault.create(pathFor(base, i), content);
+	}
+	const names = new Set(plugin.indexer.getAll(undefined, project.root).map((r) => r.name));
+	let n = 1;
+	while (names.has(`${record.name} ${n}`)) n++;
+	const newName = `${record.name} ${n}`;
+	const parentName =
+		record.type === 'location' && record.parentLocation !== null
+			? plugin.indexer.resolve(record.parentLocation, record.path)?.name
+			: undefined;
+	const base = managedEntityFileName(project.name, record.type, newName, parentName);
+	let i = 1;
+	while (plugin.app.vault.getAbstractFileByPath(pathFor(base, i)) !== null) i++;
+	const created = await plugin.app.vault.create(pathFor(base, i), content);
+	await plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
+		setLoomKey(fm, FM.name, newName);
+		fm.aliases = [newName];
+	});
+	return created;
+}
+
+/** Two-field prompt (identifier + target search) appending one relationship
+ *  to the record's own frontmatter — the list rows' "Add relationship". */
+export class AddRelationshipModal extends Modal {
+	private relType = '';
+	private target: EntityRecord | null = null;
+
+	constructor(
+		private plugin: LoomLoomPlugin,
+		private project: ProjectDef,
+		private record: EntityRecord
+	) {
+		super(plugin.app);
+	}
+
+	onOpen(): void {
+		this.titleEl.setText('Add relationship');
+		new Setting(this.contentEl).setName('Identifier').addText((t) => {
+			t.setPlaceholder('Related');
+			t.onChange((v) => (this.relType = v));
+		});
+		new Setting(this.contentEl).setName('Target').addText((t) => {
+			t.setPlaceholder('Target note');
+			new RecordInputSuggest(
+				this.app,
+				t.inputEl,
+				() =>
+					this.plugin.indexer
+						.getAll(undefined, this.project.root)
+						.filter((r) => r.path !== this.record.path)
+						.sort((a, b) => a.name.localeCompare(b.name)),
+				(r) => {
+					this.target = r;
+					t.setValue(recordPickLabel(this.plugin, this.project, r));
+				},
+				(r) => recordPickLabel(this.plugin, this.project, r),
+				false
+			);
+		});
+		new Setting(this.contentEl).addButton((b) =>
+			b
+				.setButtonText('Add')
+				.setCta()
+				.onClick(() => void this.submit())
+		);
+	}
+
+	private async submit(): Promise<void> {
+		if (!this.target) {
+			new Notice('Pick a target note.');
+			return;
+		}
+		const file = this.plugin.app.vault.getFileByPath(this.record.path);
+		if (!file) return;
+		const link = `[[${linkTargetOf(this.target)}]]`;
+		const relType = this.relType.trim() === '' ? 'related' : this.relType.trim();
+		await this.plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+			const cur = fmLoomValue(fm, FM.relationships);
+			const list = Array.isArray(cur) ? [...(cur as unknown[])] : [];
+			list.push({ type: relType, target: link });
+			setLoomKey(fm, FM.relationships, list);
+		});
+		this.close();
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+/** Multi-pick search adding an item to several characters/locations at once —
+ *  each pick collects as a chip, Add writes the item into every holder's
+ *  `loomItems`. */
+export class AddToHoldersModal extends Modal {
+	private picked: EntityRecord[] = [];
+
+	constructor(
+		private plugin: LoomLoomPlugin,
+		private project: ProjectDef,
+		private item: EntityRecord,
+		private holderType: 'character' | 'location'
+	) {
+		super(plugin.app);
+	}
+
+	onOpen(): void {
+		this.titleEl.setText(`Add "${this.item.name}" to ${ENTITY_META[this.holderType].plural.toLowerCase()}`);
+		let chips: HTMLElement;
+		const alreadyHolds = (r: EntityRecord) =>
+			r.items.some((lp) => this.plugin.indexer.resolve(lp, r.path)?.path === this.item.path);
+		new Setting(this.contentEl).setName(ENTITY_META[this.holderType].plural).addText((t) => {
+			t.setPlaceholder('Search…');
+			new RecordInputSuggest(
+				this.app,
+				t.inputEl,
+				() =>
+					this.plugin.indexer
+						.getAll(this.holderType, this.project.root)
+						.filter((r) => !this.picked.some((p) => p.path === r.path) && !alreadyHolds(r))
+						.sort((a, b) => a.name.localeCompare(b.name)),
+				(r) => {
+					this.picked.push(r);
+					refresh();
+				},
+				(r) => recordPickLabel(this.plugin, this.project, r)
+			);
+		});
+		chips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
+		const refresh = () => {
+			chips.empty();
+			for (const r of this.picked) {
+				renderChipEl(this.plugin, chips, r, recordPickLabel(this.plugin, this.project, r), () => {
+					this.picked = this.picked.filter((p) => p.path !== r.path);
+					refresh();
+				});
+			}
+		};
+		new Setting(this.contentEl).addButton((b) =>
+			b
+				.setButtonText('Add')
+				.setCta()
+				.onClick(() => void this.submit())
+		);
+	}
+
+	private async submit(): Promise<void> {
+		if (this.picked.length === 0) {
+			new Notice(`Pick at least one ${ENTITY_META[this.holderType].label.toLowerCase()}.`);
+			return;
+		}
+		const link = `[[${linkTargetOf(this.item)}]]`;
+		for (const holder of this.picked) {
+			const file = this.plugin.app.vault.getFileByPath(holder.path);
+			if (!file) continue;
+			await this.plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+				const cur = fmLoomValue(fm, FM.items);
+				const list = Array.isArray(cur) ? [...(cur as unknown[])] : [];
+				list.push(link);
+				setLoomKey(fm, FM.items, list);
+			});
+		}
+		this.close();
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+/** Standard entity chip markup for non-React surfaces (see EntityChip in
+ *  views/common.tsx — replicate, never hand-roll). */
+export function renderChipEl(
+	plugin: LoomLoomPlugin,
+	container: HTMLElement,
+	record: EntityRecord | null,
+	label: string,
+	onRemove?: () => void
+): void {
+	const chip = container.createSpan({ cls: 'loom-chip loom-session-chip loom-entity-chip' });
+	if (record) {
+		const color =
+			record.path === PC_GROUP_VALUE ? plugin.settings.groupColor : plugin.settings.nodeColors[record.type];
+		chip.style.background = color + '40';
+		chip.style.borderColor = color;
+	}
+	chip.createSpan({ text: label });
+	if (onRemove) {
+		const x = chip.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
+		x.addEventListener('click', (e) => {
+			e.preventDefault();
+			onRemove();
+		});
+	}
+}
+
 /**
  * Fuzzy-searchable picker over entity records — for choices that can grow
  * huge with a project (e.g. "Turn to a sublocation" over every location).
@@ -481,21 +788,7 @@ export class CreateEntityModal extends Modal {
 		label: string,
 		onRemove: () => void
 	): void {
-		const chip = container.createSpan({ cls: 'loom-chip loom-session-chip loom-entity-chip' });
-		if (record) {
-			const color =
-				record.path === PC_GROUP_VALUE
-					? this.plugin.settings.groupColor
-					: this.plugin.settings.nodeColors[record.type];
-			chip.style.background = color + '40';
-			chip.style.borderColor = color;
-		}
-		chip.createSpan({ text: label });
-		const x = chip.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
-		x.addEventListener('click', (e) => {
-			e.preventDefault();
-			onRemove();
-		});
+		renderChipEl(this.plugin, container, record, label, onRemove);
 	}
 
 	/** Resolves a picked name back to its record (for chip colors). */
