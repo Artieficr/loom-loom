@@ -133,8 +133,10 @@ function buildDecorations(view: EditorView): DecorationSet {
 	const sel = view.state.selection;
 	// Live preview reveals the raw markdown under the cursor/selection — an
 	// editing affordance. Read-only fields keep the rendered form even while
-	// text is selected, so selecting/copying never flashes to plain syntax.
-	const revealRaw = !view.state.readOnly;
+	// text is selected, so selecting/copying never flashes to plain syntax;
+	// and an unfocused field renders fully (the parked cursor's line must not
+	// stay raw after clicking elsewhere).
+	const revealRaw = !view.state.readOnly && view.hasFocus;
 	const touches = (from: number, to: number) =>
 		revealRaw && sel.ranges.some((r) => r.from <= to && r.to >= from);
 
@@ -274,7 +276,7 @@ const livePreview = ViewPlugin.fromClass(
 			this.decorations = buildDecorations(view);
 		}
 		update(update: ViewUpdate) {
-			if (update.docChanged || update.selectionSet || update.viewportChanged) {
+			if (update.docChanged || update.selectionSet || update.viewportChanged || update.focusChanged) {
 				this.decorations = buildDecorations(update.view);
 			}
 		}

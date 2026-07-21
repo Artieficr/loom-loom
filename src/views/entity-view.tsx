@@ -3074,6 +3074,18 @@ function EntityPage({ view }: { view: EntityView }) {
 									: [name];
 							editMembersOf(record, (arr) => [...arr, ...adds.map((n) => `[[${n}]]`)]);
 						}}
+						action={
+							project
+								? {
+										label: '+ Create new character',
+										onPick: () =>
+											new CreateEntityModal(plugin, 'character', project, {
+												onCreated: (created) =>
+													editMembersOf(record, (arr) => [...arr, `[[${created.basename}]]`]),
+											}).open(),
+									}
+								: undefined
+						}
 					/>
 					{memberRecords.length > 0 ? (
 						<div className="loom-tag-row">
@@ -3104,7 +3116,8 @@ function EntityPage({ view }: { view: EntityView }) {
 									.sort((a, b) => a.name.localeCompare(b.name))
 									.map((f) => ({ value: linkTargetOf(f), label: f.name }))}
 								onPick={(name) => {
-									const faction = projectFactions.find((f) => f.name === name);
+									// Option values are link targets (file basenames), not names.
+									const faction = projectFactions.find((f) => linkTargetOf(f) === name);
 									if (faction) editMembersOf(faction, (arr) => [...arr, `[[${linkTargetOf(record)}]]`]);
 									setFactionDraft(false);
 								}}
