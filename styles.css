@@ -177,15 +177,17 @@ body.loom-text-large {
 	margin-bottom: var(--size-4-6);
 }
 
-.loom-home-grid {
-	display: grid;
-	grid-template-columns: repeat(3, 1fr);
-	gap: var(--size-4-4);
-	margin-top: var(--size-4-4);
-}
-
-.loom-home-grid-wide {
-	grid-template-columns: 1fr;
+/* Home wheel: the Loom button centered, satellite cards on a circle around it
+   (first at 12 o'clock, clockwise). Each card carries its unit-circle position
+   in --wheel-x/--wheel-y; the shared radius lives here, so the layout
+   redistributes by count alone. (The card overrides live BELOW the .loom-card
+   base rules — equal specificity, so source order decides.) */
+.loom-home-wheel {
+	position: relative;
+	width: min(38rem, 78vmin);
+	aspect-ratio: 1;
+	margin: var(--size-4-4) auto 0;
+	--wheel-radius: 39%;
 }
 
 .loom-card {
@@ -219,6 +221,76 @@ body.loom-text-large {
 .loom-card-count {
 	color: var(--text-muted);
 	font-size: 0.9em;
+}
+
+/* Wheel satellites are circles tinted with their entity's node color: the icon
+   gets the full color, the background the same hue heavily diluted toward the
+   theme background (color-mix) so the icon stays readable in both themes. */
+.loom-home-wheel .loom-wheel-card {
+	position: absolute;
+	left: calc(50% + var(--wheel-x) * var(--wheel-radius));
+	top: calc(50% + var(--wheel-y) * var(--wheel-radius));
+	transform: translate(-50%, -50%);
+	width: 26%;
+	aspect-ratio: 1;
+	border-radius: 50%;
+	justify-content: center;
+	padding: var(--size-2-2);
+	gap: var(--size-2-1);
+	background: color-mix(in srgb, var(--wheel-color) 16%, var(--background-secondary));
+	border-color: color-mix(in srgb, var(--wheel-color) 55%, var(--background-modifier-border));
+}
+
+.loom-home-wheel .loom-wheel-card:hover {
+	background: color-mix(in srgb, var(--wheel-color) 28%, var(--background-secondary));
+}
+
+.loom-home-wheel .loom-wheel-card .loom-icon svg {
+	color: var(--wheel-color);
+}
+
+.loom-home-wheel .loom-wheel-card .loom-card-label {
+	font-size: 0.95em;
+}
+
+.loom-home-wheel .loom-wheel-center {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: 34%;
+	aspect-ratio: 1;
+	justify-content: center;
+	border-radius: 50%;
+	background: var(--wheel-center-bg);
+	border-color: color-mix(in srgb, var(--wheel-center-icon) 30%, var(--wheel-center-bg));
+}
+
+/* "Loom, original": plum on cream in light theme, reversed in dark — driven by
+   the body theme class, so switching the app theme restyles it live. */
+.loom-home-wheel .loom-wheel-center-original {
+	--wheel-center-bg: #4c3d57;
+	--wheel-center-icon: #fff8e6;
+}
+
+.theme-dark .loom-home-wheel .loom-wheel-center-original {
+	--wheel-center-bg: #fff8e6;
+	--wheel-center-icon: #4c3d57;
+}
+
+.loom-home-wheel .loom-wheel-center:hover {
+	background: color-mix(in srgb, var(--wheel-center-icon) 14%, var(--wheel-center-bg));
+}
+
+.loom-home-wheel .loom-wheel-center .loom-icon svg {
+	width: calc(var(--icon-xl, 32px) * 1.5);
+	height: calc(var(--icon-xl, 32px) * 1.5);
+	color: var(--wheel-center-icon);
+}
+
+.loom-home-wheel .loom-wheel-center .loom-card-label {
+	font-size: 1.25em;
+	color: var(--wheel-center-icon);
 }
 
 /* ---- entity list ---- */
@@ -2898,4 +2970,114 @@ span.loom-row-caret {
 
 .loom-hub-actions-open {
 	margin-right: var(--size-2-3);
+}
+
+/* ---- Group page (virtual party hub) ---- */
+
+/* Event names are the links — no separate open button. The button shrink-wraps
+   its text (no 650px flex basis) so the name sits flush left in the row. */
+.loom-view button.loom-hub-name-link {
+	background: none;
+	box-shadow: none;
+	padding: 0;
+	cursor: pointer;
+	text-align: left;
+	justify-content: flex-start;
+	flex: 0 1 auto;
+	color: var(--text-normal);
+}
+
+.loom-view button.loom-hub-name-link:hover {
+	color: var(--text-accent);
+	text-decoration: underline;
+}
+
+.loom-group-sublabel {
+	font-size: 0.85em;
+	color: var(--text-muted);
+	margin-top: var(--size-2-3);
+}
+
+/* PC filter chips: toggled-off chips sit dimmed and uncolored. */
+.loom-view button.loom-chip-filter-off {
+	opacity: 0.5;
+}
+
+/* The filter panel folded behind the filter icon; the icon lights up while
+   open or while any filter is active. */
+.loom-view button.loom-group-filter-btn-on {
+	color: var(--text-accent);
+}
+
+.loom-group-filter {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	margin-bottom: var(--size-4-2);
+	padding: var(--size-4-2) var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+}
+
+/* Month filter: year switcher centered over the 3×4 month grid. */
+.loom-group-year {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--size-2-2);
+	max-width: 20rem;
+}
+
+.loom-group-year-label {
+	font-weight: var(--font-medium);
+	min-width: 3.2em;
+	text-align: center;
+}
+
+.loom-month-grid {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: var(--size-2-2);
+	max-width: 20rem;
+	margin-top: var(--size-2-2);
+}
+
+.loom-view button.loom-month-btn {
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	padding: var(--size-2-2) 0;
+	cursor: pointer;
+	color: var(--text-muted);
+}
+
+.loom-view button.loom-month-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.loom-view button.loom-month-btn-on {
+	background: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.loom-view button.loom-month-btn-on:hover {
+	background: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
+}
+
+/* Nested settings rows (quest tag colors under Quest, custom Loom colors). */
+.loom-setting-nested {
+	padding-left: var(--size-4-6);
+}
+
+.loom-setting-nested .setting-item-name {
+	color: var(--text-muted);
+}
+
+.loom-group-filter-actions {
+	display: flex;
+	margin-top: var(--size-2-2);
 }

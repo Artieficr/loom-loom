@@ -18,6 +18,7 @@ import {
 	FM,
 	FactionMemberDecl,
 	LOOM_EXTENSION,
+	PC_TAG,
 	QUEST_OUTCOMES,
 	RelationshipDecl,
 	SessionNoteDecl,
@@ -560,12 +561,13 @@ export class LoomIndexer extends Component {
 		if (Array.isArray(rawSessionNotes)) {
 			for (const note of rawSessionNotes) {
 				if (typeof note !== 'object' || note === null) continue;
-				const { session, text, places, seq, involved } = note as {
+				const { session, text, places, seq, involved, group } = note as {
 					session?: unknown;
 					text?: unknown;
 					places?: unknown;
 					seq?: unknown;
 					involved?: unknown;
+					group?: unknown;
 				};
 				sessionNotes.push({
 					session: typeof session === 'string' ? extractLinkpath(session) : null,
@@ -573,6 +575,7 @@ export class LoomIndexer extends Component {
 					places: parseLinkList(places),
 					seq: typeof seq === 'number' ? seq : null,
 					involved: parseLinkList(involved),
+					group: parseLinkList(group),
 				});
 			}
 		}
@@ -623,6 +626,7 @@ export class LoomIndexer extends Component {
 			})(),
 			members: parseMemberList(fmLoom(fm, FM.members)),
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
+			active: fmLoom(fm, FM.active) !== false,
 			deathSession: typeof deathValue === 'string' ? extractLinkpath(deathValue) : null,
 			questReceived: typeof receivedValue === 'string' ? extractLinkpath(receivedValue) : null,
 			questOutcome:
@@ -665,6 +669,15 @@ export class LoomIndexer extends Component {
 		const all = [...this.records.values()];
 		return all.filter(
 			(r) => (type === undefined || r.type === type) && (projectRoot === undefined || r.project === projectRoot)
+		);
+	}
+
+	/** The party right now: PC-tagged characters that are alive and active —
+	 *  what the virtual "Group" faction snapshots when picked in a search.
+	 *  (Dead or away PCs stop being added; past snapshots keep them.) */
+	getGroupMembers(projectRoot: string): EntityRecord[] {
+		return this.getAll('character', projectRoot).filter(
+			(r) => r.loomTags.includes(PC_TAG) && r.alive && r.active
 		);
 	}
 
@@ -735,7 +748,9 @@ export class LoomIndexer extends Component {
 				out.push({ record: target, relType: 'session note', direction: 'outgoing' });
 				linked.add(target.path);
 			}
-			for (const lp of note.involved) {
+			// Group-snapshot members connect exactly like involved entities — the
+			// "Group" chip is a display collapse only, the graph shows individuals.
+			for (const lp of [...note.involved, ...note.group]) {
 				const inv = this.resolve(lp, record.path);
 				if (inv && inv.path !== record.path && !linked.has(inv.path)) {
 					out.push({ record: inv, relType: 'involved', direction: 'outgoing' });

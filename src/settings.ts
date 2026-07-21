@@ -42,6 +42,17 @@ export interface LoomLoomSettings {
 	globalLayerOrder: EntityType[];
 	/** Graph node fill color per entity type. */
 	nodeColors: Record<EntityType, string>;
+	/** Color of the virtual Group — its chips, home-wheel button, page header.
+	 *  Its own entity color, distinct from factions. */
+	groupColor: string;
+	/** Home-wheel Loom button colors. 'original' follows the app theme (light
+	 *  theme: plum bg / cream icon, dark theme: reversed — via body.theme-dark
+	 *  CSS, so it flips live); 'custom' uses the pair below. */
+	loomButtonStyle: 'original' | 'custom';
+	/** Custom Loom button background (used when loomButtonStyle = 'custom'). */
+	loomButtonBg: string;
+	/** Custom Loom button icon/label color (when loomButtonStyle = 'custom'). */
+	loomButtonIcon: string;
 	/** Last camera per project root — not user-facing, remembered across sessions. */
 	graphCameras: Record<string, GraphCamera>;
 	/** Resized textarea heights (px) per entity file path, keyed by field name
@@ -81,6 +92,10 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		item: '#d8b13c',
 		quest: '#c95f5f',
 	},
+	groupColor: '#46b5a5',
+	loomButtonStyle: 'original',
+	loomButtonBg: '#4c3d57',
+	loomButtonIcon: '#fff8e6',
 	graphCameras: {},
 	entityBoxSizes: {},
 	graphManualX: {},
@@ -150,6 +165,24 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 				base.nodeColors[type] = color;
 			}
 		}
+	}
+	if (typeof data.groupColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.groupColor)) {
+		base.groupColor = data.groupColor;
+	}
+	if (data.loomButtonStyle === 'original' || data.loomButtonStyle === 'custom') {
+		base.loomButtonStyle = data.loomButtonStyle;
+	} else if (
+		(data.loomButtonStyle as unknown) === 'original-light' ||
+		(data.loomButtonStyle as unknown) === 'original-dark'
+	) {
+		// Short-lived fixed presets, superseded by the theme-following original.
+		base.loomButtonStyle = 'original';
+	}
+	if (typeof data.loomButtonBg === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.loomButtonBg)) {
+		base.loomButtonBg = data.loomButtonBg;
+	}
+	if (typeof data.loomButtonIcon === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.loomButtonIcon)) {
+		base.loomButtonIcon = data.loomButtonIcon;
 	}
 	if (Array.isArray(data.globalLayerOrder)) {
 		const order: EntityType[] = [];
@@ -230,7 +263,7 @@ const SETTINGS_TABS: [SettingsTabId, string][] = [
  */
 const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 	general: ['textSize'],
-	entities: ['questTagColors'],
+	entities: ['questTagColors', 'nodeColors', 'groupColor', 'loomButtonStyle', 'loomButtonBg', 'loomButtonIcon'],
 	graph: [
 		'graphCollapseThreshold',
 		'graphFocusZoom',
@@ -238,7 +271,6 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 		'graphTrunkGap',
 		'graphArrowSize',
 		'graphDropEdits',
-		'nodeColors',
 		'globalLayerOrder',
 	],
 };
@@ -325,23 +357,97 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	}
 
 	private renderEntities(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Quests').setHeading();
-		containerEl.createEl('p', {
-			text: 'Background color for each quest tag.',
-			cls: 'setting-item-description',
+		new Setting(containerEl).setName('Entities colors').setHeading();
+		// The virtual Group leads — its own entity color-wise (chips, home
+		// wheel, its page) even though it never appears in the graph.
+		const groupSetting = new Setting(containerEl).setName('Group').addColorPicker((picker) =>
+			picker.setValue(this.plugin.settings.groupColor).onChange(async (value) => {
+				this.plugin.settings.groupColor = value;
+				await this.plugin.saveSettings();
+				this.plugin.indexer.refreshViews();
+			})
+		);
+		this.addReset(groupSetting, () => {
+			this.plugin.settings.groupColor = DEFAULT_SETTINGS.groupColor;
 		});
-		for (const k of ['main', 'important', 'side'] as const) {
-			const setting = new Setting(containerEl)
-				.setName(k[0].toUpperCase() + k.slice(1))
+		for (const type of ENTITY_TYPES) {
+			const setting = new Setting(containerEl).setName(ENTITY_META[type].label).addColorPicker((picker) =>
+				picker.setValue(this.plugin.settings.nodeColors[type]).onChange(async (value) => {
+					this.plugin.settings.nodeColors[type] = value;
+					await this.plugin.saveSettings();
+					this.plugin.indexer.refreshViews();
+				})
+			);
+			this.addReset(setting, () => {
+				this.plugin.settings.nodeColors[type] = DEFAULT_SETTINGS.nodeColors[type];
+			});
+			// Quest tag colors nest right under the quest entity color.
+			if (type === 'quest') {
+				for (const k of ['main', 'important', 'side'] as const) {
+					const tagSetting = new Setting(containerEl)
+						.setName(`Quest tag — ${k[0].toUpperCase() + k.slice(1)}`)
+						.setClass('loom-setting-nested')
+						.addColorPicker((picker) =>
+							picker.setValue(this.plugin.settings.questTagColors[k]).onChange(async (value) => {
+								this.plugin.settings.questTagColors[k] = value;
+								await this.plugin.saveSettings();
+								this.plugin.indexer.refreshViews();
+							})
+						);
+					this.addReset(tagSetting, () => {
+						this.plugin.settings.questTagColors[k] = DEFAULT_SETTINGS.questTagColors[k];
+					});
+				}
+			}
+		}
+
+		new Setting(containerEl).setName('Loom button').setHeading();
+		const styleSetting = new Setting(containerEl)
+			.setName('Colors')
+			.setDesc('Background and icon colors of the home wheel’s central Loom button.')
+			.addDropdown((dd) =>
+				dd
+					.addOption('original', 'Loom, original (follows the light/dark theme)')
+					.addOption('custom', 'Custom')
+					.setValue(this.plugin.settings.loomButtonStyle)
+					.onChange(async (value) => {
+						if (value === 'original' || value === 'custom') {
+							this.plugin.settings.loomButtonStyle = value;
+						}
+						await this.plugin.saveSettings();
+						this.plugin.indexer.refreshViews();
+						this.redisplay();
+					})
+			);
+		this.addReset(styleSetting, () => {
+			this.plugin.settings.loomButtonStyle = DEFAULT_SETTINGS.loomButtonStyle;
+		});
+		if (this.plugin.settings.loomButtonStyle === 'custom') {
+			const bgSetting = new Setting(containerEl)
+				.setName('Custom background')
+				.setClass('loom-setting-nested')
 				.addColorPicker((picker) =>
-					picker.setValue(this.plugin.settings.questTagColors[k]).onChange(async (value) => {
-						this.plugin.settings.questTagColors[k] = value;
+					picker.setValue(this.plugin.settings.loomButtonBg).onChange(async (value) => {
+						this.plugin.settings.loomButtonBg = value;
 						await this.plugin.saveSettings();
 						this.plugin.indexer.refreshViews();
 					})
 				);
-			this.addReset(setting, () => {
-				this.plugin.settings.questTagColors[k] = DEFAULT_SETTINGS.questTagColors[k];
+			this.addReset(bgSetting, () => {
+				this.plugin.settings.loomButtonBg = DEFAULT_SETTINGS.loomButtonBg;
+			});
+			const iconSetting = new Setting(containerEl)
+				.setName('Custom icon')
+				.setClass('loom-setting-nested')
+				.addColorPicker((picker) =>
+					picker.setValue(this.plugin.settings.loomButtonIcon).onChange(async (value) => {
+						this.plugin.settings.loomButtonIcon = value;
+						await this.plugin.saveSettings();
+						this.plugin.indexer.refreshViews();
+					})
+				);
+			this.addReset(iconSetting, () => {
+				this.plugin.settings.loomButtonIcon = DEFAULT_SETTINGS.loomButtonIcon;
 			});
 		}
 	}
@@ -421,20 +527,6 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			() => this.plugin.settings.graphLineGap,
 			(v) => (this.plugin.settings.graphLineGap = v)
 		);
-
-		new Setting(containerEl).setName('Node colors').setHeading();
-		for (const type of ENTITY_TYPES) {
-			const setting = new Setting(containerEl).setName(`${ENTITY_META[type].label} nodes`).addColorPicker((picker) =>
-				picker.setValue(this.plugin.settings.nodeColors[type]).onChange(async (value) => {
-					this.plugin.settings.nodeColors[type] = value;
-					await this.plugin.saveSettings();
-					this.plugin.indexer.refreshViews();
-				})
-			);
-			this.addReset(setting, () => {
-				this.plugin.settings.nodeColors[type] = DEFAULT_SETTINGS.nodeColors[type];
-			});
-		}
 
 		// "Global" is the layout's internal term — users just see entity rows.
 		new Setting(containerEl).setName('Entity layers').setHeading();

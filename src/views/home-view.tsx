@@ -1,13 +1,16 @@
-import { ReactElement } from 'react';
+import { CSSProperties, ReactElement } from 'react';
 import {
 	ENTITY_META,
 	ENTITY_TYPES,
 	EntityType,
 	LOOM_EXTENSION,
+	PC_GROUP_ICON,
 	VIEW_GRAPH,
+	VIEW_GROUP,
 	VIEW_HOME,
 	VIEW_LIST,
 } from '../types';
+import { groupNameOf } from '../calendar';
 import { LoomFileReactView } from './react-view';
 import { Icon } from './common';
 import { useIndexVersion } from './hooks';
@@ -52,23 +55,83 @@ function Home({ view }: { view: HomeView }) {
 	const state = { project: project.root };
 	const openList = (type: EntityType) => view.navigateTo(VIEW_LIST, { ...state, entityType: type });
 
+	// The wheel's satellites: Group first (12 o'clock), then the entity types
+	// clockwise in their canonical order. Positions distribute evenly, so a
+	// future entry just narrows the angle step. Each carries its node color
+	// (Group wears the faction color, like its chips).
+	const satellites: {
+		key: string;
+		icon: string;
+		label: string;
+		color: string;
+		count: number;
+		open: () => void;
+	}[] = [
+		{
+			key: 'group',
+			icon: PC_GROUP_ICON,
+			label: groupNameOf(project.config),
+			color: plugin.settings.groupColor,
+			count: plugin.indexer.getGroupMembers(project.root).length,
+			open: () =>
+				view.navigateTo(VIEW_GROUP, {
+					...state,
+					origin: { type: view.getViewType(), state: view.getState() },
+				}),
+		},
+		...ENTITY_TYPES.map((type) => ({
+			key: type,
+			icon: ENTITY_META[type].icon,
+			label: ENTITY_META[type].plural,
+			color: plugin.settings.nodeColors[type],
+			count: plugin.indexer.getAll(type, project.root).length,
+			open: () => openList(type),
+		})),
+	];
+
+	// Loom button colors: "original" carries no inline colors — CSS supplies
+	// the plum/cream pair and flips it with the app theme (body.theme-dark),
+	// live. Custom pins the user's own pair.
+	const loomCustom = plugin.settings.loomButtonStyle === 'custom';
+
 	return (
 		<div className="loom-home">
 			<h2>{project.name}</h2>
-			<div className="loom-home-grid">
-				{ENTITY_TYPES.map((type) => (
-					<button key={type} className="loom-card" onClick={() => openList(type)}>
-						<Icon name={ENTITY_META[type].icon} />
-						<span className="loom-card-label">{ENTITY_META[type].plural}</span>
-						<span className="loom-card-count">{plugin.indexer.getAll(type, project.root).length}</span>
-					</button>
-				))}
-			</div>
-			<div className="loom-home-grid loom-home-grid-wide">
-				<button className="loom-card" onClick={() => view.navigateTo(VIEW_GRAPH, state)}>
+			<div className="loom-home-wheel">
+				<button
+					className={
+						loomCustom
+							? 'loom-card loom-wheel-center'
+							: 'loom-card loom-wheel-center loom-wheel-center-original'
+					}
+					style={
+						loomCustom
+							? ({
+									'--wheel-center-bg': plugin.settings.loomButtonBg,
+									'--wheel-center-icon': plugin.settings.loomButtonIcon,
+								} as CSSProperties)
+							: undefined
+					}
+					onClick={() => view.navigateTo(VIEW_GRAPH, state)}
+				>
 					<Icon name="spool" />
 					<span className="loom-card-label">Loom</span>
 				</button>
+				{satellites.map((s, i) => {
+					const angle = ((-90 + (360 / satellites.length) * i) * Math.PI) / 180;
+					const style = {
+						'--wheel-x': Math.cos(angle).toFixed(4),
+						'--wheel-y': Math.sin(angle).toFixed(4),
+						'--wheel-color': s.color,
+					} as CSSProperties;
+					return (
+						<button key={s.key} className="loom-card loom-wheel-card" style={style} onClick={s.open}>
+							<Icon name={s.icon} fallback={s.key === 'group' ? 'star' : undefined} />
+							<span className="loom-card-label">{s.label}</span>
+							<span className="loom-card-count">{s.count}</span>
+						</button>
+					);
+				})}
 			</div>
 		</div>
 	);

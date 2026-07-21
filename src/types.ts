@@ -50,6 +50,19 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 /** Characters tagged PC appear in session attendance and carry the alive flag. */
 export const PC_TAG = 'PC';
 
+/**
+ * The virtual "Group" faction: a picker-only entry that expands to every
+ * PC-tagged character of the project — a fast way to connect the whole party
+ * instead of adding PCs one by one. It has no file and never appears in the
+ * entity list or the graph.
+ */
+export const PC_GROUP_NAME = 'Group';
+/** Sentinel option value for the virtual Group (contains `:`, so it can never
+ *  collide with a real file basename / link target). */
+export const PC_GROUP_VALUE = 'loom:pc-group';
+/** Icon of the virtual Group everywhere it appears (rail, home, its page). */
+export const PC_GROUP_ICON = 'circle-star';
+
 
 /** Entity types that live on the timeline layers of the graph. */
 export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event'];
@@ -83,6 +96,9 @@ export const FM = {
 	sublocationOrder: 'loomSublocationOrder',
 	members: 'loomMembers',
 	alive: 'loomAlive',
+	/** Character only (PC): false while the character is away from the party —
+	 *  excluded from new virtual-Group picks until re-ticked. */
+	active: 'loomActive',
 	deathSession: 'loomDeathSession',
 	questGiver: 'loomQuestGiver',
 	questReceived: 'loomQuestReceived',
@@ -146,6 +162,11 @@ export interface SessionNoteDecl {
 	/** Linkpaths of entities involved in this note — the note (not a
 	 *  relationship) is the home of involvement. */
 	involved: string[];
+	/** Virtual-Group snapshot: linkpaths of the PCs the party consisted of when
+	 *  "Group" was picked for this note (alive + active at pick time; frozen —
+	 *  later deaths/leaves don't rewrite history). Rendered as one "Group" chip
+	 *  but each member connects individually, exactly like `involved`. */
+	group: string[];
 }
 
 /** One faction membership as declared in the faction's `members` frontmatter.
@@ -213,6 +234,9 @@ export interface EntityRecord {
 	members: FactionMemberDecl[];
 	/** Character only (PC): false once the character has died. */
 	alive: boolean;
+	/** Character only (PC): false while away from the party (narrative absence);
+	 *  new virtual-Group picks skip inactive PCs. Default true. */
+	active: boolean;
 	/** Character only (PC): linkpath of the session they died in. Sessions
 	 *  after it no longer offer the character for attendance. */
 	deathSession: string | null;
@@ -231,6 +255,41 @@ export interface EntityRecord {
 	seq: number | null;
 	created: number;
 	modified: number;
+}
+
+/** Picker-only stub record for the virtual "Group" faction — handed to
+ *  suggests that operate on records. Never indexed, never rendered as a page.
+ *  `name` is the project's custom group name (default "Group"). */
+export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRecord {
+	return {
+		path: PC_GROUP_VALUE,
+		name,
+		type: 'faction',
+		project: projectRoot,
+		loomTags: [],
+		description: '',
+		relationships: [],
+		sessionNotes: [],
+		date: null,
+		attendance: [],
+		parentLocation: null,
+		sublocationOrder: [],
+		items: [],
+		itemOrigin: null,
+		itemOwner: null,
+		members: [],
+		alive: true,
+		active: true,
+		deathSession: null,
+		questReceived: null,
+		questOutcome: '',
+		questOutcomeSession: null,
+		questGivers: [],
+		reward: '',
+		seq: null,
+		created: 0,
+		modified: 0,
+	};
 }
 
 /** How a quest can end; '' in `questOutcome` means it's still active. */
@@ -269,3 +328,4 @@ export const VIEW_HOME = 'loom-loom-home';
 export const VIEW_LIST = 'loom-loom-list';
 export const VIEW_GRAPH = 'loom-loom-graph';
 export const VIEW_ENTITY = 'loom-loom-entity';
+export const VIEW_GROUP = 'loom-loom-group';

@@ -79,6 +79,24 @@ relationships:
   session contributes an edge of type `session note`, so writing a session note is also
   what connects the entity to that session. Edited under the Notes field on every entity
   page except sessions themselves ("+ Add a session note").
+- **The virtual "Group" faction is a picker macro, not an entity**: searches that
+  connect entities (Involve… on note rows, faction Members, relationship targets, the
+  create-modal's Involved field) offer a file-less "Group" entry
+  (`PC_GROUP_NAME`/`PC_GROUP_VALUE`/`pcGroupStub` in types.ts). The party at pick time
+  is `LoomIndexer.getGroupMembers` — PC-tagged, `alive`, and `active` (`loomActive`:
+  a PC that leaves the party for a while is unticked, so new picks skip them; re-tick
+  on rejoining). In involved pickers the pick writes a **`group` snapshot list** on
+  the note entry (sibling of `involved`) holding the party as of that moment — the
+  snapshot is frozen, so a later death or leave never rewrites which events a
+  character took part in. The UI collapses the snapshot into one faction-colored
+  "Group" chip, but for the index the links behave exactly like `involved`: each
+  member gets an `involved` connection, an individual graph edge, and the event on
+  their page's Events section. Members/relationship pickers expand immediately into
+  individual entries instead (a relationship draft row becomes one row per member).
+  Nothing named "Group" is ever an entity — it can't appear in the entity list or
+  graph, and creating or renaming a real faction to "Group" is blocked (reserved
+  name). The entry hides itself when a picker's type filter excludes
+  characters/factions or when every current member is already on the note.
 - **Native links count too**: any plain `[[wikilink]]` in a note's body or frontmatter
   (from `metadataCache` `links`/`frontmatterLinks`) that lands on another indexed entity
   becomes a connection of type `link`. Users shouldn't need the typed syntax just to get

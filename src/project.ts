@@ -22,10 +22,12 @@ import {
 	EntityType,
 	FM,
 	LOOM_EXTENSION,
+	PC_GROUP_VALUE,
 	TIMELINES_FOLDER,
 	VIEW_LIST,
+	pcGroupStub,
 } from './types';
-import { defaultProjectConfig, formatLoomDate, serializeProjectConfig, todayRaw } from './calendar';
+import { defaultProjectConfig, formatLoomDate, groupNameOf, serializeProjectConfig, todayRaw } from './calendar';
 import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
 import { ProjectDef, linkTargetOf } from './indexer';
 import { fmLoomValue, setLoomKey } from './fm';
@@ -108,6 +110,9 @@ export interface NewEntityFields {
 	/** Event only: entity names involved — written into the starting session
 	 *  note's `involved` list (session-less for lore events). */
 	involved?: string[];
+	/** Event only: virtual-Group snapshot (current party's names) — written into
+	 *  the starting note's `group` list, rendered as one "Group" chip. */
+	group?: string[];
 	/** Event only: location names for the starting note's `places` (events
 	 *  created from a location page). */
 	places?: string[];
@@ -153,8 +158,14 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	// entities. Involvement without a session (a lore event) writes a
 	// session-less note — involved links still connect (relType `involved`).
 	const involved = fields.involved ?? [];
+	const group = fields.group ?? [];
 	const places = fields.places ?? [];
-	if ((fields.noteSession && fields.noteSession !== '') || involved.length > 0 || places.length > 0) {
+	if (
+		(fields.noteSession && fields.noteSession !== '') ||
+		involved.length > 0 ||
+		group.length > 0 ||
+		places.length > 0
+	) {
 		lines.push(
 			`${FM.sessionNotes}:`,
 			`  - session: ${
@@ -166,6 +177,10 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 		if (involved.length > 0) {
 			lines.push('    involved:');
 			for (const n of involved) lines.push(`      - ${yamlQuote(`[[${n}]]`)}`);
+		}
+		if (group.length > 0) {
+			lines.push('    group:');
+			for (const n of group) lines.push(`      - ${yamlQuote(`[[${n}]]`)}`);
 		}
 		if (places.length > 0) {
 			lines.push('    places:');
@@ -394,6 +409,9 @@ export interface CreateEntityOptions {
 	/** Events only: location name pre-added to the starting note's places —
 	 *  e.g. the location whose page spawned the event. */
 	defaultPlace?: string;
+	/** Events only: names pre-added as the starting note's virtual-Group
+	 *  snapshot — the Group page's "+ Create new event". */
+	defaultGroup?: string[];
 	/** Prefills the Name field (e.g. "+ Create …" from a [[link completion). */
 	initialName?: string;
 }
@@ -427,6 +445,9 @@ export class CreateEntityModal extends Modal {
 			this.fields.involved = [...options.defaultInvolved];
 		}
 		if (options.defaultPlace) this.fields.places = [options.defaultPlace];
+		if (options.defaultGroup && options.defaultGroup.length > 0) {
+			this.fields.group = [...options.defaultGroup];
+		}
 		if (options.initialName) this.fields.name = options.initialName.trim();
 	}
 
@@ -462,7 +483,10 @@ export class CreateEntityModal extends Modal {
 	): void {
 		const chip = container.createSpan({ cls: 'loom-chip loom-session-chip loom-entity-chip' });
 		if (record) {
-			const color = this.plugin.settings.nodeColors[record.type];
+			const color =
+				record.path === PC_GROUP_VALUE
+					? this.plugin.settings.groupColor
+					: this.plugin.settings.nodeColors[record.type];
 			chip.style.background = color + '40';
 			chip.style.borderColor = color;
 		}
@@ -674,19 +698,42 @@ export class CreateEntityModal extends Modal {
 			// Involved entities: search with a type filter; picks collect as
 			// entity tags with ✕ (mirrors the pages' Involve… control).
 			let involveFilter: EntityType | null = null;
-			const candidates = () =>
+			const missingPcs = () =>
 				this.plugin.indexer
+					.getGroupMembers(this.project.root)
+					.filter(
+						(r) =>
+							!(this.fields.involved ?? []).includes(linkTargetOf(r)) &&
+							!(this.fields.group ?? []).includes(linkTargetOf(r))
+					);
+			const taken = (r: EntityRecord) =>
+				(this.fields.involved ?? []).includes(linkTargetOf(r)) ||
+				(this.fields.group ?? []).includes(linkTargetOf(r));
+			const candidates = () => [
+				// The virtual "Group" faction: picking it snapshots the current
+				// party into the note's `group` list (one chip, individual links).
+				...(missingPcs().length > 0 &&
+				(involveFilter === null || involveFilter === 'faction' || involveFilter === 'character')
+					? [pcGroupStub(this.project.root, groupNameOf(this.project.config))]
+					: []),
+				...this.plugin.indexer
 					.getAll(undefined, this.project.root)
 					.filter((r) => r.type !== 'session' && r.type !== 'event')
 					.filter((r) => involveFilter === null || r.type === involveFilter)
-					.filter((r) => !(this.fields.involved ?? []).includes(linkTargetOf(r)))
-					.sort((a, b) => a.name.localeCompare(b.name));
+					.filter((r) => !taken(r))
+					.sort((a, b) => a.name.localeCompare(b.name)),
+			];
 			new Setting(this.contentEl)
 				.setName('Involved entities')
 				.addText((text) => {
 					text.setPlaceholder('Involve…');
 					new RecordInputSuggest(this.app, text.inputEl, candidates, (r) => {
-						(this.fields.involved ??= []).push(linkTargetOf(r));
+						if (r.path === PC_GROUP_VALUE) {
+							const group = (this.fields.group ??= []);
+							for (const pc of missingPcs()) group.push(linkTargetOf(pc));
+						} else {
+							(this.fields.involved ??= []).push(linkTargetOf(r));
+						}
 						refreshInvolved();
 					});
 				})
@@ -722,6 +769,13 @@ export class CreateEntityModal extends Modal {
 			const involvedChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
 			const refreshInvolved = () => {
 				involvedChips.empty();
+				if ((this.fields.group ?? []).length > 0) {
+					const label = groupNameOf(this.project.config);
+					this.renderChip(involvedChips, pcGroupStub(this.project.root, label), label, () => {
+						this.fields.group = undefined;
+						refreshInvolved();
+					});
+				}
 				for (const target of this.fields.involved ?? []) {
 					const rec = this.resolveName(target);
 					this.renderChip(involvedChips, rec, rec?.name ?? target, () => {
