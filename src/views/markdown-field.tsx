@@ -438,6 +438,7 @@ export function MarkdownField({
 	placeholder,
 	onOpenLink,
 	onCreateEntity,
+	readOnly,
 }: {
 	/** Needed to outrank Obsidian's global Ctrl+B/I hotkeys while focused. */
 	app: App;
@@ -445,6 +446,9 @@ export function MarkdownField({
 	onChange: (value: string) => void;
 	names: LinkOption[];
 	placeholder?: string;
+	/** Live-preview but not editable (e.g. an "Original description" spoiler);
+	 *  clicking rendered links still works. */
+	readOnly?: boolean;
 	/** Opens a clicked rendered wikilink (raw target; `newTab` on middle-click). */
 	onOpenLink: (target: string, newTab?: boolean) => void;
 	/** Offered as "+ Create …" in the [[ completion: create an entity from the
@@ -494,6 +498,7 @@ export function MarkdownField({
 			state: EditorState.create({
 				doc: value,
 				extensions: [
+					...(readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
 					history(),
 					EditorView.lineWrapping,
 					cmPlaceholder(placeholder ?? ''),

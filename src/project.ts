@@ -1,6 +1,7 @@
 import {
 	AbstractInputSuggest,
 	App,
+	ButtonComponent,
 	FuzzySuggestModal,
 	Menu,
 	Modal,
@@ -324,6 +325,54 @@ export async function createEntity(
 	return plugin.app.vault.create(path, buildEntityContent(type, fields));
 }
 
+/**
+ * Creates a character-specific copy of `original`: a new item note named
+ * `<Project> Item <original> — <character>`, its `loomName`/aliases carrying the
+ * "<original> [<character>]" label, and `loomItemOrigin`/`loomItemOwner` links
+ * back to both. Its own description starts empty (the copy falls back to the
+ * original's until an alternative is written). Returns the new file.
+ */
+export async function createItemCopy(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	original: EntityRecord,
+	character: EntityRecord
+): Promise<TFile> {
+	const folder = projectPath(project, ENTITY_META.item.folder);
+	await ensureFolder(plugin.app, folder);
+	const base = managedEntityFileName(project.name, 'item', original.name, undefined, character.name);
+	let path = normalizePath(`${folder}/${base}.md`);
+	for (let i = 2; plugin.app.vault.getAbstractFileByPath(path) !== null; i++) {
+		path = normalizePath(`${folder}/${base} ${i}.md`);
+	}
+	const label = `${original.name} [${character.name}]`;
+	// Every alias of the original gains the "[character]" suffix so native
+	// [[…]] search offers "Excalibur [Arthur]" for each of the original's names.
+	const origFile = plugin.app.vault.getFileByPath(original.path);
+	const origAliases = origFile
+		? ((plugin.app.metadataCache.getFileCache(origFile)?.frontmatter?.aliases as unknown) ?? [])
+		: [];
+	const aliasLabels = [
+		label,
+		...(Array.isArray(origAliases) ? origAliases : [])
+			.filter((a): a is string => typeof a === 'string' && a.trim() !== '' && a !== original.name)
+			.map((a) => `${a} [${character.name}]`),
+	];
+	// processFrontMatter writes block style (`- Excalibur [Arthur]`), which stays
+	// valid YAML when Obsidian rewrites the file on later renames — a raw flow
+	// list (`["…"]`) gets its quotes stripped and breaks the alias mechanic.
+	const file = await plugin.app.vault.create(path, '');
+	await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+		setLoomKey(fm, FM.type, 'item');
+		setLoomKey(fm, FM.name, label);
+		setLoomKey(fm, FM.itemOrigin, `[[${linkTargetOf(original)}]]`);
+		setLoomKey(fm, FM.itemOwner, `[[${linkTargetOf(character)}]]`);
+		setLoomKey(fm, FM.description, '');
+		fm.aliases = aliasLabels;
+	});
+	return file;
+}
+
 export interface CreateEntityOptions {
 	/** When set, called with the new file instead of opening its entity page. */
 	onCreated?: (file: TFile) => void;
@@ -359,6 +408,9 @@ export class CreateEntityModal extends Modal {
 	/** Event/quest from a session page: an existing entity chosen in the Name
 	 *  search — submit pins it to the session instead of creating a duplicate. */
 	private pickedExisting: EntityRecord | null = null;
+	/** The primary button; its label flips to "Add" once an existing
+	 *  event/quest is picked (it will be pinned, not created). */
+	private submitBtn: ButtonComponent | null = null;
 
 	constructor(
 		private plugin: LoomLoomPlugin,
@@ -456,6 +508,7 @@ export class CreateEntityModal extends Modal {
 						this.fields.name = v.trim();
 						// Typing after a pick means "make a new one with this name".
 						this.pickedExisting = null;
+						this.refreshSubmitLabel();
 					});
 				if (searchable) {
 					new RecordInputSuggest(
@@ -466,6 +519,7 @@ export class CreateEntityModal extends Modal {
 							this.pickedExisting = r;
 							this.fields.name = r.name;
 							text.inputEl.value = r.name;
+							this.refreshSubmitLabel();
 						},
 						(r) => r.name,
 						false
@@ -909,12 +963,20 @@ export class CreateEntityModal extends Modal {
 				);
 		}
 
-		new Setting(this.contentEl).addButton((btn) =>
+		new Setting(this.contentEl).addButton((btn) => {
+			this.submitBtn = btn;
 			btn
 				.setButtonText('Create')
 				.setCta()
-				.onClick(() => void this.submit())
-		);
+				.onClick(() => void this.submit());
+			this.refreshSubmitLabel();
+		});
+	}
+
+	/** Primary button reads "Add" when a name search matched an existing
+	 *  event/quest (it gets pinned to the session), "Create" otherwise. */
+	private refreshSubmitLabel(): void {
+		this.submitBtn?.setButtonText(this.pickedExisting ? 'Add' : 'Create');
 	}
 
 	private async submit(): Promise<void> {
