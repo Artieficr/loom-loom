@@ -70,8 +70,47 @@ and a custom layered graph view.
   `location` relationship) surfaces it on that location **and every ancestor location**
   (city ⊇ tavern ⊇ secret room). Removing the page's own entity from a note warns first
   ("… this event won't be displayed here anymore"). Only event/quest pages keep an
-  editable own-`sessionNotes` section; "+ Add an event" pre-links the page's entity
-  (`defaultInvolved` / `defaultPlace`).
+  editable own-`sessionNotes` section. Adding an event is a `SearchableSelect`:
+  picking an existing event involves this page's entity in that event's first note
+  (`places` for a location page, else `involved`), and "+ Create new event" opens the
+  modal pre-linking the page's entity (`defaultInvolved` / `defaultPlace`).
+- **Items section (character/location pages, after Events)**: an ordered `loomItems`
+  frontmatter list of item links on the character/location. Each row edits the item
+  entity in place (name renames the item file, description writes its `loomDescription`);
+  drag-reordering rewrites the page's `loomItems` order (per-page). Adding searches
+  existing items (+ "Create new item"). Each row's `<` drawer holds Delete (trashes the
+  item note) + Remove (just unlinks it from this page); on a character page a `layers-2`
+  button (left of Delete) makes a character-specific copy. The links are visible
+  (non-hidden) so items also connect in the graph.
+- **Item page reverse sections**: an item page shows **Characters** (after Events) and
+  **Locations** (after Characters) — the holders that carry this item via their
+  `loomItems`. Chips (persistent entities, not editable), an "Add to character/location…"
+  search that writes the item into the picked holder's `loomItems`, and a remove ✕ that
+  unlinks it. Direct reverse query only (a holder that swapped in a character-specific
+  copy no longer credits the original).
+- **Character-specific item copies**: the `layers-2` button on a character-page item row
+  (standalone next to the row's open arrow, not in the delete/remove drawer; tooltip
+  "Replace with a character specific copy of this item") creates a copy item note
+  `<Project> Item <original> — <character>`, replaces the original in that character's
+  `loomItems` with it, and opens it. The copy carries `loomItemOrigin` (visible link →
+  graph edge to the original) + `loomItemOwner` (hidden link — the character already
+  connects via `loomItems`); its `loomName`/`aliases` are the `<original> [<character>]`
+  label (each original alias also suffixed `[character]`), so pickers and native `[[…]]`
+  search show it that way. **The copy note is written with a raw frontmatter string, not
+  `processFrontMatter`, so aliases stay quoted (`["Excalibur [Arthur]"]`) — an unquoted
+  `[…]` suffix reads as a YAML flow sequence and breaks Obsidian's alias mechanic.**
+  `managedEntityFileName` takes an `ownerName` for the `— <owner>` file name; the startup
+  migration reconciles copy names from the resolved original + owner. In a character's
+  Items row a copy shows read-only (no rename, no re-copy). The entity list nests copies
+  under their original (same machinery as sublocations, via `itemOrigin`) with the owner
+  as an `EntityChip`. A copy's page has no editable name (original chip + owner chip
+  instead); its Description shows the original until edited, at which point the field
+  becomes **Alternative description** (writes the copy's own `loomDescription`) with a
+  collapsed **Original description** spoiler (read-only `MarkdownField`, `readOnly` prop);
+  clearing the alternative reverts to the original.
+- **CreateEntityModal existing-match**: when the searchable Name field (session-page
+  event/quest add) matches an existing entity, the primary button flips from "Create" to
+  "Add" — submit pins it to the session instead of creating a duplicate.
 - **Connections**: typed frontmatter relationships + `sessionNotes` (session-pinned
   note entries `{session, text, involved, places}`; the picked session becomes a
   `session note` connection, `involved`→`involved`, event/quest `places`→`location`) + `parentLocation` on locations (sublocation parent — dedicated field
@@ -86,7 +125,8 @@ and a custom layered graph view.
   notes still connect as plain frontmatter links). Entity tags
   live in `loomTags` (legacy `pluginTags` still read); the tag vocabulary is hardcoded
   (`ENTITY_TAGS` in types.ts), not user-configurable.
-- **Hidden connections**: links under the `deathSession` and `sublocationOrder` keys
+- **Hidden connections**: links under the `deathSession`, `sublocationOrder`, and
+  `itemOwner` (a copy's owning character — already connected via `loomItems`) keys
   never become connections or graph edges. `attendance` is hidden from the generic
   link pass but emits typed `attendance` connections (a ticked PC connects to the
   session). Sessions list attending PCs (`PC` tag); PCs carry `alive` and

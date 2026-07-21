@@ -29,6 +29,7 @@ import {
 	CreateEntityModal,
 	EntityTypeSuggestModal,
 	RecordSuggestModal,
+	createItemCopy,
 	entityFileName,
 	sessionFileName,
 } from '../project';
@@ -904,6 +905,243 @@ function EntityPage({ view }: { view: EntityView }) {
 				{newestFirst ? 'New on top' : 'New on bottom'}
 			</button>
 		);
+
+		// Items section (character/location): an ordered `loomItems` list of item
+		// links, each editable inline (name renames the item, description writes
+		// its own file) and drag-reorderable here.
+		const showsItems = record.type === 'character' || record.type === 'location';
+		const itemRecords = showsItems
+			? record.items
+					.map((lp) => plugin.indexer.resolve(lp, record.path))
+					.filter((r): r is EntityRecord => r != null && r.type === 'item')
+			: [];
+		const currentItemLinks = () => itemRecords.map((r) => `[[${linkTargetOf(r)}]]`);
+		const setItemLinks = (links: string[]) => writeFm((fm) => setLoomKey(fm, FM.items, links));
+		const addItemLink = (linkTarget: string) => {
+			if (currentItemLinks().includes(`[[${linkTarget}]]`)) return;
+			setItemLinks([...currentItemLinks(), `[[${linkTarget}]]`]);
+		};
+		const removeItem = (item: EntityRecord) =>
+			setItemLinks(itemRecords.filter((r) => r.path !== item.path).map((r) => `[[${linkTargetOf(r)}]]`));
+		const commitItemsOrder = (next: EntityRecord[]) =>
+			setItemLinks(next.map((r) => `[[${linkTargetOf(r)}]]`));
+		const writeItemDescription = (item: EntityRecord, value: string) => {
+			const f = plugin.app.vault.getFileByPath(item.path);
+			if (!f) return;
+			plugin.app.fileManager
+				.processFrontMatter(f, (fm: Record<string, unknown>) => setLoomKey(fm, FM.description, value))
+				.catch((e) => {
+					console.error('Loom Loom: failed to save item description', e);
+					new Notice('Could not save the item description.');
+				});
+		};
+		// A character-specific copy of the row's item: a new item note owned by
+		// this character (`record`). It replaces the original in this page's list
+		// and opens for editing its alternative description.
+		const makeItemCopy = async (item: EntityRecord) => {
+			if (!project) return;
+			const original = item.itemOrigin
+				? plugin.indexer.resolve(item.itemOrigin, item.path) ?? item
+				: item;
+			try {
+				const copy = await createItemCopy(plugin, project, original, record);
+				setItemLinks(
+					itemRecords.map((r) => (r.path === item.path ? `[[${copy.basename}]]` : `[[${linkTargetOf(r)}]]`))
+				);
+				view.openEntity(copy.path);
+			} catch (e) {
+				console.error('Loom Loom: failed to create character-specific item', e);
+				new Notice('Could not create the item copy.');
+			}
+		};
+		// Reverse of the Items section: on an item page, the characters and
+		// locations that carry this item (via their `loomItems`). Chips + an
+		// "Add to …" search; adding/removing rewrites the holder's `loomItems`.
+		const showsItemHolders = record.type === 'item';
+		const holderCharacters =
+			showsItemHolders && project
+				? plugin.indexer
+						.getAll('character', project.root)
+						.filter((c) => c.items.some((lp) => plugin.indexer.resolve(lp, c.path)?.path === record.path))
+				: [];
+		const holderLocations =
+			showsItemHolders && project
+				? plugin.indexer
+						.getAll('location', project.root)
+						.filter((l) => l.items.some((lp) => plugin.indexer.resolve(lp, l.path)?.path === record.path))
+				: [];
+		const addItemToHolder = (holder: EntityRecord) => {
+			const f = plugin.app.vault.getFileByPath(holder.path);
+			if (!f) return;
+			void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				const cur = fmLoomValue(fm, FM.items);
+				const arr = Array.isArray(cur) ? [...(cur as unknown[])] : [];
+				const present = arr.some(
+					(x) =>
+						typeof x === 'string' &&
+						plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
+				);
+				if (!present) arr.push(`[[${linkTargetOf(record)}]]`);
+				setLoomKey(fm, FM.items, arr);
+			});
+		};
+		const removeItemFromHolder = (holder: EntityRecord) => {
+			const f = plugin.app.vault.getFileByPath(holder.path);
+			if (!f) return;
+			void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				const cur = fmLoomValue(fm, FM.items);
+				const arr = Array.isArray(cur) ? (cur as unknown[]) : [];
+				setLoomKey(
+					fm,
+					FM.items,
+					arr.filter(
+						(x) =>
+							!(
+								typeof x === 'string' &&
+								plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
+							)
+					)
+				);
+			});
+		};
+		// A character-specific item copy: original + owning-character links.
+		const isItemCopy =
+			record.type === 'item' && record.itemOrigin !== null && record.itemOwner !== null;
+		const copyOriginal =
+			isItemCopy && record.itemOrigin ? plugin.indexer.resolve(record.itemOrigin, record.path) : null;
+		const copyOwner =
+			isItemCopy && record.itemOwner ? plugin.indexer.resolve(record.itemOwner, record.path) : null;
+		// Add an existing event to this page: involve this entity in the event's
+		// first note (or, for a location page, add it to that note's places),
+		// creating a session-less note if the event has none yet.
+		const addExistingEventToPage = (event: EntityRecord) => {
+			const f = plugin.app.vault.getFileByPath(event.path);
+			if (!f) return;
+			const key = isLocation ? 'places' : 'involved';
+			const link = `[[${linkTargetOf(record)}]]`;
+			plugin.app.fileManager
+				.processFrontMatter(f, (fm: Record<string, unknown>) => {
+					const cur = fmLoomValue(fm, FM.sessionNotes);
+					const arr = Array.isArray(cur) ? [...(cur as unknown[])] : [];
+					if (arr.length === 0) {
+						arr.push({ session: '', text: '', seq: Date.now(), [key]: [link] });
+					} else {
+						const first = arr[0];
+						const note: Record<string, unknown> =
+							typeof first === 'object' && first !== null
+								? { ...(first as Record<string, unknown>) }
+								: { session: '', text: typeof first === 'string' ? first : '' };
+						const list = Array.isArray(note[key]) ? [...(note[key] as unknown[])] : [];
+						list.push(link);
+						note[key] = list;
+						arr[0] = note;
+					}
+					setLoomKey(fm, FM.sessionNotes, arr);
+				})
+				.catch((e) => {
+					console.error('Loom Loom: failed to add event to page', e);
+					new Notice('Could not add the event.');
+				});
+		};
+		const itemRow = (item: EntityRecord, i: number) => {
+			const grabbed = seqDrag?.group === 'items' && seqDrag.from === i;
+			const menuKey = 'item:' + item.path;
+			// A character-specific copy's name is derived (original + owner), so it
+			// is shown read-only here and can't be re-copied.
+			const rowIsCopy = item.itemOrigin !== null;
+			return (
+				<div
+					key={item.path}
+					className={grabbed ? 'loom-locnote loom-locnote-dragging' : 'loom-locnote'}
+					style={seqRowStyle('items', i)}
+					data-seq-row=""
+				>
+					{seqGrip('items', i, itemRecords, commitItemsOrder)}
+					<div className="loom-locnote-body">
+						<div className="loom-locnote-head">
+							{rowIsCopy ? (
+								<span className="loom-hub-name loom-hub-name-static">{item.name}</span>
+							) : (
+								<input
+									type="text"
+									className="loom-hub-name"
+									defaultValue={item.name}
+									onBlur={(e) => renameEntity(item, e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === 'Enter') renameEntity(item, e.currentTarget.value);
+									}}
+								/>
+							)}
+							<button
+								className="loom-nav-btn"
+								aria-label="Open page"
+								onClick={() => view.openEntity(item.path)}
+							>
+								→
+							</button>
+							<div className="loom-shell-spacer" />
+							<div
+								className={
+									hubMenu === menuKey ? 'loom-hub-actions loom-hub-actions-open' : 'loom-hub-actions'
+								}
+							>
+								{record.type === 'character' && !rowIsCopy ? (
+									<button
+										className="loom-nav-btn loom-item-copy-btn"
+										aria-label="Replace with a character specific copy of this item"
+										onClick={() => void makeItemCopy(item)}
+									>
+										<Icon name="layers-2" />
+									</button>
+								) : null}
+								<button
+									className="loom-nav-btn loom-entity-delete"
+									aria-label="Delete this item"
+									onClick={() =>
+										new ConfirmModal(
+											plugin.app,
+											`Delete "${item.name}"?`,
+											'The note is moved to the trash.',
+											() => {
+												const f = plugin.app.vault.getFileByPath(item.path);
+												if (f) void plugin.app.fileManager.trashFile(f);
+											},
+											'Delete'
+										).open()
+									}
+								>
+									<Icon name="trash-2" />
+								</button>
+								<button
+									className="loom-nav-btn"
+									aria-label="Remove from this page"
+									onClick={() => removeItem(item)}
+								>
+									✕
+								</button>
+							</div>
+							<button
+								className="loom-nav-btn"
+								aria-label={hubMenu === menuKey ? 'Close actions' : 'Show actions'}
+								onClick={() => setHubMenu(hubMenu === menuKey ? null : menuKey)}
+							>
+								{hubMenu === menuKey ? '>' : '<'}
+							</button>
+						</div>
+						<div className="loom-note-text">
+							<HubNoteText
+								app={plugin.app}
+								initial={item.description}
+								names={linkNames}
+								onOpenLink={openLinkTarget}
+								onCreateEntity={createLinkEntity}
+								onCommit={(v) => writeItemDescription(item, v)}
+							/>
+						</div>
+					</div>
+				</div>
+			);
+		};
 	const setMembershipField = (
 		faction: EntityRecord,
 		patch: { role?: string; location?: string | null }
@@ -972,7 +1210,12 @@ function EntityPage({ view }: { view: EntityView }) {
 		const sh = seqShift(group, i);
 		return sh !== 0 ? { transform: `translateY(${sh * slot}px)` } : undefined;
 	};
-	const endSeqDrag = (group: string, records: EntityRecord[], commit: boolean) => {
+	const endSeqDrag = (
+		group: string,
+		records: EntityRecord[],
+		commit: boolean,
+		onCommit?: (reordered: EntityRecord[]) => void
+	) => {
 		seqDragRef.current = null;
 		const drag = seqDrag;
 		setSeqDrag(null);
@@ -980,11 +1223,21 @@ function EntityPage({ view }: { view: EntityView }) {
 		const next = [...records];
 		const [moved] = next.splice(drag.from, 1);
 		next.splice(drag.over, 0, moved);
-		const base = Date.now();
-		next.forEach((r, i) => writeRecordSeq(r.path, base + i));
+		// Default order home is each record's loomSeq; callers with their own
+		// stored order (e.g. a page's item list) pass onCommit instead.
+		if (onCommit) onCommit(next);
+		else {
+			const base = Date.now();
+			next.forEach((r, i) => writeRecordSeq(r.path, base + i));
+		}
 	};
 	/** The 6-dot grab handle placed before an entry's title. */
-	const seqGrip = (group: string, i: number, records: EntityRecord[]) => (
+	const seqGrip = (
+		group: string,
+		i: number,
+		records: EntityRecord[],
+		onCommit?: (reordered: EntityRecord[]) => void
+	) => (
 		<span
 			className="loom-subloc-grip"
 			onPointerDown={(e) => {
@@ -1017,8 +1270,8 @@ function EntityPage({ view }: { view: EntityView }) {
 				);
 				setSeqDrag((cur) => (cur && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur));
 			}}
-			onPointerUp={() => endSeqDrag(group, records, true)}
-			onPointerCancel={() => endSeqDrag(group, records, false)}
+			onPointerUp={() => endSeqDrag(group, records, true, onCommit)}
+			onPointerCancel={() => endSeqDrag(group, records, false, onCommit)}
 		>
 			<Icon name="grip-vertical" />
 		</span>
@@ -2022,7 +2275,33 @@ function EntityPage({ view }: { view: EntityView }) {
 				</button>
 			</div>
 
-			{!isSession ? (
+			{/* A character-specific item copy has no editable name — it shows the
+			    original item and the owning character as chips instead. */}
+			{isItemCopy ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Item</span>
+					<div className="loom-tag-row">
+						{copyOriginal ? (
+							<EntityChip
+								plugin={plugin}
+								record={copyOriginal}
+								onOpen={() => view.openEntity(copyOriginal.path)}
+							/>
+						) : (
+							<span>{record.itemOrigin}</span>
+						)}
+						{copyOwner ? (
+							<EntityChip
+								plugin={plugin}
+								record={copyOwner}
+								onOpen={() => view.openEntity(copyOwner.path)}
+							/>
+						) : null}
+					</div>
+				</div>
+			) : null}
+
+			{!isSession && !isItemCopy ? (
 				<div className="loom-field">
 					<div className="loom-name-alias-row">
 						<label className="loom-name-col">
@@ -2452,6 +2731,37 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+		{isItemCopy ? (
+				<div className="loom-field">
+					<span className="loom-field-label">
+						{description === '' ? 'Description' : 'Alternative description'}
+					</span>
+					<MarkdownField
+						app={plugin.app}
+						value={description === '' ? copyOriginal?.description ?? '' : description}
+						names={linkNames}
+						onOpenLink={openLinkTarget}
+						onCreateEntity={createLinkEntity}
+						onChange={(v) => {
+							setDescription(v);
+							saveDescription(v);
+						}}
+					/>
+					{description !== '' ? (
+						<details className="loom-orig-desc">
+							<summary>Original description</summary>
+							<MarkdownField
+								app={plugin.app}
+								value={copyOriginal?.description ?? ''}
+								names={linkNames}
+								onOpenLink={openLinkTarget}
+								onChange={() => undefined}
+								readOnly
+							/>
+						</details>
+					) : null}
+				</div>
+			) : (
 		<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
 				<span className="loom-field-label">Description</span>
 				{isPc ? (
@@ -2498,6 +2808,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					}}
 				/>
 			</div>
+			)}
 
 		{isSession && project ? (
 				<div className="loom-field loom-graph-under">
@@ -2781,19 +3092,28 @@ function EntityPage({ view }: { view: EntityView }) {
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Events</span>
 					<div className="loom-hub-add-row">
-						<button
-							className="loom-rel-add"
-							onClick={() =>
-								new CreateEntityModal(plugin, 'event', project, {
-									...(isLocation
-										? { defaultPlace: linkTargetOf(record) }
-										: { defaultInvolved: [linkTargetOf(record)] }),
-									onCreated: () => {},
-								}).open()
-							}
-						>
-							+ Add an event
-						</button>
+						<SearchableSelect
+							placeholder="Add an event…"
+							options={plugin.indexer
+								.getAll('event', record.project)
+								.filter((ev) => !pageEventEntries.some((e) => e.owner.path === ev.path))
+								.sort((a, b) => a.name.localeCompare(b.name))
+								.map((ev) => ({ value: linkTargetOf(ev), label: ev.name }))}
+							onPick={(linkTarget) => {
+								const ev = plugin.indexer.resolve(linkTarget, record.path);
+								if (ev) addExistingEventToPage(ev);
+							}}
+							action={{
+								label: '+ Create new event',
+								onPick: () =>
+									new CreateEntityModal(plugin, 'event', project, {
+										...(isLocation
+											? { defaultPlace: linkTargetOf(record) }
+											: { defaultInvolved: [linkTargetOf(record)] }),
+										onCreated: () => {},
+									}).open(),
+							}}
+						/>
 						{orderToggle}
 					</div>
 					{pageEventGroups.map((g) => {
@@ -2837,6 +3157,110 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+			{/* Reverse of a character/location's Items section: who carries this
+			    item. Chips (persistent entities), an "Add to …" search, remove only. */}
+			{showsItemHolders && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Characters</span>
+					<div className="loom-hub-add-row">
+						<SearchableSelect
+							placeholder="Add to character…"
+							options={plugin.indexer
+								.getAll('character', project.root)
+								.filter((c) => !holderCharacters.some((h) => h.path === c.path))
+								.sort((a, b) => a.name.localeCompare(b.name))
+								.map((c) => ({ value: c.path, label: c.name }))}
+							onPick={(path) => {
+								const c = plugin.indexer.get(path);
+								if (c) addItemToHolder(c);
+							}}
+						/>
+					</div>
+					{holderCharacters.length > 0 ? (
+						<div className="loom-tag-row">
+							{holderCharacters.map((c) => (
+								<EntityChip
+									key={c.path}
+									plugin={plugin}
+									record={c}
+									onOpen={() => view.openEntity(c.path)}
+									onRemove={() => removeItemFromHolder(c)}
+									removeLabel="Remove from this character"
+								/>
+							))}
+						</div>
+					) : null}
+				</div>
+			) : null}
+
+			{showsItemHolders && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Locations</span>
+					<div className="loom-hub-add-row">
+						<SearchableSelect
+							placeholder="Add to location…"
+							options={plugin.indexer
+								.getAll('location', project.root)
+								.filter((l) => !holderLocations.some((h) => h.path === l.path))
+								.sort((a, b) => locationLabel(a, plugin).localeCompare(locationLabel(b, plugin)))
+								.map((l) => ({ value: l.path, label: locationLabel(l, plugin) }))}
+							onPick={(path) => {
+								const l = plugin.indexer.get(path);
+								if (l) addItemToHolder(l);
+							}}
+						/>
+					</div>
+					{holderLocations.length > 0 ? (
+						<div className="loom-tag-row">
+							{holderLocations.map((l) => (
+								<EntityChip
+									key={l.path}
+									plugin={plugin}
+									record={l}
+									label={locationLabel(l, plugin)}
+									onOpen={() => view.openEntity(l.path)}
+									onRemove={() => removeItemFromHolder(l)}
+									removeLabel="Remove from this location"
+								/>
+							))}
+						</div>
+					) : null}
+				</div>
+			) : null}
+
+
+			{showsItems && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Items</span>
+					<div className="loom-hub-add-row">
+						<SearchableSelect
+							placeholder="Add an item…"
+							options={plugin.indexer
+								.getAll('item', project.root)
+								.filter((it) => !itemRecords.some((r) => r.path === it.path))
+								.sort((a, b) => a.name.localeCompare(b.name))
+								.map((it) => ({ value: linkTargetOf(it), label: it.name }))}
+							onPick={(linkTarget) => addItemLink(linkTarget)}
+							action={{
+								label: '+ Create new item',
+								onPick: () =>
+									new CreateEntityModal(plugin, 'item', project, {
+										onCreated: (created) => addItemLink(created.basename),
+									}).open(),
+							}}
+						/>
+					</div>
+					{itemRecords.length > 0 ? (
+						<div
+							className={
+								seqDrag?.group === 'items' ? 'loom-note-list loom-subloc-dragging' : 'loom-note-list'
+							}
+						>
+							{itemRecords.map((item, i) => itemRow(item, i))}
+						</div>
+					) : null}
+				</div>
+			) : null}
 
 			{/* Sublocations live outside the relationships model: the list of
 			    children, creating one, and demoting this location under another

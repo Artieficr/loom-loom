@@ -3,7 +3,7 @@ import { ReactElement, useMemo, useState } from 'react';
 import { ENTITY_META, ENTITY_TAGS, EntityRecord, EntityType, VIEW_LIST, isEntityType } from '../types';
 import { ConfirmModal, CreateEntityModal } from '../project';
 import { LoomReactView } from './react-view';
-import { Icon, ViewShell, noProjectMessage, recordDate, recordLabel } from './common';
+import { EntityChip, Icon, ViewShell, noProjectMessage, recordDate, recordLabel } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
 
 type SortMode = 'name' | 'created' | 'modified' | 'date';
@@ -103,18 +103,21 @@ function EntityList({
 			.sort((a, b) => compare(a, b, sort));
 	}, [plugin.indexer, version, project, type, query, sort, tagFilter]);
 
-	// Locations nest under their parentLocation (searching flattens the list —
-	// a match shouldn't hide inside a collapsed parent). Cycles fall back to
-	// top level.
-	const nested = type === 'location' && query === '';
+	// Locations nest under their parentLocation, items under their original (a
+	// character-specific copy under the item it derives from). Searching flattens
+	// the list — a match shouldn't hide inside a collapsed parent. Cycles fall
+	// back to top level.
+	const nested = (type === 'location' || type === 'item') && query === '';
+	const parentLinkOf = (r: EntityRecord): string | null =>
+		type === 'item' ? r.itemOrigin : r.parentLocation;
 	const { roots, childrenOf } = useMemo(() => {
 		const childrenOf = new Map<string, EntityRecord[]>();
 		const roots: EntityRecord[] = [];
 		if (!nested) return { roots: records, childrenOf };
 		const byPath = new Map(records.map((r) => [r.path, r]));
 		const parentInList = (r: EntityRecord): EntityRecord | null => {
-			const parent =
-				r.parentLocation !== null ? plugin.indexer.resolve(r.parentLocation, r.path) : null;
+			const link = parentLinkOf(r);
+			const parent = link !== null ? plugin.indexer.resolve(link, r.path) : null;
 			return parent && parent.path !== r.path && byPath.has(parent.path)
 				? byPath.get(parent.path) ?? null
 				: null;
@@ -237,6 +240,12 @@ function EntityList({
 				{hasChildren ? (
 					<span className="loom-row-count">{childrenOf.get(r.path)?.length}</span>
 				) : null}
+				{(() => {
+					// A character-specific item copy carries its owner as a chip.
+					const owner =
+						r.type === 'item' && r.itemOwner ? plugin.indexer.resolve(r.itemOwner, r.path) : null;
+					return owner ? <EntityChip plugin={plugin} record={owner} /> : null;
+				})()}
 				{r.loomTags.map((tag) => (
 					<span key={tag} className="loom-chip">
 						{tag}

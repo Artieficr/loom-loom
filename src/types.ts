@@ -92,6 +92,15 @@ export const FM = {
 	/** Manual order stamp: events (timeline + session page) and quests (session
 	 *  page) sort by it, so drag-reordering persists in the file. */
 	seq: 'loomSeq',
+	/** Character/location only: ordered item links shown in their Items section
+	 *  (each a plain link, so it also connects in the graph). */
+	items: 'loomItems',
+	/** Character-specific item copy only: link to the original item it derives
+	 *  from (visible → connects to the original in the graph). */
+	itemOrigin: 'loomItemOrigin',
+	/** Character-specific item copy only: link to the owning character. Hidden
+	 *  from the link pass — the character already connects via its `loomItems`. */
+	itemOwner: 'loomItemOwner',
 	/** Timeline definition files. */
 	timelineTypes: 'loomTypes',
 } as const;
@@ -191,6 +200,14 @@ export interface EntityRecord {
 	 *  (drag-reordered on the parent's page). Hidden links — the children
 	 *  already connect via their own parentLocation. */
 	sublocationOrder: string[];
+	/** Character/location only: ordered item linkpaths shown in the Items
+	 *  section (drag-reordered here); also connect in the graph as plain links. */
+	items: string[];
+	/** Item only: linkpath of the original item this is a character-specific
+	 *  copy of, or null for a plain item. Set alongside `itemOwner`. */
+	itemOrigin: string | null;
+	/** Item only: linkpath of the character a copy belongs to, or null. */
+	itemOwner: string | null;
 	/** Faction only: member characters with per-membership roles (dedicated
 	 *  list, not relationships; typed `member` connection). */
 	members: FactionMemberDecl[];

@@ -1250,7 +1250,12 @@ span.loom-row-caret {
 	position: absolute;
 	top: 100%;
 	left: 0;
-	right: 0;
+	right: auto;
+	/* Wider than the (often narrow) search input: size to the longest option,
+	   never narrower than the input, capped so it can't run off the pane. */
+	min-width: 100%;
+	width: max-content;
+	max-width: 360px;
 	margin-top: var(--size-2-1);
 	display: flex;
 	flex-direction: column;
@@ -1262,6 +1267,10 @@ span.loom-row-caret {
 	max-height: 240px;
 	overflow-y: auto;
 	z-index: var(--layer-menu);
+}
+
+.loom-combo-item {
+	white-space: nowrap;
 }
 
 .loom-combo-item {
@@ -2097,6 +2106,40 @@ span.loom-row-caret {
 	gap: var(--size-4-2);
 }
 
+/* Character-specific item copy: the collapsed "Original description" spoiler
+   under the editable alternative. */
+.loom-orig-desc {
+	margin-top: var(--size-4-2);
+}
+
+.loom-orig-desc > summary {
+	cursor: pointer;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	padding: var(--size-2-1) 0;
+}
+
+.loom-orig-desc > summary:hover {
+	color: var(--text-normal);
+}
+
+.loom-orig-desc .loom-md-field {
+	margin-top: var(--size-4-1);
+	opacity: 0.85;
+}
+
+/* Item rows in the Items section: tinted boxes like the hub rows. */
+.loom-note-list .loom-locnote {
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-3);
+	margin-top: 0;
+}
+
+.loom-note-list .loom-locnote input[type='text'] {
+	background: var(--background-primary);
+}
+
 .loom-note-row {
 	display: flex;
 	flex-direction: column;
@@ -2363,8 +2406,38 @@ span.loom-row-caret {
 	max-width: 120px;
 }
 
+/* Items list drawer holds a third button (the copy button); it matches the
+   delete/remove buttons' icon size and natural spacing. */
+.loom-note-list .loom-hub-actions-open {
+	max-width: 160px;
+}
+
+/* The svg-to-svg gap reads tighter than the gap flanking the narrow ✕/< text
+   glyphs; a small margin evens the copy→delete gap up to the remove→toggle one. */
+.loom-item-copy-btn {
+	margin-right: var(--size-2-2);
+}
+
+.loom-item-copy-btn .loom-icon {
+	display: flex;
+}
+
+.loom-item-copy-btn .loom-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
 .loom-hub-name {
 	flex: 0 1 650px;
+}
+
+/* Read-only name for a character-specific item copy (its name is derived). */
+.loom-hub-name-static {
+	display: flex;
+	align-items: center;
+	padding: var(--size-4-1) var(--size-4-2);
+	font-weight: var(--font-medium);
+	color: var(--text-muted);
 }
 
 .loom-hub-location,

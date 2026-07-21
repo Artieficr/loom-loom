@@ -112,6 +112,7 @@ const HIDDEN_LINK_KEYS = [
 	'loomattendance',
 	'loomdeathsession',
 	'loomsublocationorder',
+	'loomitemowner',
 	'attendance',
 	'deathsession',
 	'sublocationorder',
@@ -180,6 +181,7 @@ export class LoomIndexer extends Component {
 
 	private rebuilding = false;
 	private rebuildQueued = false;
+	private reconciling = false;
 
 	constructor(private app: App, private plugin: LoomLoomPlugin) {
 		super();
@@ -275,6 +277,9 @@ export class LoomIndexer extends Component {
 			});
 		}
 		this.bump();
+		// Repair any character-specific item copies whose source was renamed
+		// (no-op when nothing is stale; its writes don't retrigger a rebuild).
+		void this.reconcileItemCopies();
 	}
 
 	// --- Startup migration -----------------------------------------------------
@@ -291,10 +296,18 @@ export class LoomIndexer extends Component {
 		// Resolve each sublocation's parent name up front (links are stable now,
 		// before any rename moves files around).
 		const parentNameOf = new Map<string, string>();
+		// Character-specific item copies name from the original item + owner
+		// character (`<Project> Item <original> — <owner>`), not their loomName.
+		const copyNamingOf = new Map<string, { name: string; owner: string }>();
 		for (const record of this.records.values()) {
 			if (record.type === 'location' && record.parentLocation !== null) {
 				const parent = this.resolve(record.parentLocation, record.path);
 				if (parent?.type === 'location') parentNameOf.set(record.path, parent.name);
+			}
+			if (record.type === 'item' && record.itemOrigin && record.itemOwner) {
+				const orig = this.resolve(record.itemOrigin, record.path);
+				const owner = this.resolve(record.itemOwner, record.path);
+				if (orig && owner) copyNamingOf.set(record.path, { name: orig.name, owner: owner.name });
 			}
 		}
 		for (const record of [...this.records.values()]) {
@@ -337,12 +350,10 @@ export class LoomIndexer extends Component {
 			}
 			// Sessions already follow their own managed scheme (from the date).
 			if (isSession) continue;
-			const base = managedEntityFileName(
-				project.name,
-				record.type,
-				displayName,
-				parentNameOf.get(record.path)
-			);
+			const copyNaming = copyNamingOf.get(record.path);
+			const base = copyNaming
+				? managedEntityFileName(project.name, record.type, copyNaming.name, undefined, copyNaming.owner)
+				: managedEntityFileName(project.name, record.type, displayName, parentNameOf.get(record.path));
 			if (file.basename === base) continue;
 			const parent = file.parent?.path ?? '';
 			let newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
@@ -378,6 +389,78 @@ export class LoomIndexer extends Component {
 			} catch (e) {
 				console.error('Loom Loom: timeline migration failed for', def.path, e);
 			}
+		}
+		await this.reconcileItemCopies();
+	}
+
+	/**
+	 * Keeps character-specific item copies in step with their source. A copy's
+	 * label (`<original> [<owner>]`) lives in its `loomName`/`aliases`/file name;
+	 * renaming the original item or the owner character leaves those stale. This
+	 * rewrites them (block-style frontmatter — valid YAML that survives Obsidian's
+	 * own rewrites) and renames the file. A no-op when everything matches, so it's
+	 * safe to run after every rebuild; re-entrancy is guarded so its own writes
+	 * don't recurse.
+	 */
+	async reconcileItemCopies(): Promise<void> {
+		if (this.reconciling) return;
+		this.reconciling = true;
+		try {
+			for (const record of [...this.records.values()]) {
+				if (record.type !== 'item' || record.itemOrigin === null || record.itemOwner === null) continue;
+				const origin = this.resolve(record.itemOrigin, record.path);
+				const owner = this.resolve(record.itemOwner, record.path);
+				const project = this.getProjectByRoot(record.project);
+				const file = this.app.vault.getFileByPath(record.path);
+				if (!origin || !owner || !project || !file) continue;
+				const label = `${origin.name} [${owner.name}]`;
+				const originFile = this.app.vault.getFileByPath(origin.path);
+				const originAliases: unknown = originFile
+					? this.app.metadataCache.getFileCache(originFile)?.frontmatter?.aliases
+					: null;
+				const expectedAliases = [
+					label,
+					...(Array.isArray(originAliases) ? (originAliases as unknown[]) : [])
+						.filter((a): a is string => typeof a === 'string' && a.trim() !== '' && a !== origin.name)
+						.map((a) => `${a} [${owner.name}]`),
+				];
+				const curAliases: unknown = this.app.metadataCache.getFileCache(file)?.frontmatter?.aliases;
+				const aliasesOk =
+					Array.isArray(curAliases) &&
+					curAliases.length === expectedAliases.length &&
+					expectedAliases.every((a) => (curAliases as unknown[]).includes(a));
+				if (record.name !== label || !aliasesOk) {
+					try {
+						await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+							fm[FM.name] = label;
+							fm.aliases = expectedAliases;
+						});
+					} catch (e) {
+						console.error('Loom Loom: item-copy frontmatter reconcile failed for', record.path, e);
+					}
+				}
+				const base = managedEntityFileName(project.name, 'item', origin.name, undefined, owner.name);
+				if (file.basename !== base) {
+					const parent = file.parent?.path ?? '';
+					let newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+					for (
+						let i = 2;
+						this.app.vault.getAbstractFileByPath(newPath) !== null && newPath !== file.path;
+						i++
+					) {
+						newPath = normalizePath(parent === '' ? `${base} ${i}.md` : `${parent}/${base} ${i}.md`);
+					}
+					if (newPath !== file.path) {
+						try {
+							await this.app.fileManager.renameFile(file, newPath);
+						} catch (e) {
+							console.error('Loom Loom: item-copy rename failed for', record.path, e);
+						}
+					}
+				}
+			}
+		} finally {
+			this.reconciling = false;
 		}
 	}
 
@@ -529,6 +612,15 @@ export class LoomIndexer extends Component {
 			attendance: parseLinkList(fmLoom(fm, FM.attendance)),
 			parentLocation: typeof parentValue === 'string' ? extractLinkpath(parentValue) : null,
 			sublocationOrder: parseLinkList(fmLoom(fm, FM.sublocationOrder)),
+			items: parseLinkList(fmLoom(fm, FM.items)),
+			itemOrigin: (() => {
+				const v = fmLoom(fm, FM.itemOrigin);
+				return typeof v === 'string' ? extractLinkpath(v) : null;
+			})(),
+			itemOwner: (() => {
+				const v = fmLoom(fm, FM.itemOwner);
+				return typeof v === 'string' ? extractLinkpath(v) : null;
+			})(),
 			members: parseMemberList(fmLoom(fm, FM.members)),
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
 			deathSession: typeof deathValue === 'string' ? extractLinkpath(deathValue) : null,
