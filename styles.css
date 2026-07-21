@@ -2321,8 +2321,11 @@ span.loom-row-caret {
 	opacity: 1;
 }
 
+/* Same danger treatment as the entity pages' delete button. */
 .loom-row-delete:hover {
-	color: var(--text-error);
+	background: var(--background-modifier-error);
+	color: #ffffff;
+	border-radius: var(--radius-s);
 }
 
 .loom-row-delete .loom-icon svg {
@@ -3080,4 +3083,51 @@ span.loom-row-caret {
 .loom-group-filter-actions {
 	display: flex;
 	margin-top: var(--size-2-2);
+}
+
+/* ---- entity list: toolbar icon buttons, filters, quest cards ---- */
+
+.loom-toolbar .loom-list-iconbtn {
+	display: flex;
+	align-items: center;
+	padding: var(--size-2-2) var(--size-2-3);
+}
+
+.loom-toolbar .loom-list-iconbtn .loom-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+/* Event-list entity filters: a compact searchable select in the toolbar. */
+.loom-list-filter {
+	width: 180px;
+}
+
+.loom-list-filter input {
+	width: 100%;
+}
+
+/* Quest cards reuse the session page's 3-up grid look. */
+.loom-list-quest-cards {
+	align-self: auto;
+}
+
+.loom-list-quest-cards .loom-quest-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+	padding: var(--size-4-2) var(--size-4-3);
+}
+
+/* Vertical nesting rail: sublocation (and item-copy) subtrees hang off a line. */
+.loom-subtree {
+	border-left: 2px solid var(--background-modifier-border);
+	margin-left: 10px;
+	padding-left: var(--size-2-3);
+}
+
+/* One-line prompt modals (rename, alias, dates). */
+.loom-modal-input {
+	width: 100%;
+	margin-bottom: var(--size-4-2);
 }

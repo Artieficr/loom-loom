@@ -46,6 +46,7 @@ import {
 	NavRail,
 	SearchableSelect,
 	SuggestInput,
+	QuestTagChip,
 	Truncated,
 	locationLabel,
 	recordLabel,
@@ -166,13 +167,6 @@ interface SessionNoteDraft {
  *  within the session (not persisted to disk). */
 const openSessionGraphs = new Set<string>();
 
-/** Lucide icon per quest tag. */
-const QUEST_TAG_ICONS: Record<string, string> = {
-	main: 'star',
-	important: 'triangle-alert',
-	side: 'shapes',
-};
-const QUEST_TAG_KEYS = ['main', 'important', 'side'] as const;
 
 /** Live-preview markdown note editor for a hub row (whose note has no draft
  *  state): keeps its own value and commits to the owner's frontmatter on idle. */
@@ -208,14 +202,6 @@ function HubNoteText({
 			}}
 		/>
 	);
-}
-/** Black or white, whichever reads better on the given #rrggbb background. */
-function readableOn(hex: string): string {
-	const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
-	if (!m) return 'var(--text-normal)';
-	const n = parseInt(m[1], 16);
-	const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
-	return lum > 0.6 ? '#000000' : '#ffffff';
 }
 
 interface LocNoteEntry {
@@ -2694,22 +2680,9 @@ function EntityPage({ view }: { view: EntityView }) {
 																{quest.loomTags.length > 1 ? 'Tags:' : 'Tag:'}
 															</span>
 															<span className="loom-quest-card-value">
-																{quest.loomTags.map((t) => {
-																	const key = (QUEST_TAG_KEYS as readonly string[]).includes(t)
-																		? (t as (typeof QUEST_TAG_KEYS)[number])
-																		: null;
-																	const bg = key ? plugin.settings.questTagColors[key] : null;
-																	return (
-																		<span
-																			key={t}
-																			className="loom-chip loom-quest-tag"
-																			style={bg ? { background: bg, borderColor: bg, color: readableOn(bg) } : undefined}
-																		>
-																			{QUEST_TAG_ICONS[t] ? <Icon name={QUEST_TAG_ICONS[t]} /> : null}
-																			{t}
-																		</span>
-																	);
-																})}
+																{quest.loomTags.map((t) => (
+																	<QuestTagChip key={t} plugin={plugin} tag={t} />
+																))}
 															</span>
 														</div>
 													) : null}
@@ -3146,7 +3119,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						</div>
 					) : (
 						<button className="loom-rel-add loom-faction-add" onClick={() => setFactionDraft(true)}>
-							+ Add faction
+							+ Add a faction
 						</button>
 					)}
 					{membershipRows.map((m) => (
