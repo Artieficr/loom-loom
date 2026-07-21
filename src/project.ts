@@ -1188,6 +1188,11 @@ export class CreateEntityModal extends Modal {
 				.getAll('location', this.project.root)
 				.sort((a, b) => a.name.localeCompare(b.name));
 			let rowsEl: HTMLElement;
+			// Rebuilds recreate every row's inputs — restore their values from the
+			// stored fields (link targets → display names), or adding a second
+			// member visually wipes the first.
+			const displayNameOf = (records: EntityRecord[], linkTarget: string) =>
+				records.find((r) => linkTargetOf(r) === linkTarget)?.name ?? linkTarget;
 			const render = () => {
 				rowsEl.empty();
 				(this.fields.members ?? []).forEach((m, i) => {
@@ -1196,6 +1201,7 @@ export class CreateEntityModal extends Modal {
 					roleInput.value = m.role;
 					roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
 					const charInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Character…' } });
+					charInput.value = m.character === '' ? '' : displayNameOf(characters, m.character);
 					new RecordInputSuggest(
 						this.app,
 						charInput,
@@ -1212,6 +1218,7 @@ export class CreateEntityModal extends Modal {
 					);
 					row.createSpan({ text: 'at', cls: 'loom-modal-faction-lbl' });
 					const locInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Location…' } });
+					locInput.value = m.location === '' ? '' : displayNameOf(locations, m.location);
 					new RecordInputSuggest(
 						this.app,
 						locInput,
