@@ -66,10 +66,14 @@ and a custom layered graph view.
 - **Events section (entity pages)**: character/item/faction/location/**quest** pages
   show the events they take part in instead of their own session notes. A note's
   `involved` list surfaces the event on each involved entity's page (quests included —
-  a quest is `involved` in the events that advance it); a note's `places` list (the
-  event's per-note location, stored on the event, replacing the old event-level
-  `location` relationship) surfaces it on that location **and every ancestor location**
-  (city ⊇ tavern ⊇ secret room). Removing the page's own entity from a note warns first
+  a quest is `involved` in the events that advance it; **locations may be involved too**
+  — a place discussed/featured in the event, distinct from where it happened); a note's
+  `places` list (the event's per-note location, stored on the event, replacing the old
+  event-level `location` relationship) surfaces it on that location **and every ancestor
+  location** (city ⊇ tavern ⊇ secret room) — the location page's Events section reads
+  `places` only, so an involved-but-not-placed location isn't listed there. Involve
+  pickers (page editor + hub rows + create modal) offer every non-session/non-event
+  type, locations included. Removing the page's own entity from a note warns first
   ("… this event won't be displayed here anymore"). Only **event** pages keep an
   editable own-`sessionNotes` section (quests no longer author their own notes — the
   session-page hub is labelled **Events** and never shows a Quests subsection). Adding
@@ -92,12 +96,17 @@ and a custom layered graph view.
   **Resolved previously** (resolved in an earlier session, capped by
   `settings.sessionResolvedQuests` — 3/6/9/12/All, default 6, newest by outcome date;
   the count reads "N of total" when capped). Only Active reorders (`loomSeq`).
-- **Location-page section order**: Notes → Factions → Items → Sublocations → Events.
-  The Events hub (shared by every entity page) is extracted into an `eventsSection`
-  node rendered at the bottom on a location page and in its usual near-top spot on
-  every other page. The Factions section's members hang off a vertical nesting rail
-  (shared `loom-event-nest`) under each faction chip. On character pages Items still
-  follows Events.
+- **Section order / Events last**: the **Events** hub is big, so it is the last
+  content section on every entity page — only **Relationships** and **Connected
+  entities** follow it. It's extracted into one `eventsSection` node rendered in a
+  SINGLE unconditional spot at the bottom (null on pages that don't show events, e.g.
+  event/session), so the page-specific sections above it (item-holder Characters/
+  Locations on item pages; Factions → Items → Sublocations on location pages) all come
+  first. Per-page differences that can't be a single global order live inline above
+  Notes: a location page is Notes → Factions → Items → Sublocations → Events, while a
+  character page puts its Faction(s) membership section and the shared `itemsSection`
+  ABOVE Notes (Items directly under Faction(s)). The Factions section's members hang
+  off a vertical nesting rail (shared `loom-event-nest`) under each faction chip.
 - **Items section (character/location pages)**: an ordered `loomItems`
   frontmatter list of item links on the character/location. Each row edits the item
   entity in place (name renames the item file, description writes its `loomDescription`);
@@ -106,8 +115,8 @@ and a custom layered graph view.
   item note) + Remove (just unlinks it from this page); on a character page a `layers-2`
   button (left of Delete) makes a character-specific copy. The links are visible
   (non-hidden) so items also connect in the graph.
-- **Item page reverse sections**: an item page shows **Characters** (after Events) and
-  **Locations** (after Characters) — the holders that carry this item via their
+- **Item page reverse sections**: an item page shows **Characters** (after Notes,
+  above Events) and **Locations** (after Characters) — the holders that carry this item via their
   `loomItems`. Chips (persistent entities, not editable), an "Add to character/location…"
   search that writes the item into the picked holder's `loomItems`, and a remove ✕ that
   unlinks it. Direct reverse query only (a holder that swapped in a character-specific

@@ -1578,7 +1578,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const involveTargets = project
 		? plugin.indexer
 				.getAll(undefined, project.root)
-				.filter((r) => r.type !== 'session' && r.type !== 'event' && r.type !== 'location' && r.path !== record.path)
+				// Locations can be involved (a place discussed/featured in the event)
+				// as well as a `places` entry (where it happened) — both are allowed.
+				.filter((r) => r.type !== 'session' && r.type !== 'event' && r.path !== record.path)
 				.sort((a, b) => a.name.localeCompare(b.name))
 		: [];
 	/** The current party (alive + active PCs, minus this page's own entity) —
@@ -1980,7 +1982,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										.setChecked(current === null)
 										.onClick(() => setHubFilter({ ...hubFilter, [fkey]: null }))
 								);
-								for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event' && t !== 'location')) {
+								for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
 									menu.addItem((item) =>
 										item
 											.setTitle(ENTITY_META[t].plural)
@@ -2340,7 +2342,6 @@ function EntityPage({ view }: { view: EntityView }) {
 									hubFilter[menuKey]
 								),
 								...hubTargets
-									.filter((t) => t.type !== 'location')
 									.filter(
 										(t) => !involved.some((iv) => iv.target?.path === t.path) && !groupPaths.has(t.path)
 									)
@@ -2397,7 +2398,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										.setChecked(current === null)
 										.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: null }))
 								);
-								for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event' && t !== 'location')) {
+								for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
 									menu.addItem((item) =>
 										item
 											.setTitle(ENTITY_META[t].plural)
@@ -2608,6 +2609,42 @@ function EntityPage({ view }: { view: EntityView }) {
 						</div>
 					);
 				})}
+			</div>
+		) : null;
+
+	// Items hub — on a character page it sits right after the Faction(s) section;
+	// on a location page it stays in the Factions → Items → Sublocations chain.
+	const itemsSection =
+		showsItems && project ? (
+			<div className="loom-field loom-field-sep">
+				<span className="loom-field-label">Items</span>
+				<div className="loom-hub-add-row">
+					<SearchableSelect
+						placeholder="Add an item…"
+						options={plugin.indexer
+							.getAll('item', project.root)
+							.filter((it) => !itemRecords.some((r) => r.path === it.path))
+							.sort((a, b) => a.name.localeCompare(b.name))
+							.map((it) => ({ value: linkTargetOf(it), label: it.name }))}
+						onPick={(linkTarget) => addItemLink(linkTarget)}
+						action={{
+							label: '+ Create new item',
+							onPick: () =>
+								new CreateEntityModal(plugin, 'item', project, {
+									onCreated: (created) => addItemLink(created.basename),
+								}).open(),
+						}}
+					/>
+				</div>
+				{itemRecords.length > 0 ? (
+					<div
+						className={
+							seqDrag?.group === 'items' ? 'loom-note-list loom-subloc-dragging' : 'loom-note-list'
+						}
+					>
+						{itemRecords.map((item, i) => itemRow(item, i))}
+					</div>
+				) : null}
 			</div>
 		) : null;
 
@@ -3571,6 +3608,9 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+			{/* Character: Items sit directly under the Faction(s) section. */}
+			{record.type === 'character' ? itemsSection : null}
+
 			{!isSession ? (
 <div className="loom-field loom-field-body">
 				<span className="loom-field-label">Notes</span>
@@ -3622,12 +3662,6 @@ function EntityPage({ view }: { view: EntityView }) {
 					) : null}
 				</div>
 			) : null}
-
-			{/* Events instead of session notes (characters/items/factions via the
-			    note's "involved"; locations via its "places", including any
-			    sublocation's events). On a location page this hub is pushed to the
-			    bottom (after Factions/Items/Sublocations); elsewhere it stays here. */}
-			{!isLocation ? eventsSection : null}
 
 			{/* Reverse of a character/location's Items section: who carries this
 			    item. Chips (persistent entities), an "Add to …" search, remove only. */}
@@ -3740,38 +3774,9 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{showsItems && project ? (
-				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Items</span>
-					<div className="loom-hub-add-row">
-						<SearchableSelect
-							placeholder="Add an item…"
-							options={plugin.indexer
-								.getAll('item', project.root)
-								.filter((it) => !itemRecords.some((r) => r.path === it.path))
-								.sort((a, b) => a.name.localeCompare(b.name))
-								.map((it) => ({ value: linkTargetOf(it), label: it.name }))}
-							onPick={(linkTarget) => addItemLink(linkTarget)}
-							action={{
-								label: '+ Create new item',
-								onPick: () =>
-									new CreateEntityModal(plugin, 'item', project, {
-										onCreated: (created) => addItemLink(created.basename),
-									}).open(),
-							}}
-						/>
-					</div>
-					{itemRecords.length > 0 ? (
-						<div
-							className={
-								seqDrag?.group === 'items' ? 'loom-note-list loom-subloc-dragging' : 'loom-note-list'
-							}
-						>
-							{itemRecords.map((item, i) => itemRow(item, i))}
-						</div>
-					) : null}
-				</div>
-			) : null}
+			{/* Location keeps Items in the Factions → Items → Sublocations chain;
+			    a character renders it right after its Faction(s) section instead. */}
+			{isLocation ? itemsSection : null}
 
 			{/* Sublocations live outside the relationships model: the list of
 			    children, creating one, and demoting this location under another
@@ -3869,9 +3874,11 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{/* On a location page the Events hub sits here, after the
-			    Factions/Items/Sublocations sections. */}
-			{isLocation ? eventsSection : null}
+			{/* Events is the last content section on every page — big, so all the
+			    page-specific sections above render first and only Relationships +
+			    Connected entities follow it. A single placement (null when the page
+			    doesn't show events, e.g. event/session pages). */}
+			{eventsSection}
 
 			<div className="loom-field loom-field-sep">
 				<span className="loom-field-label">Relationships</span>

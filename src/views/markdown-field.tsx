@@ -554,7 +554,7 @@ export function MarkdownField({
 		const wrapKey = (key: string) =>
 			scope.register(['Mod'], key, (evt) => {
 				const v = viewRef.current;
-				if (v && evt instanceof KeyboardEvent) applyFormatting(v, evt);
+				if (v) applyFormatting(v, evt);
 				return false;
 			});
 		wrapKey('b');
