@@ -347,7 +347,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 						</div>
 					) : null}
 					{en.text.trim() !== '' ? (
-						<div className="loom-note-text">
+						<div className="loom-note-text loom-note-text-plain">
 							<MarkdownField
 								app={plugin.app}
 								value={en.text}

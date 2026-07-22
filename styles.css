@@ -492,12 +492,13 @@ span.loom-row-caret {
 	height: var(--icon-s);
 }
 
-/* Window-edge-style resize strip on the bar's panel side. */
+/* Window-edge-style resize strip on the bar's outer edge (the side facing the
+   timeline), not the inner panel side. */
 .loom-nodate-handle {
 	position: absolute;
 	top: 0;
 	bottom: 0;
-	left: 0;
+	right: 0;
 	width: 8px;
 	cursor: ew-resize;
 }
@@ -1633,6 +1634,23 @@ span.loom-row-caret {
 	background: var(--background-primary);
 }
 
+/* Read-only fields render text, not an editor — no blinking caret. */
+.loom-md-readonly .cm-content {
+	caret-color: transparent;
+}
+
+.loom-md-readonly .cm-cursor,
+.loom-md-readonly .cm-cursor-primary {
+	display: none;
+}
+
+/* Group-page notes: pure rendered text, no input chrome around it. */
+.loom-note-text-plain .loom-md-field .cm-editor {
+	background: transparent;
+	border: none;
+	padding: 0;
+}
+
 .loom-md-field .cm-content {
 	padding: 0;
 	font-family: inherit;
@@ -1717,6 +1735,28 @@ span.loom-row-caret {
 
 .loom-md-bullet {
 	color: var(--list-marker-color, var(--text-faint));
+}
+
+/* Nested bullets: the raw indentation is hidden (see markdown-field), so the
+   line's own padding restores the indent and a faint rail per ancestor level
+   (drawn as one vertical line at the start of each indent step) makes nesting
+   read as an outline — mirroring Obsidian's live-preview list guides. The rails
+   are nudged right by --loom-list-rail-offset so each sits under the CENTRE of
+   its ancestor's bullet glyph rather than at the bullet's left edge. */
+.loom-md-field .cm-line.loom-md-list {
+	--loom-list-indent: 1.4em;
+	--loom-list-rail-offset: 0.28em;
+	padding-left: calc(var(--loom-list-depth, 0) * var(--loom-list-indent));
+	background-image: repeating-linear-gradient(
+		to right,
+		var(--background-modifier-border) 0,
+		var(--background-modifier-border) 1px,
+		transparent 1px,
+		transparent var(--loom-list-indent)
+	);
+	background-repeat: no-repeat;
+	background-position-x: var(--loom-list-rail-offset);
+	background-size: calc(var(--loom-list-depth, 0) * var(--loom-list-indent)) 100%;
 }
 
 .loom-md-hr {
@@ -1905,7 +1945,7 @@ span.loom-row-caret {
    [role] "of faction" [faction chip] "at" [location] ✕. The location slot
    flexes so the remove ✕ lands at the row's right edge like rel rows. */
 .loom-member-row .loom-rel-type {
-	flex: 0 1 7em;
+	flex: 0 1 14em;
 }
 
 /* Same text size as the rest of the row — only the color sets them apart.
@@ -1937,6 +1977,19 @@ span.loom-row-caret {
 /* The "+ Add faction" draft row: the faction picker fills the row. */
 .loom-member-row > .loom-combo {
 	flex: 1;
+}
+
+/* Location page — characters serving each faction here, grouped per faction.
+   The members hang off a vertical nesting rail (loom-event-nest) beneath the
+   faction chip; each member sits on its own row, so the rail reads as a list. */
+.loom-locfac-nest {
+	align-items: flex-start;
+}
+
+.loom-locfac-member {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-2-2);
 }
 
 /* Character-page faction membership rows: each a tinted box. */
@@ -2012,6 +2065,14 @@ span.loom-row-caret {
 .loom-modal-wide textarea {
 	width: 100%;
 	min-height: 72px;
+}
+
+/* Read-only description of a picked existing event (session-page add). */
+.loom-modal-existing-desc {
+	width: 100%;
+	color: var(--text-muted);
+	white-space: pre-wrap;
+	padding: var(--size-2-2) 0;
 }
 
 .loom-rel-type {

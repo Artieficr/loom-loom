@@ -51,10 +51,16 @@ export function MiniGraph({
 		// The neighborhood is laid out as if it were the whole project: a thin
 		// indexer proxy hides every other record, so columns/rows pack tight
 		// instead of inheriting the full graph's sprawl.
-		const keep = new Set([
-			focusId,
-			...plugin.indexer.getConnections(focusId).map((c) => c.record.path),
-		]);
+		const keep = new Set([focusId]);
+		const direct = plugin.indexer.getConnections(focusId).map((c) => c.record);
+		for (const r of direct) keep.add(r.path);
+		// Reach one hop further through connected events, so a session (or any
+		// focus) also shows the entities involved in its events — they connect to
+		// the event, not the focus, so they'd otherwise be missing.
+		for (const r of direct) {
+			if (r.type !== 'event') continue;
+			for (const c of plugin.indexer.getConnections(r.path)) keep.add(c.record.path);
+		}
 		const real = plugin.indexer;
 		const sub = {
 			getAll: (type?: Parameters<LoomIndexer['getAll']>[0], root?: string) =>
