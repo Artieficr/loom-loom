@@ -31,10 +31,16 @@ function matchesDef(record: EntityRecord, def: TimelineDef | null): boolean {
 export function buildColumns(
 	indexer: LoomIndexer,
 	def: TimelineDef | null,
-	projectRoot: string
+	projectRoot: string,
+	/** When set, only sessions/events whose path is in it are placed — used by
+	 *  the graph's "separate graph" filter to lay out a hand-picked subgraph. */
+	restrictTo?: ReadonlySet<string>
 ): TimelineColumn[] {
-	const sessions = indexer.getAll('session', projectRoot).filter((r) => matchesDef(r, def));
-	const events = indexer.getAll('event', projectRoot).filter((r) => matchesDef(r, def));
+	const allow = (r: EntityRecord) => restrictTo === undefined || restrictTo.has(r.path);
+	const sessions = indexer
+		.getAll('session', projectRoot)
+		.filter((r) => matchesDef(r, def) && allow(r));
+	const events = indexer.getAll('event', projectRoot).filter((r) => matchesDef(r, def) && allow(r));
 
 	const columns = new Map<string, TimelineColumn>();
 	for (const session of sessions) {

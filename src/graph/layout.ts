@@ -161,17 +161,32 @@ export function computeGraphLayout(
 	liveDragId?: string,
 	/** Drag-dropped y positions — honored for fully-unconnected nodes only,
 	 *  so they can sit anywhere within their layer's space. */
-	manualY?: ReadonlyMap<string, number>
+	manualY?: ReadonlyMap<string, number>,
+	/** When set, only these entity paths are laid out (the graph filter's
+	 *  "separate graph" mode) — the rest are dropped entirely. */
+	restrictTo?: ReadonlySet<string>
 ): GraphLayout {
-	const { raw, neighbors } = collectEdges(indexer, projectRoot);
+	const { raw, neighbors } = collectEdges(indexer, projectRoot, restrictTo);
 
 	// Round 1: provisional placement with default corridors, only to learn how
 	// many trunk lanes each corridor must fit.
-	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors, manualX, liveDragId);
+	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors, manualX, liveDragId, 0, restrictTo);
 	const demand = corridorDemand(classifyEdges(raw, prelim), trunkGap);
 
+	// Leading pad: how far the widest global row overhangs the timeline span,
+	// halved. Pushing the timeline right by that much lets the widest row (still
+	// clamped to the real left margin) center under the timeline rather than
+	// left-aligning; narrower rows and the sessions center on the same axis. Row
+	// widths are intrinsic in the prelim, so measuring them there is exact.
+	const rowWidth = (ns: LayoutNode[]) =>
+		ns.length > 0 ? Math.max(...ns.map((n) => n.x)) - Math.min(...ns.map((n) => n.x)) : 0;
+	const widestRow = prelim.layers.reduce((m, row) => Math.max(m, rowWidth(row)), 0);
+	const timelineSpan =
+		prelim.colX.length > 0 ? prelim.colX[prelim.colX.length - 1] - prelim.colX[0] : 0;
+	const leftPad = Math.max(0, (widestRow - timelineSpan) / 2);
+
 	// Round 2: final placement with widened corridors, then full routing.
-	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX, liveDragId);
+	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX, liveDragId, leftPad, restrictTo);
 	const classified = classifyEdges(raw, placed);
 	const bottom = routeEdges(classified, placed, lineGap, trunkGap);
 
@@ -236,9 +251,12 @@ function toRoute(e: CEdge): EdgeRoute {
 /** Undirected, deduplicated connections between indexed project entities. */
 function collectEdges(
 	indexer: LoomIndexer,
-	projectRoot: string
+	projectRoot: string,
+	restrictTo?: ReadonlySet<string>
 ): { raw: RawEdge[]; neighbors: Map<string, Set<string>> } {
-	const records = indexer.getAll(undefined, projectRoot);
+	const records = indexer
+		.getAll(undefined, projectRoot)
+		.filter((r) => restrictTo === undefined || restrictTo.has(r.path));
 	const indexed = new Set(records.map((r) => r.path));
 	const neighbors = new Map<string, Set<string>>();
 	// One edge per PAIR: any mutual declarations (even different relTypes)
@@ -275,11 +293,18 @@ function placeNodes(
 	corridorWidths: Map<number, number> | null,
 	neighbors: Map<string, Set<string>>,
 	manualX?: ReadonlyMap<string, number>,
-	liveDragId?: string
+	liveDragId?: string,
+	/** Leading space before the first timeline column: pushes the whole timeline
+	 *  right so wide global rows (which stay clamped to the real left margin) can
+	 *  center under it instead of left-aligning. */
+	leftPad = 0,
+	/** When set, only entities whose path is in it are laid out (subgraph mode). */
+	restrictTo?: ReadonlySet<string>
 ): Placement {
 	const nodes = new Map<string, LayoutNode>();
 	const colOf = new Map<string, number>();
-	const allColumns = buildColumns(indexer, null, projectRoot);
+	const inSet = (r: EntityRecord) => restrictTo === undefined || restrictTo.has(r.path);
+	const allColumns = buildColumns(indexer, null, projectRoot, restrictTo);
 
 	// Dateless, unconnected events don't need a chronological slot or edge
 	// corridors — pull them out of the column flow and let them float freely
@@ -297,26 +322,54 @@ function placeNodes(
 	// LANE_GAP apart (inconsistent date spacing is the accepted price).
 	const colX: number[] = [];
 	for (let i = 0; i < columns.length; i++) {
-		const base = i === 0 ? MARGIN_X : COL_WIDTH;
+		const base = i === 0 ? MARGIN_X + leftPad : COL_WIDTH;
 		const gap = Math.max(base, corridorWidths?.get(i) ?? 0);
 		colX.push(i === 0 ? gap : colX[i - 1] + gap);
 	}
 
 	let maxStack = 0;
-	const occurrences = new Map<string, number>();
-	for (const col of columns) {
-		for (const ev of col.events) occurrences.set(ev.path, (occurrences.get(ev.path) ?? 0) + 1);
-	}
-	const multi = new Map<string, { record: EntityRecord; xs: number[] }>();
-
-	/** Occupied x positions per event stack row, for collision-free placement. */
+	/** Occupied x positions per event stack row, for collision-free free-event placement. */
 	const rows: number[][] = [];
 	const occupy = (row: number, x: number) => {
 		(rows[row] ??= []).push(x);
 		maxStack = Math.max(maxStack, row + 1);
 	};
 
-	columns.forEach((col, i) => {
+	// Events stack under sessions in the SAME top-to-bottom order as the session
+	// notes / timeline — by `loomSeq` (falling back to ctime) — laid out in a
+	// shared grid: an event's row is one below the deepest event that precedes it
+	// in ANY session's ordered list. A session with fewer events above a shared
+	// event just leaves a gap in that column, so the shared event (one node,
+	// centered between its sessions) lines up across every session it's in.
+	const seqKey = (e: EntityRecord) => e.seq ?? e.created;
+	const orderedCols = columns.map((col) => ({
+		col,
+		events: [...col.events].sort((a, b) => seqKey(a) - seqKey(b)),
+	}));
+	// Column indices each event stacks under (a multi-session event has several).
+	const eventCols = new Map<string, number[]>();
+	// The event(s) directly above each event in the columns it belongs to.
+	const preds = new Map<string, string[]>();
+	const subEvents = new Map<string, EntityRecord>();
+	orderedCols.forEach(({ events }, i) => {
+		events.forEach((ev, j) => {
+			subEvents.set(ev.path, ev);
+			(eventCols.get(ev.path) ?? eventCols.set(ev.path, []).get(ev.path))?.push(i);
+			if (j > 0) (preds.get(ev.path) ?? preds.set(ev.path, []).get(ev.path))?.push(events[j - 1].path);
+		});
+	});
+	// Longest predecessor chain = the row. Processed in global seq order, so an
+	// event's predecessors (always smaller seq) are resolved before it.
+	const rowOf = new Map<string, number>();
+	const orderedEvents = [...subEvents.values()].sort((a, b) => seqKey(a) - seqKey(b));
+	for (const ev of orderedEvents) {
+		const ps = preds.get(ev.path) ?? [];
+		rowOf.set(ev.path, ps.length > 0 ? Math.max(...ps.map((p) => (rowOf.get(p) ?? 0) + 1)) : 0);
+	}
+
+	// Session anchors + standalone event columns (an event with no session sits
+	// alone at its own column, row 0).
+	orderedCols.forEach(({ col }, i) => {
 		const x = colX[i];
 		const anchorKind = col.anchor.type === 'session' ? 'session' : 'event';
 		nodes.set(col.anchor.path, {
@@ -329,46 +382,23 @@ function placeNodes(
 		});
 		colOf.set(col.anchor.path, i);
 		if (anchorKind === 'event') occupy(0, x);
-		let stack = 0;
-		for (const ev of col.events) {
-			if ((occurrences.get(ev.path) ?? 0) > 1) {
-				const entry = multi.get(ev.path) ?? { record: ev, xs: [] };
-				entry.xs.push(x);
-				multi.set(ev.path, entry);
-				continue;
-			}
-			nodes.set(ev.path, {
-				id: ev.path,
-				record: ev,
-				x,
-				y: EVENT_Y0 + stack * EVENT_DY,
-				kind: 'event',
-				zone: 0,
-			});
-			colOf.set(ev.path, i);
-			occupy(stack, x);
-			stack++;
-		}
 	});
-
-	// Multi-session events: centered between their earliest and latest session
-	// columns, dropped to the first stack row with enough horizontal clearance
-	// from what's already there.
-	for (const { record, xs } of [...multi.values()].sort((a, b) =>
-		a.record.name.localeCompare(b.record.name)
-	)) {
-		const x = (Math.min(...xs) + Math.max(...xs)) / 2;
-		let row = 0;
-		while ((rows[row] ?? []).some((ox) => Math.abs(ox - x) < MULTI_CLEARANCE)) row++;
-		nodes.set(record.path, {
-			id: record.path,
-			record,
+	// Sub-events: single-session at their column's x, multi-session centered
+	// between the columns they span; y from the shared grid row.
+	for (const ev of orderedEvents) {
+		const cols = eventCols.get(ev.path) ?? [];
+		const xs = cols.map((ci) => colX[ci]);
+		const x = cols.length > 1 ? (Math.min(...xs) + Math.max(...xs)) / 2 : xs[0] ?? MARGIN_X;
+		const row = rowOf.get(ev.path) ?? 0;
+		nodes.set(ev.path, {
+			id: ev.path,
+			record: ev,
 			x,
 			y: EVENT_Y0 + row * EVENT_DY,
 			kind: 'event',
 			zone: 0,
 		});
-		colOf.set(record.path, nearestColumn(colX, x));
+		colOf.set(ev.path, cols.length > 1 ? nearestColumn(colX, x) : cols[0] ?? 0);
 		occupy(row, x);
 	}
 
@@ -419,9 +449,14 @@ function placeNodes(
 	// under it, built after the relaxation once parents have an x.
 	const parentOf = new Map<string, string>();
 	for (const loc of indexer.getAll('location', projectRoot)) {
-		if (loc.parentLocation === null) continue;
+		if (loc.parentLocation === null || !inSet(loc)) continue;
 		const target = indexer.resolve(loc.parentLocation, loc.path);
-		if (target?.type === 'location' && target.path !== loc.path && target.project === projectRoot) {
+		if (
+			target?.type === 'location' &&
+			target.path !== loc.path &&
+			target.project === projectRoot &&
+			inSet(target)
+		) {
 			parentOf.set(loc.path, target.path);
 		}
 	}
@@ -441,7 +476,7 @@ function placeNodes(
 			type,
 			records: indexer
 				.getAll(type, projectRoot)
-				.filter((r) => !subRoot.has(r.path))
+				.filter((r) => !subRoot.has(r.path) && inSet(r))
 				.sort((a, b) => a.name.localeCompare(b.name)),
 		}))
 		.filter((row) => row.records.length > 0);
@@ -454,8 +489,9 @@ function placeNodes(
 	// collision resolve so the next pass pulls from separated positions —
 	// without it, a globals-only project collapses every estimate onto one
 	// point and the tie-break degenerates to alphabetical order.
-	const timelineMaxX = colX.length > 0 ? colX[colX.length - 1] : MARGIN_X;
-	const centerX = (MARGIN_X + timelineMaxX) / 2;
+	const timelineMinX = colX.length > 0 ? colX[0] : MARGIN_X + leftPad;
+	const timelineMaxX = colX.length > 0 ? colX[colX.length - 1] : MARGIN_X + leftPad;
+	const centerX = (timelineMinX + timelineMaxX) / 2;
 	const allGlobals = layerRecords.flat();
 	const est = new Map<string, number>();
 	const isConnected = (path: string) => (neighbors.get(path)?.size ?? 0) > 0;
@@ -567,7 +603,13 @@ function placeNodes(
 			const right = Math.max(...held.map((g) => est.get(g.path) ?? centerX));
 			loose.forEach((g, i) => est.set(g.path, right + GLOBAL_MIN_SPACING * (i + 1)));
 		}
-		for (const rs of layerRecords) resolveRowOverlaps(rs, est);
+		// Quests keep their session anchor x (overlaps are resolved by stacking
+		// them vertically below, like events) — so they're spared the horizontal
+		// spread every other layer gets.
+		for (const { type, records } of layerRows) {
+			if (type === 'quest') continue;
+			resolveRowOverlaps(records, est);
+		}
 	}
 
 	// Sublocation grid: hierarchical — each location's direct children sit
@@ -625,11 +667,23 @@ function placeNodes(
 
 	const finalRows: { record: EntityRecord; x: number }[][] = [];
 	for (const { type, records: rs } of layerRows) {
-		finalRows.push(
-			[...rs]
-				.sort((a, b) => (est.get(a.path) ?? 0) - (est.get(b.path) ?? 0))
-				.map((g) => ({ record: g, x: est.get(g.path) ?? centerX }))
-		);
+		const entries = [...rs]
+			.sort((a, b) => (est.get(a.path) ?? 0) - (est.get(b.path) ?? 0))
+			.map((g) => ({ record: g, x: est.get(g.path) ?? centerX }));
+		if (type === 'quest') {
+			// Quests sharing (or crowding) a session's x stack into sub-rows
+			// instead of spreading sideways — each sub-row is its own layer band,
+			// so quests read as a vertical stack under their session, like events.
+			const subRows: { record: EntityRecord; x: number }[][] = [];
+			for (const entry of entries) {
+				let r = 0;
+				while ((subRows[r] ?? []).some((e) => Math.abs(e.x - entry.x) < GLOBAL_MIN_SPACING)) r++;
+				(subRows[r] ??= []).push(entry);
+			}
+			finalRows.push(...(subRows.length > 0 ? subRows : [[]]));
+			continue;
+		}
+		finalRows.push(entries);
 		if (type === 'location') finalRows.push(...subRowEntries);
 	}
 	// Safety net: grid rows still need a home if the locations row vanished.
