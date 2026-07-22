@@ -2057,6 +2057,101 @@ span.loom-row-caret {
 	height: var(--icon-s);
 }
 
+/* Quest objectives: name input + "Finished on…" picker + remove, with a grab
+   handle on the active rows. */
+.loom-obj-section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	margin-top: var(--size-2-3);
+}
+
+/* Space between the "Active"/"Resolved" label and its counter (the shared
+   `.loom-section-count` uses margin-left:auto for flex headers, which does
+   nothing on this inline label). */
+.loom-obj-section .loom-rel-group-label .loom-section-count {
+	margin-left: var(--size-2-2);
+}
+
+.loom-obj-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+.loom-obj-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-3);
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+	padding: var(--size-2-2) var(--size-4-2);
+}
+
+.loom-obj-name {
+	flex: 1;
+	min-width: 0;
+}
+
+/* Editors/inputs sit inside the tinted row — give them the page background so
+   they read as distinct fields (like the session-note text editors do). */
+.loom-obj-name .loom-md-field .cm-editor,
+.loom-obj-finished .loom-combo > input {
+	background: var(--background-primary);
+}
+
+/* Fixed-width "Finished on" column so the pickers and, once resolved, the
+   session chips line up into one readable column. */
+.loom-obj-finished {
+	flex: 0 0 12em;
+	display: flex;
+	align-items: center;
+}
+
+.loom-obj-finished .loom-combo,
+.loom-obj-finished .loom-combo > input,
+.loom-obj-finished .loom-tag-row,
+.loom-obj-finished .loom-tag-row .loom-chip {
+	width: 100%;
+}
+
+/* Uniform-width session chips: fill the column, name clips rather than resizing
+   the chip, so every resolved row's chip is the same size. */
+.loom-obj-finished .loom-tag-row .loom-chip {
+	display: flex;
+	justify-content: space-between;
+	box-sizing: border-box;
+	min-width: 0;
+}
+
+.loom-obj-finished .loom-tag-row .loom-chip .loom-subloc-link {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
+
+/* Square remove button, matching the Relationships row's ✕ (loom-nav-btn). */
+.loom-obj-remove {
+	flex: 0 0 auto;
+	padding: var(--size-2-2);
+	line-height: 1;
+	aspect-ratio: 1;
+}
+
+/* Non-dragged objective rows slide into place live while one is grabbed. */
+.loom-obj-list.loom-subloc-dragging .loom-obj-row {
+	transition: transform 120ms ease;
+}
+
+/* The grabbed row rides the cursor with no transition lag, and lifts. */
+.loom-obj-list.loom-subloc-dragging .loom-obj-row.loom-obj-row-dragging {
+	transition: none;
+	box-shadow: var(--shadow-m);
+	background: var(--background-primary);
+	z-index: 2;
+}
+
 /* loomSeq drag-reorder of session-page hub rows (events + quests): non-dragged
    rows slide into place; the grabbed row rides the cursor and lifts. */
 .loom-subloc-dragging [data-seq-row] {

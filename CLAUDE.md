@@ -17,7 +17,7 @@ and a custom layered graph view.
 | `src/types.ts` | Entity types + metadata, record/connection/timeline/date shapes, `FM` frontmatter-key registry (+ legacy spellings), view type IDs |
 | `src/fm.ts` | Shared frontmatter read/write helpers: case-insensitive reads with legacy-key fallback, loom-key writes that clean stale spellings |
 | `src/naming.ts` | Managed file-name construction (`<Project> <Type label> <name>`), dependency-free for indexer + project use |
-| `src/settings.ts` | Global settings: text size, tag vocabulary, entity colors, collapse threshold, global layer order; tabbed settings UI (General/Entities/Graph, per-project timeline settings under Graph). Entities tab holds "Entities colors" (Group first, then entity types, quest tag colors nested under Quest) and the Loom button colors ("Loom, original" — plum/cream pair that flips with the app theme via `body.theme-dark` CSS — or a custom bg+icon pair) |
+| `src/settings.ts` | Global settings: text size, tag vocabulary, entity colors, collapse threshold, global layer order; tabbed settings UI (General/Entities/Graph, per-project timeline settings under Graph). Entities tab holds "Entities colors" (Group first, then entity types, quest tag colors nested under Quest), a "Quests" section (how many previously-resolved quests a session page lists — 3/6/9/12/All, `sessionResolvedQuests`, default 6), and the Loom button colors ("Loom, original" — plum/cream pair that flips with the app theme via `body.theme-dark` CSS — or a custom bg+icon pair) |
 | `src/indexer.ts` | Index cache: project discovery (.loom files), frontmatter → in-memory records, vault event handling, connection queries (incl. native links), JSON snapshot persistence |
 | `src/calendar.ts` | Date model: parsing (Gregorian + custom in-game calendars), display formats, per-project `ProjectConfig` (de)serialization |
 | `src/columns.ts` | Chronological column layout shared by timeline and graph (sessions anchor columns, session-connected events stack beneath) |
@@ -63,17 +63,35 @@ and a custom layered graph view.
   Reads fall back to legacy un-prefixed spellings; writes go through `src/fm.ts`
   helpers which clean legacy keys up; the startup migration rewrites old notes.
   Nested keys inside list entries stay unprefixed; `aliases` is deliberately native.
-- **Events section (entity pages)**: character/item/faction/location pages show the
-  events they take part in instead of their own session notes. A note's `involved`
-  list surfaces the event on each involved entity's page; a note's `places` list (the
+- **Events section (entity pages)**: character/item/faction/location/**quest** pages
+  show the events they take part in instead of their own session notes. A note's
+  `involved` list surfaces the event on each involved entity's page (quests included —
+  a quest is `involved` in the events that advance it); a note's `places` list (the
   event's per-note location, stored on the event, replacing the old event-level
   `location` relationship) surfaces it on that location **and every ancestor location**
   (city ⊇ tavern ⊇ secret room). Removing the page's own entity from a note warns first
-  ("… this event won't be displayed here anymore"). Only event/quest pages keep an
-  editable own-`sessionNotes` section. Adding an event is a `SearchableSelect`:
-  picking an existing event involves this page's entity in that event's first note
-  (`places` for a location page, else `involved`), and "+ Create new event" opens the
-  modal pre-linking the page's entity (`defaultInvolved` / `defaultPlace`).
+  ("… this event won't be displayed here anymore"). Only **event** pages keep an
+  editable own-`sessionNotes` section (quests no longer author their own notes — the
+  session-page hub is labelled **Events** and never shows a Quests subsection). Adding
+  an event is a `SearchableSelect`: picking an existing event involves this page's
+  entity in that event's first note (`places` for a location page, else `involved`),
+  and "+ Create new event" opens the modal pre-linking the page's entity
+  (`defaultInvolved` / `defaultPlace`). Creating a quest from an event note's Involve
+  search prefills the quest's "Received in session" with that note's session
+  (`CreateEntityModal` `receivedSession` — sets `questReceived` without pinning a note).
+- **Quest page specifics**: the **Reward** field is a `MarkdownField` (links, multiple
+  lines — a reward `[[item]]` connects in the graph as a plain link). An **Objectives**
+  section (after Tags, `loomObjectives` frontmatter: ordered `{ name, finishedOn? }`
+  entries) splits into **Active** (no `finishedOn`) and **Resolved** (a `finishedOn`
+  session, picked like "Received in session"); "+ Add objective" appends a row, active
+  rows drag-reorder (a drop rewrites the stored list as reordered-actives then the
+  resolved). `finishedOn` links are hidden (no graph edge — `loomobjectives` in
+  `HIDDEN_LINK_KEYS`).
+- **Session-page Quests section**: three collapsible groups computed as of the session's
+  date — **Active**, **Resolved this session** (`questOutcomeSession` is this session),
+  **Resolved previously** (resolved in an earlier session, capped by
+  `settings.sessionResolvedQuests` — 3/6/9/12/All, default 6, newest by outcome date;
+  the count reads "N of total" when capped). Only Active reorders (`loomSeq`).
 - **Items section (character/location pages, after Events)**: an ordered `loomItems`
   frontmatter list of item links on the character/location. Each row edits the item
   entity in place (name renames the item file, description writes its `loomDescription`);

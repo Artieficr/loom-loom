@@ -710,6 +710,10 @@ export interface CreateEntityOptions {
 	parentLocation?: EntityRecord;
 	/** The new entity starts with a session note pinned to this session. */
 	noteSession?: EntityRecord;
+	/** Quests only: prefills "Received in session" without pinning a session
+	 *  note — e.g. a quest created from an event note's Involve search, where the
+	 *  event already carries the session and the quest is just involved in it. */
+	receivedSession?: EntityRecord;
 	/** Events only: names pre-added to the involved list (still removable) —
 	 *  e.g. the character whose page spawned the event. */
 	defaultInvolved?: string[];
@@ -892,8 +896,9 @@ export class CreateEntityModal extends Modal {
 			};
 
 			// Received session: search like the quest page; the pick becomes a
-			// session tag with ✕. Quests born from a session page default there.
-			this.receivedSession = this.options.noteSession ?? null;
+			// session tag with ✕. Quests born from a session page (or from an event
+			// note that already carries a session) default there.
+			this.receivedSession = this.options.noteSession ?? this.options.receivedSession ?? null;
 			const receivedSetting = new Setting(this.contentEl).setName('Received in session');
 			const receivedEl = receivedSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 			const refreshReceived = () => {
@@ -925,11 +930,13 @@ export class CreateEntityModal extends Modal {
 			// Quest tags (main / important / side) sit right after the session.
 			this.renderTagPills();
 
-			new Setting(this.contentEl)
+			const reward = new Setting(this.contentEl)
 				.setName('Reward')
-				.addText((text) =>
+				.setDesc('Supports markdown and multiple lines, so you can link an [[item]].')
+				.addTextArea((text) =>
 					text.setPlaceholder('Not specified').onChange((v) => (this.fields.reward = v.trim()))
 				);
+			reward.setClass('loom-modal-wide');
 			// Full-width row: label above, the text box using the whole window width.
 			const desc = new Setting(this.contentEl)
 				.setName('Description')

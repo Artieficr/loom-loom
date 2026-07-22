@@ -20,6 +20,7 @@ import {
 	LOOM_EXTENSION,
 	PC_TAG,
 	QUEST_OUTCOMES,
+	QuestObjective,
 	RelationshipDecl,
 	SessionNoteDecl,
 	TIMELINES_FOLDER,
@@ -114,6 +115,7 @@ const HIDDEN_LINK_KEYS = [
 	'loomdeathsession',
 	'loomsublocationorder',
 	'loomitemowner',
+	'loomobjectives',
 	'attendance',
 	'deathsession',
 	'sublocationorder',
@@ -580,6 +582,19 @@ export class LoomIndexer extends Component {
 			}
 		}
 
+		const objectives: QuestObjective[] = [];
+		const rawObjectives = fmLoom(fm, FM.objectives);
+		if (Array.isArray(rawObjectives)) {
+			for (const obj of rawObjectives) {
+				if (typeof obj !== 'object' || obj === null) continue;
+				const { name, finishedOn } = obj as { name?: unknown; finishedOn?: unknown };
+				objectives.push({
+					name: typeof name === 'string' ? name : '',
+					finishedSession: typeof finishedOn === 'string' ? extractLinkpath(finishedOn) : null,
+				});
+			}
+		}
+
 		// Sessions always track real-world dates; everything else follows the
 		// project's calendar (custom in-game calendar when enabled).
 		const calendar =
@@ -638,6 +653,7 @@ export class LoomIndexer extends Component {
 				typeof outcomeSessionValue === 'string' ? extractLinkpath(outcomeSessionValue) : null,
 			questGivers: parseLinkList(fmLoom(fm, FM.questGiver)),
 			reward: typeof rewardValue === 'string' ? rewardValue : '',
+			objectives,
 			seq: typeof fmLoom(fm, FM.seq) === 'number' ? (fmLoom(fm, FM.seq) as number) : null,
 			created: file.stat.ctime,
 			modified: file.stat.mtime,

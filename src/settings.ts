@@ -19,6 +19,9 @@ export interface LoomLoomSettings {
 	textSize: LoomTextSize;
 	/** Background colors for the built-in quest tags (main / important / side). */
 	questTagColors: { main: string; important: string; side: string };
+	/** Session page — how many previously-resolved quests to list in the Quests
+	 *  section's "Resolved previously" group (most recent by outcome date). 0 = all. */
+	sessionResolvedQuests: number;
 	/** Graph side panel: sections with more entries than this start collapsed. */
 	graphCollapseThreshold: number;
 	/** Zoom level a right-clicked node is focused at (both directions — can zoom in or out to reach it). */
@@ -74,6 +77,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	projectRoot: '',
 	textSize: 'normal',
 	questTagColors: { main: '#b48b0e', important: '#c95f5f', side: '#58b478' },
+	sessionResolvedQuests: 6,
 	graphCollapseThreshold: 5,
 	graphFocusZoom: 1,
 	graphLineGap: 10,
@@ -149,6 +153,12 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.timelineDrawerHeight === 'number' && data.timelineDrawerHeight > 0) {
 		base.timelineDrawerHeight = data.timelineDrawerHeight;
+	}
+	if (
+		typeof data.sessionResolvedQuests === 'number' &&
+		[0, 3, 6, 9, 12].includes(data.sessionResolvedQuests)
+	) {
+		base.sessionResolvedQuests = data.sessionResolvedQuests;
 	}
 	if (typeof data.questTagColors === 'object' && data.questTagColors !== null) {
 		for (const k of ['main', 'important', 'side'] as const) {
@@ -263,7 +273,15 @@ const SETTINGS_TABS: [SettingsTabId, string][] = [
  */
 const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 	general: ['textSize'],
-	entities: ['questTagColors', 'nodeColors', 'groupColor', 'loomButtonStyle', 'loomButtonBg', 'loomButtonIcon'],
+	entities: [
+		'questTagColors',
+		'sessionResolvedQuests',
+		'nodeColors',
+		'groupColor',
+		'loomButtonStyle',
+		'loomButtonBg',
+		'loomButtonIcon',
+	],
 	graph: [
 		'graphCollapseThreshold',
 		'graphFocusZoom',
@@ -400,6 +418,32 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 				}
 			}
 		}
+
+		new Setting(containerEl).setName('Quests').setHeading();
+		const resolvedSetting = new Setting(containerEl)
+			.setName('Resolved quests shown on a session')
+			.setDesc(
+				'How many previously-resolved quests a session page shows in its resolved-previously group (the most recent by outcome date).'
+			)
+			.addDropdown((dd) => {
+				for (const [value, label] of [
+					['3', '3'],
+					['6', '6'],
+					['9', '9'],
+					['12', '12'],
+					['0', 'All'],
+				] as [string, string][]) {
+					dd.addOption(value, label);
+				}
+				dd.setValue(String(this.plugin.settings.sessionResolvedQuests)).onChange(async (value) => {
+					this.plugin.settings.sessionResolvedQuests = Number(value);
+					await this.plugin.saveSettings();
+					this.plugin.indexer.refreshViews();
+				});
+			});
+		this.addReset(resolvedSetting, () => {
+			this.plugin.settings.sessionResolvedQuests = DEFAULT_SETTINGS.sessionResolvedQuests;
+		});
 
 		new Setting(containerEl).setName('Loom button').setHeading();
 		const styleSetting = new Setting(containerEl)
