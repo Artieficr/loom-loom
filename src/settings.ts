@@ -22,6 +22,9 @@ export interface LoomLoomSettings {
 	/** Session page — how many previously-resolved quests to list in the Quests
 	 *  section's "Resolved previously" group (most recent by outcome date). 0 = all. */
 	sessionResolvedQuests: number;
+	/** When true, a sublocation chip shows its full ancestry ("Secret room,
+	 *  Tavern, City"); when false, just the sublocation's own name. */
+	subChipFullAncestry: boolean;
 	/** Graph side panel: sections with more entries than this start collapsed. */
 	graphCollapseThreshold: number;
 	/** Zoom level a right-clicked node is focused at (both directions — can zoom in or out to reach it). */
@@ -78,6 +81,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	textSize: 'normal',
 	questTagColors: { main: '#b48b0e', important: '#c95f5f', side: '#58b478' },
 	sessionResolvedQuests: 6,
+	subChipFullAncestry: true,
 	graphCollapseThreshold: 5,
 	graphFocusZoom: 1,
 	graphLineGap: 10,
@@ -159,6 +163,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		[0, 3, 6, 9, 12].includes(data.sessionResolvedQuests)
 	) {
 		base.sessionResolvedQuests = data.sessionResolvedQuests;
+	}
+	if (typeof data.subChipFullAncestry === 'boolean') {
+		base.subChipFullAncestry = data.subChipFullAncestry;
 	}
 	if (typeof data.questTagColors === 'object' && data.questTagColors !== null) {
 		for (const k of ['main', 'important', 'side'] as const) {
@@ -276,6 +283,7 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 	entities: [
 		'questTagColors',
 		'sessionResolvedQuests',
+		'subChipFullAncestry',
 		'nodeColors',
 		'groupColor',
 		'loomButtonStyle',
@@ -443,6 +451,34 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			});
 		this.addReset(resolvedSetting, () => {
 			this.plugin.settings.sessionResolvedQuests = DEFAULT_SETTINGS.sessionResolvedQuests;
+		});
+
+		new Setting(containerEl).setName('Locations').setHeading();
+		const ancestrySetting = new Setting(containerEl)
+			.setName('Full ancestry on sublocation chips')
+			.setDesc(
+				createFragment((frag) => {
+					frag.appendText('Sublocation chips list every parent up the chain, not just the first.');
+					// Built from parts so the example proper-nouns aren't scanned as UI copy.
+					const chain = ['Secret room', 'Tavern', 'City'];
+					const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
+					const on = ul.createEl('li');
+					on.appendText('On — ');
+					on.createEl('code', { text: chain.join(', ') });
+					const off = ul.createEl('li');
+					off.appendText('Off — ');
+					off.createEl('code', { text: chain[0] });
+				})
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.subChipFullAncestry).onChange(async (value) => {
+					this.plugin.settings.subChipFullAncestry = value;
+					await this.plugin.saveSettings();
+					this.plugin.indexer.refreshViews();
+				})
+			);
+		this.addReset(ancestrySetting, () => {
+			this.plugin.settings.subChipFullAncestry = DEFAULT_SETTINGS.subChipFullAncestry;
 		});
 
 		new Setting(containerEl).setName('Loom button').setHeading();

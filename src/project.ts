@@ -7,6 +7,7 @@ import {
 	Modal,
 	Notice,
 	Setting,
+	TextAreaComponent,
 	TextComponent,
 	TFile,
 	TFolder,
@@ -29,7 +30,7 @@ import {
 } from './types';
 import { defaultProjectConfig, formatLoomDate, groupNameOf, serializeProjectConfig, todayRaw } from './calendar';
 import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
-import { ProjectDef, linkTargetOf } from './indexer';
+import { ProjectDef, extractLinkpath, linkTargetOf } from './indexer';
 import { fmLoomValue, setLoomKey } from './fm';
 import type LoomLoomPlugin from './main';
 
@@ -226,6 +227,97 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	}
 	lines.push('---', '', '');
 	return lines.join('\n');
+}
+
+/**
+ * Removes every frontmatter reference to a deleted entity from other notes in
+ * the project — relationships, members, involved/group/places on session notes,
+ * item/quest-giver/attendance/sublocation-order lists, objective finish
+ * sessions, and the scalar link fields (parentLocation, deathSession, quest
+ * received/outcome sessions, item origin/owner). Body-text `[[links]]` are left
+ * alone — only structured fields are cleared. Run BEFORE trashing the note so
+ * links still resolve.
+ */
+export async function purgeEntityReferences(
+	plugin: LoomLoomPlugin,
+	deletedPath: string,
+	projectRoot: string
+): Promise<void> {
+	const others = plugin.indexer.getAll(undefined, projectRoot).filter((r) => r.path !== deletedPath);
+	for (const rec of others) {
+		// Only touch notes that actually connect to the deleted one (this includes
+		// body links, but we edit frontmatter only, so body links are untouched).
+		if (!plugin.indexer.getOutgoing(rec.path).some((c) => c.record.path === deletedPath)) continue;
+		const f = plugin.app.vault.getFileByPath(rec.path);
+		if (!f) continue;
+		const dead = (v: unknown): boolean =>
+			typeof v === 'string' &&
+			plugin.indexer.resolve(extractLinkpath(v) ?? '', rec.path)?.path === deletedPath;
+		const isObj = (v: unknown): v is Record<string, unknown> =>
+			typeof v === 'object' && v !== null && !Array.isArray(v);
+		try {
+			await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				for (const key of Object.keys(fm)) {
+					const lower = key.replace(/^loom/i, '').toLowerCase();
+					const val = fm[key];
+					// Scalar link fields → drop the key when it points at the deleted note.
+					if (
+						[
+							'parentlocation',
+							'deathsession',
+							'questreceived',
+							'questoutcomesession',
+							'itemorigin',
+							'itemowner',
+						].includes(lower)
+					) {
+						if (dead(val)) delete fm[key];
+						continue;
+					}
+					if (!Array.isArray(val)) continue;
+					if (lower === 'relationships') {
+						fm[key] = val.filter((e) => !(isObj(e) && dead(e.target)));
+					} else if (lower === 'members') {
+						fm[key] = val
+							.filter((e) => !dead(e) && !(isObj(e) && dead(e.character)))
+							.map((e): unknown => {
+								if (isObj(e) && dead(e.location)) {
+									const { location, ...rest } = e;
+									void location;
+									return rest;
+								}
+								return e;
+							});
+					} else if (lower === 'sessionnotes') {
+						fm[key] = val.map((e): unknown => {
+							if (!isObj(e)) return e;
+							const next = { ...e };
+							if (dead(next.session)) delete next.session;
+							for (const listKey of ['involved', 'group', 'places']) {
+								const list = next[listKey];
+								if (Array.isArray(list)) next[listKey] = list.filter((v) => !dead(v));
+							}
+							return next;
+						});
+					} else if (lower === 'objectives') {
+						fm[key] = val.map((e): unknown => {
+							if (isObj(e) && dead(e.finishedOn)) {
+								const { finishedOn, ...rest } = e;
+								void finishedOn;
+								return rest;
+							}
+							return e;
+						});
+					} else {
+						// Plain link lists: items, questGiver, attendance, sublocationOrder.
+						fm[key] = val.filter((v) => !dead(v));
+					}
+				}
+			});
+		} catch (e) {
+			console.error('Loom Loom: failed to purge references from', rec.path, e);
+		}
+	}
 }
 
 /** One-line text prompt (rename, alias, date…). Enter or the CTA submits. */
@@ -737,6 +829,9 @@ export class CreateEntityModal extends Modal {
 	/** Event/quest from a session page: an existing entity chosen in the Name
 	 *  search — submit pins it to the session instead of creating a duplicate. */
 	private pickedExisting: EntityRecord | null = null;
+	/** Event modal: re-renders the Description field read-only vs editable when
+	 *  the Name search toggles between an existing pick and a new name. */
+	private refreshDesc?: () => void;
 	/** The primary button; its label flips to "Add" once an existing
 	 *  event/quest is picked (it will be pinned, not created). */
 	private submitBtn: ButtonComponent | null = null;
@@ -800,13 +895,22 @@ export class CreateEntityModal extends Modal {
 		return this.plugin.indexer.resolve(name, this.project.loomPath);
 	}
 
-	/** "Tavern, City A" for a sublocation, else the plain name. */
+	/** Sublocation label: full ancestry ("Secret room, Tavern, City"), or just
+	 *  the own name when `subChipFullAncestry` is off. */
 	private locLabel(r: EntityRecord): string {
-		if (r.type === 'location' && r.parentLocation !== null) {
-			const parent = this.plugin.indexer.resolve(r.parentLocation, r.path);
-			if (parent?.type === 'location') return `${r.name}, ${parent.name}`;
+		if (r.type !== 'location' || r.parentLocation === null) return r.name;
+		if (!this.plugin.settings.subChipFullAncestry) return r.name;
+		const parts = [r.name];
+		let cur: EntityRecord | null = r;
+		const seen = new Set<string>([r.path]);
+		for (let guard = 0; guard < 20 && cur?.parentLocation != null; guard++) {
+			const parent = this.plugin.indexer.resolve(cur.parentLocation, cur.path);
+			if (parent?.type !== 'location' || seen.has(parent.path)) break;
+			parts.push(parent.name);
+			seen.add(parent.path);
+			cur = parent;
 		}
-		return r.name;
+		return parts.join(', ');
 	}
 
 	onOpen(): void {
@@ -830,6 +934,7 @@ export class CreateEntityModal extends Modal {
 						// Typing after a pick means "make a new one with this name".
 						this.pickedExisting = null;
 						this.refreshSubmitLabel();
+						this.refreshDesc?.();
 					});
 				if (searchable) {
 					new RecordInputSuggest(
@@ -841,6 +946,7 @@ export class CreateEntityModal extends Modal {
 							this.fields.name = r.name;
 							text.inputEl.value = r.name;
 							this.refreshSubmitLabel();
+							this.refreshDesc?.();
 						},
 						(r) => r.name,
 						false
@@ -1085,6 +1191,45 @@ export class CreateEntityModal extends Modal {
 				}
 			};
 			refreshInvolved();
+
+			// Locations: where the event takes place — written into the starting
+			// note's `places` (like the pages' Location… picker). Main locations
+			// sort above their sublocations.
+			const placeTaken = (r: EntityRecord) => (this.fields.places ?? []).includes(linkTargetOf(r));
+			const placeCandidates = () =>
+				this.plugin.indexer
+					.getAll('location', this.project.root)
+					.filter((r) => !placeTaken(r))
+					.sort(
+						(a, b) =>
+							(a.parentLocation === null ? 0 : 1) - (b.parentLocation === null ? 0 : 1) ||
+							a.name.localeCompare(b.name)
+					);
+			new Setting(this.contentEl).setName('Locations').addText((text) => {
+				text.setPlaceholder('Location…');
+				new RecordInputSuggest(
+					this.app,
+					text.inputEl,
+					placeCandidates,
+					(r) => {
+						(this.fields.places ??= []).push(linkTargetOf(r));
+						refreshPlaces();
+					},
+					(r) => this.locLabel(r)
+				);
+			});
+			const placeChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
+			const refreshPlaces = () => {
+				placeChips.empty();
+				for (const target of this.fields.places ?? []) {
+					const rec = this.resolveName(target);
+					this.renderChip(placeChips, rec, rec ? this.locLabel(rec) : target, () => {
+						this.fields.places = (this.fields.places ?? []).filter((n) => n !== target);
+						refreshPlaces();
+					});
+				}
+			};
+			refreshPlaces();
 		}
 
 		// Events born from a session page need no date — the session carries it.
@@ -1308,10 +1453,24 @@ export class CreateEntityModal extends Modal {
 		}
 
 		if (this.type === 'event') {
-			const evDesc = new Setting(this.contentEl)
-				.setName('Description')
-				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
+			// When an existing event is picked (session-page add), its description
+			// is shown read-only — you're adding it to the session, not editing it.
+			const evDesc = new Setting(this.contentEl).setName('Description');
 			evDesc.setClass('loom-modal-wide');
+			const roEl = evDesc.controlEl.createDiv({ cls: 'loom-modal-existing-desc' });
+			let ta: TextAreaComponent | null = null;
+			evDesc.addTextArea((text) => {
+				ta = text;
+				text.onChange((v) => (this.fields.description = v.trim()));
+			});
+			this.refreshDesc = () => {
+				const existing = this.pickedExisting;
+				if (ta) ta.inputEl.style.display = existing ? 'none' : '';
+				roEl.style.display = existing ? '' : 'none';
+				if (existing) roEl.setText(existing.description !== '' ? existing.description : '(No description)');
+				evDesc.setName(existing ? 'Description (existing event)' : 'Description');
+			};
+			this.refreshDesc();
 		}
 
 		const connectTo = this.options.connectTo;
@@ -1429,7 +1588,19 @@ export class CreateEntityModal extends Modal {
 			await this.plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
 				const cur = fmLoomValue(fm, FM.sessionNotes);
 				const arr = Array.isArray(cur) ? cur : [];
-				arr.push({ session: `[[${linkTargetOf(session)}]]`, text: '', seq: Date.now() });
+				// This session note carries whatever was picked in the modal — an
+				// existing event's involved list is per-session-note, so the same
+				// event can involve different entities in different sessions.
+				const note: Record<string, unknown> = {
+					session: `[[${linkTargetOf(session)}]]`,
+					text: '',
+					seq: Date.now(),
+				};
+				const links = (names?: string[]) => (names ?? []).map((n) => `[[${n}]]`);
+				if ((this.fields.involved ?? []).length > 0) note.involved = links(this.fields.involved);
+				if ((this.fields.group ?? []).length > 0) note.group = links(this.fields.group);
+				if ((this.fields.places ?? []).length > 0) note.places = links(this.fields.places);
+				arr.push(note);
 				setLoomKey(fm, FM.sessionNotes, arr);
 			});
 			this.close();

@@ -19,6 +19,7 @@ import {
 	RecordSuggestModal,
 	TextInputModal,
 	copyEntityRecord,
+	purgeEntityReferences,
 	recordPickLabel,
 	renameEntityRecord,
 	sessionFileName,
@@ -697,7 +698,10 @@ function EntityList({
 						'The note is moved to the trash.',
 						() => {
 							const file = plugin.app.vault.getFileByPath(r.path);
-							if (file) void plugin.app.fileManager.trashFile(file);
+							if (!file) return;
+							void purgeEntityReferences(plugin, r.path, r.project).finally(() =>
+								plugin.app.fileManager.trashFile(file)
+							);
 						},
 						'Delete'
 					).open()
@@ -898,7 +902,10 @@ function EntityList({
 							'The note is moved to the trash.',
 							() => {
 								const file = plugin.app.vault.getFileByPath(r.path);
-								if (file) void plugin.app.fileManager.trashFile(file);
+								if (!file) return;
+								void purgeEntityReferences(plugin, r.path, r.project).finally(() =>
+									plugin.app.fileManager.trashFile(file)
+								);
 							},
 							'Delete'
 						).open();

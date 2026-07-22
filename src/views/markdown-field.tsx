@@ -9,7 +9,7 @@ import {
 	keymap,
 	placeholder as cmPlaceholder,
 } from '@codemirror/view';
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import {
 	CompletionContext,
 	CompletionResult,
@@ -195,17 +195,34 @@ function buildDecorations(view: EditorView): DecorationSet {
 				}
 			}
 
-			const bullet = /^(\s*)([-*+])(\s)/.exec(text);
+			const bullet = /^([ \t]*)([-*+])(\s)/.exec(text);
 			if (bullet && !hr) {
+				const indent = bullet[1];
+				// Depth = indent levels (Tab inserts one indentUnit — 2 columns —
+				// per press); a tab counts as one column pair too.
+				const depth = Math.floor(indent.replace(/\t/g, '  ').length / 2);
 				entries.push({
 					from: line.from,
 					to: line.from,
-					deco: Decoration.line({ class: 'loom-md-list' }),
+					deco: Decoration.line({
+						class: 'loom-md-list',
+						attributes:
+							!lineActive && depth > 0 ? { style: `--loom-list-depth:${depth}` } : undefined,
+					}),
 				});
 				if (!lineActive) {
+					// Hide the raw indentation; the line's padding + a nesting rail per
+					// ancestor level stand in for it so nested bullets read as an outline.
+					if (indent.length > 0) {
+						entries.push({
+							from: line.from,
+							to: line.from + indent.length,
+							deco: Decoration.replace({}),
+						});
+					}
 					entries.push({
-						from: line.from + bullet[1].length,
-						to: line.from + bullet[1].length + 1,
+						from: line.from + indent.length,
+						to: line.from + indent.length + 1,
 						deco: Decoration.replace({ widget: new BulletWidget() }),
 					});
 				}
@@ -406,15 +423,39 @@ function toggleWrap(view: EditorView, open: string, close: string): boolean {
 	return true;
 }
 
-/** Obsidian's editing shortcuts: bold / italic / underline. Mod-b/Mod-i are
- *  also global Obsidian hotkeys captured at the window before CodeMirror runs,
- *  so a focused field additionally pushes a keymap Scope (see MarkdownField)
- *  that takes precedence over them; this CM keymap covers unbound keys. */
-const formattingKeys = keymap.of([
-	{ key: 'Mod-b', run: (view) => toggleWrap(view, '**', '**') },
-	{ key: 'Mod-i', run: (view) => toggleWrap(view, '*', '*') },
-	{ key: 'Mod-u', run: (view) => toggleWrap(view, '<u>', '</u>') },
-]);
+/** The inline markers Ctrl/Cmd+B/I/U wrap with. */
+function formattingPair(key: string): [string, string] | null {
+	switch (key.toLowerCase()) {
+		case 'b':
+			return ['**', '**'];
+		case 'i':
+			return ['*', '*'];
+		case 'u':
+			return ['<u>', '</u>'];
+		default:
+			return null;
+	}
+}
+
+// A single Ctrl+B/I/U keypress can reach us twice — once through CodeMirror's
+// own keydown (for keys Obsidian doesn't grab, e.g. Ctrl+U) and once through the
+// focused-field app Scope that outranks Obsidian's global Ctrl+B/I hotkeys. Both
+// call `applyFormatting`; this WeakSet keeps the physical event from toggling
+// twice (which would cancel itself out).
+const formattedEvents = new WeakSet<KeyboardEvent>();
+
+/** Toggles the marker for `event` once per physical keypress. Returns whether it
+ *  was a formatting key at all (so callers know to preventDefault/stopPropagation). */
+function applyFormatting(view: EditorView, event: KeyboardEvent): boolean {
+	if (event.altKey || !(event.ctrlKey || event.metaKey)) return false;
+	const pair = formattingPair(event.key);
+	if (!pair) return false;
+	if (!formattedEvents.has(event)) {
+		formattedEvents.add(event);
+		toggleWrap(view, pair[0], pair[1]);
+	}
+	return true;
+}
 
 /** Inserts a picked link at the completion range, reusing/adding the `]]`. */
 function insertLink(view: EditorView, from: number, to: number, insert: string) {
@@ -504,17 +545,21 @@ export function MarkdownField({
 	useEffect(() => {
 		if (!hostRef.current) return;
 		// While the field is focused, this scope outranks Obsidian's global
-		// hotkeys (Ctrl+B/I are bound app-wide and captured before CodeMirror).
+		// hotkeys — Ctrl+B/I are bound app-wide (toggle bold/italic) and grabbed
+		// before CodeMirror ever sees them, so this is the ONLY layer that can
+		// intercept them here. Ctrl+U has no global binding, so it also reaches
+		// CodeMirror's keydown handler below; the shared `applyFormatting` guard
+		// keeps a keypress that hits both paths from toggling twice.
 		const scope = new Scope(app.scope);
-		const wrapKey = (key: string, open: string, close: string) =>
-			scope.register(['Mod'], key, () => {
+		const wrapKey = (key: string) =>
+			scope.register(['Mod'], key, (evt) => {
 				const v = viewRef.current;
-				if (v) toggleWrap(v, open, close);
+				if (v && evt instanceof KeyboardEvent) applyFormatting(v, evt);
 				return false;
 			});
-		wrapKey('b', '**', '**');
-		wrapKey('i', '*', '*');
-		wrapKey('u', '<u>', '</u>');
+		wrapKey('b');
+		wrapKey('i');
+		wrapKey('u');
 		let scopePushed = false;
 		const pushScope = () => {
 			if (!scopePushed) {
@@ -578,7 +623,6 @@ export function MarkdownField({
 							bracketPairing,
 							pairDeletion,
 							formatContinuation,
-							formattingKeys,
 							autocompletion({
 								override: [
 									linkCompletion(
@@ -588,7 +632,9 @@ export function MarkdownField({
 								],
 								icons: false,
 							}),
-							keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap]),
+							// Tab indents (nesting bullets) instead of leaving the field;
+						// lowest precedence so an open completion still accepts on Tab.
+						keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
 							EditorView.updateListener.of((update) => {
 								if (update.docChanged) onChangeRef.current(update.state.doc.toString());
 								if (update.focusChanged) {
@@ -596,7 +642,19 @@ export function MarkdownField({
 									else popScope();
 								}
 							}),
-							EditorView.domEventHandlers({ mousedown: openLinkOnMousedown }),
+							EditorView.domEventHandlers({
+								mousedown: openLinkOnMousedown,
+								// Handles Ctrl/Cmd+B/I/U for keys that reach CodeMirror (e.g.
+								// Ctrl+U, which Obsidian doesn't grab). B/I are usually
+								// intercepted upstream and toggled by the app Scope instead;
+								// the shared guard stops a double toggle when both fire.
+								keydown: (event, v) => {
+									if (!applyFormatting(v, event)) return false;
+									event.preventDefault();
+									event.stopPropagation();
+									return true;
+								},
+							}),
 						],
 			}),
 		});
@@ -621,5 +679,5 @@ export function MarkdownField({
 		}
 	}, [value]);
 
-	return <div className="loom-md-field" ref={hostRef} />;
+	return <div className={readOnly ? 'loom-md-field loom-md-readonly' : 'loom-md-field'} ref={hostRef} />;
 }

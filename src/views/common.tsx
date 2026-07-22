@@ -341,14 +341,31 @@ export function recordLabel(record: EntityRecord, project: ProjectDef | null): s
 	return record.name;
 }
 
-/** Search/display label for a location: sublocations read "Tavern, City A" so
- *  same-named places under different parents stay distinguishable. */
+/** Search/display label for a location: a sublocation reads "Secret room,
+ *  Tavern, City" (its full ancestry, so same-named places stay distinct). The
+ *  `subChipFullAncestry` setting can trim it to just the sublocation's own name. */
 export function locationLabel(record: EntityRecord, plugin: LoomLoomPlugin): string {
-	if (record.type === 'location' && record.parentLocation !== null) {
-		const parent = plugin.indexer.resolve(record.parentLocation, record.path);
-		if (parent?.type === 'location') return `${record.name}, ${parent.name}`;
+	if (record.type !== 'location' || record.parentLocation === null) return record.name;
+	if (!plugin.settings.subChipFullAncestry) return record.name;
+	const parts = [record.name];
+	let cur: EntityRecord | null = record;
+	const seen = new Set<string>([record.path]);
+	for (let guard = 0; guard < 20 && cur?.parentLocation != null; guard++) {
+		const parent = plugin.indexer.resolve(cur.parentLocation, cur.path);
+		if (parent?.type !== 'location' || seen.has(parent.path)) break;
+		parts.push(parent.name);
+		seen.add(parent.path);
+		cur = parent;
 	}
-	return record.name;
+	return parts.join(', ');
+}
+
+/** Location picker order: top-level locations before sublocations (so searching
+ *  "City" lists City above "Tavern, City"), then alphabetically within each. */
+export function mainLocationFirst(a: EntityRecord, b: EntityRecord): number {
+	const da = a.parentLocation === null ? 0 : 1;
+	const db = b.parentLocation === null ? 0 : 1;
+	return da - db || a.name.localeCompare(b.name);
 }
 
 /** Formatted date of a record, or empty string. */

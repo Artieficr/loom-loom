@@ -35,6 +35,7 @@ import {
 	RecordSuggestModal,
 	createItemCopy,
 	entityFileName,
+	purgeEntityReferences,
 	sessionFileName,
 } from '../project';
 import { formatLoomDateShort, groupNameOf, todayRaw } from '../calendar';
@@ -49,6 +50,7 @@ import {
 	QuestTagChip,
 	Truncated,
 	locationLabel,
+	mainLocationFirst,
 	recordLabel,
 } from './common';
 import { ConnectedEntities } from './connected-entities';
@@ -354,10 +356,26 @@ function EntityPage({ view }: { view: EntityView }) {
 	const linkNames = useMemo(() => {
 		const records = record ? plugin.indexer.getAll(undefined, record.project) : [];
 		return records
-			.map((r) => {
+			.flatMap((r) => {
 				const target = linkTargetOf(r);
 				const label = draftLabel(r);
-				return { label, insert: target === label ? label : `${target}|${label}` };
+				const opts: LinkOption[] = [
+					{ label, insert: target === label ? label : `${target}|${label}` },
+				];
+				// Also offer each alias (native `aliases` frontmatter); inserting the
+				// real target keeps the link resolvable while showing the alias.
+				const f = plugin.app.vault.getFileByPath(r.path);
+				const aliases = f
+					? (plugin.app.metadataCache.getFileCache(f)?.frontmatter?.aliases as unknown)
+					: undefined;
+				if (Array.isArray(aliases)) {
+					for (const a of aliases) {
+						if (typeof a === 'string' && a.trim() !== '' && a !== label) {
+							opts.push({ label: a, insert: `${target}|${a}` });
+						}
+					}
+				}
+				return opts;
 			})
 			.sort((a, b) => a.label.localeCompare(b.label));
 	}, [plugin, record, version]);
@@ -955,6 +973,34 @@ function EntityPage({ view }: { view: EntityView }) {
 		.sort((a, b) => a.faction.name.localeCompare(b.faction.name));
 	const membershipLocations =
 		record.type === 'character' ? plugin.indexer.getAll('location', record.project) : [];
+	// Location page: the characters serving a faction AT this location — read
+	// from every faction's `members` whose per-membership `location` is this one.
+	const locationFactionRows =
+		record.type === 'location'
+			? plugin.indexer
+					.getAll('faction', record.project)
+					.flatMap((faction) =>
+						faction.members
+							.filter(
+								(m) =>
+									m.location !== null &&
+									plugin.indexer.resolve(m.location, faction.path)?.path === record.path
+							)
+							.map((m) => ({
+								faction,
+								role: m.role,
+								character: plugin.indexer.resolve(m.linkpath, faction.path),
+							}))
+					)
+					.filter((r): r is { faction: EntityRecord; role: string; character: EntityRecord } =>
+						r.character != null && r.character.type === 'character'
+					)
+					.sort(
+						(a, b) =>
+							a.faction.name.localeCompare(b.faction.name) ||
+							a.character.name.localeCompare(b.character.name)
+					)
+			: [];
 	// Events shown on this page. For a location: every event placed here OR in
 	// any descendant location (ancestor propagation) — via the note's `places`.
 	// For other entities (character, item, faction): events whose `involved`
@@ -1219,7 +1265,10 @@ function EntityPage({ view }: { view: EntityView }) {
 											'The note is moved to the trash.',
 											() => {
 												const f = plugin.app.vault.getFileByPath(item.path);
-												if (f) void plugin.app.fileManager.trashFile(f);
+												if (!f) return;
+												void purgeEntityReferences(plugin, item.path, item.project).finally(() =>
+													plugin.app.fileManager.trashFile(f)
+												);
 											},
 											'Delete'
 										).open()
@@ -1989,7 +2038,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								placeholder="Location…"
 								options={(project ? plugin.indexer.getAll('location', project.root) : [])
 									.filter((l) => !noteLocs.some((q) => q.target?.path === l.path))
-									.sort((a, b) => a.name.localeCompare(b.name))
+									.sort(mainLocationFirst)
 									.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 								onPick={(name) => setNote({ places: [...note.places, name] }, true)}
 								action={
@@ -2013,7 +2062,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										key={key}
 										plugin={plugin}
 										record={target}
-										label={target?.name ?? key}
+										label={target ? locationLabel(target, plugin) : key}
 										onOpen={target ? () => view.openEntity(target.path) : undefined}
 										onRemove={remove}
 										removeLabel="Remove location"
@@ -2046,21 +2095,24 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			{isLocation ? (
 					<div className="loom-tag-row">
-						{note.places.map((pl, pi) => (
-							<EntityChip
-								key={pl}
-								plugin={plugin}
-								record={plugin.indexer.resolve(pl, record.path)}
-								label={pl}
-								onRemove={() => setNote({ places: note.places.filter((_, j) => j !== pi) }, true)}
-								removeLabel="Remove place"
-							/>
-						))}
+						{note.places.map((pl, pi) => {
+							const placeRec = plugin.indexer.resolve(pl, record.path);
+							return (
+								<EntityChip
+									key={pl}
+									plugin={plugin}
+									record={placeRec}
+									label={placeRec ? locationLabel(placeRec, plugin) : pl}
+									onRemove={() => setNote({ places: note.places.filter((_, j) => j !== pi) }, true)}
+									removeLabel="Remove place"
+								/>
+							);
+						})}
 						<SearchableSelect
 							placeholder="Add a place…"
 							options={projectLocations
 								.filter((l) => l.path !== record.path && !note.places.includes(linkTargetOf(l)))
-								.sort((a, b) => a.name.localeCompare(b.name))
+								.sort(mainLocationFirst)
 								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 							onPick={(name) => setNote({ places: [...note.places, name] }, true)}
 						/>
@@ -2179,7 +2231,10 @@ function EntityPage({ view }: { view: EntityView }) {
 									'The note is moved to the trash.',
 									() => {
 										const f = plugin.app.vault.getFileByPath(en.owner.path);
-										if (f) void plugin.app.fileManager.trashFile(f);
+										if (!f) return;
+										void purgeEntityReferences(plugin, en.owner.path, en.owner.project).finally(() =>
+											plugin.app.fileManager.trashFile(f)
+										);
 									},
 									'Delete'
 								).open()
@@ -2411,7 +2466,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							placeholder="Location…"
 							options={(project ? plugin.indexer.getAll('location', project.root) : [])
 								.filter((t) => !locs.some((l) => l.target?.path === t.path))
-								.sort((a, b) => a.name.localeCompare(b.name))
+								.sort(mainLocationFirst)
 								.map((t) => ({ value: linkTargetOf(t), label: locationLabel(t, plugin) }))}
 							onPick={(name) => writeEntryPlaces(en, (list) => [...list, `[[${name}]]`])}
 							action={
@@ -2435,7 +2490,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										key={key}
 										plugin={plugin}
 										record={target}
-										label={target?.name ?? key}
+										label={target ? locationLabel(target, plugin) : key}
 										onOpen={target ? () => view.openEntity(target.path) : undefined}
 										onRemove={() => {
 											// Removing the place that surfaces this event here — this
@@ -2483,6 +2538,78 @@ function EntityPage({ view }: { view: EntityView }) {
 			</div>
 		);
 	};
+
+	// Events hub — rendered near the top on most entity pages, but pushed below
+	// the location-only sections (Factions/Items/Sublocations) on a location page.
+	const eventsSection =
+		showsEvents && project ? (
+			<div className="loom-field loom-field-sep">
+				<span className="loom-field-label">Events</span>
+				<div className="loom-hub-add-row">
+					<SearchableSelect
+						placeholder="Add an event…"
+						options={plugin.indexer
+							.getAll('event', record.project)
+							.filter((ev) => !pageEventEntries.some((e) => e.owner.path === ev.path))
+							.sort((a, b) => a.name.localeCompare(b.name))
+							.map((ev) => ({ value: linkTargetOf(ev), label: ev.name }))}
+						onPick={(linkTarget) => {
+							const ev = plugin.indexer.resolve(linkTarget, record.path);
+							if (ev) addExistingEventToPage(ev);
+						}}
+						action={{
+							label: '+ Create new event',
+							onPick: () =>
+								new CreateEntityModal(plugin, 'event', project, {
+									...(isLocation
+										? { defaultPlace: linkTargetOf(record) }
+										: { defaultInvolved: [linkTargetOf(record)] }),
+									onCreated: () => {},
+								}).open(),
+						}}
+					/>
+					{orderToggle}
+				</div>
+				{pageEventGroups.map((g) => {
+					// Events within a session group are drag-reorderable (loomSeq,
+					// shared with the session page); the slide is scoped to the group,
+					// so it never crosses sessions.
+					const gkey = 'pgevents-' + (g.session?.path ?? 'none');
+					const owners = g.entries.map((e) => e.owner);
+					return (
+						<div key={g.session?.path ?? 'none'} className="loom-locnote-group loom-char-event-group">
+							<div className="loom-tag-row loom-event-group-session">
+								{g.session ? (
+									<EntityChip
+										plugin={plugin}
+										record={g.session}
+										label={shortSessionLabel(g.session)}
+										onOpen={() => g.session && view.openEntity(g.session.path)}
+									/>
+								) : (
+									<EntityChip plugin={plugin} record={null} label="No session" />
+								)}
+							</div>
+							<div
+								className={
+									seqDrag?.group === gkey ? 'loom-event-nest loom-subloc-dragging' : 'loom-event-nest'
+								}
+							>
+								{g.entries.map((en, i) =>
+									hubEntryRow(
+										en,
+										seqGrip(gkey, i, owners),
+										seqRowStyle(gkey, i),
+										seqDrag?.group === gkey && seqDrag.from === i,
+										i
+									)
+								)}
+							</div>
+						</div>
+					);
+				})}
+			</div>
+		) : null;
 
 	return (
 		<div className="loom-entity-row">
@@ -2539,7 +2666,9 @@ function EntityPage({ view }: { view: EntityView }) {
 								else if (project) {
 									view.navigateTo(VIEW_LIST, { project: project.root, entityType: record.type });
 								}
-								void plugin.app.fileManager.trashFile(file);
+								void purgeEntityReferences(plugin, record.path, record.project).finally(() =>
+									plugin.app.fileManager.trashFile(file)
+								);
 							},
 							'Delete'
 						).open()
@@ -3496,75 +3625,9 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{/* Events instead of session notes (characters/items/factions via the
 			    note's "involved"; locations via its "places", including any
-			    sublocation's events). The modal pre-links this page's entity. */}
-			{showsEvents && project ? (
-				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Events</span>
-					<div className="loom-hub-add-row">
-						<SearchableSelect
-							placeholder="Add an event…"
-							options={plugin.indexer
-								.getAll('event', record.project)
-								.filter((ev) => !pageEventEntries.some((e) => e.owner.path === ev.path))
-								.sort((a, b) => a.name.localeCompare(b.name))
-								.map((ev) => ({ value: linkTargetOf(ev), label: ev.name }))}
-							onPick={(linkTarget) => {
-								const ev = plugin.indexer.resolve(linkTarget, record.path);
-								if (ev) addExistingEventToPage(ev);
-							}}
-							action={{
-								label: '+ Create new event',
-								onPick: () =>
-									new CreateEntityModal(plugin, 'event', project, {
-										...(isLocation
-											? { defaultPlace: linkTargetOf(record) }
-											: { defaultInvolved: [linkTargetOf(record)] }),
-										onCreated: () => {},
-									}).open(),
-							}}
-						/>
-						{orderToggle}
-					</div>
-					{pageEventGroups.map((g) => {
-						// Events within a session group are drag-reorderable (loomSeq,
-						// shared with the session page); the slide is scoped to the group,
-						// so it never crosses sessions.
-						const gkey = 'pgevents-' + (g.session?.path ?? 'none');
-						const owners = g.entries.map((e) => e.owner);
-						return (
-							<div key={g.session?.path ?? 'none'} className="loom-locnote-group loom-char-event-group">
-								<div className="loom-tag-row loom-event-group-session">
-									{g.session ? (
-										<EntityChip
-											plugin={plugin}
-											record={g.session}
-											label={shortSessionLabel(g.session)}
-											onOpen={() => g.session && view.openEntity(g.session.path)}
-										/>
-									) : (
-										<EntityChip plugin={plugin} record={null} label="No session" />
-									)}
-								</div>
-								<div
-									className={
-										seqDrag?.group === gkey ? 'loom-event-nest loom-subloc-dragging' : 'loom-event-nest'
-									}
-								>
-									{g.entries.map((en, i) =>
-										hubEntryRow(
-											en,
-											seqGrip(gkey, i, owners),
-											seqRowStyle(gkey, i),
-											seqDrag?.group === gkey && seqDrag.from === i,
-											i
-										)
-									)}
-								</div>
-							</div>
-						);
-					})}
-				</div>
-			) : null}
+			    sublocation's events). On a location page this hub is pushed to the
+			    bottom (after Factions/Items/Sublocations); elsewhere it stays here. */}
+			{!isLocation ? eventsSection : null}
 
 			{/* Reverse of a character/location's Items section: who carries this
 			    item. Chips (persistent entities), an "Add to …" search, remove only. */}
@@ -3637,6 +3700,45 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+
+			{/* Characters serving a faction at this location (reverse of the
+			    faction/character membership `location`). Read-only — edits happen
+			    on the faction or character pages. Each faction's members hang off a
+			    vertical nesting rail beneath the faction chip. */}
+			{isLocation && locationFactionRows.length > 0 ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Factions</span>
+					{[...new Map(locationFactionRows.map((r) => [r.faction.path, r.faction])).values()].map(
+						(faction) => (
+							<div key={faction.path} className="loom-locnote-group loom-char-event-group">
+								<div className="loom-tag-row loom-event-group-session">
+									<EntityChip
+										plugin={plugin}
+										record={faction}
+										onOpen={() => view.openEntity(faction.path)}
+									/>
+								</div>
+								<div className="loom-event-nest loom-locfac-nest">
+									{locationFactionRows
+										.filter((r) => r.faction.path === faction.path)
+										.map((r) => (
+											<span key={r.character.path} className="loom-locfac-member">
+												<EntityChip
+													plugin={plugin}
+													record={r.character}
+													onOpen={() => view.openEntity(r.character.path)}
+												/>
+												{r.role && r.role.toLowerCase() !== 'member' ? (
+													<span className="loom-member-sep">{r.role}</span>
+												) : null}
+											</span>
+										))}
+								</div>
+							</div>
+						)
+					)}
+				</div>
+			) : null}
 
 			{showsItems && project ? (
 				<div className="loom-field loom-field-sep">
@@ -3766,6 +3868,10 @@ function EntityPage({ view }: { view: EntityView }) {
 					) : null}
 				</div>
 			) : null}
+
+			{/* On a location page the Events hub sits here, after the
+			    Factions/Items/Sublocations sections. */}
+			{isLocation ? eventsSection : null}
 
 			<div className="loom-field loom-field-sep">
 				<span className="loom-field-label">Relationships</span>
