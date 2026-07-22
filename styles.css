@@ -1515,6 +1515,16 @@ span.loom-row-caret {
 	font-weight: var(--font-medium);
 }
 
+/* A field label sharing its row with a right-aligned extra (the session's
+   chronological number next to the Date title — inherits the label's muted
+   style, so it reads as a copy of the "Date" title). */
+.loom-field-label-row {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+}
+
 .loom-today-link {
 	align-self: flex-start;
 	color: var(--link-color, var(--text-accent));
