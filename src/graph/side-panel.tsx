@@ -1,6 +1,9 @@
+import { App } from 'obsidian';
 import { PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
 import { Connection, ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
 import { Icon, Truncated } from '../views/common';
+import { MarkdownField } from '../views/markdown-field';
+import type { LinkOption } from '../views/link-textarea';
 
 /** The panel's original fixed width — resizing can only widen it. */
 export const PANEL_MIN = 260;
@@ -57,22 +60,30 @@ function Section({
 }
 
 export function GraphSidePanel({
+	app,
 	record,
 	label,
 	connections,
 	connectionLabel,
 	threshold,
+	names,
+	onOpenLink,
 	width,
 	onWidthChange,
 	onOpen,
 	onClose,
 	onCreate,
 }: {
+	app: App;
 	record: EntityRecord;
 	label: string;
 	connections: Connection[];
 	connectionLabel: (record: EntityRecord) => string;
 	threshold: number;
+	/** Link vocabulary for the read-only description's rendered links. */
+	names: LinkOption[];
+	/** Opens a wikilink target from the rendered description. */
+	onOpenLink: (target: string, newTab?: boolean) => void;
 	/** Current panel width (px), owned by the graph view so it persists. */
 	width: number;
 	onWidthChange: (width: number) => void;
@@ -97,8 +108,24 @@ export function GraphSidePanel({
 		if (resize.current?.pointerId === e.pointerId) resize.current = null;
 	};
 
-	const groups = new Map<EntityType, Connection[]>();
+	// Reciprocal typed relationships collapse to what THIS node declares: if the
+	// selected node has an outgoing connection to a target, its incoming ones to
+	// the same target are dropped (A→B "husband" hides B→A "wife" on A's panel).
+	// Targets the node only receives connections from keep those as-is.
+	const byTarget = new Map<string, Connection[]>();
 	for (const conn of connections) {
+		const list = byTarget.get(conn.record.path) ?? [];
+		list.push(conn);
+		byTarget.set(conn.record.path, list);
+	}
+	const deduped: Connection[] = [];
+	for (const list of byTarget.values()) {
+		const outgoing = list.filter((c) => c.direction === 'outgoing');
+		deduped.push(...(outgoing.length > 0 ? outgoing : list));
+	}
+
+	const groups = new Map<EntityType, Connection[]>();
+	for (const conn of deduped) {
 		const list = groups.get(conn.record.type) ?? [];
 		list.push(conn);
 		groups.set(conn.record.type, list);
@@ -121,8 +148,19 @@ export function GraphSidePanel({
 					✕
 				</button>
 			</div>
-			{record.description !== '' ? <div className="loom-sidepanel-desc">{record.description}</div> : null}
-			{connections.length === 0 ? (
+			{record.description !== '' ? (
+				<div className="loom-sidepanel-desc">
+					<MarkdownField
+						app={app}
+						value={record.description}
+						names={names}
+						onOpenLink={onOpenLink}
+						onChange={() => undefined}
+						readOnly
+					/>
+				</div>
+			) : null}
+			{deduped.length === 0 ? (
 				<div className="loom-empty">No connections.</div>
 			) : (
 				// key on record.path so open/collapsed state resets per selection

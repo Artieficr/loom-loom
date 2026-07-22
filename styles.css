@@ -1014,6 +1014,33 @@ span.loom-row-caret {
 	stroke-width: 3;
 }
 
+/* Focus cue: entities in the graph filter's "Focus on entities" set get a
+   node-colored ring that pulses outward, so picks are easy to spot. Drawn in
+   screen space (not inside .loom-node) so its size is zoom-independent. */
+.loom-node-focus-ring {
+	fill: none;
+	stroke-width: 2.5;
+	transform-box: fill-box;
+	transform-origin: center;
+	animation: loom-node-pulse 1.7s ease-out infinite;
+	pointer-events: none;
+}
+
+@keyframes loom-node-pulse {
+	0% {
+		transform: scale(1);
+		opacity: 0.75;
+	}
+	70% {
+		transform: scale(2.4);
+		opacity: 0;
+	}
+	100% {
+		transform: scale(2.4);
+		opacity: 0;
+	}
+}
+
 /* Drop-to-connect cue: ring around the node a dragged node hovers over. */
 .loom-node circle.loom-drop-ring {
 	fill: none;
@@ -1106,6 +1133,14 @@ span.loom-row-caret {
 	color: var(--text-muted);
 	font-size: 0.9em;
 	margin-bottom: var(--size-4-2);
+}
+
+/* The description renders through the read-only markdown field — strip the
+   input chrome so it reads as plain rendered text (links stay clickable). */
+.loom-sidepanel-desc .loom-md-field .cm-editor {
+	background: transparent;
+	border: none;
+	padding: 0;
 }
 
 .loom-section {
@@ -2859,6 +2894,20 @@ span.loom-row-caret {
 	margin-left: 0;
 }
 
+/* Search Prev / All / Next cluster, shown while a query has matches. */
+.loom-search-nav {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+}
+
+.loom-search-count {
+	font-size: 0.8em;
+	color: var(--text-muted);
+	min-width: 2.5em;
+	text-align: center;
+}
+
 .loom-filter-mode {
 	display: flex;
 	align-items: center;
@@ -2871,6 +2920,119 @@ span.loom-row-caret {
 .loom-filter-mode .checkbox-container {
 	margin-left: auto;
 	cursor: pointer;
+}
+
+.loom-filter-mode-btn {
+	cursor: pointer;
+}
+
+/* Entity-focus block at the bottom of the filter popover. */
+.loom-filter-pick {
+	align-self: stretch;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	padding-top: var(--size-2-2);
+	border-top: 1px solid var(--background-modifier-border);
+	width: 260px;
+}
+
+.loom-filter-pick-head {
+	font-size: 0.85em;
+	color: var(--text-muted);
+}
+
+.loom-filter-pick-search .loom-combo {
+	max-width: none;
+}
+
+/* The popover sits near the pane's right edge (often beside Obsidian's right
+   sidebar), so the entity dropdown hangs straight down from the search bar with
+   its right edge aligned to the bar's right, growing leftward — clear of the
+   sidebar. Sized to its content (not the narrow search bar), capped so it can't
+   run off the left edge. */
+.loom-filter-pick-search .loom-combo-menu {
+	top: 100%;
+	right: 0;
+	left: auto;
+	width: max-content;
+	min-width: 200px;
+	max-width: 320px;
+}
+
+/* Items keep their natural height (no flex-shrink squish) and clip long names. */
+.loom-filter-pick-search .loom-combo-item {
+	flex: 0 0 auto;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.loom-filter-pick-chips {
+	max-height: 160px;
+	overflow-y: auto;
+}
+
+/* Focus chips clip their name so a long one can't force the popover to scroll. */
+.loom-filter-pick-chips .loom-chip {
+	max-width: 100%;
+	min-width: 0;
+}
+
+.loom-filter-pick-chips .loom-chip .loom-subloc-link {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
+
+/* Two-option segmented rows (both choices shown, the active one lit) replace the
+   ambiguous single toggle. */
+.loom-filter-seg-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
+.loom-filter-seg-label {
+	font-size: 0.85em;
+	color: var(--text-muted);
+	flex: 0 0 auto;
+	min-width: 3.5em;
+}
+
+.loom-filter-seg-row .loom-seg {
+	margin-left: auto;
+}
+
+.loom-filter-seg-row .loom-seg-btn {
+	font-size: 0.85em;
+	padding: var(--size-2-1) var(--size-2-3);
+}
+
+.loom-view button.loom-filter-clear {
+	align-self: flex-end;
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	background: none;
+	box-shadow: none;
+	color: var(--text-muted);
+	font-size: 0.85em;
+	padding: var(--size-2-1) var(--size-2-3);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+
+.loom-filter-clear .loom-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.loom-view button.loom-filter-clear:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+	text-decoration: underline;
 }
 
 /* Segmented pill group (creation modal tags). */
