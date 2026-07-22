@@ -477,6 +477,21 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sessions = project ? plugin.indexer.getAll('session', project.root) : [];
 	const targetRecords = project ? plugin.indexer.getAll(undefined, project.root) : [];
 
+	// This session's chronological number: its 1-based position among all the
+	// project's sessions ordered by date. Computed live (never stored), so it
+	// self-corrects when a session is deleted or its date is edited. Ties on the
+	// same date fall back to creation time, then path, for a stable order.
+	const sessionNumber = isSession
+		? [...sessions]
+				.sort(
+					(a, b) =>
+						(a.date?.sortKey ?? 0) - (b.date?.sortKey ?? 0) ||
+						a.created - b.created ||
+						a.path.localeCompare(b.path)
+				)
+				.findIndex((s) => s.path === record.path) + 1
+		: 0;
+
 	/**
 	 * THE write path for a loom frontmatter list on any file: reads the raw
 	 * array (legacy spellings included), hands it to `apply`, writes the loom
@@ -2808,7 +2823,12 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{isSession ? (
 				<label className="loom-field">
-					<span className="loom-field-label">Date</span>
+					<span className="loom-field-label loom-field-label-row">
+						Date
+						{sessionNumber > 0 ? (
+							<span className="loom-session-number">Session {sessionNumber}</span>
+						) : null}
+					</span>
 					<input
 						type="date"
 						value={date}
