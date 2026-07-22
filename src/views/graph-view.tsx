@@ -17,6 +17,7 @@ import {
 	EntityType,
 	FM,
 	GraphCamera,
+	PC_TAG,
 	QUEST_OUTCOMES,
 	TimelineDef,
 	VIEW_GRAPH,
@@ -280,6 +281,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	);
 	const [size, setSize] = useState({ w: 1200, h: 700 });
 	const [, setTick] = useState(0);
+	/** True while a node is being dragged. Drives the window-level pointer
+	 *  listeners that own the drag (see the effect below) — the node's own
+	 *  element can't, because a re-render can unmount it mid-drag and drop the
+	 *  pointer capture, freezing the drag. */
+	const [dragActive, setDragActive] = useState(false);
 	const [drawerOpen, setDrawerOpen] = useState(view.restored.drawerOpen ?? false);
 	// Restored via Back navigation (view state) or, across restarts, from settings.
 	const [drawerHeight, setDrawerHeight] = useState(
@@ -508,7 +514,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			return;
 		}
 		e.stopPropagation();
-		e.currentTarget.setPointerCapture(e.pointerId);
+		// No setPointerCapture: capturing on the node <g> is exactly what broke —
+		// a re-render that unmounts it drops the capture and freezes the drag.
+		// The drag is owned by window listeners (gated on dragActive) instead.
 		dragRef.current = {
 			id: node.id,
 			node,
@@ -526,6 +534,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		d.vx = 0;
 		d.vy = 0;
 		dispRef.current.set(node.id, d);
+		setDragActive(true);
 	};
 
 	/** Bails out of a drag whose pointerup never arrived (canceled pointer,
@@ -534,9 +543,13 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	 *  node stayed glued to the cursor. */
 	const abortDrag = () => {
 		const drag = dragRef.current;
-		if (!drag) return;
+		if (!drag) {
+			setDragActive(false);
+			return;
+		}
 		dragRef.current = null;
 		dropRef.current = null;
+		setDragActive(false);
 		const hadLive = liveManual.current !== null;
 		liveManual.current = null;
 		const d = dispRef.current.get(drag.id);
@@ -553,7 +566,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			node.record.date === null &&
 			(layout.neighbors.get(node.id)?.size ?? 0) === 0);
 
-	const onNodePointerMove = (e: ReactPointerEvent<SVGGElement>) => {
+	const onNodePointerMove = (e: PointerEvent) => {
 		const drag = dragRef.current;
 		if (!drag || drag.pointerId !== e.pointerId) return;
 		if (e.buttons === 0) {
@@ -599,10 +612,14 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		}
 	};
 
-	const onNodePointerUp = (node: LayoutNode, e: ReactPointerEvent<SVGGElement>) => {
+	const onNodePointerUp = (e: PointerEvent) => {
 		const drag = dragRef.current;
-		if (!drag || drag.pointerId !== e.pointerId) return;
+		if (!drag || drag.pointerId !== e.pointerId) {
+			setDragActive(false);
+			return;
+		}
 		dragRef.current = null;
+		setDragActive(false);
 		const dropId = dropRef.current;
 		dropRef.current = null;
 		const hadLive = liveManual.current !== null;
@@ -660,9 +677,36 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			}
 		} else {
 			dispRef.current.delete(drag.id);
-			setSelected((cur) => (cur === node.id ? null : node.id));
+			setSelected((cur) => (cur === drag.id ? null : drag.id));
 		}
 	};
+
+	// A node drag lives on window listeners, not the node's element + pointer
+	// capture: a re-render (index refresh, live reflow) can unmount/replace the
+	// captured <g>, which drops the capture and used to freeze the drag (then the
+	// node sprang back home). The window can't be unmounted, so the drag survives
+	// every re-render. `dragHandlers` keeps the latest closures so the once-per-
+	// drag listeners always call fresh state.
+	const dragHandlers = useRef<{
+		move: (e: PointerEvent) => void;
+		up: (e: PointerEvent) => void;
+		abort: () => void;
+	}>({ move: () => {}, up: () => {}, abort: () => {} });
+	dragHandlers.current = { move: onNodePointerMove, up: onNodePointerUp, abort: abortDrag };
+	useEffect(() => {
+		if (!dragActive) return;
+		const move = (e: PointerEvent) => dragHandlers.current.move(e);
+		const up = (e: PointerEvent) => dragHandlers.current.up(e);
+		const cancel = () => dragHandlers.current.abort();
+		window.addEventListener('pointermove', move);
+		window.addEventListener('pointerup', up);
+		window.addEventListener('pointercancel', cancel);
+		return () => {
+			window.removeEventListener('pointermove', move);
+			window.removeEventListener('pointerup', up);
+			window.removeEventListener('pointercancel', cancel);
+		};
+	}, [dragActive]);
 
 	// --- Drop-to-connect -------------------------------------------------------
 
@@ -685,6 +729,31 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	/** Frontmatter value as a link list (accepts a single string too). */
 	const linkList = (raw: unknown): unknown[] =>
 		Array.isArray(raw) ? raw : typeof raw === 'string' && raw !== '' ? [raw] : [];
+
+	/** Adds a `[[link]]` to the event's first session note's `involved`/`places`
+	 *  list, creating a session-less note if the event has none yet (mirrors the
+	 *  entity page's "Add an event" behaviour). */
+	const addToEventNote = (event: LayoutNode, other: LayoutNode, key: 'involved' | 'places') => {
+		const link = `[[${linkTargetOf(other.record)}]]`;
+		writeNodeFm(event, (fm) => {
+			const cur = fmLoomValue(fm, FM.sessionNotes);
+			const arr: unknown[] = Array.isArray(cur) ? [...(cur as unknown[])] : [];
+			if (arr.length === 0) {
+				arr.push({ session: '', text: '', seq: Date.now(), [key]: [link] });
+			} else {
+				const first = arr[0];
+				const note: Record<string, unknown> =
+					typeof first === 'object' && first !== null
+						? { ...(first as Record<string, unknown>) }
+						: { session: '', text: typeof first === 'string' ? first : '' };
+				const list = Array.isArray(note[key]) ? [...(note[key] as unknown[])] : [];
+				list.push(link);
+				note[key] = list;
+				arr[0] = note;
+			}
+			setLoomKey(fm, FM.sessionNotes, arr);
+		});
+	};
 
 	/** Node-on-node drop. Pairs with a dedicated field offer to fill it — those
 	 *  writes go to the note that OWNS the field (a character dropped on a quest
@@ -723,6 +792,45 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			}
 		}
 
+		// Faction ↔ character: add the character to the faction's members list
+		// (plain link → default "Member" role, editable on either page).
+		const factionChar = pair('faction', 'character');
+		if (factionChar) {
+			const { a: faction, b: char } = factionChar;
+			const resolve = resolvesFrom(faction);
+			if (!faction.record.members.some((m) => resolve(m.linkpath) === char.id)) {
+				options.push({
+					title: 'Add as member',
+					action: () =>
+						writeNodeFm(faction, (fm) => {
+							setLoomKey(fm, FM.members, [
+								...linkList(fmLoomValue(fm, FM.members)),
+								`[[${linkTargetOf(char.record)}]]`,
+							]);
+						}),
+				});
+			}
+		}
+
+		// Item ↔ character/location: add the item to the holder's items list.
+		for (const holderType of ['character', 'location'] as const) {
+			const itemHolder = pair('item', holderType);
+			if (!itemHolder) continue;
+			const { a: item, b: holder } = itemHolder;
+			const resolve = resolvesFrom(holder);
+			if (holder.record.items.some((lp) => resolve(lp) === item.id)) continue;
+			options.push({
+				title: 'Add item',
+				action: () =>
+					writeNodeFm(holder, (fm) => {
+						setLoomKey(fm, FM.items, [
+							...linkList(fmLoomValue(fm, FM.items)),
+							`[[${linkTargetOf(item.record)}]]`,
+						]);
+					}),
+			});
+		}
+
 		const questSession = pair('quest', 'session');
 		if (questSession) {
 			const { a: quest, b: session } = questSession;
@@ -757,8 +865,54 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			}
 		}
 
+		// Quest ↔ item: append the item as a reward (the reward is a free-form
+		// markdown field, so a `[[item]]` link is added on its own line).
+		const questItem = pair('quest', 'item');
+		if (questItem) {
+			const { a: quest, b: item } = questItem;
+			const link = `[[${linkTargetOf(item.record)}]]`;
+			if (!quest.record.reward.includes(linkTargetOf(item.record))) {
+				options.push({
+					title: 'Add as reward',
+					action: () =>
+						writeNodeFm(quest, (fm) => {
+							const cur = fmLoomValue(fm, FM.reward);
+							const text = typeof cur === 'string' ? cur : '';
+							setLoomKey(fm, FM.reward, text.trim() === '' ? link : `${text}\n${link}`);
+						}),
+				});
+			}
+		}
+
+		// Event ↔ any involvable entity: add it to the event's first session note
+		// (creating one if the event has none). Locations can be BOTH involved
+		// (a place discussed in the event) and a `places` entry (where it
+		// happened, surfaced on the location page), so a location offers both.
+		const eventOther =
+			from.record.type === 'event' && to.record.type !== 'event' && to.record.type !== 'session'
+				? { event: from, other: to }
+				: to.record.type === 'event' && from.record.type !== 'event' && from.record.type !== 'session'
+					? { event: to, other: from }
+					: null;
+		if (eventOther) {
+			const { event, other } = eventOther;
+			const onNote = (key: 'involved' | 'places') =>
+				event.record.sessionNotes.some((n) =>
+					(key === 'places' ? n.places : [...n.involved, ...n.group]).some(
+						(lp) => plugin.indexer.resolve(lp, event.id)?.path === other.id
+					)
+				);
+			if (!onNote('involved')) {
+				options.push({ title: 'Involve in event', action: () => addToEventNote(event, other, 'involved') });
+			}
+			if (other.record.type === 'location' && !onNote('places')) {
+				options.push({ title: 'Add as place', action: () => addToEventNote(event, other, 'places') });
+			}
+		}
+
 		// Any node ↔ session: offer a session note on the non-session side
-		// (empty text, filled in on its page) alongside the generic relationship.
+		// (empty text, filled in on its page) alongside the generic relationship;
+		// a PC also gets "Mark as attending" (the session's attendance list).
 		const sessionPair =
 			from.record.type === 'session' && to.record.type !== 'session'
 				? { session: from, other: to }
@@ -767,6 +921,24 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					: null;
 		if (sessionPair) {
 			const { session, other } = sessionPair;
+			if (
+				other.record.type === 'character' &&
+				other.record.loomTags.includes(PC_TAG) &&
+				!session.record.attendance.some(
+					(lp) => plugin.indexer.resolve(lp, session.id)?.path === other.id
+				)
+			) {
+				options.push({
+					title: 'Mark as attending',
+					action: () =>
+						writeNodeFm(session, (fm) => {
+							setLoomKey(fm, FM.attendance, [
+								...linkList(fmLoomValue(fm, FM.attendance)),
+								`[[${linkTargetOf(other.record)}]]`,
+							]);
+						}),
+				});
+			}
 			const has = other.record.sessionNotes.some(
 				(n) => n.session !== null && plugin.indexer.resolve(n.session, other.id)?.path === session.id
 			);
@@ -1479,8 +1651,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								);
 							})}
 						{layout.nodes.map((node) => {
-								if (!visible.has(node.id)) return null;
-								if (pickHidden(node.id)) return null;
+								// The dragged node always renders, even if it slides out of the
+								// cull range — losing its element mid-drag is the old freeze.
+								const isDragged = dragRef.current?.id === node.id;
+								if (!isDragged && !visible.has(node.id)) return null;
+								if (!isDragged && pickHidden(node.id)) return null;
 								if (
 									filterActive &&
 									filterMode === 'hide' &&
@@ -1510,9 +1685,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										className={classes.join(' ')}
 										transform={`translate(${p.x},${p.y})`}
 										onPointerDown={(e) => onNodePointerDown(node, e)}
-										onPointerMove={onNodePointerMove}
-										onPointerUp={(e) => onNodePointerUp(node, e)}
-										onPointerCancel={abortDrag}
 										onDoubleClick={() => view.openEntity(node.id)}
 										onContextMenu={(e) => {
 											// Right click zoom-focuses the node (open moved to double-click).
