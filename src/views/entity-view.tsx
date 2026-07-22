@@ -144,6 +144,12 @@ interface RelationshipDraft {
 	filter?: EntityType | null;
 }
 
+interface ObjectiveDraft {
+	name: string;
+	/** Linkpath of the session it was finished in; '' while still active. */
+	finishedOn: string;
+}
+
 interface SessionNoteDraft {
 	/** Session linkpath; '' while no session is picked yet. */
 	session: string;
@@ -247,6 +253,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [sessionNotes, setSessionNotes] = useState<SessionNoteDraft[]>(
 		record?.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, group: n.group, seq: n.seq, idx })) ?? []
 	);
+	const [objectives, setObjectives] = useState<ObjectiveDraft[]>(
+		record?.objectives.map((o) => ({ name: o.name, finishedOn: o.finishedSession ?? '' })) ?? []
+	);
 	const [body, setBody] = useState<string | null>(null);
 	/** Live sublocation reorder: rows slide in real time while the grip is
 	 *  held; the row itself is never carried by the cursor. */
@@ -267,9 +276,14 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (open) openSessionGraphs.add(file.path);
 		else openSessionGraphs.delete(file.path);
 	};
-	const [questsOpen, setQuestsOpen] = useState<{ active: boolean; finished: boolean }>({
+	const [questsOpen, setQuestsOpen] = useState<{
+		active: boolean;
+		resolvedThis: boolean;
+		resolvedPrev: boolean;
+	}>({
 		active: true,
-		finished: false,
+		resolvedThis: true,
+		resolvedPrev: false,
 	});
 	/** Hub row whose action menu (trash / unlink) is slid open, if any. */
 	const [hubMenu, setHubMenu] = useState<string | null>(null);
@@ -298,6 +312,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const questDragRef = useRef<{ startX: number; startY: number; rects: QuestRect[]; over: number } | null>(
 		null
 	);
+	/** Live reorder of the active objectives list (indices within that sublist). */
+	const [objDrag, setObjDrag] = useState<{ from: number; over: number; dy: number } | null>(null);
+	const objDragRef = useRef<{ startY: number; slot: number; mids: number[] } | null>(null);
 
 	// A freshly created note opens before metadataCache has indexed it, so the
 	// record can arrive one tick after mount — seed the drafts then.
@@ -316,6 +333,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			})
 		);
 		setSessionNotes(record.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, group: n.group, seq: n.seq, idx })));
+		setObjectives(record.objectives.map((o) => ({ name: o.name, finishedOn: o.finishedSession ?? '' })));
 	}, [record]);
 
 	useEffect(() => {
@@ -372,6 +390,25 @@ function EntityPage({ view }: { view: EntityView }) {
 					})
 					.catch((e) => {
 						console.error('Loom Loom: failed to save description', e);
+					});
+			}, 600);
+		};
+	}, [plugin, file]);
+
+	// Reward supports markdown (links, multiple lines); commits on idle like the
+	// description field.
+	const saveReward = useMemo(() => {
+		let timer = 0;
+		return (value: string) => {
+			window.clearTimeout(timer);
+			timer = window.setTimeout(() => {
+				if (!file) return;
+				plugin.app.fileManager
+					.processFrontMatter(file, (fm: Record<string, unknown>) => {
+						setLoomKey(fm, FM.reward, value);
+					})
+					.catch((e) => {
+						console.error('Loom Loom: failed to save reward', e);
 					});
 			}, 600);
 		};
@@ -586,6 +623,83 @@ function EntityPage({ view }: { view: EntityView }) {
 				})
 		);
 	};
+
+	// Quest objectives: written to `loomObjectives` as `{ name, finishedOn? }`.
+	// Empty rows (no name, no session) are dropped on commit.
+	const commitObjectives = (next: ObjectiveDraft[]) => {
+		setObjectives(next);
+		editFmList(record.path, FM.objectives, () =>
+			next
+				.filter((o) => o.name.trim() !== '' || o.finishedOn !== '')
+				.map((o) => {
+					const out: Record<string, unknown> = { name: o.name };
+					if (o.finishedOn !== '') out.finishedOn = `[[${o.finishedOn}]]`;
+					return out;
+				})
+		);
+	};
+
+	// Objective reorder (active sublist): live sliding modeled on the sublocation
+	// grip. `active`/`resolved` are the two draft partitions; a drop rewrites the
+	// stored list as reordered-actives followed by the resolved ones.
+	const objRowStyle = (i: number, count: number): CSSProperties | undefined => {
+		if (!objDrag) return undefined;
+		const slot = objDragRef.current?.slot ?? 40;
+		if (objDrag.from === i)
+			return { transform: `translateY(${objDrag.dy}px)`, position: 'relative', zIndex: 2 };
+		const { from, over } = objDrag;
+		let sh = 0;
+		if (from < i && i <= over) sh = -1;
+		else if (over <= i && i < from) sh = 1;
+		void count;
+		return sh !== 0 ? { transform: `translateY(${sh * slot}px)` } : undefined;
+	};
+	const objGrip = (i: number, active: ObjectiveDraft[], resolved: ObjectiveDraft[]) => (
+		<span
+			className="loom-subloc-grip"
+			onPointerDown={(e) => {
+				e.preventDefault();
+				e.currentTarget.setPointerCapture(e.pointerId);
+				const rowEl = e.currentTarget.closest('[data-obj-row]');
+				const row = rowEl instanceof HTMLElement ? rowEl : null;
+				const rows = row?.parentElement
+					? [...row.parentElement.querySelectorAll(':scope > [data-obj-row]')]
+					: [];
+				const mids = rows.map((r) => {
+					const b = r.getBoundingClientRect();
+					return b.top + b.height / 2;
+				});
+				objDragRef.current = { startY: e.clientY, slot: (row?.offsetHeight ?? 40) + 8, mids };
+				setObjDrag({ from: i, over: i, dy: 0 });
+			}}
+			onPointerMove={(e) => {
+				const start = objDragRef.current;
+				if (!start) return;
+				const dy = e.clientY - start.startY;
+				const over = Math.max(
+					0,
+					Math.min(active.length - 1, start.mids.filter((m) => m < e.clientY).length)
+				);
+				setObjDrag((cur) => (cur && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur));
+			}}
+			onPointerUp={() => {
+				const drag = objDrag;
+				objDragRef.current = null;
+				setObjDrag(null);
+				if (!drag || drag.from === drag.over) return;
+				const nextActive = [...active];
+				const [moved] = nextActive.splice(drag.from, 1);
+				nextActive.splice(drag.over, 0, moved);
+				commitObjectives([...nextActive, ...resolved]);
+			}}
+			onPointerCancel={() => {
+				objDragRef.current = null;
+				setObjDrag(null);
+			}}
+		>
+			<Icon name="grip-vertical" />
+		</span>
+	);
 
 	// Session attendance: PC characters offered as toggle chips. A PC who died
 	// in an earlier session is no longer offered in sessions after it.
@@ -849,7 +963,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		record.type === 'character' ||
 		record.type === 'item' ||
 		record.type === 'faction' ||
-		record.type === 'location';
+		record.type === 'location' ||
+		record.type === 'quest';
 	const pageEventEntries: LocNoteEntry[] = showsEvents
 		? plugin.indexer
 				.getAll('event', record.project)
@@ -1347,6 +1462,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	const hubEntries: LocNoteEntry[] = isSession
 		? plugin.indexer
 				.getAll(undefined, record.project)
+				// Quests no longer author their own session notes — they take part in
+				// events (their own Events section) and get their own Quests section
+				// below, so they never appear in the session-note hub.
+				.filter((owner) => owner.type !== 'quest')
 				.flatMap((owner) =>
 					owner.sessionNotes
 						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq, involved: n.involved, group: n.group, places: n.places }))
@@ -1475,7 +1594,14 @@ function EntityPage({ view }: { view: EntityView }) {
 					? plugin.indexer.resolve(q.questOutcomeSession, q.path)
 					: null;
 			const finished = q.questOutcome !== '' && out?.date !== undefined && out.date !== null && out.date.sortKey <= asOf;
-			return { quest: q, state: finished ? 'finished' : 'active' };
+			// Three buckets: still active as of this session, resolved in this very
+			// session, or resolved in an earlier one ("Resolved previously").
+			const state = !finished
+				? 'active'
+				: out?.path === record.path
+					? 'resolvedThis'
+					: 'resolvedPrev';
+			return { quest: q, state };
 		})
 		.filter((e): e is { quest: EntityRecord; state: string } => e !== null)
 		// Manual order (drag-reorderable), then chronological for the unstamped.
@@ -1778,6 +1904,11 @@ function EntityPage({ view }: { view: EntityView }) {
 											onPick: () =>
 												new EntityTypeSuggestModal(plugin, (type) =>
 													new CreateEntityModal(plugin, type, project, {
+														// A quest involved via a session-pinned note defaults its
+														// "Received in session" to that session.
+														...(picked && picked.type === 'session'
+															? { receivedSession: picked }
+															: {}),
 														onCreated: (created) =>
 															setNote({ involved: [...note.involved, created.basename] }, true),
 													}).open()
@@ -2178,13 +2309,22 @@ function EntityPage({ view }: { view: EntityView }) {
 								project
 									? {
 											label: '+ Create new entity',
-											onPick: () =>
+											onPick: () => {
+												// A quest created here inherits the note's session as its
+												// "Received in session".
+												const entrySession = en.session
+													? plugin.indexer.resolve(en.session, en.owner.path)
+													: null;
 												new EntityTypeSuggestModal(plugin, (type) =>
 													new CreateEntityModal(plugin, type, project, {
+														...(entrySession && entrySession.type === 'session'
+															? { receivedSession: entrySession }
+															: {}),
 														onCreated: (created) =>
 															writeEntryInvolved(en, (list) => [...list, `[[${created.basename}]]`]),
 													}).open()
-												).open(),
+												).open();
+											},
 										}
 									: undefined
 							}
@@ -2574,24 +2714,36 @@ function EntityPage({ view }: { view: EntityView }) {
 			{isSession && project ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Quests</span>
-					{(['active', 'finished'] as const).map((state) => {
+					{(['active', 'resolvedThis', 'resolvedPrev'] as const).map((state) => {
 						const outcomeKey = (q: EntityRecord) =>
 							q.questOutcomeSession
 								? plugin.indexer.resolve(q.questOutcomeSession, q.path)?.date?.sortKey ?? 0
 								: 0;
-						// Active: manual loomSeq order (from sessionQuests). Finished: most
-						// recently finished on top (by outcome session date) — no reorder.
+						// Active: manual loomSeq order (from sessionQuests). Resolved
+						// groups: most recently finished on top (by outcome session date),
+						// no reorder — and "Resolved previously" is capped by the setting.
+						const limit = plugin.settings.sessionResolvedQuests;
 						const list =
-							state === 'finished'
-								? sessionQuests
-										.filter((q) => q.state === state)
-										.slice()
-										.sort((a, b) => outcomeKey(b.quest) - outcomeKey(a.quest))
-								: sessionQuests.filter((q) => q.state === state);
+							state === 'active'
+								? sessionQuests.filter((q) => q.state === state)
+								: (() => {
+										const sorted = sessionQuests
+											.filter((q) => q.state === state)
+											.slice()
+											.sort((a, b) => outcomeKey(b.quest) - outcomeKey(a.quest));
+										return state === 'resolvedPrev' && limit > 0 ? sorted.slice(0, limit) : sorted;
+									})();
+						const total = sessionQuests.filter((q) => q.state === state).length;
 						const open = questsOpen[state];
 						const gkey = 'quest-' + state;
 						const reorderable = state === 'active';
 						const questRecords = list.map((x) => x.quest);
+						const heading =
+							state === 'active'
+								? 'Active'
+								: state === 'resolvedThis'
+									? 'Resolved this session'
+									: 'Resolved previously';
 						return (
 							<div key={state} className="loom-section">
 								<button
@@ -2599,8 +2751,12 @@ function EntityPage({ view }: { view: EntityView }) {
 									onClick={() => setQuestsOpen({ ...questsOpen, [state]: !open })}
 								>
 									<span className={open ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
-									{state === 'active' ? 'Active' : 'Finished'}
-									<span className="loom-section-count">{list.length}</span>
+									{heading}
+									<span className="loom-section-count">
+										{state === 'resolvedPrev' && limit > 0 && total > list.length
+											? `${list.length} of ${total}`
+											: list.length}
+									</span>
 								</button>
 								{open
 									? (
@@ -2687,7 +2843,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														</div>
 													) : null}
 
-													{state === 'finished' ? (
+													{state !== 'active' ? (
 														<>
 															<div className="loom-quest-card-row">
 															<span className="loom-quest-card-label">Completed on:</span>
@@ -2834,20 +2990,21 @@ function EntityPage({ view }: { view: EntityView }) {
 								</select>
 							</label>
 						</div>
-						<label className="loom-field">
+						<div className="loom-field">
 							<span className="loom-field-label">Reward</span>
-							<input
-								type="text"
-								placeholder="Not specified"
+							<MarkdownField
+								app={plugin.app}
 								value={reward}
-								onChange={(e) => setReward(e.target.value)}
-								onBlur={() =>
-									writeFm((fm) => {
-										setLoomKey(fm, FM.reward, reward);
-									})
-								}
+								names={linkNames}
+								placeholder="Not specified"
+								onOpenLink={openLinkTarget}
+								onCreateEntity={createLinkEntity}
+								onChange={(v) => {
+									setReward(v);
+									saveReward(v);
+								}}
 							/>
-						</label>
+						</div>
 					</div>
 				</div>
 			) : null}
@@ -2965,9 +3122,9 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{isSession && project ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Session notes</span>
+					<span className="loom-field-label">Events</span>
 					{/* Creation first, as always. The modal's Name field searches
-					    existing events/quests — picking one pins it here instead of
+					    existing events — picking one pins it here instead of
 					    creating a duplicate. */}
 					<div className="loom-hub-add-row">
 						<button
@@ -2980,17 +3137,6 @@ function EntityPage({ view }: { view: EntityView }) {
 							}
 						>
 							+ Add an event
-						</button>
-						<button
-							className="loom-rel-add"
-							onClick={() =>
-								new CreateEntityModal(plugin, 'quest', project, {
-									noteSession: record,
-									onCreated: () => {},
-								}).open()
-							}
-						>
-							+ Add a quest
 						</button>
 					</div>
 					{ENTITY_TYPES.filter((t) => hubEntries.some((e) => e.owner.type === t)).map((t) => {
@@ -3048,6 +3194,108 @@ function EntityPage({ view }: { view: EntityView }) {
 						))}
 					</div>
 				</div>
+			) : null}
+
+			{isQuest ? (
+				(() => {
+					const rows = objectives.map((o, idx) => ({ o, idx }));
+					const active = rows.filter((r) => r.o.finishedOn === '');
+					const resolved = rows.filter((r) => r.o.finishedOn !== '');
+					const activeDrafts = active.map((r) => r.o);
+					const resolvedDrafts = resolved.map((r) => r.o);
+					const commitSet = (idx: number, patch: Partial<ObjectiveDraft>) =>
+						commitObjectives(objectives.map((o, j) => (j === idx ? { ...o, ...patch } : o)));
+					const del = (idx: number) => commitObjectives(objectives.filter((_, j) => j !== idx));
+					const objectiveRow = (
+						idx: number,
+						grip: ReactNode,
+						style: CSSProperties | undefined,
+						dragging: boolean
+					) => {
+						const o = objectives[idx];
+						const finished =
+							o.finishedOn !== '' ? plugin.indexer.resolve(o.finishedOn, record.path) : null;
+						return (
+							<div
+								key={idx}
+								data-obj-row=""
+								className={dragging ? 'loom-obj-row loom-obj-row-dragging' : 'loom-obj-row'}
+								style={style}
+							>
+								{grip}
+								<div className="loom-obj-name">
+									<HubNoteText
+										app={plugin.app}
+										initial={o.name}
+										names={linkNames}
+										onOpenLink={openLinkTarget}
+										onCreateEntity={createLinkEntity}
+										onCommit={(v) => commitSet(idx, { name: v })}
+									/>
+								</div>
+								<div className="loom-obj-finished">
+									{finished && finished.type === 'session' ? (
+										sessionChip(finished, () => commitSet(idx, { finishedOn: '' }))
+									) : (
+										<SearchableSelect
+											placeholder="Finished on…"
+											options={sessionsByDate.map((s) => ({
+												value: linkTargetOf(s),
+												label: recordLabel(s, project),
+											}))}
+											onPick={(name) => commitSet(idx, { finishedOn: name })}
+										/>
+									)}
+								</div>
+								<button
+									className="loom-nav-btn loom-obj-remove"
+									aria-label="Remove objective"
+									onClick={() => del(idx)}
+								>
+									✕
+								</button>
+							</div>
+						);
+					};
+					return (
+						<div className="loom-field loom-field-sep">
+							<span className="loom-field-label">Objectives</span>
+							<div className="loom-hub-add-row">
+								<button
+									className="loom-rel-add"
+									onClick={() => setObjectives([...objectives, { name: '', finishedOn: '' }])}
+								>
+									+ Add objective
+								</button>
+							</div>
+							<div className="loom-obj-section">
+								<span className="loom-rel-group-label">
+									Active<span className="loom-section-count">{active.length}</span>
+								</span>
+								<div className={objDrag ? 'loom-obj-list loom-subloc-dragging' : 'loom-obj-list'}>
+									{active.map((r, i) =>
+										objectiveRow(
+											r.idx,
+											objGrip(i, activeDrafts, resolvedDrafts),
+											objRowStyle(i, active.length),
+											objDrag?.from === i
+										)
+									)}
+								</div>
+							</div>
+							{resolved.length > 0 ? (
+								<div className="loom-obj-section">
+									<span className="loom-rel-group-label">
+										Resolved<span className="loom-section-count">{resolved.length}</span>
+									</span>
+									<div className="loom-obj-list">
+										{resolved.map((r) => objectiveRow(r.idx, null, undefined, false))}
+									</div>
+								</div>
+							) : null}
+						</div>
+					);
+				})()
 			) : null}
 
 			{record.type === 'faction' ? (
@@ -3212,7 +3460,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : null}
 
 
-			{record.type === 'event' || record.type === 'quest' ? (
+			{record.type === 'event' ? (
 				<div className="loom-field loom-field-sep">
 					{sessionNotes.length > 0 ? <span className="loom-field-label">Session notes</span> : null}
 					<div className="loom-hub-add-row">

@@ -105,6 +105,8 @@ export const FM = {
 	questOutcome: 'loomQuestOutcome',
 	questOutcomeSession: 'loomQuestOutcomeSession',
 	reward: 'loomReward',
+	/** Quest only: ordered list of objective entries ({ name, finishedOn }). */
+	objectives: 'loomObjectives',
 	/** Manual order stamp: events (timeline + session page) and quests (session
 	 *  page) sort by it, so drag-reordering persists in the file. */
 	seq: 'loomSeq',
@@ -186,6 +188,15 @@ export interface FactionMemberDecl {
 /** Role shown (and stored as a plain link) when a membership has no explicit role. */
 export const DEFAULT_MEMBER_ROLE = 'Member';
 
+/** One quest objective as declared in the quest's `loomObjectives` frontmatter.
+ *  Stored as `{ name, finishedOn?: "[[session]]" }`; an objective with a
+ *  `finishedOn` session is resolved, otherwise it's still active. */
+export interface QuestObjective {
+	name: string;
+	/** Linkpath of the session this objective was finished in, or null. */
+	finishedSession: string | null;
+}
+
 /** A typed relationship as declared in one note's frontmatter. */
 export interface RelationshipDecl {
 	type: string;
@@ -248,8 +259,11 @@ export interface EntityRecord {
 	questOutcomeSession: string | null;
 	/** Quest only: linkpaths of the characters who gave the quest. */
 	questGivers: string[];
-	/** Quest only: reward text (free-form). */
+	/** Quest only: reward text (free-form, supports markdown). */
 	reward: string;
+	/** Quest only: ordered objective entries. Those with a `finishedSession`
+	 *  are resolved; the rest are still active. */
+	objectives: QuestObjective[];
 	/** Manual order stamp (events + quests). Null = never reordered; callers
 	 *  fall back to `created` so unstamped entries stay chronological. */
 	seq: number | null;
@@ -286,6 +300,7 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		questOutcomeSession: null,
 		questGivers: [],
 		reward: '',
+		objectives: [],
 		seq: null,
 		created: 0,
 		modified: 0,
