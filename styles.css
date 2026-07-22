@@ -1042,6 +1042,60 @@ span.loom-row-caret {
 	}
 }
 
+/* Pinned node: frozen at a fixed screen spot. A solid accent ring + a small pin
+   glyph mark it, and it keeps full opacity even when the rest of the graph dims. */
+.loom-node circle.loom-node-pin-ring {
+	fill: none;
+	stroke: var(--interactive-accent);
+	stroke-width: 2;
+}
+
+.loom-node-pin-mark {
+	font-size: 0.7em;
+	user-select: none;
+	pointer-events: none;
+}
+
+.loom-node-pinned.loom-dim {
+	opacity: 1;
+}
+
+/* Off-screen pin indicator: a node-colored dot clamped to the viewport edge with
+   a little arrow pointing toward the pinned node; click pans to it. */
+.loom-pin-edge {
+	cursor: pointer;
+}
+
+.loom-pin-edge circle {
+	stroke: var(--background-primary);
+	stroke-width: 2;
+}
+
+.loom-pin-edge-tip {
+	fill: var(--background-primary);
+}
+
+/* Soft halo behind the indicator, slowly breathing to draw the eye without
+   enlarging the dot itself. */
+.loom-pin-halo {
+	transform-box: fill-box;
+	transform-origin: center;
+	animation: loom-pin-halo-pulse 2.4s ease-in-out infinite;
+	pointer-events: none;
+}
+
+@keyframes loom-pin-halo-pulse {
+	0%,
+	100% {
+		transform: scale(0.7);
+		opacity: 0.6;
+	}
+	50% {
+		transform: scale(1.1);
+		opacity: 1;
+	}
+}
+
 /* Drop-to-connect cue: ring around the node a dragged node hovers over. */
 .loom-node circle.loom-drop-ring {
 	fill: none;

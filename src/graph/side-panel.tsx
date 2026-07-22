@@ -1,5 +1,5 @@
 import { App } from 'obsidian';
-import { PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
+import { PointerEvent as ReactPointerEvent, memo, useRef, useState } from 'react';
 import { Connection, ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
 import { Icon, Truncated } from '../views/common';
 import { MarkdownField } from '../views/markdown-field';
@@ -59,7 +59,11 @@ function Section({
 	);
 }
 
-export function GraphSidePanel({
+// Memoized so a graph drag/spring frame (which re-renders the graph) doesn't
+// re-render the whole connections list while a node is selected — the parent
+// passes stable, memoized props (connections array + callbacks) so the shallow
+// compare skips it until the selection or index actually changes.
+export const GraphSidePanel = memo(function GraphSidePanel({
 	app,
 	record,
 	label,
@@ -179,4 +183,4 @@ export function GraphSidePanel({
 			</div>
 		</div>
 	);
-}
+});

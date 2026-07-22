@@ -3,6 +3,8 @@ import {
 	MouseEvent as ReactMouseEvent,
 	PointerEvent as ReactPointerEvent,
 	ReactElement,
+	memo,
+	useCallback,
 	useEffect,
 	useLayoutEffect,
 	useMemo,
@@ -27,7 +29,7 @@ import { ConfirmModal, CreateEntityModal, RelationshipPromptModal } from '../pro
 import { extractLinkpath, linkTargetOf } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
-import { Pt, edgeEndDirs, edgePath, edgeXRange } from '../graph/routing';
+import { EdgeRoute, Pt, edgeEndDirs, edgePath, edgeXRange } from '../graph/routing';
 import { GraphSidePanel, PANEL_MAX, PANEL_MIN } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
 import { EntityChip, Icon, SearchableSelect, ViewShell, noProjectMessage, recordLabel } from './common';
@@ -98,6 +100,9 @@ const MAX_ZOOM = 3;
 /** Focus-pulse ring (screen px, zoom-independent) and its period. */
 const FOCUS_RING_R = 15;
 const FOCUS_PULSE_MS = 1700;
+/** Off-screen pin-halo pulse period; a shared clock-based delay keeps every
+ *  indicator's breathing in sync (matches the CSS animation duration). */
+const PIN_PULSE_MS = 2400;
 /** Screen-space padding the selected node keeps from the viewport edges. */
 const REVEAL_MARGIN = 90;
 /** World-space margin around a node's circle within which a dragged node snaps to it as a drop target. */
@@ -127,7 +132,13 @@ interface DragState {
 	worldY: number;
 	lastClientX: number;
 	lastClientY: number;
+	/** Press-and-hold (no movement) zoom-focus timer + whether it already fired
+	 *  (so the release doesn't also toggle selection). */
+	holdTimer: number;
+	held: boolean;
 }
+/** How long a still press-and-hold on a node waits before zoom-focusing it. */
+const HOLD_MS = 450;
 
 interface PanState {
 	pointerId: number;
@@ -163,6 +174,165 @@ function arrowPoints(tip: Pt, dir: Pt, size: number): string {
 	return `${tip.x},${tip.y} ${bx + px},${by + py} ${bx - px},${by - py}`;
 }
 
+// A single edge, memoized: the parent re-renders on every drag/spring frame, but
+// only edges whose endpoint positions actually changed (an incident edge of the
+// dragged/springing node) re-run the routing/path math. Props are all primitives
+// (positions as numbers) or the stable `route` reference, so React.memo's shallow
+// compare skips every unaffected edge — the key to scaling with connection count.
+interface GraphEdgeProps {
+	route: EdgeRoute;
+	/** Layout home of each endpoint (for the bend-following displacement). */
+	ax: number;
+	ay: number;
+	bx: number;
+	by: number;
+	/** Current rendered position of each endpoint (home + displacement/drag). */
+	pax: number;
+	pay: number;
+	pbx: number;
+	pby: number;
+	aRadius: number;
+	bRadius: number;
+	dim: boolean;
+	arrowA: boolean;
+	arrowB: boolean;
+	arrowSize: number;
+}
+const GraphEdge = memo(function GraphEdge({
+	route,
+	ax,
+	ay,
+	bx,
+	by,
+	pax,
+	pay,
+	pbx,
+	pby,
+	aRadius,
+	bRadius,
+	dim,
+	arrowA,
+	arrowB,
+	arrowSize,
+}: GraphEdgeProps) {
+	const pa = { x: pax, y: pay };
+	const pb = { x: pbx, y: pby };
+	const da = { x: pax - ax, y: pay - ay };
+	const db = { x: pbx - bx, y: pby - by };
+	let arrows: ReactElement | null = null;
+	if (arrowA || arrowB) {
+		const dirs = edgeEndDirs(route, pa, pb, da, db);
+		arrows = (
+			<g className={dim ? 'loom-edge-arrows loom-dim' : 'loom-edge-arrows'}>
+				{arrowA ? (
+					<polygon
+						points={arrowPoints(
+							{ x: pa.x + dirs.start.x * (aRadius + 1), y: pa.y + dirs.start.y * (aRadius + 1) },
+							{ x: -dirs.start.x, y: -dirs.start.y },
+							arrowSize
+						)}
+					/>
+				) : null}
+				{arrowB ? (
+					<polygon
+						points={arrowPoints(
+							{ x: pb.x - dirs.end.x * (bRadius + 1), y: pb.y - dirs.end.y * (bRadius + 1) },
+							dirs.end,
+							arrowSize
+						)}
+					/>
+				) : null}
+			</g>
+		);
+	}
+	return (
+		<g>
+			<path className={dim ? 'loom-edge loom-dim' : 'loom-edge'} d={edgePath(route, pa, pb, da, db)} />
+			{arrows}
+		</g>
+	);
+});
+
+// A single node, memoized on the same principle — during a drag only the dragged
+// node (and any springing ones, plus the current drop-target) change position or
+// state, so every other node's `<g>` is skipped. Handlers are stable (the parent
+// passes ref-backed callbacks), and `node` is a stable layout reference.
+interface GraphNodeProps {
+	node: LayoutNode;
+	px: number;
+	py: number;
+	radius: number;
+	color: string;
+	dim: boolean;
+	selected: boolean;
+	focused: boolean;
+	pinned: boolean;
+	showDropRing: boolean;
+	dropRemove: boolean;
+	label: string;
+	shortLabel: string;
+	onPointerDown: (node: LayoutNode, e: ReactPointerEvent<SVGGElement>) => void;
+	onOpen: (node: LayoutNode) => void;
+	onPin: (node: LayoutNode) => void;
+}
+const GraphNode = memo(function GraphNode({
+	node,
+	px,
+	py,
+	radius,
+	color,
+	dim,
+	selected,
+	focused,
+	pinned,
+	showDropRing,
+	dropRemove,
+	label,
+	shortLabel,
+	onPointerDown,
+	onOpen,
+	onPin,
+}: GraphNodeProps) {
+	const classes = ['loom-node', `loom-node-${node.kind}`];
+	if (dim) classes.push('loom-dim');
+	if (selected) classes.push('loom-node-selected');
+	if (focused) classes.push('loom-node-focused');
+	if (pinned) classes.push('loom-node-pinned');
+	return (
+		<g
+			className={classes.join(' ')}
+			transform={`translate(${px},${py})`}
+			onPointerDown={(e) => onPointerDown(node, e)}
+			onDoubleClick={() => onOpen(node)}
+			onContextMenu={(e) => {
+				// Right-click toggles a pin (zoom-focus moved to press-and-hold).
+				e.preventDefault();
+				e.stopPropagation();
+				onPin(node);
+			}}
+		>
+			{/* Native SVG tooltip carries the full name when truncated. */}
+			{shortLabel !== label ? <title>{label}</title> : null}
+			{showDropRing ? (
+				<circle
+					className={dropRemove ? 'loom-drop-ring loom-drop-ring-remove' : 'loom-drop-ring'}
+					r={radius + 8}
+				/>
+			) : null}
+			{pinned ? <circle className="loom-node-pin-ring" r={radius + 4} /> : null}
+			<circle r={radius} fill={color} />
+			<text className="loom-node-label" y={radius + 16} textAnchor="middle">
+				{shortLabel}
+			</text>
+			{pinned ? (
+				<text className="loom-node-pin-mark" x={radius - 2} y={-radius + 4} textAnchor="middle">
+					📌
+				</text>
+			) : null}
+		</g>
+	);
+});
+
 function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | null }) {
 	const plugin = view.plugin;
 	const version = useIndexVersion(plugin.indexer);
@@ -170,17 +340,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const layerKey = plugin.settings.globalLayerOrder.join(',');
 	/** Bumped when a drag-reorder writes a new manual x, to re-run the layout. */
 	const [manualVersion, setManualVersion] = useState(0);
-	/** Transient manual-x override while a reorder drag is in flight — the
-	 *  layout reflows live under the cursor instead of only after the drop. */
+	// Retained but inert: live reflow was removed (dragging no longer re-lays out
+	// the graph each frame), so this stays null — kept only so runLayout and the
+	// drop handlers read a stable "no live override".
 	const liveManual = useRef<{ id: string; x: number; y: number } | null>(null);
-	const liveLayoutRaf = useRef(0);
-	const scheduleLiveLayout = () => {
-		if (liveLayoutRaf.current) return;
-		liveLayoutRaf.current = window.requestAnimationFrame(() => {
-			liveLayoutRaf.current = 0;
-			setManualVersion((v) => v + 1);
-		});
-	};
 	// Entity pick filter: hand-picked entities (+ their connections) are the only
 	// ones shown. Empty = inactive. `pickTransitive` extends to connections of
 	// connections; `pickSeparate` re-lays out just the subgraph instead of hiding
@@ -248,15 +411,42 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const layout = subLayout ?? fullLayout;
 
 	const [selected, setSelected] = useState<string | null>(null);
-	// Esc clears the selection (right-click focus otherwise needs an
-	// empty-space click to dismiss).
+	// Pinned nodes: id → the WORLD position they're locked at. A pinned node holds
+	// that spot on the canvas (scrolling with the camera like any node, so it can
+	// go off-screen — an edge indicator then points to it) instead of following
+	// the force layout. Because the world position is fixed, its edges route with
+	// the normal fan geometry (diagonal tips, no home-anchored arch). Right-click
+	// toggles a pin (also mid-drag — see the drag contextmenu handler).
+	const [pinned, setPinned] = useState<Map<string, { wx: number; wy: number }>>(() => {
+		const stored = project ? plugin.settings.graphPins[project.root] : undefined;
+		const m = new Map<string, { wx: number; wy: number }>();
+		if (stored) for (const [path, p] of Object.entries(stored)) m.set(path, { wx: p.x, wy: p.y });
+		return m;
+	});
+	const pinnedRef = useRef(pinned);
+	pinnedRef.current = pinned;
+	// Persist pins per project so they survive restarts (discrete changes only —
+	// pin/unpin/reposition — never per-frame, so a plain save is fine).
+	useEffect(() => {
+		if (!project) return;
+		if (pinned.size === 0) delete plugin.settings.graphPins[project.root];
+		else
+			plugin.settings.graphPins[project.root] = Object.fromEntries(
+				[...pinned].map(([id, p]) => [id, { x: p.wx, y: p.wy }])
+			);
+		void plugin.saveSettings();
+	}, [pinned, project, plugin]);
+	// Esc clears the selection, then (on a second press) any pins. Right-click
+	// focus otherwise needs an empty-space click to dismiss.
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key === 'Escape') setSelected(null);
+			if (e.key !== 'Escape') return;
+			if (selected) setSelected(null);
+			else unpinAllRef.current();
 		};
 		document.addEventListener('keydown', onKey);
 		return () => document.removeEventListener('keydown', onKey);
-	}, []);
+	}, [selected]);
 	/** Graph search: matching nodes highlight, everything else dims. */
 	const [search, setSearch] = useState('');
 	/** Graph filter: unticked types are dimmed or hidden per the eye mode. */
@@ -272,8 +462,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		document.addEventListener('pointerdown', onDown, true);
 		return () => document.removeEventListener('pointerdown', onDown, true);
 	}, [filterOpen]);
-	const [filterTypes, setFilterTypes] = useState<ReadonlySet<EntityType>>(new Set(ENTITY_TYPES));
-	const [filterMode, setFilterMode] = useState<'dim' | 'hide'>('dim');
+	const [filterTypes, setFilterTypes] = useState<ReadonlySet<EntityType>>(() => {
+		const stored = project ? plugin.settings.graphFilters[project.root] : undefined;
+		return new Set(stored ? stored.types : ENTITY_TYPES);
+	});
+	const [filterMode, setFilterMode] = useState<'dim' | 'hide'>(
+		() => (project ? plugin.settings.graphFilters[project.root]?.mode : undefined) ?? 'dim'
+	);
+	// Persist the type filter + eye mode per project across restarts.
+	useEffect(() => {
+		if (!project) return;
+		plugin.settings.graphFilters[project.root] = { types: [...filterTypes], mode: filterMode };
+		void plugin.saveSettings();
+	}, [filterTypes, filterMode, project, plugin]);
 	const [camera, setCamera] = useState<Camera>(
 		() =>
 			view.restored.camera ??
@@ -502,6 +703,79 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	// --- Node interaction ----------------------------------------------------
 
+	const pos = (n: LayoutNode) => {
+		// The dragged node renders exactly at the cursor's world position —
+		// never through home+displacement, which is one frame stale while
+		// live reflows move its home (it read as flicker/lag on the held node).
+		const drag = dragRef.current;
+		if (drag && drag.moved && drag.id === n.id) return { x: drag.worldX, y: drag.worldY };
+		// A pinned node holds a fixed WORLD position (locked on the canvas).
+		const pin = pinned.get(n.id);
+		if (pin) return { x: pin.wx, y: pin.wy };
+		const d = dispRef.current.get(n.id);
+		return { x: n.x + (d?.dx ?? 0), y: n.y + (d?.dy ?? 0) };
+	};
+
+	/** Locks a node at a world position. */
+	const pinNodeAt = (id: string, wx: number, wy: number) =>
+		setPinned((cur) => {
+			const next = new Map(cur);
+			next.set(id, { wx, wy });
+			return next;
+		});
+	/** Unpins `node` and eases it back to its force-layout home (seed the drag/pin
+	 *  spot as a displacement so it springs from there instead of jumping — the
+	 *  fix for a dismissed pin that used to stick until the next interaction). */
+	const unpinNode = (node: LayoutNode) => {
+		const pin = pinnedRef.current.get(node.id);
+		if (pin) {
+			dispRef.current.set(node.id, {
+				dx: pin.wx - node.x,
+				dy: pin.wy - node.y,
+				vx: 0,
+				vy: 0,
+				dragging: false,
+			});
+			startSpring();
+		}
+		setPinned((cur) => {
+			const next = new Map(cur);
+			next.delete(node.id);
+			return next;
+		});
+	};
+	/** Right-click toggles a node's pin: off if pinned, else locked where it is. */
+	const togglePin = (node: LayoutNode) => {
+		if (pinnedRef.current.has(node.id)) {
+			unpinNode(node);
+			return;
+		}
+		const p = pos(node);
+		pinNodeAt(node.id, p.x, p.y);
+	};
+	/** Clears every pin, easing each node back to its force home (same seed +
+	 *  spring as a single unpin, so cleared nodes don't stick at the pinned spot). */
+	const unpinAll = () => {
+		const pins = pinnedRef.current;
+		if (pins.size === 0) return;
+		for (const [id, pin] of pins) {
+			const node = nodeById.get(id);
+			if (node) {
+				dispRef.current.set(id, {
+					dx: pin.wx - node.x,
+					dy: pin.wy - node.y,
+					vx: 0,
+					vy: 0,
+					dragging: false,
+				});
+			}
+		}
+		startSpring();
+		setPinned(new Map());
+	};
+	const unpinAllRef = useRef(unpinAll);
+	unpinAllRef.current = unpinAll;
+
 	const onNodePointerDown = (node: LayoutNode, e: ReactPointerEvent<SVGGElement>) => {
 		if (e.button !== 0) {
 			// Keep right/middle presses on a node away from the pan handler.
@@ -517,17 +791,33 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		// No setPointerCapture: capturing on the node <g> is exactly what broke —
 		// a re-render that unmounts it drops the capture and freezes the drag.
 		// The drag is owned by window listeners (gated on dragActive) instead.
+		// Start from the node's CURRENT position (a pinned or mid-spring node isn't
+		// at its home): bake the (start − home) offset into startX/startY so the
+		// move formula (home + (clientX − startX)/k) begins exactly under the cursor
+		// with no jump, and stays compatible with the live-reflow rebase effect.
+		const start = pos(node);
+		const k = cameraRef.current.k;
+		// Press-and-hold with no movement zoom-focuses the node (right-click is now
+		// reserved for pinning). The timer is cleared the moment a drag begins.
+		const holdTimer = window.setTimeout(() => {
+			const drag = dragRef.current;
+			if (!drag || drag.id !== node.id || drag.moved) return;
+			drag.held = true;
+			focusNode(node);
+		}, HOLD_MS);
 		dragRef.current = {
 			id: node.id,
 			node,
 			pointerId: e.pointerId,
-			startX: e.clientX,
-			startY: e.clientY,
+			startX: e.clientX - (start.x - node.x) * k,
+			startY: e.clientY - (start.y - node.y) * k,
 			moved: false,
-			worldX: node.x,
-			worldY: node.y,
+			worldX: start.x,
+			worldY: start.y,
 			lastClientX: e.clientX,
 			lastClientY: e.clientY,
+			holdTimer,
+			held: false,
 		};
 		const d = dispRef.current.get(node.id) ?? { dx: 0, dy: 0, vx: 0, vy: 0, dragging: true };
 		d.dragging = true;
@@ -547,6 +837,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			setDragActive(false);
 			return;
 		}
+		window.clearTimeout(drag.holdTimer);
 		dragRef.current = null;
 		dropRef.current = null;
 		setDragActive(false);
@@ -558,13 +849,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		startSpring();
 	};
 
-	/** Drags whose drop would persist a manual x (globals + free events) —
-	 *  these get the live reflow preview while in flight. */
-	const isReorderDrag = (node: LayoutNode) =>
-		node.kind === 'global' ||
-		(node.kind === 'event' &&
-			node.record.date === null &&
-			(layout.neighbors.get(node.id)?.size ?? 0) === 0);
+	/** Only fully-unconnected nodes persist a dropped position (the layout honors
+	 *  manual x/y for them alone). Connected nodes are placed purely by the pull
+	 *  forces, so dragging one just springs it back — there is no reordering. */
+	const isFreePlacement = (node: LayoutNode) =>
+		(layout.neighbors.get(node.id)?.size ?? 0) === 0;
 
 	const onNodePointerMove = (e: PointerEvent) => {
 		const drag = dragRef.current;
@@ -577,15 +866,18 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		const dx = e.clientX - drag.startX;
 		const dy = e.clientY - drag.startY;
 		if (!drag.moved && Math.hypot(dx, dy) < CLICK_SLOP) return;
+		if (!drag.moved) window.clearTimeout(drag.holdTimer); // a drag cancels the hold-focus
 		drag.moved = true;
 		drag.lastClientX = e.clientX;
 		drag.lastClientY = e.clientY;
 		const d = dispRef.current.get(drag.id);
 		if (d) {
-			// Pointer deltas are screen px; node displacement is world space.
+			// Pointer deltas are screen px; node displacement is world space. The
+			// press-time startX/startY already bake in any start offset (a pinned or
+			// mid-spring node), and the live-reflow rebase effect keeps startX in
+			// this same frame, so `home + (clientX − startX)/k` follows the cursor.
 			d.dx = dx / cameraRef.current.k;
 			d.dy = dy / cameraRef.current.k;
-			// Drop-to-connect: does the dragged node's center sit on another node?
 			const cx = drag.node.x + d.dx;
 			const cy = drag.node.y + d.dy;
 			drag.worldX = cx;
@@ -602,12 +894,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				}
 			}
 			dropRef.current = target;
-			// Live reflow: everything the drop would rearrange (row reorder,
-			// free-event repel, edge routing) follows the drag in real time.
-		if (isReorderDrag(drag.node) && project) {
-				liveManual.current = { id: drag.id, x: cx, y: cy };
-				scheduleLiveLayout();
-			}
+			// NO live reflow while dragging: re-running the full layout (force
+			// relaxation + leftPad) every frame made the whole graph shift under the
+			// cursor and pulled other rows toward the held node. The dragged node
+			// just follows the cursor; the full layout (all rules) runs once on drop.
 			setTick((t) => t + 1);
 		}
 	};
@@ -618,6 +908,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			setDragActive(false);
 			return;
 		}
+		window.clearTimeout(drag.holdTimer);
 		dragRef.current = null;
 		setDragActive(false);
 		const dropId = dropRef.current;
@@ -626,6 +917,12 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		liveManual.current = null;
 		const d = dispRef.current.get(drag.id);
 		if (d) d.dragging = false;
+		if (drag.held) {
+			// A press-and-hold zoom-focus already happened — don't also toggle
+			// selection on release.
+			dispRef.current.delete(drag.id);
+			return;
+		}
 		if (drag.moved) {
 			// Trash sector drop: confirm, then move the note to the trash.
 			const cam = cameraRef.current;
@@ -654,21 +951,22 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				if (hadLive) setManualVersion((v) => v + 1);
 				startSpring();
 				onNodeDrop(drag.node, target, { x: e.clientX, y: e.clientY });
-			} else if (isReorderDrag(drag.node) && project && d) {
-				// Reorder drop: persisted for globals and for free events
-				// (dateless + unconnected — they float outside the column
-				// flow); the layout decides its weight — free-floating
-				// components follow the drop (towing their neighbors),
-				// timeline-anchored ones ease back home (their forces win).
-				// The live preview already reflowed everything; this makes it
-				// stick.
-			const forProject = (plugin.settings.graphManualX[project.root] ??= {});
-				forProject[drag.id] = drag.worldX;
-				// Fully-unconnected nodes hold their vertical spot too.
-				if ((layout.neighbors.get(drag.id)?.size ?? 0) === 0) {
-					(plugin.settings.graphManualY[project.root] ??= {})[drag.id] = drag.worldY;
-				}
+			} else if (pinnedRef.current.has(drag.id)) {
+				// A pinned node just gets re-pinned at its new world spot (no
+				// spring-back, no reorder-persist) — dragging repositions the pin.
+				pinNodeAt(drag.id, drag.worldX, drag.worldY);
+				dispRef.current.delete(drag.id);
+			} else if (isFreePlacement(drag.node) && project && d) {
+				// Free placement: an unconnected node has no forces, so it holds
+				// exactly where it's dropped (both x and y persisted per project).
+				(plugin.settings.graphManualX[project.root] ??= {})[drag.id] = drag.worldX;
+				(plugin.settings.graphManualY[project.root] ??= {})[drag.id] = drag.worldY;
 				void plugin.saveSettings();
+				// Clear the drag displacement BEFORE the relayout: the new home IS
+				// the drop point, so with no leftover displacement the very next
+				// render lands the node exactly there — no one-frame offset ghost.
+				// pendingReorder still neutralizes the home-move carry (to disp 0).
+				dispRef.current.delete(drag.id);
 				pendingReorder.current = { id: drag.id, x: drag.worldX, y: drag.worldY };
 				setManualVersion((v) => v + 1);
 			} else {
@@ -693,20 +991,62 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		abort: () => void;
 	}>({ move: () => {}, up: () => {}, abort: () => {} });
 	dragHandlers.current = { move: onNodePointerMove, up: onNodePointerUp, abort: abortDrag };
+	// Right-click MID-DRAG pins the dragged node where it currently sits (and ends
+	// the drag), so you can gather far-apart nodes on screen. Capture phase +
+	// stopPropagation so the node's own contextmenu (which would pin whatever is
+	// under the cursor) never fires.
+	const dragContextMenuRef = useRef<(e: MouseEvent) => void>(() => {});
+	dragContextMenuRef.current = (e: MouseEvent) => {
+		const drag = dragRef.current;
+		if (!drag) return;
+		e.preventDefault();
+		e.stopPropagation();
+		window.clearTimeout(drag.holdTimer);
+		pinNodeAt(drag.id, drag.worldX, drag.worldY);
+		const d = dispRef.current.get(drag.id);
+		if (d) d.dragging = false;
+		dragRef.current = null;
+		dropRef.current = null;
+		liveManual.current = null;
+		setDragActive(false);
+	};
 	useEffect(() => {
 		if (!dragActive) return;
 		const move = (e: PointerEvent) => dragHandlers.current.move(e);
 		const up = (e: PointerEvent) => dragHandlers.current.up(e);
 		const cancel = () => dragHandlers.current.abort();
+		const ctx = (e: MouseEvent) => dragContextMenuRef.current(e);
 		window.addEventListener('pointermove', move);
 		window.addEventListener('pointerup', up);
 		window.addEventListener('pointercancel', cancel);
+		window.addEventListener('contextmenu', ctx, true);
 		return () => {
 			window.removeEventListener('pointermove', move);
 			window.removeEventListener('pointerup', up);
 			window.removeEventListener('pointercancel', cancel);
+			window.removeEventListener('contextmenu', ctx, true);
 		};
 	}, [dragActive]);
+
+	// Stable node-event callbacks so memoized `GraphNode`s don't re-render just
+	// because the parent re-ran (inline arrows would be new refs every frame). The
+	// latest closures live in a ref; these wrappers never change identity.
+	const nodeCbRef = useRef({
+		down: onNodePointerDown,
+		open: (n: LayoutNode) => view.openEntity(n.id),
+		pin: togglePin,
+	});
+	nodeCbRef.current = {
+		down: onNodePointerDown,
+		open: (n: LayoutNode) => view.openEntity(n.id),
+		pin: togglePin,
+	};
+	const stableNodeDown = useMemo(
+		() => (n: LayoutNode, e: ReactPointerEvent<SVGGElement>) => nodeCbRef.current.down(n, e),
+		[]
+	);
+	const stableNodeOpen = useMemo(() => (n: LayoutNode) => nodeCbRef.current.open(n), []);
+	const stableNodePin = useMemo(() => (n: LayoutNode) => nodeCbRef.current.pin(n), []);
 
 	// --- Drop-to-connect -------------------------------------------------------
 
@@ -1146,6 +1486,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				.map((n) => n.id)
 		);
 	}, [search, layout, project]);
+	// An edge endpoint counts as "visible" for filter/dim purposes when its type
+	// passes the type filter or it matches the search. Used by the edge render.
+	const endpointVisible = (n: LayoutNode) => passesFilter(n) || searchMatches?.has(n.id) === true;
 	// Matches in reading order (left→right) — the virtual list Prev/Next step
 	// through and All fits.
 	const searchResults = useMemo(
@@ -1178,16 +1521,38 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		}),
 		[camera, size]
 	);
-	const visible = useMemo(
-		() =>
-			new Set(
-				layout.nodes.filter((n) => n.x >= viewRange.min && n.x <= viewRange.max).map((n) => n.id)
-			),
-		[layout, viewRange]
-	);
-
 	const nodeById = useMemo(() => new Map(layout.nodes.map((n) => [n.id, n])), [layout]);
 	const selectedRecord = selected ? plugin.indexer.get(selected) : undefined;
+	// Side-panel props stabilized so the memoized panel skips re-render on drag/
+	// spring frames — they only change when the selection or the index changes.
+	const panelConnections = useMemo(
+		() => (selectedRecord ? plugin.indexer.getConnections(selectedRecord.path) : []),
+		[plugin, selectedRecord, version]
+	);
+	const panelConnectionLabel = useCallback(
+		(r: EntityRecord) => recordLabel(r, project),
+		[project]
+	);
+	const panelOnOpenLink = useCallback(
+		(target: string, newTab?: boolean) => {
+			if (!selectedRecord) return;
+			const resolved = plugin.indexer.resolve(target, selectedRecord.path);
+			if (resolved) view.openEntity(resolved.path, newTab);
+			else void plugin.app.workspace.openLinkText(target, selectedRecord.path, newTab ? 'tab' : false);
+		},
+		[plugin, selectedRecord, view]
+	);
+	const panelOnOpen = useCallback((path: string) => view.openEntity(path), [view]);
+	const panelOnClose = useCallback(() => setSelected(null), []);
+	const panelOnCreate = useCallback(
+		(type: EntityType) => {
+			if (!selectedRecord || !project) return;
+			new CreateEntityModal(plugin, type, project, {
+				connectTo: { record: selectedRecord, label: recordLabel(selectedRecord, project) },
+			}).open();
+		},
+		[plugin, project, selectedRecord]
+	);
 	// Link vocabulary for the side panel's read-only description (rendered links).
 	const panelLinkNames = useMemo(
 		() =>
@@ -1228,16 +1593,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		});
 		return () => window.cancelAnimationFrame(raf);
 	}, [selected, nodeById]);
-
-	const pos = (n: LayoutNode) => {
-		// The dragged node renders exactly at the cursor's world position —
-		// never through home+displacement, which is one frame stale while
-		// live reflows move its home (it read as flicker/lag on the held node).
-		const drag = dragRef.current;
-		if (drag && drag.moved && drag.id === n.id) return { x: drag.worldX, y: drag.worldY };
-		const d = dispRef.current.get(n.id);
-		return { x: n.x + (d?.dx ?? 0), y: n.y + (d?.dy ?? 0) };
-	};
 
 	// Every relayout slides instead of snapping: nodes whose home moved carry
 	// the difference as displacement (keeping their rendered position) and
@@ -1536,6 +1891,15 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								</div>
 							) : null}
 						</div>
+					{pinned.size > 0 ? (
+						<button
+							className="loom-rel-filter loom-filter-active"
+							aria-label={`Clear ${pinned.size} pinned node${pinned.size > 1 ? 's' : ''}`}
+							onClick={unpinAll}
+						>
+							<Icon name="pin-off" fallback="x" />
+						</button>
+					) : null}
 					<button className="loom-rel-filter" aria-label="Fit view" onClick={fitAll}>
 						<Icon name="scan" />
 					</button>
@@ -1574,13 +1938,20 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						onPointerUp={onSvgPointerUp}
 						onContextMenu={onSvgContextMenu}
 					>
+						<defs>
+							{/* Soft halo behind an off-screen pin indicator; `currentColor`
+							    resolves to each indicator's node color. */}
+							<radialGradient id="loom-pin-halo">
+								<stop offset="0%" stopColor="currentColor" stopOpacity="0.45" />
+								<stop offset="60%" stopColor="currentColor" stopOpacity="0.18" />
+								<stop offset="100%" stopColor="currentColor" stopOpacity="0" />
+							</radialGradient>
+						</defs>
 						<g transform={`translate(${camera.tx},${camera.ty}) scale(${camera.k})`}>
 							{layout.edges.map((edge) => {
 								const a = nodeById.get(edge.a);
 								const b = nodeById.get(edge.b);
 								if (!a || !b) return null;
-					const endpointVisible = (n: LayoutNode) =>
-									passesFilter(n) || searchMatches?.has(n.id) === true;
 								if (pickHidden(a.id) || pickHidden(b.id)) return null;
 								if (
 									filterActive &&
@@ -1591,9 +1962,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								}
 								const pa = pos(a);
 								const pb = pos(b);
-								// Bends follow their endpoint's displacement.
-								const da = { x: pa.x - a.x, y: pa.y - a.y };
-								const db = { x: pb.x - b.x, y: pb.y - b.y };
 								// Cull on the full route extent, so a long trunk
 								// stays visible while both endpoints are off-screen.
 								const [minX, maxX] = edgeXRange(edge.route, pa, pb);
@@ -1602,61 +1970,52 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 									(searchMatches
 										? !searchMatches.has(edge.a) && !searchMatches.has(edge.b)
 										: connectedTo !== null && edge.a !== selected && edge.b !== selected) ||
-								(filterActive &&
+									(filterActive &&
 										filterMode === 'dim' &&
 										(!endpointVisible(a) || !endpointVisible(b)));
-								const key = edge.a + '|' + edge.b + '|' + edge.relType;
-								// Declaration arrowheads, tips at the node rims.
-								const arrowSize = plugin.settings.graphArrowSize;
-								let arrows: ReactElement | null = null;
-								if (edge.arrowA || edge.arrowB) {
-									const dirs = edgeEndDirs(edge.route, pa, pb, da, db);
-									arrows = (
-										<g className={dim ? 'loom-edge-arrows loom-dim' : 'loom-edge-arrows'}>
-											{edge.arrowA ? (
-												<polygon
-													points={arrowPoints(
-														{
-															x: pa.x + dirs.start.x * (RADII[a.kind] + 1),
-															y: pa.y + dirs.start.y * (RADII[a.kind] + 1),
-														},
-														{ x: -dirs.start.x, y: -dirs.start.y },
-														arrowSize
-													)}
-												/>
-											) : null}
-											{edge.arrowB ? (
-												<polygon
-													points={arrowPoints(
-														{
-															x: pb.x - dirs.end.x * (RADII[b.kind] + 1),
-															y: pb.y - dirs.end.y * (RADII[b.kind] + 1),
-														},
-														dirs.end,
-														arrowSize
-													)}
-												/>
-											) : null}
-										</g>
-									);
-								}
+								// Path/arrow math runs inside the memoized GraphEdge — skipped
+								// unless one of these primitive props changes (i.e. an endpoint
+								// moved), so a drag only recomputes its incident edges.
 								return (
-									<g key={key}>
-										<path
-											className={dim ? 'loom-edge loom-dim' : 'loom-edge'}
-											d={edgePath(edge.route, pa, pb, da, db)}
-										/>
-										{arrows}
-									</g>
+									<GraphEdge
+										key={edge.a + '|' + edge.b + '|' + edge.relType}
+										route={edge.route}
+										ax={a.x}
+										ay={a.y}
+										bx={b.x}
+										by={b.y}
+										pax={pa.x}
+										pay={pa.y}
+										pbx={pb.x}
+										pby={pb.y}
+										aRadius={RADII[a.kind]}
+										bRadius={RADII[b.kind]}
+										dim={dim}
+										arrowA={edge.arrowA}
+										arrowB={edge.arrowB}
+										arrowSize={plugin.settings.graphArrowSize}
+									/>
 								);
 							})}
-						{layout.nodes.map((node) => {
-								// The dragged node always renders, even if it slides out of the
-								// cull range — losing its element mid-drag is the old freeze.
+						{/* Pinned nodes render last so they sit on top of the graph. */}
+						{[...layout.nodes]
+								.sort((a, b) => (pinned.has(a.id) ? 1 : 0) - (pinned.has(b.id) ? 1 : 0))
+								.map((node) => {
+								// The dragged node always renders even if it slides out of the
+								// cull range (losing its element mid-drag was the old freeze bug).
+								// A pinned node scrolls off-screen like any node — an edge
+								// indicator (below) points to it — but stays exempt from filter/
+								// pick hiding so pinning keeps it visible when it's on screen.
 								const isDragged = dragRef.current?.id === node.id;
-								if (!isDragged && !visible.has(node.id)) return null;
-								if (!isDragged && pickHidden(node.id)) return null;
+								const isPinned = pinned.has(node.id);
+								const p = pos(node);
+								// Cull on the ACTUAL position, not the layout home: a pinned or
+								// dragged node lives away from its home, so a home-based test
+								// wrongly hid it (the disappearing far-dragged node).
+								if (!isDragged && (p.x < viewRange.min || p.x > viewRange.max)) return null;
+								if (!isDragged && !isPinned && pickHidden(node.id)) return null;
 								if (
+									!isPinned &&
 									filterActive &&
 									filterMode === 'hide' &&
 									!passesFilter(node) &&
@@ -1664,7 +2023,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								) {
 									return null;
 								}
-								const p = pos(node);
 								const dim =
 									(searchMatches
 										? !searchMatches.has(node.id)
@@ -1673,45 +2031,35 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										filterMode === 'dim' &&
 										!passesFilter(node) &&
 										searchMatches?.has(node.id) !== true);
-								const classes = ['loom-node', `loom-node-${node.kind}`];
-								if (dim) classes.push('loom-dim');
-								if (node.id === selected) classes.push('loom-node-selected');
-								if (pickedPaths.has(node.id)) classes.push('loom-node-focused');
 								const label = recordLabel(node.record, project);
 								const shortLabel = label.length > 24 ? label.slice(0, 23).trimEnd() + '…' : label;
+								const showDropRing = dropRef.current === node.id && dragRef.current !== null;
+								const dropRemove =
+									showDropRing && dragRef.current
+										? plugin.settings.graphDropEdits === 'dragged'
+											? declaresConnection(dragRef.current.node, node.id)
+											: declaresConnection(node, dragRef.current.id)
+										: false;
 								return (
-									<g
+									<GraphNode
 										key={node.id}
-										className={classes.join(' ')}
-										transform={`translate(${p.x},${p.y})`}
-										onPointerDown={(e) => onNodePointerDown(node, e)}
-										onDoubleClick={() => view.openEntity(node.id)}
-										onContextMenu={(e) => {
-											// Right click zoom-focuses the node (open moved to double-click).
-											e.preventDefault();
-											e.stopPropagation();
-											focusNode(node);
-										}}
-									>
-										{/* Native SVG tooltip carries the full name when truncated. */}
-										{shortLabel !== label ? <title>{label}</title> : null}
-										{dropRef.current === node.id && dragRef.current ? (
-											<circle
-												className={
-													(plugin.settings.graphDropEdits === 'dragged'
-														? declaresConnection(dragRef.current.node, node.id)
-														: declaresConnection(node, dragRef.current.id))
-														? 'loom-drop-ring loom-drop-ring-remove'
-														: 'loom-drop-ring'
-												}
-												r={RADII[node.kind] + 8}
-											/>
-										) : null}
-										<circle r={RADII[node.kind]} fill={plugin.settings.nodeColors[node.record.type]} />
-										<text className="loom-node-label" y={RADII[node.kind] + 16} textAnchor="middle">
-											{shortLabel}
-										</text>
-									</g>
+										node={node}
+										px={p.x}
+										py={p.y}
+										radius={RADII[node.kind]}
+										color={plugin.settings.nodeColors[node.record.type]}
+										dim={dim}
+										selected={node.id === selected}
+										focused={pickedPaths.has(node.id)}
+										pinned={isPinned}
+										showDropRing={showDropRing}
+										dropRemove={dropRemove}
+										label={label}
+										shortLabel={shortLabel}
+										onPointerDown={stableNodeDown}
+										onOpen={stableNodeOpen}
+										onPin={stableNodePin}
+									/>
 								);
 							})}
 						</g>
@@ -1741,6 +2089,68 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										});
 								})()
 							: null}
+						{/* Off-screen pin indicators: only once a pinned node is FULLY off
+						    the viewport (so it never overlaps a still-visible node), a
+						    node-colored dot with a pulsing halo clamps to the screen edge
+						    and its arrow points at the node; clicking pans to center it. */}
+						{pinned.size > 0
+							? (() => {
+									// One shared clock-derived delay so every halo pulses in unison.
+									const haloDelay = -(Date.now() % PIN_PULSE_MS);
+									return [...pinned.entries()].map(([id, pin]) => {
+									const node = nodeById.get(id);
+									if (!node) return null;
+									const sx = camera.tx + pin.wx * camera.k;
+									const sy = camera.ty + pin.wy * camera.k;
+									const rk = RADII[node.kind] * camera.k;
+									const fullyOff =
+										sx + rk < 0 || sx - rk > size.w || sy + rk < 0 || sy - rk > size.h;
+									if (!fullyOff) return null;
+									const m = 18;
+									const ex = clamp(sx, m, size.w - m);
+									const ey = clamp(sy, m, size.h - m);
+									const ang = (Math.atan2(sy - ey, sx - ex) * 180) / Math.PI;
+									const color = plugin.settings.nodeColors[node.record.type];
+									return (
+										<g
+											key={'pinedge-' + id}
+											className="loom-pin-edge"
+											transform={`translate(${ex},${ey}) rotate(${ang})`}
+											style={{ color }}
+											onPointerDown={(e) => {
+												e.stopPropagation();
+												// Left-click pans to the node; right-click unpins it
+												// (and must not fall through to the empty-space menu).
+												if (e.button !== 0) return;
+												const el = wrapRef.current;
+												const w = el?.clientWidth ?? size.w;
+												const h = el?.clientHeight ?? size.h;
+												animateCamera({
+													k: camera.k,
+													tx: w / 2 - pin.wx * camera.k,
+													ty: h / 2 - pin.wy * camera.k,
+												});
+											}}
+											onContextMenu={(e) => {
+												e.preventDefault();
+												e.stopPropagation();
+												unpinNode(node);
+											}}
+										>
+											<title>{recordLabel(node.record, project)}</title>
+											<circle
+												className="loom-pin-halo"
+												r={30}
+												fill="url(#loom-pin-halo)"
+												style={{ animationDelay: `${haloDelay}ms` }}
+											/>
+											<circle r={11} fill={color} />
+											<polygon points="11,0 4,-5 4,5" className="loom-pin-edge-tip" />
+										</g>
+									);
+								});
+								})()
+							: null}
 					</svg>
 				</div>
 				{selectedRecord ? (
@@ -1748,24 +2158,16 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						app={plugin.app}
 						record={selectedRecord}
 						label={recordLabel(selectedRecord, project)}
-						connections={plugin.indexer.getConnections(selectedRecord.path)}
-						connectionLabel={(r) => recordLabel(r, project)}
+						connections={panelConnections}
+						connectionLabel={panelConnectionLabel}
 						threshold={plugin.settings.graphCollapseThreshold}
 						names={panelLinkNames}
-						onOpenLink={(target, newTab) => {
-							const resolved = plugin.indexer.resolve(target, selectedRecord.path);
-							if (resolved) view.openEntity(resolved.path, newTab);
-							else void plugin.app.workspace.openLinkText(target, selectedRecord.path, newTab ? 'tab' : false);
-						}}
+						onOpenLink={panelOnOpenLink}
 						width={panelWidth}
 						onWidthChange={setPanelWidth}
-						onOpen={(path) => view.openEntity(path)}
-						onClose={() => setSelected(null)}
-						onCreate={(type) =>
-							new CreateEntityModal(plugin, type, project, {
-								connectTo: { record: selectedRecord, label: recordLabel(selectedRecord, project) },
-							}).open()
-						}
+						onOpen={panelOnOpen}
+						onClose={panelOnClose}
+						onCreate={panelOnCreate}
 					/>
 				) : null}
 				{layout.nodes.length === 0 ? (

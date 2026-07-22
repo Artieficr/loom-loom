@@ -3,6 +3,7 @@ import {
 	CSSProperties,
 	MouseEvent as ReactMouseEvent,
 	PointerEvent as ReactPointerEvent,
+	memo,
 	useEffect,
 	useMemo,
 	useRef,
@@ -171,7 +172,10 @@ function Bubble({
  * scroll bounds; plain wheel scrolls vertically, Ctrl+wheel horizontally;
  * right-click opens the create menu.
  */
-export function TimelineStrip({
+// Memoized: the graph re-renders on every drag/spring frame, but the timeline's
+// props (navigator, project, def, zoom) don't change then, so this whole subtree
+// is skipped — a graph node drag no longer re-renders the entire strip 60×/sec.
+export const TimelineStrip = memo(function TimelineStrip({
 	navigator,
 	project,
 	def,
@@ -943,4 +947,4 @@ export function TimelineStrip({
 				: null}
 		</div>
 	);
-}
+});

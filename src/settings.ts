@@ -69,6 +69,12 @@ export interface LoomLoomSettings {
 	graphManualX: Record<string, Record<string, number>>;
 	/** Drag-dropped y of fully-unconnected graph nodes, per project root then note path. */
 	graphManualY: Record<string, Record<string, number>>;
+	/** Pinned graph nodes' world positions, per project root then note path —
+	 *  remembered across restarts. */
+	graphPins: Record<string, Record<string, { x: number; y: number }>>;
+	/** Graph type-filter state per project root: the ticked entity types and the
+	 *  dim/hide eye mode — remembered across restarts. */
+	graphFilters: Record<string, { types: EntityType[]; mode: 'dim' | 'hide' }>;
 	/** Manual vertical order of timeline event bubbles, per project root then
 	 *  note path (rank within its column/drawer) — not user-facing. */
 	timelineManualOrder: Record<string, Record<string, number>>;
@@ -108,6 +114,8 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	entityBoxSizes: {},
 	graphManualX: {},
 	graphManualY: {},
+	graphPins: {},
+	graphFilters: {},
 	timelineManualOrder: {},
 	timelineDrawerHeight: 240,
 };
@@ -122,6 +130,8 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		entityBoxSizes: {},
 		graphManualX: {},
 		graphManualY: {},
+		graphPins: {},
+		graphFilters: {},
 		timelineManualOrder: {},
 		timelineDrawerHeight: 240,
 	};
@@ -250,6 +260,36 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 				if (typeof y === 'number' && Number.isFinite(y)) ys[path] = y;
 			}
 			if (Object.keys(ys).length > 0) base.graphManualY[root] = ys;
+		}
+	}
+	if (typeof data.graphPins === 'object' && data.graphPins !== null) {
+		for (const [root, entries] of Object.entries(data.graphPins)) {
+			if (typeof entries !== 'object' || entries === null) continue;
+			const pins: Record<string, { x: number; y: number }> = {};
+			for (const [path, p] of Object.entries(entries)) {
+				if (
+					typeof p === 'object' &&
+					p !== null &&
+					Number.isFinite((p as { x?: unknown }).x) &&
+					Number.isFinite((p as { y?: unknown }).y)
+				) {
+					pins[path] = { x: (p as { x: number }).x, y: (p as { y: number }).y };
+				}
+			}
+			if (Object.keys(pins).length > 0) base.graphPins[root] = pins;
+		}
+	}
+	if (typeof data.graphFilters === 'object' && data.graphFilters !== null) {
+		for (const [root, f] of Object.entries(data.graphFilters)) {
+			if (typeof f !== 'object' || f === null) continue;
+			const types = (f as { types?: unknown }).types;
+			const mode = (f as { mode?: unknown }).mode;
+			base.graphFilters[root] = {
+				types: Array.isArray(types)
+					? types.filter((t): t is EntityType => ENTITY_TYPES.includes(t as EntityType))
+					: [...ENTITY_TYPES],
+				mode: mode === 'hide' ? 'hide' : 'dim',
+			};
 		}
 	}
 	if (typeof data.timelineManualOrder === 'object' && data.timelineManualOrder !== null) {
