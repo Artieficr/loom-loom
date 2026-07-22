@@ -17,6 +17,10 @@
 export type EdgeRoute =
 	/** Straight line between the endpoints (vertically adjacent same-column nodes). */
 	| { kind: 'direct' }
+	/** Orthogonal Z between two off-grid points (a pinned node): both endpoints
+	 *  leave vertically to a shared mid-Y band, then a horizontal run across.
+	 *  Computed live from the current positions, so it ignores da/db. */
+	| { kind: 'elbow' }
 	/**
 	 * Upper node → lower node, angled at both ends: diagonal exit down to the
 	 * trunk top at (`laneX`, `departY`) → trunk to `approachY` → optional
@@ -65,6 +69,13 @@ export function edgePoints(route: EdgeRoute, a: Pt, b: Pt, da: Pt = NO_SHIFT, db
 	switch (route.kind) {
 		case 'direct':
 			return [a, b];
+		case 'elbow': {
+			// Both endpoints exit vertically to a shared mid-Y band, then a
+			// horizontal run across — keeps every segment vertical/horizontal even
+			// when a pinned node sits far off its column.
+			const midY = (a.y + b.y) / 2;
+			return dedupe([a, { x: a.x, y: midY }, { x: b.x, y: midY }, b]);
+		}
 		case 'fan': {
 			// The trunk lives beside the UPPER node's column: both its ends
 			// follow da.x. Only the approach line's y and the fan foot follow

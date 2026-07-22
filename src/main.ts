@@ -82,11 +82,13 @@ export default class LoomLoomPlugin extends Plugin {
 					this.settings.entityBoxSizes[file.path] = sizes;
 					changed = true;
 				}
-			for (const entries of [
+			const renameMaps: Record<string, unknown>[] = [
 					...Object.values(this.settings.graphManualX),
 					...Object.values(this.settings.graphManualY),
+					...Object.values(this.settings.graphPins),
 					...Object.values(this.settings.timelineManualOrder),
-				]) {
+				];
+				for (const entries of renameMaps) {
 					if (oldPath in entries) {
 						entries[file.path] = entries[oldPath];
 						delete entries[oldPath];
@@ -104,11 +106,13 @@ export default class LoomLoomPlugin extends Plugin {
 					delete this.settings.entityBoxSizes[file.path];
 					changed = true;
 				}
-			for (const entries of [
+			const deleteMaps: Record<string, unknown>[] = [
 					...Object.values(this.settings.graphManualX),
 					...Object.values(this.settings.graphManualY),
+					...Object.values(this.settings.graphPins),
 					...Object.values(this.settings.timelineManualOrder),
-				]) {
+				];
+				for (const entries of deleteMaps) {
 					if (file.path in entries) {
 						delete entries[file.path];
 						changed = true;

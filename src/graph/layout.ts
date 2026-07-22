@@ -190,15 +190,38 @@ export function computeGraphLayout(
 	const classified = classifyEdges(raw, placed);
 	const bottom = routeEdges(classified, placed, lineGap, trunkGap);
 
-	// Free y-placement: a fully-unconnected node holds its dragged vertical
-	// spot, clamped to its own layer's band — it may float within its entity
-	// type's space but never into another layer. Applied after routing so the
-	// clamp is relative to the final row y.
+	// Free y-placement: a fully-unconnected node holds its dropped vertical spot,
+	// clamped to its LAYER band (accurate to the real layout — not a flat ±55).
+	// An unconnected event roams the whole event stack (EVENT_Y0…eventsBottom) and
+	// into the gap below; an unconnected global roams half-way to the adjacent
+	// layer rows above/below it. Applied after routing so the row Ys are final.
 	if (manualY) {
+		const globalYs = placed.layers
+			.map((layer) => layer[0]?.y)
+			.filter((y): y is number => y !== undefined)
+			.sort((a, b) => a - b);
+		const firstGlobalY = globalYs[0];
 		for (const [path, y] of manualY) {
 			const node = placed.nodes.get(path);
 			if (!node || (neighbors.get(path)?.size ?? 0) > 0) continue;
-			node.y = Math.max(node.y - 55, Math.min(node.y + 55, y));
+			const home = node.y;
+			let lo: number;
+			let hi: number;
+			if (home <= placed.eventsBottom + 1) {
+				// Event stack (home at the top of it): roam it and into the gap below.
+				lo = EVENT_Y0 - MIN_BAND / 2;
+				hi =
+					firstGlobalY !== undefined
+						? (placed.eventsBottom + firstGlobalY) / 2
+						: placed.eventsBottom + MIN_BAND / 2;
+			} else {
+				const idx = globalYs.indexOf(home);
+				const above = idx > 0 ? globalYs[idx - 1] : placed.eventsBottom;
+				const below = idx >= 0 && idx < globalYs.length - 1 ? globalYs[idx + 1] : undefined;
+				lo = (above + home) / 2;
+				hi = below !== undefined ? (home + below) / 2 : home + MIN_BAND / 2;
+			}
+			node.y = Math.max(lo, Math.min(hi, y));
 		}
 	}
 
