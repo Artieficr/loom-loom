@@ -338,9 +338,10 @@ span.loom-row-caret {
 	font-weight: var(--font-normal);
 }
 
-/* One horizontal scroll per main location's subtree: deep indents scroll the
-   subtree, never the whole list. Descriptions (min-width 0) give way first. */
-.loom-subtree {
+/* One horizontal scroll per outermost subtree: deep indents scroll the subtree,
+   never the whole list. Descriptions (min-width 0) give way first. Nested
+   subtrees don't scroll on their own — the root container carries it. */
+.loom-subtree-root {
 	overflow-x: auto;
 }
 
@@ -373,6 +374,8 @@ span.loom-row-caret {
 	color: var(--text-muted);
 	flex: 1;
 	font-size: 0.9em;
+	/* Extra breathing room between the name (and any chips) and the description. */
+	margin-left: var(--size-4-8);
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -1461,6 +1464,23 @@ span.loom-row-caret {
 
 .loom-combo-menu .loom-combo-action {
 	color: var(--text-accent);
+}
+
+/* Region group headers in the location list read as a heavier grouping row. */
+.loom-row-region .loom-row-name {
+	font-weight: var(--font-semibold);
+}
+
+/* "Part of region" field: a picker/chip row on location pages. */
+.loom-region-pick {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
+.loom-region-pick .loom-combo {
+	flex: 1;
+	max-width: 280px;
 }
 
 .loom-combo-empty {
@@ -3565,10 +3585,12 @@ span.loom-row-caret {
 	padding: var(--size-4-2) var(--size-4-3);
 }
 
-/* Vertical nesting rail: sublocation (and item-copy) subtrees hang off a line. */
+/* Vertical nesting rail: every nesting level (region → location → sublocation,
+   and item copies) hangs off its own line. Nudged right so the rail sits nearer
+   the caret column. */
 .loom-subtree {
 	border-left: 2px solid var(--background-modifier-border);
-	margin-left: 10px;
+	margin-left: 14px;
 	padding-left: var(--size-2-3);
 }
 
@@ -3618,12 +3640,13 @@ span.loom-row-caret {
 	stroke: var(--background-primary);
 }
 
-/* Marquee selection box (Ctrl+drag on empty space). */
+/* Marquee selection box (Ctrl+drag on empty space). The stroke width + dash are
+   already divided by the zoom inline, so it must NOT also be non-scaling (that
+   double-compensates and makes it balloon when zoomed out). */
 .loom-map-marquee {
 	fill: var(--interactive-accent);
 	fill-opacity: 0.12;
 	stroke: var(--interactive-accent);
-	vector-effect: non-scaling-stroke;
 	pointer-events: none;
 }
 
@@ -3889,6 +3912,38 @@ span.loom-row-caret {
 
 .loom-map-node-dot {
 	cursor: pointer;
+}
+
+/* A road's two connected locations (start → end), read-only in its menu. */
+.loom-map-road-ends {
+	gap: var(--size-2-1);
+	justify-content: flex-start;
+}
+
+.loom-map-road-ends > svg {
+	flex: none;
+	width: 14px;
+	height: 14px;
+	color: var(--text-muted);
+}
+
+.loom-map-road-missing {
+	color: var(--text-muted);
+	padding: 0 var(--size-2-2);
+}
+
+/* Region wraps (node view): auto-hull around a region's location clusters. */
+.loom-map-region {
+	cursor: pointer;
+}
+
+.loom-map-region-label {
+	font-weight: var(--font-semibold);
+	paint-order: stroke;
+	stroke: var(--background-secondary);
+	stroke-width: 3px;
+	pointer-events: none;
+	user-select: none;
 }
 
 /* Doors: portal markers linking a zone to another map page. */

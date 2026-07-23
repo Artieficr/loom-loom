@@ -31,8 +31,12 @@ interface MapZone {
 	id: string;
 	/** A closed polygon ('zone') or an open, width-rendered centerline ('road'). */
 	kind: 'zone' | 'road';
-	/** Polygon vertices (zone) or centerline points (road), in world coordinates. */
+	/** Polygon vertices (zone) or the road's intermediate waypoints (road). A
+	 *  road's real endpoints are its start/end locations' nodes, not stored here. */
 	points: { x: number; y: number }[];
+	/** Road only: link targets of the locations the road connects (its two ends). */
+	startLoc?: string | null;
+	endLoc?: string | null;
 	/** Road stroke width in world units (ignored for zones). */
 	width: number;
 	/** Fill color (hex) — the outline is a darker shade of it. */
@@ -125,6 +129,8 @@ function parseZones(raw: unknown): MapZone[] {
 			points: z.points
 				.filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
 				.map((p) => ({ x: p.x, y: p.y })),
+			startLoc: typeof z.startLoc === 'string' ? z.startLoc : null,
+			endLoc: typeof z.endLoc === 'string' ? z.endLoc : null,
 			width:
 				typeof z.width === 'number' && Number.isFinite(z.width)
 					? Math.max(ROAD_WIDTH_MIN, Math.min(ROAD_WIDTH_MAX, z.width))
@@ -277,6 +283,40 @@ function distToPolygon(px: number, py: number, pts: { x: number; y: number }[]):
 	return best;
 }
 
+/** Segment/segment intersection parameter `t` along p1→p2 (0..1), or null. */
+function segIntersectT(
+	p1: { x: number; y: number },
+	p2: { x: number; y: number },
+	p3: { x: number; y: number },
+	p4: { x: number; y: number }
+): number | null {
+	const d1x = p2.x - p1.x;
+	const d1y = p2.y - p1.y;
+	const d2x = p4.x - p3.x;
+	const d2y = p4.y - p3.y;
+	const denom = d1x * d2y - d1y * d2x;
+	if (Math.abs(denom) < 1e-9) return null;
+	const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+	const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / denom;
+	return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : null;
+}
+
+/** Where segment `from`→`to` first crosses a polygon boundary (from inside → the
+ *  zone edge). Returns `from` when it never crosses. */
+function boundaryExit(
+	from: { x: number; y: number },
+	to: { x: number; y: number },
+	poly: { x: number; y: number }[]
+): { x: number; y: number } {
+	let bestT = Infinity;
+	for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+		const t = segIntersectT(from, to, poly[j], poly[i]);
+		if (t !== null && t > 1e-6 && t < bestT) bestT = t;
+	}
+	if (bestT === Infinity) return from;
+	return { x: from.x + (to.x - from.x) * bestT, y: from.y + (to.y - from.y) * bestT };
+}
+
 /** Distance from a point to an open polyline (road centerline). */
 function distToPolyline(px: number, py: number, pts: { x: number; y: number }[]): number {
 	let best = Infinity;
@@ -375,6 +415,75 @@ function zoneCenter(zone: MapZone): { x: number; y: number } {
 	return zone.kind === 'road' ? polylineMidpoint(zone.points) : polygonCentroid(zone.points);
 }
 
+type Pt = { x: number; y: number };
+
+/** Convex hull (Andrew's monotone chain), CCW. Returns the input for <3 points. */
+function convexHull(pts: Pt[]): Pt[] {
+	if (pts.length < 3) return pts.slice();
+	const p = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+	const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+	const lower: Pt[] = [];
+	for (const pt of p) {
+		while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pt) <= 0) lower.pop();
+		lower.push(pt);
+	}
+	const upper: Pt[] = [];
+	for (let i = p.length - 1; i >= 0; i--) {
+		const pt = p[i];
+		while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pt) <= 0) upper.pop();
+		upper.push(pt);
+	}
+	lower.pop();
+	upper.pop();
+	return lower.concat(upper);
+}
+
+/** Median nearest-neighbour distance among points — the typical spacing, used to
+ *  scale the region-cluster merge threshold to the map. */
+function medianNearestNeighbor(pts: Pt[]): number {
+	if (pts.length < 2) return 0;
+	const nn = pts
+		.map((_, i) => {
+			let best = Infinity;
+			for (let j = 0; j < pts.length; j++) {
+				if (i === j) continue;
+				best = Math.min(best, Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y));
+			}
+			return best;
+		})
+		.sort((a, b) => a - b);
+	return nn[Math.floor(nn.length / 2)] || 0;
+}
+
+function regularPolygon(center: Pt, r: number, n = 16): Pt[] {
+	const out: Pt[] = [];
+	for (let i = 0; i < n; i++) {
+		const a = (Math.PI * 2 * i) / n;
+		out.push({ x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r });
+	}
+	return out;
+}
+
+/** The padded outline that wraps a cluster of nodes: a convex hull pushed
+ *  outward by `pad` (a rounded blob for 1–2 points). */
+function regionHull(cluster: Pt[], pad: number): Pt[] {
+	if (cluster.length === 0) return [];
+	const c = centroid(cluster);
+	if (cluster.length === 1) return regularPolygon(cluster[0], pad);
+	const hull = convexHull(cluster);
+	if (hull.length < 3) {
+		const r = Math.max(...cluster.map((p) => Math.hypot(p.x - c.x, p.y - c.y))) + pad;
+		return regularPolygon(c, r);
+	}
+	// Push each hull vertex outward from the cluster centroid.
+	return hull.map((v) => {
+		const dx = v.x - c.x;
+		const dy = v.y - c.y;
+		const len = Math.hypot(dx, dy) || 1;
+		return { x: v.x + (dx / len) * pad, y: v.y + (dy / len) * pad };
+	});
+}
+
 interface Camera {
 	tx: number;
 	ty: number;
@@ -422,7 +531,7 @@ export class MapView extends LoomReactView {
 
 function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string | null }) {
 	const plugin = view.plugin;
-	useIndexVersion(plugin.indexer);
+	const indexVersion = useIndexVersion(plugin.indexer);
 	const project = resolveProject(plugin.indexer, projectRoot);
 
 	const wrapRef = useRef<HTMLDivElement>(null);
@@ -509,12 +618,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	}, [viewMode]);
 	const [draft, setDraft] = useState<{ x: number; y: number }[]>([]);
 	const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
-	/** Timestamp + screen pos of the last road-draw click, to detect a
-	 *  double-click that finishes the road. */
-	const lastRoadClick = useRef<{ t: number; sx: number; sy: number } | null>(null);
-	/** When a road was finished via double-click, so the browser's own dblclick
-	 *  that follows doesn't then insert a vertex on the just-finished road. */
-	const roadFinishAt = useRef(0);
+	/** Road drawing: the start location's link target, picked with the first click
+	 *  (a road runs location→location; the drawn `draft` points are the waypoints). */
+	const [roadDraft, setRoadDraft] = useState<{ startLoc: string } | null>(null);
 	/** Zone whose vertices are editable (left-click select), independent of the
 	 *  context menu (right-click only). */
 	const [selectedZone, setSelectedZone] = useState<string | null>(null);
@@ -1017,32 +1123,46 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			return;
 		}
 
-		if (tool === 'draw' || tool === 'road') {
+		if (tool === 'draw') {
 			if (e.button !== 0) return;
 			// A zone closes when the click lands back on its first vertex.
-			if (tool === 'draw' && draft.length >= 3) {
+			if (draft.length >= 3) {
 				const first = screenOf(draft[0].x, draft[0].y);
 				if (Math.hypot(first.x - sx, first.y - sy) <= CLOSE_SNAP) {
 					finishDraft();
 					return;
 				}
 			}
-			// A road is an open line: a double-click (two quick clicks in ~the same
-			// spot) on the last vertex finishes it. The first click already placed
-			// that vertex; the second finishes without adding a duplicate.
-			if (tool === 'road') {
-				const prev = lastRoadClick.current;
-				const isDbl = prev && performance.now() - prev.t < 400 && Math.hypot(sx - prev.sx, sy - prev.sy) < 8;
-				if (isDbl && draft.length >= 2) {
-					lastRoadClick.current = null;
-					roadFinishAt.current = performance.now();
-					finishRoadDraft();
+			// Don't stack a near-duplicate vertex right on top of the last one.
+			if (draft.length > 0) {
+				const lastV = screenOf(draft[draft.length - 1].x, draft[draft.length - 1].y);
+				if (Math.hypot(lastV.x - sx, lastV.y - sy) < MIN_VERTEX_DIST) return;
+			}
+			setDraft((d) => [...d, { x: w.x, y: w.y }]);
+			return;
+		}
+
+		// A road runs location → location: the first click picks the start
+		// location, the drawn clicks are waypoints, and clicking a second location
+		// finishes it.
+		if (tool === 'road') {
+			if (e.button !== 0) return;
+			const hit = hitZone(sx, sy);
+			const hitLoc = hit && hit.kind === 'zone' && hit.location ? hit.location : null;
+			if (!roadDraft) {
+				if (!hitLoc) {
+					new Notice('Roads start on a location — click a location to begin.');
 					return;
 				}
-				lastRoadClick.current = { t: performance.now(), sx, sy };
+				setRoadDraft({ startLoc: hitLoc });
+				setDraft([]);
+				return;
 			}
-			// Don't stack a near-duplicate vertex right on top of the last one — this
-			// keeps a double-click (to finish a road) from dropping a stray vertex.
+			if (hitLoc && hitLoc !== roadDraft.startLoc) {
+				finishRoad(roadDraft.startLoc, hitLoc, draft);
+				return;
+			}
+			// Otherwise a waypoint (skip near-duplicates).
 			if (draft.length > 0) {
 				const lastV = screenOf(draft[draft.length - 1].x, draft[draft.length - 1].y);
 				if (Math.hypot(lastV.x - sx, lastV.y - sy) < MIN_VERTEX_DIST) return;
@@ -1126,8 +1246,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const onContextMenu = (e: ReactPointerEvent<SVGSVGElement>) => {
 		e.preventDefault();
 		if (tool === 'road') {
-			// Right-click finishes the open road (or cancels if too short).
-			if (draft.length >= 2) finishRoadDraft();
+			// A road finishes by clicking a second location — remind, don't finish.
+			if (roadDraft) new Notice('Click a location to finish the road.');
 			else cancelDraft();
 			return;
 		}
@@ -1151,8 +1271,6 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	// Double-click a zone outline / road centerline to insert a vertex there.
 	const onCanvasDoubleClick = (e: ReactMouseEvent<SVGSVGElement>) => {
 		if (tool !== 'select') return;
-		// Ignore the native dblclick that trails a double-click road-finish.
-		if (performance.now() - roadFinishAt.current < 450) return;
 		const { sx, sy } = localXY(e.clientX, e.clientY);
 		const hit = hitZone(sx, sy);
 		if (!hit || hit.locked) return;
@@ -1176,7 +1294,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		for (let i = zonesRef.current.length - 1; i >= 0; i--) {
 			const z = zonesRef.current[i];
 			if (z.kind === 'road') {
-				const d = distToPolyline(w.x, w.y, z.points);
+				const line = roadCenterline(z, squishRef.current);
+				if (!line) continue;
+				const d = distToPolyline(w.x, w.y, line);
 				if (d <= z.width / 2 || d * k <= 6) return z;
 				continue;
 			}
@@ -1213,13 +1333,14 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		setSelectedZone(zone.id);
 		setMenu({ kind: 'zone', id: zone.id, wx: ctr.x, wy: ctr.y });
 	};
-	const finishRoadDraft = () => {
-		lastRoadClick.current = null;
-		if (draft.length < 2) return;
+	/** Creates a road connecting two locations, with the drawn waypoints between. */
+	const finishRoad = (startLoc: string, endLoc: string, waypoints: { x: number; y: number }[]) => {
 		const road: MapZone = {
 			id: newId(),
 			kind: 'road',
-			points: draft.map((p) => ({ ...p })),
+			points: waypoints.map((p) => ({ ...p })),
+			startLoc,
+			endLoc,
 			width: DEFAULT_ROAD_WIDTH,
 			color: plugin.settings.mapsColor,
 			alpha: DEFAULT_ALPHA,
@@ -1231,16 +1352,14 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		};
 		snapshot();
 		commit([...zonesRef.current, road]);
+		setRoadDraft(null);
 		setDraft([]);
 		setCursor(null);
 		setTool('select');
-		const ctr = centroid(road.points);
-		menuWorld.current = ctr;
 		setSelectedZone(road.id);
-		setMenu({ kind: 'zone', id: road.id, wx: ctr.x, wy: ctr.y });
 	};
 	const cancelDraft = () => {
-		lastRoadClick.current = null;
+		setRoadDraft(null);
 		setDraft([]);
 		setCursor(null);
 	};
@@ -1297,6 +1416,49 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		if (zoneIds.size === 1) setSelectedZone([...zoneIds][0]);
 	};
 
+	// --- Roads connect two locations -----------------------------------------
+	/** The polygon zone on this map associated with a location link target. */
+	const zoneForLoc = (locLp: string | null | undefined): MapZone | null =>
+		locLp ? zonesRef.current.find((z) => z.kind === 'zone' && z.location === locLp) ?? null : null;
+	const locNode = (locLp: string | null | undefined): { x: number; y: number } | null => {
+		const z = zoneForLoc(locLp);
+		return z ? z.node ?? centroid(z.points) : null;
+	};
+	/** The top (main) location's node — a sublocation collapses into its main
+	 *  location in node view, so roads anchor there. Falls back to the location's
+	 *  own node when its main isn't placed on this map. */
+	const mainLocNode = (locLp: string | null | undefined): { x: number; y: number } | null => {
+		if (!locLp || !project) return locNode(locLp);
+		let loc = plugin.indexer.resolve(locLp, project.loomPath);
+		for (let g = 0; g < 20 && loc?.parentLocation; g++) {
+			const p = plugin.indexer.resolve(loc.parentLocation, loc.path);
+			if (!p) break;
+			loc = p;
+		}
+		return (loc ? locNode(linkTargetOf(loc)) : null) ?? locNode(locLp);
+	};
+	/** A road's full centerline for a squish level (0 = regular, clipped to the
+	 *  start/end zone edges so it doesn't overlap them; 1 = node view, anchored to
+	 *  the main-location nodes). Null when an endpoint isn't on this map. */
+	const roadCenterline = (road: MapZone, squishAmt: number): { x: number; y: number }[] | null => {
+		const sNode = locNode(road.startLoc);
+		const eNode = locNode(road.endLoc);
+		if (!sNode || !eNode) return null;
+		const mid = road.points;
+		const full = [sNode, ...mid, eNode];
+		const sZone = zoneForLoc(road.startLoc);
+		const eZone = zoneForLoc(road.endLoc);
+		const sClip = sZone ? boundaryExit(sNode, full[1], sZone.points) : sNode;
+		const eClip = eZone ? boundaryExit(eNode, full[full.length - 2], eZone.points) : eNode;
+		const sMain = mainLocNode(road.startLoc) ?? sNode;
+		const eMain = mainLocNode(road.endLoc) ?? eNode;
+		const lerp = (a: { x: number; y: number }, b: { x: number; y: number }) => ({
+			x: a.x + (b.x - a.x) * squishAmt,
+			y: a.y + (b.y - a.y) * squishAmt,
+		});
+		return [lerp(sClip, sMain), ...mid.map((p) => ({ ...p })), lerp(eClip, eMain)];
+	};
+
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			// Ignore keys while typing in a field (search box, inputs, etc.).
@@ -1314,16 +1476,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				redo();
 				return;
 			}
-			if (e.key === 'Enter' && tool === 'road' && draft.length >= 2) {
-				finishRoadDraft();
-				return;
-			}
-			if ((e.key === 'Delete' || e.key === 'Backspace') && selectedZone && draft.length === 0) {
+			if ((e.key === 'Delete' || e.key === 'Backspace') && selectedZone && draft.length === 0 && !roadDraft) {
 				deleteZone(selectedZone);
 				return;
 			}
 			if (e.key !== 'Escape') return;
-			if (draft.length > 0) cancelDraft();
+			if (roadDraft || draft.length > 0) cancelDraft();
 			else if (menu) setMenu(null);
 			else if (selectedVertsRef.current.size > 0) setSelectedVerts(new Set());
 			else if (selectedZone) setSelectedZone(null);
@@ -1331,7 +1489,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		};
 		document.addEventListener('keydown', onKey);
 		return () => document.removeEventListener('keydown', onKey);
-	}, [draft.length, menu, selectedZone, tool]);
+	}, [draft.length, menu, selectedZone, tool, roadDraft]);
 
 	// --- Zone / node actions -------------------------------------------------
 	const deleteZone = (id: string) => {
@@ -1365,6 +1523,61 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		() => new Set(zones.filter((z) => z.location).map((z) => z.location as string)),
 		[zones]
 	);
+	// Region wraps (node view only): each region's placed locations' ZONES are
+	// clustered by proximity, and each cluster gets its own padded convex hull
+	// around the actual zone areas (not the collapsed nodes) — so a region wraps
+	// the land its locations occupy, and far-apart members wrap separately.
+	const regionClusters = useMemo(() => {
+		if (!project) return [] as { region: EntityRecord; vertices: Pt[] }[];
+		const byRegion = new Map<string, { region: EntityRecord; zones: MapZone[] }>();
+		const allNodePts: Pt[] = [];
+		for (const z of zones) {
+			if (!z.location) continue;
+			const loc = plugin.indexer.resolve(z.location, project.loomPath);
+			if (loc?.type !== 'location') continue;
+			allNodePts.push(z.node ?? centroid(z.points));
+			if (!loc.region) continue;
+			const region = plugin.indexer.resolve(loc.region, loc.path);
+			if (region?.type !== 'region') continue;
+			if (!byRegion.has(region.path)) byRegion.set(region.path, { region, zones: [] });
+			byRegion.get(region.path)?.zones.push(z);
+		}
+		const spacing = medianNearestNeighbor(allNodePts);
+		// Zones within ~2.5x the typical node spacing share a wrap; beyond it they
+		// form a separate cluster (the "far lands" case).
+		const threshold = spacing > 0 ? spacing * 2.5 : Infinity;
+		const out: { region: EntityRecord; vertices: Pt[] }[] = [];
+		for (const { region, zones: rzones } of byRegion.values()) {
+			// Cluster the region's zones by their node positions (union-find).
+			const nodes = rzones.map((z) => z.node ?? centroid(z.points));
+			const parent = nodes.map((_, i) => i);
+			const find = (i: number): number => {
+				while (parent[i] !== i) {
+					parent[i] = parent[parent[i]];
+					i = parent[i];
+				}
+				return i;
+			};
+			for (let i = 0; i < nodes.length; i++) {
+				for (let j = i + 1; j < nodes.length; j++) {
+					if (Math.hypot(nodes[i].x - nodes[j].x, nodes[i].y - nodes[j].y) <= threshold) {
+						parent[find(i)] = find(j);
+					}
+				}
+			}
+			const groups = new Map<number, MapZone[]>();
+			rzones.forEach((z, i) => {
+				const r = find(i);
+				if (!groups.has(r)) groups.set(r, []);
+				groups.get(r)?.push(z);
+			});
+			// The hull wraps every vertex of the cluster's zones (their real areas).
+			for (const clusterZones of groups.values()) {
+				out.push({ region, vertices: clusterZones.flatMap((z) => z.points) });
+			}
+		}
+		return out;
+	}, [zones, project, plugin, indexVersion]);
 	const openLocation = (target: string | null, newTab = false) => {
 		if (!target) return;
 		const rec = plugin.indexer.resolve(target, project?.loomPath ?? '');
@@ -1472,8 +1685,15 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									const isRoad = z.kind === 'road';
 									// Polygon zones fully collapse in node view; roads stay as a line.
 									if (!isRoad && squish >= 0.995) return null;
+									// A road is rendered along its location→location centerline
+									// (clipped to the zone edges in regular view, anchored to the
+									// main-location nodes in node view); its `points` are only the
+									// editable waypoints. Skip when an endpoint isn't on this map.
+									const roadLine = isRoad ? roadCenterline(z, squish) : null;
+									if (isRoad && (!roadLine || roadLine.length < 2)) return null;
 									const stroke = darker(z.color);
-									const line = z.points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+									const linePts = isRoad ? (roadLine as Pt[]) : z.points;
+									const line = linePts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
 									const d = isRoad ? line : line + ' Z';
 									const zoneSel = selectedZone === z.id;
 									// Show handles for the selected zone and for any zone that has
@@ -1492,6 +1712,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 															r={(vSel ? VERTEX_R + 1.5 : VERTEX_R) / camera.k}
 															className={vSel ? 'loom-map-vertex loom-map-vertex-sel' : 'loom-map-vertex'}
 															onPointerDown={(e) => {
+																if (tool !== 'select') return;
 																e.stopPropagation();
 																if (e.button !== 0) return;
 																beginPending();
@@ -1515,11 +1736,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 																setDragActive(true);
 															}}
 															onContextMenu={(e) => {
-															// Right-click a vertex deletes it (polygons keep ≥3,
-															// roads keep ≥2).
+															// Right-click a waypoint deletes it (roads can drop all
+															// their waypoints; polygons keep ≥3).
 															e.preventDefault();
 															e.stopPropagation();
-															const min = isRoad ? 2 : 3;
+															const min = isRoad ? 0 : 3;
 															if (z.points.length <= min) return;
 															snapshot();
 															updateZone(z.id, {
@@ -1585,31 +1806,50 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										</g>
 									);
 								})}
-						{draft.length > 0 ? (
+						{/* Road preview: from the start location through the waypoints to
+						    the cursor (a thick line at the road width). */}
+						{tool === 'road' && roadDraft
+							? (() => {
+									const start = locNode(roadDraft.startLoc);
+									const pts = [start, ...draft, cursor].filter(Boolean) as Pt[];
+									if (pts.length < 1) return null;
+									const dp = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+									return (
+										<g className="loom-map-draft">
+											<path
+												d={dp}
+												fill="none"
+												stroke={plugin.settings.mapsColor}
+												strokeOpacity={DEFAULT_ALPHA + 0.2}
+												strokeWidth={DEFAULT_ROAD_WIDTH}
+												strokeLinejoin="round"
+												strokeLinecap="round"
+											/>
+											<path
+												d={dp}
+												fill="none"
+												stroke={darker(plugin.settings.mapsColor)}
+												strokeWidth={1.5 / camera.k}
+												strokeDasharray={`${6 / camera.k} ${4 / camera.k}`}
+											/>
+											{draft.map((p, i) => (
+												<circle key={i} cx={p.x} cy={p.y} r={VERTEX_R / camera.k} className="loom-map-vertex" />
+											))}
+										</g>
+									);
+								})()
+							: null}
+						{/* Zone (polygon) draw preview. */}
+						{tool === 'draw' && draft.length > 0 ? (
 							<g className="loom-map-draft">
-								{tool === 'road' ? (
-									// Road preview: a semi-transparent thick line at the road width.
-									<path
-										d={
-											draft.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') +
-											(cursor ? ` L${cursor.x},${cursor.y}` : '')
-										}
-										fill="none"
-										stroke={plugin.settings.mapsColor}
-										strokeOpacity={DEFAULT_ALPHA + 0.2}
-										strokeWidth={DEFAULT_ROAD_WIDTH}
-										strokeLinejoin="round"
-										strokeLinecap="round"
-									/>
-								) : null}
 								<path
 									d={
 										draft.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') +
 										(cursor ? ` L${cursor.x},${cursor.y}` : '') +
-										(tool !== 'road' && draft.length >= 2 ? ' Z' : '')
+										(draft.length >= 2 ? ' Z' : '')
 									}
-									fill={tool === 'road' ? 'none' : plugin.settings.mapsColor}
-									fillOpacity={tool !== 'road' && draft.length >= 2 ? DEFAULT_ALPHA * 0.6 : 0}
+									fill={plugin.settings.mapsColor}
+									fillOpacity={draft.length >= 2 ? DEFAULT_ALPHA * 0.6 : 0}
 									stroke={darker(plugin.settings.mapsColor)}
 									strokeWidth={1.5 / camera.k}
 									strokeDasharray={`${6 / camera.k} ${4 / camera.k}`}
@@ -1651,6 +1891,50 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 								strokeDasharray={`${4 / camera.k} ${3 / camera.k}`}
 							/>
 						) : null}
+						{/* Region wraps — node view only: a padded convex hull around each
+						    cluster of a region's location nodes (far-apart members wrap
+						    separately). Behind the nodes; fades in with the squish. */}
+						{squish > 0.02
+							? regionClusters.map(({ region, vertices }, i) => {
+									// A modest constant-screen margin around the zone areas.
+									const pad = 40 / camera.k;
+									const hull = regionHull(vertices, pad);
+									if (hull.length < 3) return null;
+									const d = hull.map((p, j) => `${j === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') + ' Z';
+									const c = centroid(vertices);
+									const minY = Math.min(...hull.map((p) => p.y));
+									const fill = plugin.settings.nodeColors.region;
+									return (
+										<g
+											key={`region-${region.path}-${i}`}
+											className="loom-map-region"
+											opacity={squish}
+											onDoubleClick={(e) => {
+												e.stopPropagation();
+												view.openEntity(region.path);
+											}}
+										>
+											<path
+												d={d}
+												fill={fill}
+												fillOpacity={0.14}
+												stroke={darker(fill)}
+												strokeWidth={2 / camera.k}
+												strokeLinejoin="round"
+											/>
+											<text
+												x={c.x}
+												y={minY - 12 / camera.k}
+												textAnchor="middle"
+												className="loom-map-region-label"
+												style={{ fontSize: `${17 / camera.k}px`, fill: darker(fill) }}
+											>
+												{region.name}
+											</text>
+										</g>
+									);
+								})
+							: null}
 						{/* Nodes layer — always on top of every zone, screen-space sized
 						    (constant apparent size when zooming). Right-click falls
 						    through to the zone menu; left-drag moves the node (or, in
@@ -1672,6 +1956,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									className="loom-map-node"
 									style={opacity < 1 ? { opacity } : undefined}
 									onPointerDown={(e) => {
+										// While a drawing tool is active (e.g. picking road
+										// endpoints), let the click fall through to the canvas
+										// instead of selecting the node/zone.
+										if (tool !== 'select') return;
 										// Middle-click opens the location page in a new tab (handled
 										// in onAuxClick) — don't let it start a canvas pan.
 										if (e.button === 1) {
@@ -1750,6 +2038,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									transform={doorSquish}
 									opacity={squish > 0.001 ? ds : undefined}
 									onPointerDown={(e) => {
+										if (tool !== 'select') return;
 										if (e.button !== 0) return;
 										e.stopPropagation();
 										setSelectedZone(z.id);
@@ -1849,6 +2138,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						locationName={locationName(menuZone.location)}
 						locationOptions={locationOptions}
 						usedLocations={usedLocations}
+						roadStart={menuZone.startLoc ? plugin.indexer.resolve(menuZone.startLoc, project.loomPath) : null}
+						roadEnd={menuZone.endLoc ? plugin.indexer.resolve(menuZone.endLoc, project.loomPath) : null}
+						onOpenRoadLoc={(rec) => view.openEntity(rec.path)}
 						mapPageOptions={mapPageOptions}
 						pageName={pageName}
 						onAddDoor={(pageId) => addDoor(menuZone, pageId)}
@@ -1984,6 +2276,9 @@ function ZonePanel({
 	locationName,
 	locationOptions,
 	usedLocations,
+	roadStart,
+	roadEnd,
+	onOpenRoadLoc,
 	mapPageOptions,
 	pageName,
 	onAddDoor,
@@ -2010,6 +2305,9 @@ function ZonePanel({
 	locationName: string;
 	locationOptions: { value: string; label: string }[];
 	usedLocations: Set<string>;
+	roadStart: EntityRecord | null;
+	roadEnd: EntityRecord | null;
+	onOpenRoadLoc: (rec: EntityRecord) => void;
 	mapPageOptions: { value: string; label: string }[];
 	pageName: (id: string) => string;
 	onAddDoor: (pageId: string) => void;
@@ -2046,9 +2344,23 @@ function ZonePanel({
 			>
 				<Icon name="grip" fallback="move" />
 			</button>
-			{/* Group: location (chip link) + change pencil. A road is a zone too —
-			    it can be associated with a location just like a polygon zone. */}
-			{showSearch ? (
+			{/* A road connects two locations — show them read-only (start → end)
+			    instead of the polygon zone's location picker. */}
+			{isRoad ? (
+				<div className="loom-map-loc loom-map-road-ends">
+					{roadStart ? (
+						<EntityChip plugin={plugin} record={roadStart} onOpen={() => onOpenRoadLoc(roadStart)} />
+					) : (
+						<span className="loom-map-road-missing">?</span>
+					)}
+					<Icon name="arrow-right" fallback="move-right" />
+					{roadEnd ? (
+						<EntityChip plugin={plugin} record={roadEnd} onOpen={() => onOpenRoadLoc(roadEnd)} />
+					) : (
+						<span className="loom-map-road-missing">?</span>
+					)}
+				</div>
+			) : showSearch ? (
 				<div className="loom-map-loc loom-map-loc-search">
 					<SearchableSelect
 						// Keyed on the association state so clearing remounts it empty

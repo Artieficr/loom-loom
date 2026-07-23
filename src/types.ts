@@ -1,6 +1,7 @@
 export const ENTITY_TYPES = [
 	'character',
 	'location',
+	'region',
 	'faction',
 	'item',
 	'quest',
@@ -26,6 +27,7 @@ export interface EntityTypeMeta {
 export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 	character: { label: 'Character', plural: 'Characters', folder: 'Entities/Characters', icon: 'user' },
 	location: { label: 'Location', plural: 'Locations', folder: 'Entities/Locations', icon: 'map-pin' },
+	region: { label: 'Region', plural: 'Regions', folder: 'Entities/Regions', icon: 'hexagon' },
 	faction: { label: 'Faction', plural: 'Factions', folder: 'Entities/Factions', icon: 'flag' },
 	item: { label: 'Item', plural: 'Items', folder: 'Entities/Items', icon: 'gem' },
 	quest: { label: 'Quest', plural: 'Quests', folder: 'Entities/Quests', icon: 'scroll' },
@@ -40,6 +42,7 @@ export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 export const ENTITY_TAGS: Record<EntityType, string[]> = {
 	character: ['PC', 'NPC', 'Cast'],
 	location: [],
+	region: [],
 	faction: [],
 	item: [],
 	quest: ['main', 'important', 'side'],
@@ -67,7 +70,7 @@ export const PC_GROUP_ICON = 'circle-star';
 /** Entity types that live on the timeline layers of the graph. */
 export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event'];
 /** Entity types that live on the fixed lower axis of the graph. */
-export const GLOBAL_TYPES: readonly EntityType[] = ['character', 'location', 'faction', 'item', 'quest'];
+export const GLOBAL_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest'];
 
 export const TIMELINES_FOLDER = 'Timelines';
 /** File extension of project home files (shown in the file explorer like .canvas/.base). */
@@ -94,6 +97,12 @@ export const FM = {
 	attendance: 'loomAttendance',
 	parentLocation: 'loomParentLocation',
 	sublocationOrder: 'loomSublocationOrder',
+	/** Location only: link to the region this location is part of (a grouping
+	 *  layer above main locations — not a sublocation). Its own field, like
+	 *  `parentLocation`; emits a typed `region` connection. */
+	region: 'loomRegion',
+	/** Region only: manual display order of the region's member locations. */
+	regionOrder: 'loomRegionOrder',
 	members: 'loomMembers',
 	alive: 'loomAlive',
 	/** Character only (PC): false while the character is away from the party —
@@ -262,6 +271,13 @@ export interface EntityRecord {
 	 *  (drag-reordered on the parent's page). Hidden links — the children
 	 *  already connect via their own parentLocation. */
 	sublocationOrder: string[];
+	/** Location only: linkpath of the region this location is part of (a grouping
+	 *  layer above main locations), or null. Dedicated field like
+	 *  `parentLocation`; emits a typed `region` connection. */
+	region: string | null;
+	/** Region only: manual display order of its member locations (drag-reordered
+	 *  on the region's page). */
+	regionOrder: string[];
 	/** Character/location only: ordered item linkpaths shown in the Items
 	 *  section (drag-reordered here); also connect in the graph as plain links. */
 	items: string[];
@@ -318,6 +334,8 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		attendance: [],
 		parentLocation: null,
 		sublocationOrder: [],
+		region: null,
+		regionOrder: [],
 		items: [],
 		itemOrigin: null,
 		itemOwner: null,

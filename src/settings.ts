@@ -6,6 +6,23 @@ import type LoomLoomPlugin from './main';
 
 export type LoomTextSize = 'compact' | 'normal' | 'large';
 
+/** A darker shade of a hex color. */
+export function darkenHex(hex: string, factor = 0.62): string {
+	const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+	if (!m) return hex;
+	const n = parseInt(m[1], 16);
+	const r = Math.round(((n >> 16) & 0xff) * factor);
+	const g = Math.round(((n >> 8) & 0xff) * factor);
+	const b = Math.round((n & 0xff) * factor);
+	return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+}
+
+/** Region has no configurable color — it's always a darker shade of the location
+ *  color. Call on load and after any location-color change. */
+export function syncRegionColor(settings: LoomLoomSettings): void {
+	settings.nodeColors.region = darkenHex(settings.nodeColors.location);
+}
+
 /** Graph node radius (px) slider bounds. */
 export const NODE_SIZE_MIN = 8;
 export const NODE_SIZE_MAX = 44;
@@ -127,12 +144,15 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphDropEdits: 'target',
 	confirmTimelineMove: true,
 	notesNewestFirst: true,
-	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location'],
+	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location', 'region'],
 	nodeColors: {
 		session: '#7c5cff',
 		event: '#e08e45',
 		character: '#58b478',
 		location: '#4aa3d8',
+		// Region is not user-configurable — always kept as a darker shade of the
+		// location color (see `syncRegionColor`). This is just the initial value.
+		region: '#2c6282',
 		faction: '#d16d9e',
 		item: '#d8b13c',
 		quest: '#c95f5f',
@@ -142,6 +162,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		event: 20,
 		character: 17,
 		location: 17,
+		region: 17,
 		faction: 17,
 		item: 17,
 		quest: 17,
@@ -402,6 +423,8 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			if (Object.keys(ranks).length > 0) base.timelineManualOrder[root] = ranks;
 		}
 	}
+	// Region color is derived, never stored independently.
+	syncRegionColor(base);
 	return base;
 }
 
@@ -539,11 +562,16 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			this.plugin.settings.groupColor = DEFAULT_SETTINGS.groupColor;
 		});
 		for (const type of ENTITY_TYPES) {
+			// Region has no color/size row — its color is auto-derived from the
+			// location color (a darker shade), and it isn't a map node.
+			if (type === 'region') continue;
 			const setting = new Setting(containerEl)
 				.setName(ENTITY_META[type].label)
 				.addColorPicker((picker) =>
 					picker.setValue(this.plugin.settings.nodeColors[type]).onChange(async (value) => {
 						this.plugin.settings.nodeColors[type] = value;
+						// Region tracks the location color.
+						if (type === 'location') syncRegionColor(this.plugin.settings);
 						await this.plugin.saveSettings();
 						this.plugin.indexer.refreshViews();
 					})
@@ -564,6 +592,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			this.addReset(setting, () => {
 				this.plugin.settings.nodeColors[type] = DEFAULT_SETTINGS.nodeColors[type];
 				this.plugin.settings.nodeSizes[type] = DEFAULT_SETTINGS.nodeSizes[type];
+				if (type === 'location') syncRegionColor(this.plugin.settings);
 			});
 			// Quest tag colors nest right under the quest entity (tags aren't nodes,
 			// so no size slider on them).

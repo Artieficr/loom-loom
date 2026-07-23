@@ -109,6 +109,8 @@ export interface NewEntityFields {
 	relationship?: { type: string; target: string };
 	/** Location only: parent location name — the new location is its sublocation. */
 	parentLocation?: string;
+	/** Location only: region name — the new location is part of this region. */
+	region?: string;
 	/** Event only: entity names involved — written into the starting session
 	 *  note's `involved` list (session-less for lore events). */
 	involved?: string[];
@@ -191,6 +193,9 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	}
 	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
 		lines.push(`${FM.parentLocation}: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
+	}
+	if (type === 'location' && fields.region && fields.region !== '') {
+		lines.push(`${FM.region}: ${yamlQuote(`[[${fields.region}]]`)}`);
 	}
 	if (type === 'faction') {
 		const members = (fields.members ?? []).filter((m) => m.character !== '');
@@ -809,6 +814,8 @@ export interface CreateEntityOptions {
 	/** Locations only: the new location is created as this one's sublocation
 	 *  (writes `parentLocation`, not a relationship). */
 	parentLocation?: EntityRecord;
+	/** Locations only: prefill the new location's "Part of region". */
+	region?: EntityRecord;
 	/** The new entity starts with a session note pinned to this session. */
 	noteSession?: EntityRecord;
 	/** Quests only: prefills "Received in session" without pinning a session
@@ -1460,10 +1467,49 @@ export class CreateEntityModal extends Modal {
 				}
 			};
 			refreshParent();
+			// Part of region (optional) — a grouping layer above main locations.
+			const regions = this.plugin.indexer
+				.getAll('region', this.project.root)
+				.sort((a, b) => a.name.localeCompare(b.name));
+			let pickedRegion: EntityRecord | null = this.options.region ?? null;
+			if (pickedRegion) this.fields.region = linkTargetOf(pickedRegion);
+			const regionSetting = new Setting(this.contentEl).setName('Part of region');
+			const regionEl = regionSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
+			const refreshRegion = () => {
+				regionEl.empty();
+				if (pickedRegion) {
+					this.renderChip(regionEl, pickedRegion, pickedRegion.name, () => {
+						pickedRegion = null;
+						this.fields.region = '';
+						refreshRegion();
+					});
+				} else {
+					const input = regionEl.createEl('input', { type: 'text', attr: { placeholder: '(Not specified)' } });
+					new RecordInputSuggest(
+						this.app,
+						input,
+						() => regions,
+						(r) => {
+							pickedRegion = r;
+							this.fields.region = linkTargetOf(r);
+							refreshRegion();
+						},
+						(r) => r.name
+					);
+				}
+			};
+			refreshRegion();
 			const locDesc = new Setting(this.contentEl)
 				.setName('Description')
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
 			locDesc.setClass('loom-modal-wide');
+		}
+
+		if (this.type === 'region') {
+			const regDesc = new Setting(this.contentEl)
+				.setName('Description')
+				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
+			regDesc.setClass('loom-modal-wide');
 		}
 
 		if (this.type === 'event') {

@@ -1,5 +1,5 @@
 import { Menu, ViewStateResult, normalizePath } from 'obsidian';
-import { MouseEvent as ReactMouseEvent, ReactElement, useMemo, useState } from 'react';
+import { Fragment, MouseEvent as ReactMouseEvent, ReactElement, useMemo, useState } from 'react';
 import {
 	ENTITY_META,
 	ENTITY_TAGS,
@@ -13,6 +13,7 @@ import {
 	VIEW_LIST,
 	VIEW_MAP,
 	isEntityType,
+	pcGroupStub,
 } from '../types';
 import {
 	AddRelationshipModal,
@@ -104,6 +105,10 @@ function compare(a: EntityRecord, b: EntityRecord, mode: SortMode): number {
 			return a.name.localeCompare(b.name);
 	}
 }
+
+/** Sentinel path of the synthetic "Unspecified Region" group in the location
+ *  list — locations with no region nest under it. */
+const UNSPEC_REGION = 'loom:unspecified-region';
 
 function EntityList({
 	view,
@@ -213,17 +218,54 @@ function EntityList({
 			}
 			return false;
 		};
+		// Sublocation (or item-copy) nesting: children hang under their parent;
+		// everything else is a top-level record.
+		const topLevel: EntityRecord[] = [];
 		for (const r of records) {
 			const parent = !inCycle(r) ? parentInList(r) : null;
 			if (parent) {
 				if (!childrenOf.has(parent.path)) childrenOf.set(parent.path, []);
 				childrenOf.get(parent.path)?.push(r);
 			} else {
-				roots.push(r);
+				topLevel.push(r);
 			}
 		}
+		// Locations get an extra top layer: each main location nests under its
+		// Region (or "Unspecified Region" when it has none).
+		if (type !== 'location' || !project) return { roots: topLevel, childrenOf };
+		const groups = new Map<string, { region: EntityRecord | null; mains: EntityRecord[] }>();
+		for (const m of topLevel) {
+			const reg = m.region ? plugin.indexer.resolve(m.region, m.path) : null;
+			const region = reg?.type === 'region' ? reg : null;
+			const key = region?.path ?? UNSPEC_REGION;
+			if (!groups.has(key)) groups.set(key, { region, mains: [] });
+			groups.get(key)?.mains.push(m);
+		}
+		const realKeys = [...groups.keys()]
+			.filter((k) => k !== UNSPEC_REGION)
+			.sort((a, b) => (groups.get(a)?.region?.name ?? '').localeCompare(groups.get(b)?.region?.name ?? ''));
+		// No region in use yet → keep the plain flat location list (don't wrap
+		// everything under a lone "Unspecified Region").
+		if (realKeys.length === 0) return { roots: topLevel, childrenOf };
+		for (const k of realKeys) {
+			const g = groups.get(k);
+			if (!g?.region) continue;
+			roots.push(g.region);
+			childrenOf.set(g.region.path, g.mains);
+		}
+		const unspec = groups.get(UNSPEC_REGION);
+		if (unspec) {
+			const stub: EntityRecord = {
+				...pcGroupStub(project.root),
+				path: UNSPEC_REGION,
+				name: 'Unspecified Region',
+				type: 'region',
+			};
+			roots.push(stub);
+			childrenOf.set(UNSPEC_REGION, unspec.mains);
+		}
 		return { roots, childrenOf };
-	}, [plugin.indexer, records, nested]);
+	}, [plugin.indexer, records, nested, type, project]);
 
 	const isCollapsed = (path: string) =>
 		collapseOverride.get(path) ?? (childrenOf.get(path)?.length ?? 0) > 5;
@@ -358,6 +400,8 @@ function EntityList({
 
 	const onRowMenu = (e: ReactMouseEvent, r: EntityRecord) => {
 		e.preventDefault();
+		// The synthetic "Unspecified Region" group has no note → no menu.
+		if (r.path === UNSPEC_REGION) return;
 		const menu = new Menu();
 		const isItemCopy = r.type === 'item' && r.itemOrigin !== null;
 
@@ -503,6 +547,37 @@ function EntityList({
 					.onClick(() =>
 						new CreateEntityModal(plugin, 'location', project, {
 							parentLocation: r,
+							onCreated: () => {},
+						}).open()
+					)
+			);
+		}
+
+		if (r.type === 'region') {
+			menu.addSeparator();
+			menu.addItem((i) =>
+				i
+					.setTitle('Add location')
+					.setIcon(ENTITY_META.location.icon)
+					.onClick(() =>
+						new RecordSuggestModal(
+							plugin.app,
+							plugin.indexer
+								.getAll('location', project.root)
+								.filter((l) => plugin.indexer.resolve(l.region ?? '', l.path)?.path !== r.path)
+								.sort((a, b) => a.name.localeCompare(b.name)),
+							(l) => writeFmOf(l, (fm) => setLoomKey(fm, FM.region, `[[${linkTargetOf(r)}]]`)),
+							'Pick the location…'
+						).open()
+					)
+			);
+			menu.addItem((i) =>
+				i
+					.setTitle('New location in region')
+					.setIcon(ENTITY_META.location.icon)
+					.onClick(() =>
+						new CreateEntityModal(plugin, 'location', project, {
+							region: r,
 							onCreated: () => {},
 						}).open()
 					)
@@ -857,12 +932,18 @@ function EntityList({
 
 	const row = (r: EntityRecord, depth: number) => {
 		const hasChildren = nested && (childrenOf.get(r.path)?.length ?? 0) > 0;
+		const isUnspecRegion = r.path === UNSPEC_REGION;
 		return (
 			<div
 				key={r.path}
-				className={depth > 0 ? 'loom-row loom-row-sub' : 'loom-row'}
-				style={depth > 0 ? { paddingLeft: depth * 20 } : undefined}
-				onClick={() => view.openEntity(r.path)}
+				className={
+					(depth > 0 ? 'loom-row loom-row-sub' : 'loom-row') +
+					(r.type === 'region' ? ' loom-row-region' : '')
+				}
+				onClick={() => {
+					if (isUnspecRegion) toggleCollapsed(r.path);
+					else view.openEntity(r.path);
+				}}
 				onContextMenu={(e) => onRowMenu(e, r)}
 			>
 				{/* The caret slot is always reserved in nested mode so names line
@@ -904,6 +985,7 @@ function EntityList({
 					<span className="loom-row-date">{recordDate(r, project)}</span>
 				) : null}
 				<span className="loom-row-desc">{r.description}</span>
+				{isUnspecRegion ? null : (
 				<button
 					className="loom-row-delete"
 					aria-label="Delete"
@@ -926,6 +1008,7 @@ function EntityList({
 				>
 					<Icon name="trash-2" />
 				</button>
+				)}
 			</div>
 		);
 	};
@@ -1001,26 +1084,33 @@ function EntityList({
 		);
 	};
 
-	// Depth-first emit; collapsed parents keep their subtree hidden. Each main
-	// location's descendants share one horizontal scroll container, so deep
-	// nesting scrolls per subtree instead of the whole list.
+	// Each nesting level hangs off its own vertical rail: a `.loom-subtree`
+	// wraps a parent's children, and each child with children of its own gets a
+	// further nested subtree. The outermost (root) subtree owns the horizontal
+	// scroll so deep nesting scrolls as one unit, not the whole list.
+	const renderSubtree = (parent: EntityRecord, depth: number, isRoot: boolean): ReactElement | null => {
+		if (!nested || isCollapsed(parent.path)) return null;
+		const children = childrenOf.get(parent.path) ?? [];
+		if (children.length === 0) return null;
+		return (
+			<div
+				key={parent.path + ':subtree'}
+				className={isRoot ? 'loom-subtree loom-subtree-root' : 'loom-subtree'}
+			>
+				{children.map((child) => (
+					<Fragment key={child.path}>
+						{row(child, depth)}
+						{renderSubtree(child, depth + 1, false)}
+					</Fragment>
+				))}
+			</div>
+		);
+	};
 	const rows: ReactElement[] = [];
 	for (const r of roots) {
 		rows.push(row(r, 0));
-		if (!nested || isCollapsed(r.path) || (childrenOf.get(r.path)?.length ?? 0) === 0) continue;
-		const subRows: ReactElement[] = [];
-		const emit = (parent: EntityRecord, depth: number) => {
-			for (const child of childrenOf.get(parent.path) ?? []) {
-				subRows.push(row(child, depth));
-				if (!isCollapsed(child.path)) emit(child, depth + 1);
-			}
-		};
-		emit(r, 1);
-		rows.push(
-			<div key={r.path + ':subtree'} className="loom-subtree">
-				{subRows}
-			</div>
-		);
+		const sub = renderSubtree(r, 1, true);
+		if (sub) rows.push(sub);
 	}
 
 	return (
