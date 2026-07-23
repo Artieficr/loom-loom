@@ -1421,35 +1421,45 @@ span.loom-row-caret {
 	margin-top: var(--size-2-1);
 	display: flex;
 	flex-direction: column;
-	padding: var(--size-2-1);
+	/* Vertical padding only — rows go edge-to-edge like Obsidian's native
+	   suggestion list (the "Sublocation of" picker), not inset button chips. */
+	padding: var(--size-2-1) 0;
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);
 	box-shadow: var(--shadow-s);
 	max-height: 240px;
-	overflow-y: auto;
+	overflow: hidden auto;
 	z-index: var(--layer-menu);
 }
 
-.loom-combo-item {
-	white-space: nowrap;
-}
-
-.loom-combo-item {
+/* Plain list rows, not buttons: no border/box/radius, full-width edge-to-edge
+   hover — mirrors Obsidian's native suggestion list. Shared by every combo
+   search (SearchableSelect + SuggestInput). The `.loom-combo-menu` prefix lifts
+   specificity above Obsidian's own `button:not(...)` chrome, which otherwise
+   re-adds the background/box-shadow/radius that make each row look like a button. */
+.loom-combo-menu .loom-combo-item {
+	appearance: none;
 	background: none;
+	border: none;
+	border-radius: 0;
 	box-shadow: none;
 	cursor: pointer;
 	text-align: left;
+	white-space: nowrap;
+	width: 100%;
 	height: auto;
+	margin: 0;
 	padding: var(--size-2-2) var(--size-4-2);
-	border-radius: var(--radius-s);
+	font-weight: var(--font-normal);
+	color: var(--text-normal);
 }
 
-.loom-combo-item:hover {
+.loom-combo-menu .loom-combo-item:hover {
 	background: var(--background-modifier-hover);
 }
 
-.loom-combo-action {
+.loom-combo-menu .loom-combo-action {
 	color: var(--text-accent);
 }
 
@@ -3602,7 +3612,29 @@ span.loom-row-caret {
 	fill: var(--interactive-accent);
 }
 
+/* Marquee-selected vertices: filled accent so the group reads as one selection. */
+.loom-map-vertex-sel {
+	fill: var(--interactive-accent);
+	stroke: var(--background-primary);
+}
+
+/* Marquee selection box (Ctrl+drag on empty space). */
+.loom-map-marquee {
+	fill: var(--interactive-accent);
+	fill-opacity: 0.12;
+	stroke: var(--interactive-accent);
+	vector-effect: non-scaling-stroke;
+	pointer-events: none;
+}
+
 .loom-map-node {
+	cursor: pointer;
+}
+
+/* Hovering a zone outline / road body shows the same pointer cursor as a vertex
+   handle (that's where a double-click inserts a vertex) — must beat the svg's
+   own `cursor: grab`. */
+.loom-map-wrap.loom-map-edge-hover .loom-map-svg {
 	cursor: pointer;
 }
 
@@ -3659,6 +3691,20 @@ span.loom-row-caret {
 .loom-view .loom-map-icon-btn:disabled {
 	opacity: 0.5;
 	cursor: default;
+}
+
+/* Revert-to-default controls in the style popover: a bare circled-arrow icon
+   (icon style, not a button), sized to sit at the end of a palette row. */
+.loom-view .loom-map-reset {
+	width: 22px;
+	height: 22px;
+	flex: none;
+	color: var(--text-muted);
+}
+
+.loom-view .loom-map-reset svg {
+	width: 14px;
+	height: 14px;
 }
 
 .loom-view .loom-map-icon-btn.loom-filter-active {
@@ -3759,24 +3805,32 @@ span.loom-row-caret {
 	width: 96px;
 }
 
-/* Color swatch as a rectangular field (fits the rectangular popover). */
-.loom-map-color {
-	width: 118px;
-	height: 24px;
+/* The whole element IS the color: a wide horizontal rectangle filled edge-to-edge
+   with the picked color — no visible frame/padding around an inner swatch. */
+.loom-view .loom-map-color {
+	appearance: none;
+	-webkit-appearance: none;
+	flex: 1;
+	width: auto;
+	min-width: 120px;
+	height: 26px;
 	padding: 0;
-	border: 1px solid var(--background-modifier-border);
+	margin: 0;
+	border: none;
 	border-radius: var(--radius-s);
 	background: transparent;
+	box-shadow: none;
 	cursor: pointer;
+	overflow: hidden;
 }
 
 .loom-map-color::-webkit-color-swatch-wrapper {
-	padding: 2px;
+	padding: 0;
 }
 
 .loom-map-color::-webkit-color-swatch {
 	border: none;
-	border-radius: 2px;
+	border-radius: var(--radius-s);
 }
 
 /* Vertical group separators inside the horizontal menus. */
@@ -3787,22 +3841,116 @@ span.loom-row-caret {
 	background: var(--background-modifier-border);
 }
 
-/* Node menu size dropdown (S/M/L/XL). */
-.loom-map-size-btn {
-	width: auto;
-	padding: 0 2px;
+/* Node menu size dropdown (S/M/L/XL). Styled like the other map icon buttons:
+   transparent by default, a slight hover tint — NOT the theme's grey button fill.
+   Not a loom-map-icon-btn so it isn't clipped to 28px and can show its value. */
+.loom-view .loom-map-size-btn {
+	display: inline-flex;
+	align-items: center;
+	height: 28px;
+	padding: 0;
+	margin: 0;
+	background: transparent;
+	border: none;
+	border-radius: var(--radius-s);
+	box-shadow: none;
 }
 
-.loom-map-size {
+.loom-view .loom-map-size-btn:hover {
+	background: var(--background-modifier-hover);
+}
+
+/* appearance:none strips the theme's grey <select> chrome (the reported grey). */
+.loom-view select.loom-map-size {
+	appearance: none;
+	-webkit-appearance: none;
+	height: 24px;
+	min-width: 34px;
+	padding: 0 4px;
 	font-size: var(--font-ui-smaller);
 	background: transparent;
 	border: none;
 	color: var(--text-normal);
 	cursor: pointer;
+	box-shadow: none;
+	/* Center the selected value in the closed field. */
+	text-align: center;
+	text-align-last: center;
+}
+
+/* Opening the dropdown must not draw a bold focus ring/outline on the field. */
+.loom-view .loom-map-size:focus,
+.loom-view .loom-map-size:focus-visible,
+.loom-view .loom-map-size:active {
+	outline: none;
+	box-shadow: none;
+	border: none;
 }
 
 .loom-map-node-dot {
 	cursor: pointer;
+}
+
+/* Doors: portal markers linking a zone to another map page. */
+.loom-map-door {
+	cursor: pointer;
+}
+
+.loom-map-door-dot {
+	fill: var(--background-primary);
+	stroke: var(--interactive-accent);
+	stroke-width: 2;
+	vector-effect: non-scaling-stroke;
+}
+
+.loom-map-door-glyph {
+	pointer-events: none;
+	stroke: var(--interactive-accent);
+	vector-effect: non-scaling-stroke;
+}
+
+.loom-map-doors-pop {
+	min-width: 200px;
+}
+
+.loom-map-doors-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin-top: var(--size-2-2);
+}
+
+.loom-map-doors-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+}
+
+.loom-view .loom-map-doors-open {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+	justify-content: flex-start;
+	padding: var(--size-2-1) var(--size-2-2);
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	border-radius: var(--radius-s);
+	color: var(--text-normal);
+	cursor: pointer;
+	text-align: left;
+	min-width: 0;
+}
+
+.loom-view .loom-map-doors-open:hover {
+	background: var(--background-modifier-hover);
+}
+
+.loom-map-doors-open span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .loom-map-node-sel {
@@ -3822,13 +3970,164 @@ span.loom-row-caret {
 }
 
 /* Top-left map controls: find-a-location search + the vertical scale slider. */
+/* ---- Maps navigator panel (left, slides on hover, pins open) ---- */
+.loom-map-panel {
+	position: absolute;
+	top: 0;
+	left: 0;
+	height: 100%;
+	z-index: 28;
+	display: flex;
+	align-items: stretch;
+	/* Hidden: only the 16px edge tab peeks out; hover/pin slides it in. */
+	transform: translateX(-240px);
+	transition: transform 0.18s ease;
+}
+
+.loom-map-panel:hover,
+.loom-map-panel-pinned {
+	transform: translateX(0);
+}
+
+.loom-map-panel-inner {
+	width: 240px;
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	padding: var(--size-2-3);
+	background: var(--background-primary);
+	border-right: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+}
+
+.loom-map-panel-edge {
+	width: 16px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-left: none;
+	border-radius: 0 var(--radius-m) var(--radius-m) 0;
+	color: var(--text-muted);
+	box-shadow: var(--shadow-s);
+	align-self: center;
+	height: 64px;
+}
+
+.loom-map-panel-pinned .loom-map-panel-edge {
+	display: none;
+}
+
+.loom-map-panel-edge svg {
+	width: 14px;
+	height: 14px;
+}
+
+.loom-map-panel-head {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+}
+
+.loom-map-panel-title {
+	font-weight: var(--font-semibold);
+	color: var(--text-normal);
+}
+
+.loom-map-panel-search {
+	width: 100%;
+}
+
+.loom-map-panel-list {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.loom-map-panel-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	padding: var(--size-2-2);
+}
+
+.loom-view .loom-map-page-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+	padding: var(--size-2-1) var(--size-2-2);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	color: var(--text-normal);
+	user-select: none;
+}
+
+.loom-view .loom-map-page-row:hover {
+	background: var(--background-modifier-hover);
+}
+
+.loom-view .loom-map-page-active {
+	background: var(--background-modifier-active-hover);
+	color: var(--text-accent);
+}
+
+.loom-view .loom-map-page-drop {
+	box-shadow: inset 0 0 0 2px var(--interactive-accent);
+}
+
+.loom-map-page-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-map-page-rename {
+	flex: 1;
+	min-width: 0;
+	height: 22px;
+}
+
+.loom-view .loom-map-page-caret {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.loom-map-page-caret-empty {
+	width: 16px;
+	flex: none;
+}
+
+.loom-map-page-row > svg {
+	width: 15px;
+	height: 15px;
+	color: var(--text-muted);
+	flex: none;
+}
+
 .loom-map-controls {
 	position: absolute;
 	top: var(--size-4-3);
-	left: var(--size-4-3);
+	/* Top-right so the sliding Maps panel on the left never covers them. */
+	right: var(--size-4-3);
 	z-index: 25;
 	display: flex;
 	flex-direction: column;
+	align-items: flex-end;
 	gap: var(--size-2-3);
 	width: 172px;
 }

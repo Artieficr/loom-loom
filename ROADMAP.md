@@ -200,16 +200,25 @@ A spatial drawing canvas per project — zones (polygons) associated with locati
 - [x] The location **node is draggable within its zone** (`clampToPolygon`); nodes render in a **separate layer on top of every zone**, **screen-space sized** (constant apparent size when zooming)
 - [x] **Scale slider** (top-left, 3 stops — Close up / Regular / Node view) **coupled to the camera zoom**: the mode is derived from `camera.k` (`CLOSEUP_K`/`NODEVIEW_K`), so wheel-zooming flips the mode automatically, and clicking a stop eases the zoom to that mode (`MODE_K`, `animateCameraK`); zooming past Node view still works (mode just stays). A **find-a-location search** above it (solid field bg) pans to a picked node. **Close up**: main node see-through (`CLOSEUP_NODE_OPACITY`). **Node view**: each zone **squishes/warps into its node** and vanishes (`squish` eased animation), leaving just the nodes; **unassociated zones fade in a light-grey placeholder node** (opacity tied to `squish`); **dragging a node in node view moves its whole zone**
 - [ ] Sublocation node sizing: a node's size = its zone's `nodeSize` (main default **M**), each nesting level **one step smaller** with a **minimum** floor (so sublocations-of-sublocations don't vanish); sublocation nodes are **canvas-sized** (scale with zoom) and render **behind** the main node — pending the sublocation feature
-- [ ] **Drawing tweaks (next)**: double-click a zone outline **adds a vertex**; right-click a vertex **deletes it** (min 3); a **rectangle draw tool** alongside the current click-to-place polygon ("lasso", done)
+- [x] **Drawing tweaks**: double-click a zone outline **adds a vertex** (`insertVertexAt`); right-click a vertex handle **deletes it** (polygons ≥3, roads ≥2); **Delete/Backspace** removes the selected zone; **left-click a node selects its zone**
+- [x] **Rectangle tool** ("Draw a rectangle", `square`): press-drag defines an axis-aligned 4-vertex zone (`finishRect`, live `rectPreview`) — `src/views/map-view.tsx`
+- [x] **Vertex alignment + multi-select**: **Ctrl+drag a vertex** axis-locks it (X/Y by dominant direction); **Ctrl+drag empty space** marquees vertices (`selectVertsInBox`/`selectedVerts`) that then move together — `src/views/map-view.tsx`
+- [x] **Node double-click opens the location page**, middle-click opens it in a new tab (`openLocation(target, newTab)`); the location picker skips a location already placed on the active map (`usedLocations`) — `src/views/map-view.tsx`
+- [x] **Multiple map pages per project** (`MapsPanel`): left navigator that slides on hover + pins open, name search, new-map, inline rename, right-click Menu (New inside / Rename / Delete), **drag-to-nest** (`parentId`, cycle-guarded). Panel stays open during menu/rename (`forceOpen`); new map creates with an empty name → inline rename with cursor focused, blank/Esc auto-names **"New map N"** (lowest free), duplicate names prompt a de-dup suggestion; new maps open at regular zoom. Storage moved to `Maps/<Project> Maps.json` (`MapsFile`/`MapPage`, `parseMapsFile`), auto-migrating the legacy `Map.json` — `src/views/map-view.tsx`, `styles.css`, `src/views/entity-view.tsx`
+- [x] **Doors** (`MapZone.doors`): a `door-open` popover in `ZonePanel` links a zone to other map pages (page `SearchableSelect` excluding active + a list); each door draws a 🚪 marker in the zone (draggable), **double-click / list-click opens the target page** (`switchMap`) — `src/views/map-view.tsx`, `styles.css`
+- [x] Consolidated the three draw tools into one `square-dashed` button → Obsidian Menu (Rectangle / Polygon / Road); the location picker de-dups (skip a location already on the active map) — `src/views/map-view.tsx`
+- [x] **Road tool**: "Draw a road" global-menu entry (`route` icon) draws an **open centerline** (right-click / Enter / **double-click last vertex** finishes — not closed), rendered as a **width-stroked path** (a long box that bends: outline + fill round-joined strokes at `width`). A road is a **full zone with a different draw method** — it takes a location/node/size/color/lock and squishes into its node in node view like any zone; `distToPolyline`/`clampToCapsule` treat its body as a capsule; **Width** slider (roads only) in the palette popover — `MapZone.kind: 'zone'|'road'` + `width` — `src/views/map-view.tsx`
+- [x] Cursor turns to a pointer over a zone outline / road body (`loom-map-edge-hover`), matching vertex-handle hover; zone color picker is a wide horizontal rectangle (`appearance:none`) — `src/views/map-view.tsx`, `styles.css`
+- [x] Zones associate a **main location only** (`locationOptions` filters `parentLocation === null`); entity-page "Turn to a sublocation" **warns + deletes** the location's map zone when it becomes a sublocation — `src/views/map-view.tsx`, `src/views/entity-view.tsx`
+- [x] **Undo / redo** (map-local): `Ctrl+Z` / `Ctrl+Shift+Z` (+`Ctrl+Y`), field-focus guarded — a `zones` snapshot `history` ref, discrete actions push before-change snapshots and drag/slider gestures coalesce to one step (`snapshot`/`beginPending`/`commitPending`, `HISTORY_CAP`) — `src/views/map-view.tsx`
+- [x] Combo searches (`SearchableSelect` + `SuggestInput` → `.loom-combo-*`) render as a **plain edge-to-edge list** (no per-item button chrome), matching Obsidian's native suggestion popup — `styles.css`
 - [ ] **Sublocations panel** (zone menu "list" button → sub-panel, columns **Title | Node**): Title = clickable `EntityChip` link; Node = checkbox (checked ⇒ sublocation shows as a node in the zone); chips are **drag-and-drop** (ghost on cursor, drop inside the zone places the node); **Add all** (warn `"There is not enough space for all sublocation nodes in this zone"` when it won't fit) and **Remove all** (confirm `"This will remove all sublocation nodes from the zone."`, button `"Yes, remove"`). Introduces sublocation nodes → wire in the sizing rule above
 - [ ] **Items panel** — same Title|Node panel for a location's items (checkbox, draggable chips, add/remove all). PREREQ: confirm/implement **item inheritance up the location ancestry** on entity pages (a sublocation's item should surface in ancestor locations' Items section, noting which sublocation holds it — `src/views/entity-view.tsx` + `src/indexer.ts`)
-- [ ] **Size dropdown fixes** (`ZonePanel` S/M/L/XL select): overlaps neighbouring menu items; clicking it wrongly triggers the icon-btn active/outline bolding; doesn't show the selected value in the closed field
-- [x] Persistence: `Maps/<Project> Map.json` (JSON, debounced saves)
-- [ ] Node double-click opens the location's own nested map (copies the zone outline as the boundary to place sublocations in)
+- [x] **Size dropdown fixes** (`ZonePanel` S/M/L/XL select): no longer clipped to the 28px icon-btn width (was hiding the selected value and overlapping neighbours) — it's a plain inline `.loom-map-size-btn` select now, hover-tint only, showing the current S/M/L/XL
+- [x] Persistence: `Maps/<Project> Maps.json` (multi-map `MapsFile`, debounced), migrating legacy `Map.json`
 - [ ] Node single-click fans the location's sublocations out in a wheel around it (sublocation nodes default to Small)
 - [ ] Global menu: background-image import into `Maps/Images` (draw over it); a locked image only opens its context menu on its edge, its interior counts as empty space
 - [ ] Waypoints mode (global menu toggle, accent-lit): show location-connected nodes like a graph view but organized around locations, not sessions
-- [ ] Lasso/rectangle draw tools (beyond click-to-place polygon)
 
 ## Project types (the next big feature)
 
@@ -237,6 +246,26 @@ what exists today. Chosen at project creation (and switchable), stored in the .l
 - [ ] **Node icons / shapes in the graph** — beyond plain circles: an icon or shape per node, e.g. a skull on a death event, distinct marks for "big" events. Not urgent; keep the idea on file. (Would extend the graph node render + a per-entity/per-event icon source.)
 - [ ] **Date system rethink** — dates + custom calendars exist but were added before a clear use emerged (everything works off sessions' natural dates, so the custom calendar is unused so far). Needs a real application and possibly a bigger model: the timeline is **linear** today — what about **multiple / parallel timelines** (time-travel stories, parallel character arcs across different timelines that interconnect)? Complex; no clear vision yet — brainstorm before building.
 - [ ] **Design polish pass** — some copy and visual details aren't dialed in yet (deferred deliberately while features had priority). Collect the rough spots and do a focused design/UX pass once the feature set settles.
+
+## Guided tutorial / onboarding (planned)
+
+An in-app guided tutorial that teaches the plugin's features, on by default for new users.
+
+- [ ] **Guided overlay**: a transparent black scrim with a cut-out/highlight window over the
+  UI area being taught, plus an explanation card (text + next/skip). Steps walk the user
+  through the app and prompt them to *try* things (create a test character, link two entities,
+  draw a zone, etc.).
+- [ ] **Lessons**: grouped into separate lessons — one per entity type/page, plus Graph,
+  Timeline, and Maps. Each lesson is independently completable/skippable.
+- [ ] **Enabled by default**; a lesson that's **completed or skipped never auto-pops again**.
+  Persist per-lesson status (`todo` / `completed` / `skipped`) in settings.
+- [ ] **Progress window** openable via an Obsidian **command** — lists every lesson with its
+  status and lets the user (re)start any of them.
+- [ ] **Cleanup**: an option to **delete all tutorial-created pages** (tag/track the notes the
+  tutorial makes) so the user can continue with a clean vault.
+- [ ] Design notes: keep the overlay accessible (Esc to exit, focus trap), don't block real
+  work, and make the highlight follow layout/scroll. Tutorial-made entities should be clearly
+  marked (e.g. a `loomTutorial` frontmatter flag) so cleanup is exact.
 
 ## Code health
 
