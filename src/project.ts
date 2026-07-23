@@ -26,6 +26,7 @@ import {
 	PC_GROUP_VALUE,
 	TIMELINES_FOLDER,
 	VIEW_LIST,
+	formatTimestamp,
 	pcGroupStub,
 } from './types';
 import { defaultProjectConfig, formatLoomDate, groupNameOf, serializeProjectConfig, todayRaw } from './calendar';
@@ -225,6 +226,11 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 			`${FM.reward}: ${yamlQuote(fields.reward ?? '')}`
 		);
 	}
+	// Loom-managed timestamps: captured at creation so the real creation date
+	// survives cloud-sync overwriting the filesystem ctime. Datetime-property
+	// format so Obsidian renders them in the date & time picker.
+	const now = formatTimestamp(Date.now());
+	lines.push(`${FM.created}: ${now}`, `${FM.modified}: ${now}`);
 	lines.push('---', '', '');
 	return lines.join('\n');
 }
@@ -782,6 +788,9 @@ export async function createItemCopy(
 		setLoomKey(fm, FM.itemOrigin, `[[${linkTargetOf(original)}]]`);
 		setLoomKey(fm, FM.itemOwner, `[[${linkTargetOf(character)}]]`);
 		setLoomKey(fm, FM.description, '');
+		const now = formatTimestamp(Date.now());
+		setLoomKey(fm, FM.created, now);
+		setLoomKey(fm, FM.modified, now);
 		fm.aliases = aliasLabels;
 	});
 	return file;

@@ -24,11 +24,11 @@ import {
 	TimelineDef,
 	VIEW_GRAPH,
 } from '../types';
-import type { LoomTextSize } from '../settings';
-import { ConfirmModal, CreateEntityModal, RelationshipPromptModal } from '../project';
+import type { LoomTextSize, SavedGraphView } from '../settings';
+import { ConfirmModal, CreateEntityModal, RelationshipPromptModal, TextInputModal } from '../project';
 import { extractLinkpath, linkTargetOf } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
-import { LayoutNode, computeGraphLayout } from '../graph/layout';
+import { GraphLayout, LayoutNode, computeGraphLayout } from '../graph/layout';
 import { EdgeRoute, Pt, edgeEndDirs, edgePath, edgeXRange } from '../graph/routing';
 import { GraphSidePanel, PANEL_MAX, PANEL_MIN } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
@@ -140,6 +140,153 @@ interface DragState {
 /** How long a still press-and-hold on a node waits before zoom-focusing it. */
 const HOLD_MS = 450;
 
+/** Creation-order graph animation. Duration scales with node count between a
+ *  floor and ceiling (small graphs are quick, large ones never drag on), and
+ *  reveals batch into at most this many force-layout recomputes so big graphs
+ *  don't relayout per node. */
+const ANIM_MIN_MS = 1800;
+const ANIM_MAX_MS = 15000;
+const ANIM_MS_PER_NODE = 120;
+const ANIM_MAX_STEPS = 40;
+/** Distance an isolated (no revealed neighbor) node hovers outside its nearest
+ *  node while the graph is still filling in. */
+const ANIM_BIND_GAP = 70;
+/** How long a single node takes to grow in (ms) — slow enough that the grow
+ *  reads clearly rather than snapping in. */
+const ANIM_GROW_MS = 900;
+/** How long an edge's line takes to draw in (ms), starting once both its
+ *  endpoints have finished growing. */
+const ANIM_EDGE_MS = 420;
+/** Per-frame fraction a node glides toward its target during the animation —
+ *  a momentum-free exponential ease, so motion is floaty (no spring overshoot). */
+const ANIM_FLOAT = 0.07;
+
+/** Reveal-rate curve: an ease-in-out (slow→fast→slow) softened with a linear
+ *  term so neither end drags — the cubic alone is dead-flat at 0 and 1. */
+function animEase(t: number): number {
+	const cubic = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+	return 0.7 * cubic + 0.3 * t;
+}
+
+/** Per-node grow-in curve: a smooth ease-out (cubic) with no overshoot — the
+ *  node scales up along a curve and settles gently at 1, no bounce. */
+function animGrow(t: number): number {
+	if (t >= 1) return 1;
+	return 1 - Math.pow(1 - t, 3);
+}
+
+/** Rebinds every node with no revealed neighbor so it hovers just outside its
+ *  nearest node (biased toward its own real home) instead of sitting alone at
+ *  that far home — keeps unconnected nodes clustered with the visible graph
+ *  mid-animation — then separates the bound nodes so they don't overlap each
+ *  other or the cluster. Connected nodes keep their force home (used as fixed
+ *  anchors here); the final batch skips this so unconnected nodes return to
+ *  their last (manual) position. */
+function bindIsolated(gl: GraphLayout, homes: Map<string, { x: number; y: number }>): void {
+	const orig = new Map([...homes].map(([k, v]) => [k, { ...v }]));
+	const isConnected = (id: string) => (gl.neighbors.get(id)?.size ?? 0) > 0;
+	const anchors = gl.nodes.filter((n) => isConnected(n.id));
+	const pool = anchors.length > 0 ? anchors : gl.nodes;
+	const isolated = gl.nodes.filter((n) => !isConnected(n.id));
+	if (isolated.length === 0) return;
+	for (const n of isolated) {
+		const h = orig.get(n.id);
+		if (!h) continue;
+		let best: { x: number; y: number } | null = null;
+		let bestD = Infinity;
+		for (const m of pool) {
+			if (m.id === n.id) continue;
+			const mh = orig.get(m.id);
+			if (!mh) continue;
+			const d = (mh.x - h.x) ** 2 + (mh.y - h.y) ** 2;
+			if (d < bestD) {
+				bestD = d;
+				best = mh;
+			}
+		}
+		if (!best) continue;
+		const dx = h.x - best.x;
+		const dy = h.y - best.y;
+		const len = Math.hypot(dx, dy) || 1;
+		homes.set(n.id, { x: best.x + (dx / len) * ANIM_BIND_GAP, y: best.y + (dy / len) * ANIM_BIND_GAP });
+	}
+	// Separation relaxation: push the bound (isolated) nodes out of any overlap
+	// with each other or with a connected anchor. Connected nodes stay fixed
+	// (their force layout already spaced them); isolated↔isolated splits the push.
+	const movable = new Set(isolated.map((n) => n.id));
+	const radOf = new Map(gl.nodes.map((n) => [n.id, RADII[n.kind]]));
+	const radAt = (id: string) => radOf.get(id) ?? RADII.global;
+	const PAD = 12;
+	for (let pass = 0; pass < 10; pass++) {
+		let moved = false;
+		for (const a of isolated) {
+			const ha = homes.get(a.id);
+			if (!ha) continue;
+			for (const b of gl.nodes) {
+				if (b.id === a.id) continue;
+				const hb = homes.get(b.id);
+				if (!hb) continue;
+				let dx = ha.x - hb.x;
+				let dy = ha.y - hb.y;
+				let dist = Math.hypot(dx, dy);
+				const min = radAt(a.id) + radAt(b.id) + PAD;
+				if (dist >= min) continue;
+				if (dist < 1e-3) {
+					// Coincident: nudge by a deterministic (id-derived) vector.
+					dx = ((a.id.charCodeAt(0) || 1) % 7) - 3 || 1;
+					dy = ((a.id.charCodeAt(1) || 1) % 7) - 3 || 1;
+					dist = Math.hypot(dx, dy);
+				}
+				const push = min - dist;
+				const ux = dx / dist;
+				const uy = dy / dist;
+				if (movable.has(b.id)) {
+					ha.x += ux * push * 0.5;
+					ha.y += uy * push * 0.5;
+					hb.x -= ux * push * 0.5;
+					hb.y -= uy * push * 0.5;
+				} else {
+					ha.x += ux * push;
+					ha.y += uy * push;
+				}
+				moved = true;
+			}
+		}
+		if (!moved) break;
+	}
+}
+
+/** One node's live animation state during the creation-order replay: its
+ *  gliding position (x/y, momentum-free), the time it appeared, and its current
+ *  grow-in scale (`s`, derived from `appear` via `animGrow`). */
+interface AnimNode {
+	x: number;
+	y: number;
+	appear: number;
+	s: number;
+}
+interface AnimState {
+	/** Node ids in creation order. */
+	order: string[];
+	total: number;
+	/** Total run length (ms), scaled to the node count. */
+	duration: number;
+	/** Nodes revealed per batch (≥1) — caps force-layout recomputes at ~steps. */
+	batchSize: number;
+	start: number;
+	revealedCount: number;
+	/** Time of the most recent reveal — the run stays active past it long enough
+	 *  for the last batch's nodes to grow and their edges to finish drawing. */
+	lastRevealAt: number;
+	/** Layout of the currently-revealed subset (forces run on just those nodes,
+	 *  so positions evolve as more nodes/connections appear). */
+	layout: GraphLayout;
+	/** Per-node home (spring target) from the current subset layout. */
+	homes: Map<string, { x: number; y: number }>;
+	/** Per-node live spring state. */
+	an: Map<string, AnimNode>;
+}
+
 interface PanState {
 	pointerId: number;
 	startX: number;
@@ -197,6 +344,11 @@ interface GraphEdgeProps {
 	arrowA: boolean;
 	arrowB: boolean;
 	arrowSize: number;
+	/** Reveal opacity during the creation-order animation (1 = normal). */
+	opacity: number;
+	/** Line-draw progress during the animation (1 = fully drawn). Below 1 the
+	 *  line grows from both endpoints toward the center. */
+	draw: number;
 }
 const GraphEdge = memo(function GraphEdge({
 	route,
@@ -214,13 +366,17 @@ const GraphEdge = memo(function GraphEdge({
 	arrowA,
 	arrowB,
 	arrowSize,
+	opacity,
+	draw,
 }: GraphEdgeProps) {
 	const pa = { x: pax, y: pay };
 	const pb = { x: pbx, y: pby };
 	const da = { x: pax - ax, y: pay - ay };
 	const db = { x: pbx - bx, y: pby - by };
 	let arrows: ReactElement | null = null;
-	if (arrowA || arrowB) {
+	// While the line is still drawing, hold the arrowheads back — they land once
+	// the two halves meet.
+	if ((arrowA || arrowB) && draw >= 1) {
 		const dirs = edgeEndDirs(route, pa, pb, da, db);
 		arrows = (
 			<g className={dim ? 'loom-edge-arrows loom-dim' : 'loom-edge-arrows'}>
@@ -245,9 +401,20 @@ const GraphEdge = memo(function GraphEdge({
 			</g>
 		);
 	}
+	// Draw-in: `pathLength=100` normalizes the dash math regardless of the real
+	// path length, so a centered dash pattern of [half, gap, half] shows both ends
+	// growing toward a shrinking middle gap (gap = 100·(1−draw)) — the line meets
+	// in the center at draw=1.
+	const drawing = draw < 1;
+	const half = 50 * Math.max(0, draw);
 	return (
-		<g>
-			<path className={dim ? 'loom-edge loom-dim' : 'loom-edge'} d={edgePath(route, pa, pb, da, db)} />
+		<g style={opacity < 1 ? { opacity } : undefined}>
+			<path
+				className={dim ? 'loom-edge loom-dim' : 'loom-edge'}
+				d={edgePath(route, pa, pb, da, db)}
+				pathLength={drawing ? 100 : undefined}
+				strokeDasharray={drawing ? `${half} ${100 - 2 * half} ${half}` : undefined}
+			/>
 			{arrows}
 		</g>
 	);
@@ -271,6 +438,10 @@ interface GraphNodeProps {
 	dropRemove: boolean;
 	label: string;
 	shortLabel: string;
+	/** Reveal opacity during the creation-order animation (1 = normal). */
+	opacity: number;
+	/** Pop-in scale during the creation-order animation (1 = normal). */
+	scale: number;
 	onPointerDown: (node: LayoutNode, e: ReactPointerEvent<SVGGElement>) => void;
 	onOpen: (node: LayoutNode) => void;
 	onPin: (node: LayoutNode) => void;
@@ -289,6 +460,8 @@ const GraphNode = memo(function GraphNode({
 	dropRemove,
 	label,
 	shortLabel,
+	opacity,
+	scale,
 	onPointerDown,
 	onOpen,
 	onPin,
@@ -301,7 +474,8 @@ const GraphNode = memo(function GraphNode({
 	return (
 		<g
 			className={classes.join(' ')}
-			transform={`translate(${px},${py})`}
+			transform={scale !== 1 ? `translate(${px},${py}) scale(${scale})` : `translate(${px},${py})`}
+			style={opacity < 1 ? { opacity } : undefined}
 			onPointerDown={(e) => onPointerDown(node, e)}
 			onDoubleClick={() => onOpen(node)}
 			onContextMenu={(e) => {
@@ -475,6 +649,104 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		plugin.settings.graphFilters[project.root] = { types: [...filterTypes], mode: filterMode };
 		void plugin.saveSettings();
 	}, [filterTypes, filterMode, project, plugin]);
+	// Custom views: named snapshots of filter + focus + pins the user flips
+	// between. The list lives per project in settings; the popover switcher is
+	// in the header.
+	const [views, setViews] = useState<SavedGraphView[]>(() =>
+		project ? plugin.settings.graphViews[project.root] ?? [] : []
+	);
+	const [viewsOpen, setViewsOpen] = useState(false);
+	const viewsRef = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		if (!viewsOpen) return;
+		const onDown = (e: PointerEvent) => {
+			if (!viewsRef.current?.contains(e.target as Node)) setViewsOpen(false);
+		};
+		document.addEventListener('pointerdown', onDown, true);
+		return () => document.removeEventListener('pointerdown', onDown, true);
+	}, [viewsOpen]);
+	const persistViews = (next: SavedGraphView[]) => {
+		setViews(next);
+		if (!project) return;
+		if (next.length === 0) delete plugin.settings.graphViews[project.root];
+		else plugin.settings.graphViews[project.root] = next;
+		void plugin.saveSettings();
+	};
+	/** Applies a saved view: restores its filter, focus and pins in one shot. */
+	const applyView = (v: SavedGraphView) => {
+		setFilterTypes(new Set(v.filterTypes));
+		setFilterMode(v.filterMode);
+		setSelected(null);
+		setPickedPaths(new Set(v.focus.filter((p) => plugin.indexer.get(p))));
+		setPickSeparate(v.focusSeparate);
+		const m = new Map<string, { wx: number; wy: number }>();
+		for (const [path, p] of Object.entries(v.pins)) m.set(path, { wx: p.x, wy: p.y });
+		setPinned(m);
+		setViewsOpen(false);
+	};
+	/** Snapshots the current filter/focus/pins into a new named view. */
+	const saveCurrentAsView = () => {
+		new TextInputModal(plugin.app, {
+			title: 'Save current graph as a view',
+			placeholder: 'View name',
+			cta: 'Save',
+			onSubmit: (name) => {
+				const snapshot: SavedGraphView = {
+					id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+					name,
+					filterTypes: [...filterTypes],
+					filterMode,
+					focus: [...pickedPaths],
+					focusSeparate: pickSeparate,
+					pins: Object.fromEntries([...pinned].map(([id, p]) => [id, { x: p.wx, y: p.wy }])),
+				};
+				persistViews([...views, snapshot]);
+			},
+		}).open();
+	};
+	const renameView = (v: SavedGraphView) => {
+		new TextInputModal(plugin.app, {
+			title: 'Rename view',
+			initial: v.name,
+			cta: 'Rename',
+			onSubmit: (name) => persistViews(views.map((x) => (x.id === v.id ? { ...x, name } : x))),
+		}).open();
+	};
+	const deleteView = (v: SavedGraphView) => {
+		new ConfirmModal(
+			plugin.app,
+			'Delete view',
+			`Delete the saved view "${v.name}"?`,
+			() => persistViews(views.filter((x) => x.id !== v.id)),
+			'Delete'
+		).open();
+	};
+	/** Overwrites an existing view with the current graph state. */
+	const updateView = (v: SavedGraphView) => {
+		persistViews(
+			views.map((x) =>
+				x.id === v.id
+					? {
+							...x,
+							filterTypes: [...filterTypes],
+							filterMode,
+							focus: [...pickedPaths],
+							focusSeparate: pickSeparate,
+							pins: Object.fromEntries([...pinned].map(([id, p]) => [id, { x: p.wx, y: p.wy }])),
+						}
+					: x
+			)
+		);
+	};
+
+	// "Animate graph": replay node-creation history — nodes pop in (scale spring)
+	// in `loomCreated` order while the force layout re-runs on the growing subset
+	// (so connections form live and positions shift as pull forces change) and the
+	// camera re-frames every revealed node. `animRef` holds the live run; the
+	// functions are defined after the layout/camera helpers below.
+	const [animActive, setAnimActive] = useState(false);
+	const animRef = useRef<AnimState | null>(null);
+	const animRaf = useRef(0);
 	const [camera, setCamera] = useState<Camera>(
 		() =>
 			view.restored.camera ??
@@ -597,6 +869,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		() => () => {
 			window.cancelAnimationFrame(springRaf.current);
 			window.cancelAnimationFrame(cameraRaf.current);
+			window.cancelAnimationFrame(animRaf.current);
 		},
 		[]
 	);
@@ -627,19 +900,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		animateCamera({ k, tx: w / 2 - node.x * k, ty: h / 2 - node.y * k });
 	};
 
-	const fitNodes = (nodes: LayoutNode[]) => {
+	const fitPoints = (pts: { x: number; y: number }[]) => {
 		const el = wrapRef.current;
-		if (!el || nodes.length === 0) return;
+		if (!el || pts.length === 0) return;
 		const pad = 60;
 		let minX = Infinity;
 		let maxX = -Infinity;
 		let minY = Infinity;
 		let maxY = -Infinity;
-		for (const n of nodes) {
-			minX = Math.min(minX, n.x);
-			maxX = Math.max(maxX, n.x);
-			minY = Math.min(minY, n.y);
-			maxY = Math.max(maxY, n.y);
+		for (const p of pts) {
+			minX = Math.min(minX, p.x);
+			maxX = Math.max(maxX, p.x);
+			minY = Math.min(minY, p.y);
+			maxY = Math.max(maxY, p.y);
 		}
 		minX -= pad;
 		maxX += pad;
@@ -651,7 +924,103 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		const k = clamp(Math.min(w / (maxX - minX), h / (maxY - minY)), MIN_ZOOM, 1.25);
 		animateCamera({ k, tx: (w - (minX + maxX) * k) / 2, ty: (h - (minY + maxY) * k) / 2 });
 	};
+	const fitNodes = (nodes: LayoutNode[]) => fitPoints(nodes.map((n) => ({ x: n.x, y: n.y })));
 	const fitAll = () => fitNodes(layout.nodes);
+
+	// --- Creation-order animation --------------------------------------------
+	const finishAnimation = () => {
+		window.cancelAnimationFrame(animRaf.current);
+		animRef.current = null;
+		setAnimActive(false);
+	};
+	const animStep = (now: number) => {
+		const st = animRef.current;
+		if (!st) return;
+		// Eased reveal: the fraction of nodes shown follows slow→fast→slow over the
+		// run, quantized up to whole batches so recomputes stay ≤ ANIM_MAX_STEPS.
+		const eased = animEase(Math.min(1, (now - st.start) / st.duration));
+		const wantCount = Math.min(
+			st.total,
+			Math.ceil((st.total * eased) / st.batchSize) * st.batchSize
+		);
+		if (wantCount > st.revealedCount) {
+			st.revealedCount = wantCount;
+			st.lastRevealAt = now;
+			const revealed = new Set(st.order.slice(0, wantCount));
+			const final = wantCount >= st.total;
+			// The final batch settles to the exact layout the normal graph renders
+			// (`layout`, stable for the run) so there's no jump when the animation
+			// ends — connected nodes land at their force home and unconnected ones
+			// return to their last (manual) position, both already honored there.
+			// Intermediate batches lay out just the revealed subset, so positions
+			// genuinely shift as more nodes and connections appear.
+			const rl = final ? layout : runLayout(revealed);
+			st.layout = rl;
+			st.homes = new Map(rl.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+			// While the graph is still filling in, keep isolated nodes near the
+			// visible cluster instead of alone at their far final home.
+			if (!final) bindIsolated(rl, st.homes);
+			for (const n of rl.nodes) {
+				// A newly revealed node grows in AT its current target, from scale 0.
+				if (!st.an.has(n.id)) {
+					const h = st.homes.get(n.id) ?? { x: n.x, y: n.y };
+					st.an.set(n.id, { x: h.x, y: h.y, appear: now, s: 0 });
+				}
+			}
+			// Re-frame every revealed node, like "fit all", each time more appear.
+			fitPoints([...st.homes.values()]);
+		}
+		let active = false;
+		for (const n of st.layout.nodes) {
+			const a = st.an.get(n.id);
+			const home = st.homes.get(n.id);
+			if (!a || !home) continue;
+			// Momentum-free glide toward the current home: an exponential ease with
+			// no velocity, so nodes drift floatily and never overshoot or oscillate.
+			a.x += (home.x - a.x) * ANIM_FLOAT;
+			a.y += (home.y - a.y) * ANIM_FLOAT;
+			// Curved grow-in: scale eases out over ANIM_GROW_MS from when the node
+			// appeared, settling gently at 1 (no bounce).
+			const growT = (now - a.appear) / ANIM_GROW_MS;
+			a.s = animGrow(growT);
+			if (growT < 1 || Math.abs(home.x - a.x) > 0.5 || Math.abs(home.y - a.y) > 0.5) {
+				active = true;
+			}
+		}
+		setTick((t) => t + 1);
+		// Don't finish until the last batch's nodes have grown and their edges have
+		// finished drawing, even if the position springs have already settled.
+		const edgesDone = now - st.lastRevealAt >= ANIM_GROW_MS + ANIM_EDGE_MS;
+		if (st.revealedCount >= st.total && !active && edgesDone) {
+			finishAnimation();
+			return;
+		}
+		animRaf.current = window.requestAnimationFrame(animStep);
+	};
+	const startAnimation = () => {
+		const order = [...layout.nodes]
+			.map((n) => ({ id: n.id, created: plugin.indexer.get(n.id)?.created ?? 0 }))
+			.sort((a, b) => a.created - b.created)
+			.map((x) => x.id);
+		if (order.length === 0) return;
+		const total = order.length;
+		const duration = clamp(total * ANIM_MS_PER_NODE, ANIM_MIN_MS, ANIM_MAX_MS);
+		const batchSize = Math.max(1, Math.ceil(total / ANIM_MAX_STEPS));
+		animRef.current = {
+			order,
+			total,
+			duration,
+			batchSize,
+			start: performance.now(),
+			revealedCount: 0,
+			lastRevealAt: performance.now(),
+			layout: { nodes: [], edges: [], neighbors: new Map(), width: 0, height: 0 },
+			homes: new Map(),
+			an: new Map(),
+		};
+		setAnimActive(true);
+		animRaf.current = window.requestAnimationFrame(animStep);
+	};
 
 	// Re-frame the view when the focus filter changes the rendered coordinate
 	// space: entering (or changing) the separate subgraph frames it; leaving it
@@ -777,6 +1146,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	unpinAllRef.current = unpinAll;
 
 	const onNodePointerDown = (node: LayoutNode, e: ReactPointerEvent<SVGGElement>) => {
+		// The creation-order animation owns node positions — no dragging/selecting
+		// while it plays.
+		if (animRef.current) return;
 		if (e.button !== 0) {
 			// Keep right/middle presses on a node away from the pan handler.
 			e.stopPropagation();
@@ -885,10 +1257,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			let target: string | null = null;
 			for (const n of layout.nodes) {
 				if (n.id === drag.id) continue;
-				const nd = dispRef.current.get(n.id);
-				const nx = n.x + (nd?.dx ?? 0);
-				const ny = n.y + (nd?.dy ?? 0);
-				if (Math.hypot(nx - cx, ny - cy) <= RADII[n.kind] + DROP_SNAP) {
+				// Use the node's rendered position (pos honors pins) — a pinned target
+				// sits at its world pin, not its layout home, so a home-based hit test
+				// missed its center and only caught the offset home spot.
+				const np = pos(n);
+				if (Math.hypot(np.x - cx, np.y - cy) <= RADII[n.kind] + DROP_SNAP) {
 					target = n.id;
 					break;
 				}
@@ -1766,7 +2139,65 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							</button>
 						</div>
 					) : null}
-				<div className="loom-graph-filter" ref={filterRef}>
+				<div className="loom-graph-filter" ref={viewsRef}>
+							<button
+								className="loom-rel-filter"
+								aria-label="Saved views"
+								onClick={() => setViewsOpen(!viewsOpen)}
+							>
+								<Icon name="bookmark" fallback="star" />
+							</button>
+							{viewsOpen ? (
+								<div className="loom-filter-pop loom-views-pop">
+									{views.length > 0 ? (
+										<div className="loom-views-list">
+											{views.map((v) => (
+												<div key={v.id} className="loom-views-row">
+													<button
+														className="loom-views-name"
+														onClick={() => applyView(v)}
+														title="Apply this view"
+													>
+														{v.name}
+													</button>
+													<button
+														className="loom-rel-filter loom-views-act"
+														aria-label="Update view to current graph"
+														title="Update to current"
+														onClick={() => updateView(v)}
+													>
+														<Icon name="save" fallback="check" />
+													</button>
+													<button
+														className="loom-rel-filter loom-views-act"
+														aria-label="Rename view"
+														title="Rename"
+														onClick={() => renameView(v)}
+													>
+														<Icon name="pencil" fallback="edit" />
+													</button>
+													<button
+														className="loom-rel-filter loom-views-act"
+														aria-label="Delete view"
+														title="Delete"
+														onClick={() => deleteView(v)}
+													>
+														<Icon name="trash-2" fallback="x" />
+													</button>
+												</div>
+											))}
+										</div>
+									) : (
+										<div className="loom-views-empty">No saved views yet.</div>
+									)}
+									<button className="loom-filter-clear" onClick={saveCurrentAsView}>
+										<Icon name="plus" />
+										Save current as view
+									</button>
+								</div>
+							) : null}
+						</div>
+					<div className="loom-graph-filter" ref={filterRef}>
 							<button
 								className={
 									filterActive || pickedPaths.size > 0
@@ -1900,6 +2331,13 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							<Icon name="pin-off" fallback="x" />
 						</button>
 					) : null}
+					<button
+						className={animActive ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+						aria-label={animActive ? 'Stop time-lapse animation' : 'Start time-lapse animation'}
+						onClick={() => (animActive ? finishAnimation() : startAnimation())}
+					>
+						<Icon name={animActive ? 'square' : 'play'} fallback={animActive ? 'x' : 'chevron-right'} />
+					</button>
 					<button className="loom-rel-filter" aria-label="Fit view" onClick={fitAll}>
 						<Icon name="scan" />
 					</button>
@@ -1948,7 +2386,84 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							</radialGradient>
 						</defs>
 						<g transform={`translate(${camera.tx},${camera.ty}) scale(${camera.k})`}>
-							{layout.edges.map((edge) => {
+							{animActive && animRef.current
+								? (() => {
+										const st = animRef.current;
+										const byId = new Map(st.layout.nodes.map((n) => [n.id, n]));
+										const nowMs = performance.now();
+										return (
+											<>
+												{st.layout.edges.map((edge) => {
+													const na = byId.get(edge.a);
+													const nb = byId.get(edge.b);
+													const aa = st.an.get(edge.a);
+													const ab = st.an.get(edge.b);
+													const ha = st.homes.get(edge.a);
+													const hb = st.homes.get(edge.b);
+													if (!na || !nb || !aa || !ab || !ha || !hb) return null;
+													// The line starts drawing once both endpoints have grown
+													// in, then grows from both ends to meet in the center.
+													const edgeStart = Math.max(aa.appear, ab.appear) + ANIM_GROW_MS;
+													const drawT = clamp((nowMs - edgeStart) / ANIM_EDGE_MS, 0, 1);
+													if (drawT <= 0) return null;
+													return (
+														<GraphEdge
+															key={edge.a + '|' + edge.b + '|' + edge.relType}
+															route={edge.route}
+															ax={ha.x}
+															ay={ha.y}
+															bx={hb.x}
+															by={hb.y}
+															pax={aa.x}
+															pay={aa.y}
+															pbx={ab.x}
+															pby={ab.y}
+															aRadius={RADII[na.kind]}
+															bRadius={RADII[nb.kind]}
+															dim={false}
+															arrowA={edge.arrowA}
+															arrowB={edge.arrowB}
+															arrowSize={plugin.settings.graphArrowSize}
+															opacity={1}
+															draw={drawT}
+														/>
+													);
+												})}
+												{st.layout.nodes.map((node) => {
+													const a = st.an.get(node.id);
+													if (!a) return null;
+													const label = recordLabel(node.record, project);
+													const shortLabel =
+														label.length > 24 ? label.slice(0, 23).trimEnd() + '…' : label;
+													return (
+														<GraphNode
+															key={node.id}
+															node={node}
+															px={a.x}
+															py={a.y}
+															radius={RADII[node.kind]}
+															color={plugin.settings.nodeColors[node.record.type]}
+															dim={false}
+															selected={false}
+															focused={false}
+															pinned={false}
+															showDropRing={false}
+															dropRemove={false}
+															label={label}
+															shortLabel={shortLabel}
+															opacity={1}
+															scale={a.s}
+															onPointerDown={stableNodeDown}
+															onOpen={stableNodeOpen}
+															onPin={stableNodePin}
+														/>
+													);
+												})}
+											</>
+										);
+									})()
+								: null}
+							{!animActive && layout.edges.map((edge) => {
 								const a = nodeById.get(edge.a);
 								const b = nodeById.get(edge.b);
 								if (!a || !b) return null;
@@ -1994,11 +2509,13 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										arrowA={edge.arrowA}
 										arrowB={edge.arrowB}
 										arrowSize={plugin.settings.graphArrowSize}
+										opacity={1}
+										draw={1}
 									/>
 								);
 							})}
 						{/* Pinned nodes render last so they sit on top of the graph. */}
-						{[...layout.nodes]
+						{!animActive && [...layout.nodes]
 								.sort((a, b) => (pinned.has(a.id) ? 1 : 0) - (pinned.has(b.id) ? 1 : 0))
 								.map((node) => {
 								// The dragged node always renders even if it slides out of the
@@ -2056,6 +2573,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										dropRemove={dropRemove}
 										label={label}
 										shortLabel={shortLabel}
+										opacity={1}
+										scale={1}
 										onPointerDown={stableNodeDown}
 										onOpen={stableNodeOpen}
 										onPin={stableNodePin}
@@ -2066,7 +2585,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						{/* Focus pulse: screen space (outside the zoom transform) so its
 						    size is zoom-independent; one shared animation-delay off a
 						    global clock keeps every ring pulsing in unison. */}
-						{pickedPaths.size > 0
+						{!animActive && pickedPaths.size > 0
 							? (() => {
 									const delay = -(Date.now() % FOCUS_PULSE_MS);
 									return layout.nodes
@@ -2093,7 +2612,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						    the viewport (so it never overlaps a still-visible node), a
 						    node-colored dot with a pulsing halo clamps to the screen edge
 						    and its arrow points at the node; clicking pans to center it. */}
-						{pinned.size > 0
+						{!animActive && pinned.size > 0
 							? (() => {
 									// One shared clock-derived delay so every halo pulses in unison.
 									const haloDelay = -(Date.now() % PIN_PULSE_MS);

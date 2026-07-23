@@ -1,6 +1,7 @@
 import { ItemView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
 import {
 	EntityOrigin,
+	FM,
 	LOOM_EXTENSION,
 	VIEW_ENTITY,
 	VIEW_GRAPH,
@@ -123,6 +124,7 @@ export default class LoomLoomPlugin extends Plugin {
 		);
 
 		this.app.workspace.onLayoutReady(() => {
+			this.registerTimestampPropertyTypes();
 			void this.migrateLegacyProject().then(() => {
 				this.indexer.rebuild();
 				// Frontmatter-key + managed-file-name migration of existing notes;
@@ -130,6 +132,25 @@ export default class LoomLoomPlugin extends Plugin {
 				void this.indexer.migrateFiles();
 			});
 		});
+	}
+
+	/** Registers `loomCreated`/`loomModified` as "Date & time" properties in the
+	 *  vault's type registry so Obsidian renders them in the datetime picker
+	 *  rather than as plain text. `metadataTypeManager.setType` is a stable
+	 *  (pre-1.13) internal API; guarded so a missing/renamed manager is a no-op. */
+	private registerTimestampPropertyTypes(): void {
+		const manager = (
+			this.app as unknown as {
+				metadataTypeManager?: { setType?: (name: string, type: string) => void };
+			}
+		).metadataTypeManager;
+		if (typeof manager?.setType !== 'function') return;
+		try {
+			manager.setType(FM.created, 'datetime');
+			manager.setType(FM.modified, 'datetime');
+		} catch (e) {
+			console.error('Loom Loom: failed to register timestamp property types', e);
+		}
 	}
 
 	/** Pre-.loom versions stored a single project root in settings. */

@@ -147,6 +147,7 @@ storing a second copy:
 | Death | `loomAlive` + `loomDeathSession` on the character (hidden link) | session attendance offering |
 | Quest lifecycle | `loomQuestGiver/Received/Outcome/OutcomeSession/Reward` on the quest | session-page quest cards |
 | Plain mention | `[[wikilink]]` anywhere in the note | relType `link` |
+| Created / modified time | `loomCreated` / `loomModified` (Obsidian Date & time format `YYYY-MM-DDTHH:mm:ss`, registered `datetime`) on the entity — authoritative over ctime/mtime (cloud-sync overwrites the stats) | `record.created`/`.modified`, list sorts, graph creation-order animation |
 
 **Write-path rule**: never rebuild a stored list from UI draft state — edit the raw
 frontmatter array in place (`editFmList` in entity-view; `fm.ts` helpers), or merge

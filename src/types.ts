@@ -121,14 +121,44 @@ export const FM = {
 	itemOwner: 'loomItemOwner',
 	/** Timeline definition files. */
 	timelineTypes: 'loomTypes',
+	/** Loom-managed creation timestamp (ISO 8601). Authoritative over the
+	 *  filesystem ctime, which cloud-sync can overwrite with the sync time. */
+	created: 'loomCreated',
+	/** Loom-managed modification timestamp (ISO 8601), stamped on every edit. */
+	modified: 'loomModified',
 } as const;
 
 /** Legacy spelling(s) of a loom frontmatter key, still read and migrated. */
 export function legacyFmKeys(key: string): string[] {
 	if (key === FM.tags) return ['pluginTags'];
 	if (key === FM.name) return []; // never existed un-prefixed
+	// Timestamps are loom-owned only — never adopt/delete a bare `created`/
+	// `modified` some other plugin (e.g. Linter) may already maintain.
+	if (key === FM.created || key === FM.modified) return [];
 	const stripped = key.replace(/^loom/, '');
 	return [stripped[0].toLowerCase() + stripped.slice(1)];
+}
+
+/** Parses a loom timestamp frontmatter value (ISO string or epoch-ms number)
+ *  to epoch milliseconds, or null when absent/unparseable. */
+export function parseTimestamp(value: unknown): number | null {
+	if (typeof value === 'number' && Number.isFinite(value)) return value;
+	if (typeof value === 'string' && value.trim() !== '') {
+		const ms = Date.parse(value);
+		if (!Number.isNaN(ms)) return ms;
+	}
+	return null;
+}
+
+/** Formats an epoch-ms timestamp in Obsidian's "Date & time" property format
+ *  (`YYYY-MM-DDTHH:mm:ss`, local time — no timezone suffix, no milliseconds),
+ *  so the value renders in the datetime picker once the property is typed. */
+export function formatTimestamp(ms: number): string {
+	const d = new Date(ms);
+	const p = (n: number) => String(n).padStart(2, '0');
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(
+		d.getMinutes()
+	)}:${p(d.getSeconds())}`;
 }
 
 export type CalendarId = 'gregorian' | 'custom';
