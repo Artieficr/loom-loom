@@ -267,6 +267,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	);
 	const sublocDragRef = useRef<{ startY: number; slot: number } | null>(null);
 	const sublocListRef = useRef<HTMLDivElement | null>(null);
+	/** Location page: whether the "Part of region" field is showing its picker. */
+	const [editingRegion, setEditingRegion] = useState(false);
 	/** Characters: a pending "+ Add faction" row awaiting its faction pick. */
 	const [factionDraft, setFactionDraft] = useState(false);
 	/** Pending alias text (committed via + / Enter into native `aliases`). */
@@ -900,6 +902,90 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 		return false;
 	};
+
+	// --- Regions: a grouping layer above locations (item "Part of region"). -----
+	const isRegion = record.type === 'region';
+	// Regions available to pick as a location's "Part of region".
+	const regions = (isLocation || isRegion) && project ? plugin.indexer.getAll('region', project.root) : [];
+	const currentRegion = isLocation && record.region ? plugin.indexer.resolve(record.region, record.path) : null;
+	const setLocationRegion = (target: string) => {
+		const f = plugin.app.vault.getFileByPath(record.path);
+		if (!f) return;
+		void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
+			setLoomKey(fm, FM.region, `[[${target}]]`)
+		);
+	};
+	const clearLocationRegion = () => {
+		const f = plugin.app.vault.getFileByPath(record.path);
+		if (!f) return;
+		void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+			for (const k of Object.keys(fm)) {
+				const lower = k.toLowerCase();
+				if (lower === 'loomregion' || lower === 'region') delete fm[k];
+			}
+		});
+	};
+	// Region page: its member locations, ordered by the region's `regionOrder`.
+	const regionLocations = (() => {
+		if (!isRegion || !project) return [];
+		const orderIdx = new Map<string, number>(
+			record.regionOrder
+				.map((lp, i) => [plugin.indexer.resolve(lp, record.path)?.path, i] as const)
+				.filter((e): e is [string, number] => e[0] !== undefined)
+		);
+		return plugin.indexer
+			.getAll('location', project.root)
+			.filter((l) => l.region !== null && plugin.indexer.resolve(l.region, l.path)?.path === record.path)
+			.sort(
+				(a, b) =>
+					(orderIdx.get(a.path) ?? Number.MAX_SAFE_INTEGER) -
+						(orderIdx.get(b.path) ?? Number.MAX_SAFE_INTEGER) || a.name.localeCompare(b.name)
+			);
+	})();
+	const writeRegionOrder = (ordered: EntityRecord[]) => {
+		writeFm((fm) => setLoomKey(fm, FM.regionOrder, ordered.map((s) => `[[${linkTargetOf(s)}]]`)));
+	};
+	/** Sets a location's region to this region (region page "Add location"). */
+	const addRegionLocation = (target: string) => {
+		const rec = plugin.indexer.resolve(target, record.path);
+		if (!rec) return;
+		const f = plugin.app.vault.getFileByPath(rec.path);
+		if (!f) return;
+		void (async () => {
+			await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
+				setLoomKey(fm, FM.region, `[[${linkTargetOf(record)}]]`)
+			);
+			writeRegionOrder([...regionLocations, rec]);
+		})();
+	};
+	/** Removes a location from this region (clears its `region`). */
+	const removeRegionLocation = (l: EntityRecord) => {
+		const f = plugin.app.vault.getFileByPath(l.path);
+		if (!f) return;
+		void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+			for (const k of Object.keys(fm)) {
+				const lower = k.toLowerCase();
+				if (lower === 'loomregion' || lower === 'region') delete fm[k];
+			}
+		});
+		writeRegionOrder(regionLocations.filter((o) => o.path !== l.path));
+	};
+	/** Whether a place location falls under this region (it or an ancestor is a
+	 *  member) — mirrors the location `places` ancestor-propagation, one layer up. */
+	const placeInThisRegion = (place: EntityRecord): boolean => {
+		let cur: EntityRecord | null = place;
+		for (let guard = 0; guard < 25 && cur !== null; guard++) {
+			if (
+				cur.type === 'location' &&
+				cur.region !== null &&
+				plugin.indexer.resolve(cur.region, cur.path)?.path === record.path
+			) {
+				return true;
+			}
+			cur = cur.parentLocation ? plugin.indexer.resolve(cur.parentLocation, cur.path) : null;
+		}
+		return false;
+	};
 	/** Renames a location's file to its managed name for `parentName` (undefined
 	 *  = top-level). Obsidian updates the links. */
 	const renameLocationFile = async (rec: EntityRecord, parentName: string | undefined) => {
@@ -1116,6 +1202,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		record.type === 'item' ||
 		record.type === 'faction' ||
 		record.type === 'location' ||
+		record.type === 'region' ||
 		record.type === 'quest';
 	const pageEventEntries: LocNoteEntry[] = showsEvents
 		? plugin.indexer
@@ -1129,9 +1216,14 @@ function EntityPage({ view }: { view: EntityView }) {
 										const p = plugin.indexer.resolve(lp, owner.path);
 										return p?.type === 'location' && (p.path === record.path || descendsFromThis(p));
 									})
-								: [...e.involved, ...e.group].some(
-										(lp) => plugin.indexer.resolve(lp, owner.path)?.path === record.path
-									)
+								: isRegion
+									? e.places.some((lp) => {
+											const p = plugin.indexer.resolve(lp, owner.path);
+											return p?.type === 'location' && placeInThisRegion(p);
+										})
+									: [...e.involved, ...e.group].some(
+											(lp) => plugin.indexer.resolve(lp, owner.path)?.path === record.path
+										)
 						)
 				)
 			: [];
@@ -2935,6 +3027,72 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+			{/* Part of region — a grouping layer above locations (every location,
+			    sublocations included; shown right after "Sublocation of"). */}
+			{isLocation ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Part of region</span>
+					{!record.region || editingRegion ? (
+						<div className="loom-region-pick">
+							<SearchableSelect
+								key={`${record.region ?? ''}:${editingRegion}`}
+								placeholder="Not specified"
+								options={regions
+									.map((r) => ({ value: linkTargetOf(r), label: r.name }))
+									.sort((a, b) => a.label.localeCompare(b.label))}
+								initialQuery={editingRegion ? currentRegion?.name ?? '' : ''}
+								action={
+									project
+										? {
+												label: '+ Create region…',
+												onPick: () =>
+													new CreateEntityModal(plugin, 'region', project, {
+														onCreated: (created) => {
+															setLocationRegion(created.basename);
+															setEditingRegion(false);
+														},
+													}).open(),
+											}
+										: undefined
+								}
+								onPick={(target) => {
+									setLocationRegion(target);
+									setEditingRegion(false);
+								}}
+							/>
+							{editingRegion ? (
+								<button
+									className="loom-rel-filter"
+									aria-label="Clear region"
+									onClick={() => {
+										clearLocationRegion();
+										setEditingRegion(false);
+									}}
+								>
+									<Icon name="eraser" />
+								</button>
+							) : null}
+						</div>
+					) : (
+						<div className="loom-region-pick">
+							<EntityChip
+								plugin={plugin}
+								record={currentRegion}
+								label={currentRegion?.name ?? record.region}
+								onOpen={() => currentRegion && view.openEntity(currentRegion.path)}
+							/>
+							<button
+								className="loom-rel-filter"
+								aria-label="Change region"
+								onClick={() => setEditingRegion(true)}
+							>
+								<Icon name="square-pen" fallback="pencil" />
+							</button>
+						</div>
+					)}
+				</div>
+			) : null}
+
 			{isSession ? (
 				<label className="loom-field">
 					<span className="loom-field-label loom-field-label-row">
@@ -4003,6 +4161,48 @@ function EntityPage({ view }: { view: EntityView }) {
 								</div>
 								);
 							})}
+						</div>
+					) : null}
+				</div>
+			) : null}
+
+			{/* Region page: its member locations (a location's "Part of region"
+			    points here). Like a location's Sublocations, but for the grouping
+			    layer — add existing / create new / remove. */}
+			{isRegion && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Locations</span>
+					<div className="loom-hub-add-row">
+						<SearchableSelect
+							placeholder="Add a location…"
+							options={plugin.indexer
+								.getAll('location', project.root)
+								.filter((l) => !regionLocations.some((m) => m.path === l.path))
+								.sort((a, b) => locationLabel(a, plugin).localeCompare(locationLabel(b, plugin)))
+								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
+							action={{
+								label: '+ New location',
+								onPick: () =>
+									new CreateEntityModal(plugin, 'location', project, {
+										onCreated: (created) => addRegionLocation(created.basename),
+									}).open(),
+							}}
+							onPick={(target) => addRegionLocation(target)}
+						/>
+					</div>
+					{regionLocations.length > 0 ? (
+						<div className="loom-tag-row">
+							{regionLocations.map((l) => (
+								<EntityChip
+									key={l.path}
+									plugin={plugin}
+									record={l}
+									label={locationLabel(l, plugin)}
+									onOpen={() => view.openEntity(l.path)}
+									onRemove={() => removeRegionLocation(l)}
+									removeLabel="Remove from this region"
+								/>
+							))}
 						</div>
 					) : null}
 				</div>

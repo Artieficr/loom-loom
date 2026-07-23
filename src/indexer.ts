@@ -116,11 +116,13 @@ const HIDDEN_LINK_KEYS = [
 	'loomattendance',
 	'loomdeathsession',
 	'loomsublocationorder',
+	'loomregionorder',
 	'loomitemowner',
 	'loomobjectives',
 	'attendance',
 	'deathsession',
 	'sublocationorder',
+	'regionorder',
 ];
 
 function isHiddenLinkKey(key: string): boolean {
@@ -651,6 +653,11 @@ export class LoomIndexer extends Component {
 			attendance: parseLinkList(fmLoom(fm, FM.attendance)),
 			parentLocation: typeof parentValue === 'string' ? extractLinkpath(parentValue) : null,
 			sublocationOrder: parseLinkList(fmLoom(fm, FM.sublocationOrder)),
+			region: (() => {
+				const v = fmLoom(fm, FM.region);
+				return typeof v === 'string' ? extractLinkpath(v) : null;
+			})(),
+			regionOrder: parseLinkList(fmLoom(fm, FM.regionOrder)),
 			items: parseLinkList(fmLoom(fm, FM.items)),
 			itemOrigin: (() => {
 				const v = fmLoom(fm, FM.itemOrigin);
@@ -803,6 +810,14 @@ export class LoomIndexer extends Component {
 			if (parent?.type === 'location' && parent.path !== record.path && !linked.has(parent.path)) {
 				out.push({ record: parent, relType: 'sublocation', direction: 'outgoing' });
 				linked.add(parent.path);
+			}
+		}
+		// A location's `region` connects it to that region (a grouping layer).
+		if (record.region !== null) {
+			const region = this.resolve(record.region, record.path);
+			if (region?.type === 'region' && region.path !== record.path && !linked.has(region.path)) {
+				out.push({ record: region, relType: 'region', direction: 'outgoing' });
+				linked.add(region.path);
 			}
 		}
 	for (const note of record.sessionNotes) {

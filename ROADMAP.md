@@ -247,6 +247,30 @@ what exists today. Chosen at project creation (and switchable), stored in the .l
 - [ ] **Date system rethink** — dates + custom calendars exist but were added before a clear use emerged (everything works off sessions' natural dates, so the custom calendar is unused so far). Needs a real application and possibly a bigger model: the timeline is **linear** today — what about **multiple / parallel timelines** (time-travel stories, parallel character arcs across different timelines that interconnect)? Complex; no clear vision yet — brainstorm before building.
 - [ ] **Design polish pass** — some copy and visual details aren't dialed in yet (deferred deliberately while features had priority). Collect the rough spots and do a focused design/UX pass once the feature set settles.
 
+## Regions (in progress)
+
+A grouping layer above main locations — gather locations under a territory without making
+them sublocations. `region` entity type. See CLAUDE.md "Regions" for the design.
+
+- [x] `region` entity type + page (location-page shell, a **Locations** member section instead
+  of Sublocations, events inherited from members via `placeInThisRegion`) — `types.ts`,
+  `indexer.ts`, `project.ts`, `src/views/entity-view.tsx`
+- [x] Locations get a **"Part of region"** field (all locations, after "Sublocation of";
+  "Not specified" when empty; `FM.region`, typed `region` connection, `regionOrder`)
+- [x] Region color auto = darker(location color) (`syncRegionColor`/`darkenHex`), no config;
+  regions reuse `EntityChip`; in `GLOBAL_TYPES` (graph) but not map nodes
+- [x] **Location list groups under Regions**: each main location nests under its Region (or a
+  synthetic "Unspecified Region"), sublocations still nest under their parent; falls back to the
+  flat list when no region is in use. Region rows get their own right-click commands (Add location
+  / New location in region) — `src/views/list-view.tsx` (`UNSPEC_REGION`)
+- [x] **Maps auto-wrap** (node view only): a region draws a padded **convex hull** around each
+  cluster of its locations' nodes; members clustered by proximity (union-find, threshold = 2.5×
+  the map's median nearest-neighbour spacing) so far-apart members wrap **separately** (one hull
+  per cluster, labelled, double-click opens the region). Color = darker(location), fades in with
+  the squish — `regionClusters`/`regionHull`/`convexHull`/`clusterPoints` in `src/views/map-view.tsx`
+- [ ] Region "Locations" section drag-reorder (currently add/remove + `regionOrder` list, no
+  drag UI yet — mirror the sublocation drag machinery)
+
 ## Guided tutorial / onboarding (planned)
 
 An in-app guided tutorial that teaches the plugin's features, on by default for new users.
