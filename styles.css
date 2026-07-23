@@ -3619,76 +3619,196 @@ span.loom-row-caret {
 }
 
 /* Horizontal context-menu panels (zone + global). */
+/* Horizontal context menus — anchored at the cursor, floating just above it. */
 .loom-map-menu {
 	position: absolute;
 	z-index: 30;
 	display: flex;
 	align-items: center;
-	gap: var(--size-2-2);
-	padding: var(--size-2-2) var(--size-2-3);
+	gap: var(--size-2-1);
+	padding: var(--size-2-1) var(--size-2-2);
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);
 	box-shadow: var(--shadow-s);
-	transform: translate(-50%, calc(-100% - 10px));
+	transform: translate(-50%, calc(-100% - 12px));
 	white-space: nowrap;
 }
 
-.loom-map-global-menu {
-	transform: translate(0, 0);
-}
-
-.loom-map-menu-btn {
+/* Icon-style menu items: a bare icon (no button box), tinting only on hover.
+   Qualified with .loom-view so it beats Obsidian's default button chrome. */
+.loom-view .loom-map-icon-btn {
 	display: inline-flex;
 	align-items: center;
-	gap: var(--size-2-1);
-	padding: var(--size-2-1) var(--size-2-2);
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
 	background: transparent;
 	border: none;
 	border-radius: var(--radius-s);
 	color: var(--text-normal);
 	cursor: pointer;
-	font-size: var(--font-ui-smaller);
+	box-shadow: none;
 }
 
-.loom-map-menu-btn:hover:not(:disabled) {
+.loom-view .loom-map-icon-btn:hover:not(:disabled) {
 	background: var(--background-modifier-hover);
 }
 
-.loom-map-menu-btn:disabled {
+.loom-view .loom-map-icon-btn:disabled {
 	opacity: 0.5;
 	cursor: default;
 }
 
-.loom-map-menu-btn.loom-filter-active {
+.loom-view .loom-map-icon-btn.loom-filter-active {
 	color: var(--interactive-accent);
 }
 
-.loom-map-menu-btn.loom-map-danger:hover {
-	color: var(--text-error);
+/* Same danger treatment as the entity/list delete buttons. */
+.loom-view .loom-map-icon-btn.loom-map-danger:hover {
+	background: var(--background-modifier-error);
+	color: #ffffff;
 }
 
-.loom-map-menu-alpha {
-	display: inline-flex;
+/* Grip is a drag handle, not a button: grab cursor, no hover box. */
+.loom-view .loom-map-grip {
+	cursor: grab;
+}
+
+.loom-view .loom-map-grip:active {
+	cursor: grabbing;
+}
+
+.loom-view .loom-map-grip:hover:not(:disabled) {
+	background: transparent;
+}
+
+/* The location group is a fixed width, so the menu is the same size before and
+   after associating (search vs chip+pencil). The chip/search fills it; the
+   trailing icon (pencil / clear) is fixed — so search width == chip+button. */
+.loom-map-loc {
+	display: flex;
 	align-items: center;
 	gap: var(--size-2-1);
+	width: 214px;
 }
 
-.loom-map-menu-alpha input[type='range'] {
-	width: 80px;
+.loom-map-loc .loom-combo {
+	flex: 1;
+	min-width: 0;
+	max-width: none;
 }
 
+.loom-map-loc .loom-combo > input {
+	width: 100%;
+}
+
+.loom-map-loc .loom-entity-chip {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	justify-content: center;
+}
+
+.loom-map-loc .loom-subloc-link {
+	display: inline-block;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	vertical-align: bottom;
+	text-align: center;
+}
+
+/* Palette popover (color + transparency) under the palette icon. */
+.loom-map-palette {
+	position: relative;
+	display: inline-flex;
+}
+
+.loom-map-palette-pop {
+	position: absolute;
+	top: calc(100% + 6px);
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 1;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	padding: var(--size-2-3);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+}
+
+.loom-map-palette-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.loom-map-palette-row > span {
+	width: 52px;
+}
+
+.loom-map-palette-row input[type='range'] {
+	width: 96px;
+}
+
+/* Color swatch as a rectangular field (fits the rectangular popover). */
 .loom-map-color {
-	width: 24px;
-	height: 20px;
+	width: 118px;
+	height: 24px;
 	padding: 0;
-	border: none;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
 	background: transparent;
 	cursor: pointer;
 }
 
+.loom-map-color::-webkit-color-swatch-wrapper {
+	padding: 2px;
+}
+
+.loom-map-color::-webkit-color-swatch {
+	border: none;
+	border-radius: 2px;
+}
+
+/* Vertical group separators inside the horizontal menus. */
+.loom-map-sep {
+	width: 1px;
+	align-self: stretch;
+	margin: 2px 1px;
+	background: var(--background-modifier-border);
+}
+
+/* Node menu size dropdown (S/M/L/XL). */
+.loom-map-size-btn {
+	width: auto;
+	padding: 0 2px;
+}
+
 .loom-map-size {
 	font-size: var(--font-ui-smaller);
+	background: transparent;
+	border: none;
+	color: var(--text-normal);
+	cursor: pointer;
+}
+
+.loom-map-node-dot {
+	cursor: pointer;
+}
+
+.loom-map-node-sel {
+	stroke: var(--interactive-accent);
+	stroke-width: 2;
+	vector-effect: non-scaling-stroke;
 }
 
 .loom-map-hint {
@@ -3699,4 +3819,64 @@ span.loom-row-caret {
 	color: var(--text-muted);
 	pointer-events: none;
 	text-align: center;
+}
+
+/* Top-left map controls: find-a-location search + the vertical scale slider. */
+.loom-map-controls {
+	position: absolute;
+	top: var(--size-4-3);
+	left: var(--size-4-3);
+	z-index: 25;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-3);
+	width: 172px;
+}
+
+.loom-map-search .loom-combo {
+	max-width: none;
+}
+
+/* The find-a-location field sits over the canvas — give it an opaque background
+   (the form-field variable is translucent in many themes, so the canvas shows
+   through). */
+.loom-view .loom-map-search .loom-combo > input {
+	background-color: var(--background-primary);
+}
+
+.loom-map-scale {
+	display: flex;
+	flex-direction: column;
+	width: max-content;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+	overflow: hidden;
+}
+
+.loom-view .loom-map-scale-stop {
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	border-radius: 0;
+	padding: var(--size-2-2) var(--size-4-3);
+	text-align: left;
+	color: var(--text-muted);
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+}
+
+.loom-view .loom-map-scale-stop:not(:last-child) {
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.loom-view .loom-map-scale-stop:hover {
+	background: var(--background-modifier-hover);
+}
+
+.loom-view .loom-map-scale-stop.loom-map-scale-on {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-weight: var(--font-semibold);
 }
