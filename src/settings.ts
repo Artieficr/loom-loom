@@ -6,6 +6,10 @@ import type LoomLoomPlugin from './main';
 
 export type LoomTextSize = 'compact' | 'normal' | 'large';
 
+/** Graph node radius (px) slider bounds. */
+export const NODE_SIZE_MIN = 8;
+export const NODE_SIZE_MAX = 44;
+
 /** A named saved graph view: a curated lens over the same graph, capturing the
  *  type filter, the focus-entity restriction, and the pinned nodes so the user
  *  can flip between them from the graph header. */
@@ -66,6 +70,8 @@ export interface LoomLoomSettings {
 	globalLayerOrder: EntityType[];
 	/** Graph node fill color per entity type. */
 	nodeColors: Record<EntityType, string>;
+	/** Graph node radius (px) per entity type. */
+	nodeSizes: Record<EntityType, number>;
 	/** Color of the virtual Group — its chips, home-wheel button, page header.
 	 *  Its own entity color, distinct from factions. */
 	groupColor: string;
@@ -127,6 +133,15 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		item: '#d8b13c',
 		quest: '#c95f5f',
 	},
+	nodeSizes: {
+		session: 26,
+		event: 20,
+		character: 17,
+		location: 17,
+		faction: 17,
+		item: 17,
+		quest: 17,
+	},
 	groupColor: '#46b5a5',
 	loomButtonStyle: 'original',
 	loomButtonBg: '#4c3d57',
@@ -147,6 +162,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		...DEFAULT_SETTINGS,
 		questTagColors: { ...DEFAULT_SETTINGS.questTagColors },
 		nodeColors: { ...DEFAULT_SETTINGS.nodeColors },
+		nodeSizes: { ...DEFAULT_SETTINGS.nodeSizes },
 		globalLayerOrder: [...DEFAULT_SETTINGS.globalLayerOrder],
 		graphCameras: {},
 		entityBoxSizes: {},
@@ -213,6 +229,14 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			const color = (data.nodeColors as Record<string, unknown>)[type];
 			if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) {
 				base.nodeColors[type] = color;
+			}
+		}
+	}
+	if (typeof data.nodeSizes === 'object' && data.nodeSizes !== null) {
+		for (const type of ENTITY_TYPES) {
+			const size = (data.nodeSizes as Record<string, unknown>)[type];
+			if (typeof size === 'number' && Number.isFinite(size)) {
+				base.nodeSizes[type] = Math.max(NODE_SIZE_MIN, Math.min(NODE_SIZE_MAX, size));
 			}
 		}
 	}
@@ -384,6 +408,7 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 		'sessionResolvedQuests',
 		'subChipFullAncestry',
 		'nodeColors',
+		'nodeSizes',
 		'groupColor',
 		'loomButtonStyle',
 		'loomButtonBg',
@@ -450,7 +475,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			containerEl,
 			'general',
 			'Restore general defaults',
-			'Reset all general settings on this page to their defaults.'
+			'Reset all general settings on this tab to their defaults.'
 		);
 	}
 
@@ -482,9 +507,9 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	}
 
 	private renderEntities(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Entities colors').setHeading();
+		new Setting(containerEl).setName('Entities colors and node sizes').setHeading();
 		// The virtual Group leads — its own entity color-wise (chips, home
-		// wheel, its page) even though it never appears in the graph.
+		// wheel, its page) even though it never appears in the graph (so no size).
 		const groupSetting = new Setting(containerEl).setName('Group').addColorPicker((picker) =>
 			picker.setValue(this.plugin.settings.groupColor).onChange(async (value) => {
 				this.plugin.settings.groupColor = value;
@@ -496,17 +521,34 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			this.plugin.settings.groupColor = DEFAULT_SETTINGS.groupColor;
 		});
 		for (const type of ENTITY_TYPES) {
-			const setting = new Setting(containerEl).setName(ENTITY_META[type].label).addColorPicker((picker) =>
-				picker.setValue(this.plugin.settings.nodeColors[type]).onChange(async (value) => {
-					this.plugin.settings.nodeColors[type] = value;
-					await this.plugin.saveSettings();
-					this.plugin.indexer.refreshViews();
-				})
-			);
+			const setting = new Setting(containerEl)
+				.setName(ENTITY_META[type].label)
+				.addColorPicker((picker) =>
+					picker.setValue(this.plugin.settings.nodeColors[type]).onChange(async (value) => {
+						this.plugin.settings.nodeColors[type] = value;
+						await this.plugin.saveSettings();
+						this.plugin.indexer.refreshViews();
+					})
+				)
+				.addSlider((slider) =>
+					slider
+						.setLimits(NODE_SIZE_MIN, NODE_SIZE_MAX, 1)
+						.setValue(this.plugin.settings.nodeSizes[type])
+						// Deprecated in the 1.13 typings (value shown inline there), but
+						// 1.13 is Catalyst-only, so on public Obsidian we still need it.
+						.setDynamicTooltip()
+						.onChange(async (value) => {
+							this.plugin.settings.nodeSizes[type] = value;
+							await this.plugin.saveSettings();
+							this.plugin.indexer.refreshViews();
+						})
+				);
 			this.addReset(setting, () => {
 				this.plugin.settings.nodeColors[type] = DEFAULT_SETTINGS.nodeColors[type];
+				this.plugin.settings.nodeSizes[type] = DEFAULT_SETTINGS.nodeSizes[type];
 			});
-			// Quest tag colors nest right under the quest entity color.
+			// Quest tag colors nest right under the quest entity (tags aren't nodes,
+			// so no size slider on them).
 			if (type === 'quest') {
 				for (const k of ['main', 'important', 'side'] as const) {
 					const tagSetting = new Setting(containerEl)
@@ -525,6 +567,8 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 				}
 			}
 		}
+
+		this.renderLoomButton(containerEl);
 
 		new Setting(containerEl).setName('Quests').setHeading();
 		const resolvedSetting = new Setting(containerEl)
@@ -557,7 +601,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			.setName('Full ancestry on sublocation chips')
 			.setDesc(
 				createFragment((frag) => {
-					frag.appendText('Sublocation chips list every parent up the chain, not just the first.');
+					frag.appendText('Sublocation chips list every parent up the chain.');
 					// Built from parts so the example proper-nouns aren't scanned as UI copy.
 					const chain = ['Secret room', 'Tavern', 'City'];
 					const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
@@ -579,14 +623,18 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		this.addReset(ancestrySetting, () => {
 			this.plugin.settings.subChipFullAncestry = DEFAULT_SETTINGS.subChipFullAncestry;
 		});
+	}
 
+	/** Home-wheel central Loom button colors — rendered right under the entity
+	 *  colors so all color settings sit together. */
+	private renderLoomButton(containerEl: HTMLElement): void {
 		new Setting(containerEl).setName('Loom button').setHeading();
 		const styleSetting = new Setting(containerEl)
 			.setName('Colors')
 			.setDesc('Background and icon colors of the home wheel’s central Loom button.')
 			.addDropdown((dd) =>
 				dd
-					.addOption('original', 'Loom, original (follows the light/dark theme)')
+					.addOption('original', 'Loom original')
 					.addOption('custom', 'Custom')
 					.setValue(this.plugin.settings.loomButtonStyle)
 					.onChange(async (value) => {
@@ -632,15 +680,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	}
 
 	private renderGraph(containerEl: HTMLElement): void {
-		this.slider(
-			containerEl,
-			'Panel collapse threshold',
-			'Connection sections in the graph side panel start collapsed when they have more entries than this.',
-			{ min: 1, max: 25, step: 1 },
-			DEFAULT_SETTINGS.graphCollapseThreshold,
-			() => this.plugin.settings.graphCollapseThreshold,
-			(v) => (this.plugin.settings.graphCollapseThreshold = v)
-		);
+		new Setting(containerEl).setName('Main graph').setHeading();
 
 		this.slider(
 			containerEl,
@@ -656,10 +696,18 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			.setName('Drop-to-connect edits')
 			.setDesc(
 				createFragment((frag) => {
-					frag.appendText('Which note a node-on-node drop writes the relationship into:');
+					frag.appendText(
+						'Which note a node-on-node drop writes the relationship. When node A is dragged and dropped on B:'
+					);
 					const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
-					ul.createEl('li', { text: 'The node dropped onto (the dragged node is added into it)' });
-					ul.createEl('li', { text: 'Or the dragged node itself' });
+					// The A/B node labels sit in code spans so the sentence-case lint
+					// rule doesn't read a lone capital letter as mis-cased UI copy.
+					const dragged = ul.createEl('li');
+					dragged.appendText('Dragged node \u2014 ');
+					dragged.createEl('code', { text: 'A' });
+					const onto = ul.createEl('li');
+					onto.appendText('Node dropped onto \u2014 ');
+					onto.createEl('code', { text: 'B' });
 					frag.appendText('Field fills like ');
 					frag.createEl('code').appendText('quest giver');
 					frag.appendText(' always edit the field\u2019s owner.');
@@ -677,16 +725,6 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			this.plugin.settings.graphDropEdits = DEFAULT_SETTINGS.graphDropEdits;
 		});
 
-		new Setting(containerEl)
-			.setName('Confirm timeline moves')
-			.setDesc('Ask before a drag in the timeline moves an event from one session to another.')
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.confirmTimelineMove).onChange(async (value) => {
-					this.plugin.settings.confirmTimelineMove = value;
-					await this.plugin.saveSettings();
-				})
-			);
-
 		this.slider(
 			containerEl,
 			'Relationship arrow size',
@@ -700,7 +738,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		this.slider(
 			containerEl,
 			'Connection line spacing',
-			'Distance between parallel horizontal connection lines, so they don’t overlap. Minimum is the tightest spacing.',
+			'Distance between parallel horizontal connection lines to avoid overlapping.',
 			{ min: 10, max: 40, step: 2 },
 			DEFAULT_SETTINGS.graphLineGap,
 			() => this.plugin.settings.graphLineGap,
@@ -749,13 +787,24 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			})()
 		);
 
+		new Setting(containerEl).setName('Right side panel').setHeading();
+		this.slider(
+			containerEl,
+			'Panel collapse threshold',
+			'Connection sections in the graph side panel start collapsed when they have more entries than this.',
+			{ min: 1, max: 25, step: 1 },
+			DEFAULT_SETTINGS.graphCollapseThreshold,
+			() => this.plugin.settings.graphCollapseThreshold,
+			(v) => (this.plugin.settings.graphCollapseThreshold = v)
+		);
+
 		this.renderTimeline(containerEl);
 
 		this.addRestoreDefaults(
 			containerEl,
 			'graph',
-			'Restore graph defaults',
-			'Reset all graph settings on this page to their defaults. Timeline settings belong to their project and are not affected.'
+			'Restore defaults',
+			'Reset all settings on this tab to their defaults. Timeline settings belong to their project and are not affected.'
 		);
 	}
 

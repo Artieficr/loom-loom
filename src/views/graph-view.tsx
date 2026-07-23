@@ -182,7 +182,11 @@ function animGrow(t: number): number {
  *  other or the cluster. Connected nodes keep their force home (used as fixed
  *  anchors here); the final batch skips this so unconnected nodes return to
  *  their last (manual) position. */
-function bindIsolated(gl: GraphLayout, homes: Map<string, { x: number; y: number }>): void {
+function bindIsolated(
+	gl: GraphLayout,
+	homes: Map<string, { x: number; y: number }>,
+	sizes: Record<EntityType, number>
+): void {
 	const orig = new Map([...homes].map(([k, v]) => [k, { ...v }]));
 	const isConnected = (id: string) => (gl.neighbors.get(id)?.size ?? 0) > 0;
 	const anchors = gl.nodes.filter((n) => isConnected(n.id));
@@ -214,7 +218,7 @@ function bindIsolated(gl: GraphLayout, homes: Map<string, { x: number; y: number
 	// with each other or with a connected anchor. Connected nodes stay fixed
 	// (their force layout already spaced them); isolated↔isolated splits the push.
 	const movable = new Set(isolated.map((n) => n.id));
-	const radOf = new Map(gl.nodes.map((n) => [n.id, RADII[n.kind]]));
+	const radOf = new Map(gl.nodes.map((n) => [n.id, sizes[n.record.type] ?? RADII[n.kind]]));
 	const radAt = (id: string) => radOf.get(id) ?? RADII.global;
 	const PAD = 12;
 	for (let pass = 0; pass < 10; pass++) {
@@ -583,6 +587,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		[pickedVisible, pickSeparate, fullLayout]
 	);
 	const layout = subLayout ?? fullLayout;
+
+	/** Configured graph-node radius for a node (per entity type), falling back to
+	 *  the kind-based default for anything not in settings. */
+	const radiusOf = (n: LayoutNode): number =>
+		plugin.settings.nodeSizes[n.record.type] ?? RADII[n.kind];
 
 	const [selected, setSelected] = useState<string | null>(null);
 	// Pinned nodes: id → the WORLD position they're locked at. A pinned node holds
@@ -959,7 +968,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			st.homes = new Map(rl.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
 			// While the graph is still filling in, keep isolated nodes near the
 			// visible cluster instead of alone at their far final home.
-			if (!final) bindIsolated(rl, st.homes);
+			if (!final) bindIsolated(rl, st.homes, plugin.settings.nodeSizes);
 			for (const n of rl.nodes) {
 				// A newly revealed node grows in AT its current target, from scale 0.
 				if (!st.an.has(n.id)) {
@@ -1261,7 +1270,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				// sits at its world pin, not its layout home, so a home-based hit test
 				// missed its center and only caught the offset home spot.
 				const np = pos(n);
-				if (Math.hypot(np.x - cx, np.y - cy) <= RADII[n.kind] + DROP_SNAP) {
+				if (Math.hypot(np.x - cx, np.y - cy) <= radiusOf(n) + DROP_SNAP) {
 					target = n.id;
 					break;
 				}
@@ -2418,8 +2427,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 															pay={aa.y}
 															pbx={ab.x}
 															pby={ab.y}
-															aRadius={RADII[na.kind]}
-															bRadius={RADII[nb.kind]}
+															aRadius={radiusOf(na)}
+															bRadius={radiusOf(nb)}
 															dim={false}
 															arrowA={edge.arrowA}
 															arrowB={edge.arrowB}
@@ -2441,7 +2450,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 															node={node}
 															px={a.x}
 															py={a.y}
-															radius={RADII[node.kind]}
+															radius={radiusOf(node)}
 															color={plugin.settings.nodeColors[node.record.type]}
 															dim={false}
 															selected={false}
@@ -2503,8 +2512,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										pay={pa.y}
 										pbx={pb.x}
 										pby={pb.y}
-										aRadius={RADII[a.kind]}
-										bRadius={RADII[b.kind]}
+										aRadius={radiusOf(a)}
+										bRadius={radiusOf(b)}
 										dim={dim}
 										arrowA={edge.arrowA}
 										arrowB={edge.arrowB}
@@ -2563,7 +2572,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										node={node}
 										px={p.x}
 										py={p.y}
-										radius={RADII[node.kind]}
+										radius={radiusOf(node)}
 										color={plugin.settings.nodeColors[node.record.type]}
 										dim={dim}
 										selected={node.id === selected}
@@ -2621,7 +2630,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 									if (!node) return null;
 									const sx = camera.tx + pin.wx * camera.k;
 									const sy = camera.ty + pin.wy * camera.k;
-									const rk = RADII[node.kind] * camera.k;
+									const rk = radiusOf(node) * camera.k;
 									const fullyOff =
 										sx + rk < 0 || sx - rk > size.w || sy + rk < 0 || sy - rk > size.h;
 									if (!fullyOff) return null;
