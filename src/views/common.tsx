@@ -13,11 +13,14 @@ import {
 	ENTITY_META,
 	ENTITY_TYPES,
 	EntityRecord,
+	MAPS_ICON,
+	MAPS_LABEL,
 	PC_GROUP_ICON,
 	PC_GROUP_VALUE,
 	VIEW_GRAPH,
 	VIEW_GROUP,
 	VIEW_LIST,
+	VIEW_MAP,
 } from '../types';
 import { formatLoomDate, groupNameOf } from '../calendar';
 import { ProjectDef } from '../indexer';
@@ -253,6 +256,8 @@ export function SearchableSelect({
 	options,
 	onPick,
 	action,
+	initialQuery,
+	autoFocus,
 }: {
 	placeholder: string;
 	options: { value: string; label: string }[];
@@ -260,10 +265,21 @@ export function SearchableSelect({
 	/** Extra fixed entry pinned at the top of the list (e.g. "+ New session…"),
 	 *  so it never needs scrolling to reach. */
 	action?: { label: string; onPick: () => void };
+	/** Seeds the search field on mount (e.g. the current value being edited). */
+	initialQuery?: string;
+	/** Focus (and select) the field on mount, so typing starts immediately. */
+	autoFocus?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
-	const [query, setQuery] = useState('');
+	const [query, setQuery] = useState(initialQuery ?? '');
 	const wrapRef = useRef<HTMLDivElement>(null);
+	const inputRef = useRef<HTMLInputElement>(null);
+	useEffect(() => {
+		if (autoFocus && inputRef.current) {
+			inputRef.current.focus();
+			inputRef.current.select();
+		}
+	}, [autoFocus]);
 
 	// Close on any press outside the component.
 	useEffect(() => {
@@ -291,6 +307,7 @@ export function SearchableSelect({
 	return (
 		<div className="loom-combo" ref={wrapRef}>
 			<input
+				ref={inputRef}
 				type="text"
 				placeholder={placeholder}
 				value={query}
@@ -536,15 +553,31 @@ export function NavRail({
 					navigator.navigateTo(VIEW_GROUP, { project: project.root, origin });
 				}}
 			/>
-			{ENTITY_TYPES.map((t) => (
-				<RailButton
-					key={t}
-					icon={ENTITY_META[t].icon}
-					label={ENTITY_META[t].plural}
-					active={active === t}
-					onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: t })}
-				/>
-			))}
+			{ENTITY_TYPES.flatMap((t) => {
+				const btn = (
+					<RailButton
+						key={t}
+						icon={ENTITY_META[t].icon}
+						label={ENTITY_META[t].plural}
+						active={active === t}
+						onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: t })}
+					/>
+				);
+				// Maps sits right after Locations, matching the home wheel order.
+				if (t === 'location') {
+					return [
+						btn,
+						<RailButton
+							key="maps"
+							icon={MAPS_ICON}
+							label={MAPS_LABEL}
+							active={active === 'map'}
+							onClick={() => navigator.navigateTo(VIEW_MAP, { project: project.root })}
+						/>,
+					];
+				}
+				return [btn];
+			})}
 			<div className="loom-rail-sep" />
 			<RailButton
 				icon="spool"

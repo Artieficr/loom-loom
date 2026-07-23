@@ -87,6 +87,8 @@ export interface LoomLoomSettings {
 	loomButtonIcon: string;
 	/** Last camera per project root — not user-facing, remembered across sessions. */
 	graphCameras: Record<string, GraphCamera>;
+	/** Last map camera per project root — remembered across sessions. */
+	mapCameras: Record<string, GraphCamera>;
 	/** Resized textarea heights (px) per entity file path, keyed by field name
 	 *  (e.g. "description", "notes") — not user-facing, remembered across sessions. */
 	entityBoxSizes: Record<string, Record<string, number>>;
@@ -150,6 +152,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	loomButtonBg: '#4c3d57',
 	loomButtonIcon: '#fff8e6',
 	graphCameras: {},
+	mapCameras: {},
 	entityBoxSizes: {},
 	graphManualX: {},
 	graphManualY: {},
@@ -168,6 +171,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		nodeSizes: { ...DEFAULT_SETTINGS.nodeSizes },
 		globalLayerOrder: [...DEFAULT_SETTINGS.globalLayerOrder],
 		graphCameras: {},
+		mapCameras: {},
 		entityBoxSizes: {},
 		graphManualX: {},
 		graphManualY: {},
@@ -282,6 +286,13 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		for (const [root, cam] of Object.entries(data.graphCameras)) {
 			if (cam && typeof cam.tx === 'number' && typeof cam.ty === 'number' && typeof cam.k === 'number') {
 				base.graphCameras[root] = { tx: cam.tx, ty: cam.ty, k: cam.k };
+			}
+		}
+	}
+	if (typeof data.mapCameras === 'object' && data.mapCameras !== null) {
+		for (const [root, cam] of Object.entries(data.mapCameras)) {
+			if (cam && typeof cam.tx === 'number' && typeof cam.ty === 'number' && typeof cam.k === 'number') {
+				base.mapCameras[root] = { tx: cam.tx, ty: cam.ty, k: cam.k };
 			}
 		}
 	}
