@@ -8,6 +8,7 @@ import {
 	VIEW_GROUP,
 	VIEW_HOME,
 	VIEW_LIST,
+	VIEW_MAP,
 } from './types';
 import { DEFAULT_SETTINGS, LoomLoomSettingTab, LoomLoomSettings, mergeSettings } from './settings';
 import { LoomIndexer, ProjectDef } from './indexer';
@@ -23,6 +24,7 @@ import { EntityListView } from './views/list-view';
 import { GraphView } from './views/graph-view';
 import { EntityView } from './views/entity-view';
 import { GroupView } from './views/group-view';
+import { MapView } from './views/map-view';
 
 export default class LoomLoomPlugin extends Plugin {
 	settings: LoomLoomSettings = DEFAULT_SETTINGS;
@@ -39,6 +41,7 @@ export default class LoomLoomPlugin extends Plugin {
 		this.registerView(VIEW_GRAPH, (leaf) => new GraphView(leaf, this));
 		this.registerView(VIEW_ENTITY, (leaf) => new EntityView(leaf, this));
 		this.registerView(VIEW_GROUP, (leaf) => new GroupView(leaf, this));
+		this.registerView(VIEW_MAP, (leaf) => new MapView(leaf, this));
 		// Project home files show up in the file explorer like .canvas/.base
 		// files and open straight into the plugin.
 		this.registerExtensions([LOOM_EXTENSION], VIEW_HOME);

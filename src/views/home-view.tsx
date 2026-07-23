@@ -4,11 +4,14 @@ import {
 	ENTITY_TYPES,
 	EntityType,
 	LOOM_EXTENSION,
+	MAPS_ICON,
+	MAPS_LABEL,
 	PC_GROUP_ICON,
 	VIEW_GRAPH,
 	VIEW_GROUP,
 	VIEW_HOME,
 	VIEW_LIST,
+	VIEW_MAP,
 } from '../types';
 import { groupNameOf } from '../calendar';
 import { LoomFileReactView } from './react-view';
@@ -64,7 +67,7 @@ function Home({ view }: { view: HomeView }) {
 		icon: string;
 		label: string;
 		color: string;
-		count: number;
+		count?: number;
 		open: () => void;
 	}[] = [
 		{
@@ -79,14 +82,30 @@ function Home({ view }: { view: HomeView }) {
 					origin: { type: view.getViewType(), state: view.getState() },
 				}),
 		},
-		...ENTITY_TYPES.map((type) => ({
-			key: type,
-			icon: ENTITY_META[type].icon,
-			label: ENTITY_META[type].plural,
-			color: plugin.settings.nodeColors[type],
-			count: plugin.indexer.getAll(type, project.root).length,
-			open: () => openList(type),
-		})),
+		// Maps sits right after Locations (no count — it's a canvas, not a list).
+		...ENTITY_TYPES.flatMap((type) => {
+			const entry = {
+				key: type,
+				icon: ENTITY_META[type].icon,
+				label: ENTITY_META[type].plural,
+				color: plugin.settings.nodeColors[type],
+				count: plugin.indexer.getAll(type, project.root).length,
+				open: () => openList(type),
+			};
+			if (type === 'location') {
+				return [
+					entry,
+					{
+						key: 'maps',
+						icon: MAPS_ICON,
+						label: MAPS_LABEL,
+						color: plugin.settings.mapsColor,
+						open: () => view.navigateTo(VIEW_MAP, state),
+					},
+				];
+			}
+			return [entry];
+		}),
 	];
 
 	// Loom button colors: "original" carries no inline colors — CSS supplies
@@ -128,7 +147,7 @@ function Home({ view }: { view: HomeView }) {
 						<button key={s.key} className="loom-card loom-wheel-card" style={style} onClick={s.open}>
 							<Icon name={s.icon} fallback={s.key === 'group' ? 'star' : undefined} />
 							<span className="loom-card-label">{s.label}</span>
-							<span className="loom-card-count">{s.count}</span>
+							{s.count !== undefined ? <span className="loom-card-count">{s.count}</span> : null}
 						</button>
 					);
 				})}

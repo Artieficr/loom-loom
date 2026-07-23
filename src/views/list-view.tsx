@@ -6,9 +6,12 @@ import {
 	EntityRecord,
 	EntityType,
 	FM,
+	MAPS_ICON,
+	MAPS_LABEL,
 	PC_TAG,
 	QUEST_OUTCOMES,
 	VIEW_LIST,
+	VIEW_MAP,
 	isEntityType,
 } from '../types';
 import {
@@ -827,6 +830,16 @@ function EntityList({
 				</button>
 			) : null}
 			<div className="loom-shell-spacer" />
+			{type === 'location' ? (
+				<button
+					className="loom-rel-filter"
+					aria-label={`Open ${MAPS_LABEL}`}
+					title={MAPS_LABEL}
+					onClick={() => view.navigateTo(VIEW_MAP, { project: project.root })}
+				>
+					<Icon name={MAPS_ICON} />
+				</button>
+			) : null}
 			<button
 				className="mod-cta"
 				onClick={() =>
