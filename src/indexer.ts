@@ -27,6 +27,8 @@ import {
 	TimelineDef,
 	isEntityType,
 	legacyFmKeys,
+	formatTimestamp,
+	parseTimestamp,
 } from './types';
 import { ProjectConfig, parseLoomDate, parseProjectConfig } from './calendar';
 import { managedEntityFileName } from './naming';
@@ -185,6 +187,9 @@ export class LoomIndexer extends Component {
 	private rebuilding = false;
 	private rebuildQueued = false;
 	private reconciling = false;
+	/** Path -> last time we stamped `loomModified`, so the metadata-change echo
+	 *  from our own write (and rapid edit bursts) don't loop back into a stamp. */
+	private lastStamp = new Map<string, number>();
 
 	constructor(private app: App, private plugin: LoomLoomPlugin) {
 		super();
@@ -196,6 +201,7 @@ export class LoomIndexer extends Component {
 				if (!this.projectForPath(file.path)) return;
 				this.indexFile(file);
 				this.bump();
+				void this.stampModified(file);
 			})
 		);
 		this.registerEvent(
@@ -321,6 +327,9 @@ export class LoomIndexer extends Component {
 			// record.name already read loomName-with-basename-fallback, so for an
 			// unmigrated file it is the old display name — exactly what to keep.
 			const displayName = record.name;
+			// This migration write fires a metadata 'changed' echo — guard it so
+			// stampModified doesn't overwrite loomModified with the startup time.
+			this.lastStamp.set(file.path, Date.now());
 			try {
 				await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 					for (const key of Object.values(FM)) {
@@ -346,6 +355,17 @@ export class LoomIndexer extends Component {
 						const aliases: unknown[] = Array.isArray(fm.aliases) ? (fm.aliases as unknown[]) : [];
 						if (!aliases.includes(displayName)) fm.aliases = [displayName, ...aliases];
 					}
+					// Loom-managed timestamps: seed from the filesystem stats when absent
+					// (capturing the real creation date before cloud-sync overwrites
+					// ctime), and always normalize to the datetime-property format so a
+					// value stamped in another shape (e.g. an ISO string with a Z) renders
+					// in Obsidian's date & time picker. Same instant either way.
+					fm[FM.created] = formatTimestamp(
+						parseTimestamp(fmField(fm, FM.created)) ?? file.stat.ctime
+					);
+					fm[FM.modified] = formatTimestamp(
+						parseTimestamp(fmField(fm, FM.modified)) ?? file.stat.mtime
+					);
 				});
 			} catch (e) {
 				console.error('Loom Loom: frontmatter migration failed for', record.path, e);
@@ -433,6 +453,7 @@ export class LoomIndexer extends Component {
 					curAliases.length === expectedAliases.length &&
 					expectedAliases.every((a) => (curAliases as unknown[]).includes(a));
 				if (record.name !== label || !aliasesOk) {
+					this.lastStamp.set(file.path, Date.now());
 					try {
 						await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 							fm[FM.name] = label;
@@ -655,8 +676,11 @@ export class LoomIndexer extends Component {
 			reward: typeof rewardValue === 'string' ? rewardValue : '',
 			objectives,
 			seq: typeof fmLoom(fm, FM.seq) === 'number' ? (fmLoom(fm, FM.seq) as number) : null,
-			created: file.stat.ctime,
-			modified: file.stat.mtime,
+			// Loom-managed timestamps win over the filesystem stats (cloud-sync can
+			// overwrite ctime/mtime with the sync time); stats are the fallback for
+			// notes not yet stamped.
+			created: parseTimestamp(fmLoom(fm, FM.created)) ?? file.stat.ctime,
+			modified: parseTimestamp(fmLoom(fm, FM.modified)) ?? file.stat.mtime,
 		};
 	}
 
@@ -665,6 +689,29 @@ export class LoomIndexer extends Component {
 		this.incoming = null;
 		this.persistLater();
 		this.events.trigger('changed');
+	}
+
+	/**
+	 * Stamps `loomModified` on a loom entity note whenever its content changes.
+	 * Every edit — plugin write or a manual markdown edit — flows through the
+	 * `metadataCache.on('changed')` handler, so this is the single place the
+	 * modification time is maintained. The write itself re-fires `changed`; a
+	 * short per-path guard swallows that echo (and coalesces rapid edit bursts)
+	 * so it never loops. Only stamps indexed entity notes, never .loom/timeline
+	 * files. Absence of `loomModified` still falls back to the filesystem mtime.
+	 */
+	private async stampModified(file: TFile): Promise<void> {
+		if (!this.records.has(file.path)) return;
+		const now = Date.now();
+		if (now - (this.lastStamp.get(file.path) ?? 0) < 2000) return;
+		this.lastStamp.set(file.path, now);
+		try {
+			await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+				fm[FM.modified] = formatTimestamp(now);
+			});
+		} catch (e) {
+			console.error('Loom Loom: modified-stamp failed for', file.path, e);
+		}
 	}
 
 	/** Re-render subscribed views without re-indexing — for settings changes

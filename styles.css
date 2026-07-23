@@ -2984,6 +2984,57 @@ span.loom-row-caret {
 	min-width: 180px;
 }
 
+/* Saved-views popover: a list of named lenses + a save action. */
+.loom-views-pop {
+	min-width: 220px;
+}
+
+.loom-views-list {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: var(--size-2-1);
+	width: 100%;
+	max-height: 320px;
+	overflow-y: auto;
+}
+
+.loom-views-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+}
+
+.loom-view button.loom-views-name {
+	flex: 1;
+	min-width: 0;
+	text-align: left;
+	background: transparent;
+	border: none;
+	padding: var(--size-2-1) var(--size-2-2);
+	border-radius: var(--radius-s);
+	color: var(--text-normal);
+	cursor: pointer;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-view button.loom-views-name:hover {
+	background: var(--background-modifier-hover);
+}
+
+.loom-view button.loom-views-act {
+	flex: 0 0 auto;
+	padding: 2px;
+}
+
+.loom-views-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	padding: var(--size-2-1) var(--size-2-2);
+}
+
 /* Search bar carries its clear ✕ inside, at the right edge. */
 .loom-graph-search {
 	display: flex;

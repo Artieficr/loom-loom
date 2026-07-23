@@ -6,6 +6,24 @@ import type LoomLoomPlugin from './main';
 
 export type LoomTextSize = 'compact' | 'normal' | 'large';
 
+/** A named saved graph view: a curated lens over the same graph, capturing the
+ *  type filter, the focus-entity restriction, and the pinned nodes so the user
+ *  can flip between them from the graph header. */
+export interface SavedGraphView {
+	id: string;
+	name: string;
+	/** Ticked entity types (the graph type filter). */
+	filterTypes: EntityType[];
+	/** Whether unticked types are dimmed or hidden. */
+	filterMode: 'dim' | 'hide';
+	/** Focus-entity note paths (empty = no focus restriction). */
+	focus: string[];
+	/** Focus render mode: true = separate subgraph, false = dim/hide in place. */
+	focusSeparate: boolean;
+	/** Pinned nodes' world positions, keyed by note path. */
+	pins: Record<string, { x: number; y: number }>;
+}
+
 export const TEXT_SIZES: [LoomTextSize, string][] = [
 	['compact', 'Compact'],
 	['normal', 'Normal'],
@@ -75,6 +93,9 @@ export interface LoomLoomSettings {
 	/** Graph type-filter state per project root: the ticked entity types and the
 	 *  dim/hide eye mode — remembered across restarts. */
 	graphFilters: Record<string, { types: EntityType[]; mode: 'dim' | 'hide' }>;
+	/** Named saved graph views per project root — curated filter/focus/pin
+	 *  snapshots the user switches between from the graph header. */
+	graphViews: Record<string, SavedGraphView[]>;
 	/** Manual vertical order of timeline event bubbles, per project root then
 	 *  note path (rank within its column/drawer) — not user-facing. */
 	timelineManualOrder: Record<string, Record<string, number>>;
@@ -116,6 +137,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphManualY: {},
 	graphPins: {},
 	graphFilters: {},
+	graphViews: {},
 	timelineManualOrder: {},
 	timelineDrawerHeight: 240,
 };
@@ -132,6 +154,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		graphManualY: {},
 		graphPins: {},
 		graphFilters: {},
+		graphViews: {},
 		timelineManualOrder: {},
 		timelineDrawerHeight: 240,
 	};
@@ -290,6 +313,42 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 					: [...ENTITY_TYPES],
 				mode: mode === 'hide' ? 'hide' : 'dim',
 			};
+		}
+	}
+	if (typeof data.graphViews === 'object' && data.graphViews !== null) {
+		for (const [root, list] of Object.entries(data.graphViews)) {
+			if (!Array.isArray(list)) continue;
+			const views: SavedGraphView[] = [];
+			for (const v of list) {
+				if (typeof v !== 'object' || v === null) continue;
+				const o = v as Partial<SavedGraphView>;
+				if (typeof o.id !== 'string' || typeof o.name !== 'string') continue;
+				const pins: Record<string, { x: number; y: number }> = {};
+				if (o.pins && typeof o.pins === 'object') {
+					for (const [path, p] of Object.entries(o.pins)) {
+						if (
+							p &&
+							typeof p === 'object' &&
+							Number.isFinite((p as { x?: unknown }).x) &&
+							Number.isFinite((p as { y?: unknown }).y)
+						) {
+							pins[path] = { x: (p as { x: number }).x, y: (p as { y: number }).y };
+						}
+					}
+				}
+				views.push({
+					id: o.id,
+					name: o.name,
+					filterTypes: Array.isArray(o.filterTypes)
+						? o.filterTypes.filter((t) => ENTITY_TYPES.includes(t))
+						: [...ENTITY_TYPES],
+					filterMode: o.filterMode === 'hide' ? 'hide' : 'dim',
+					focus: Array.isArray(o.focus) ? o.focus.filter((p): p is string => typeof p === 'string') : [],
+					focusSeparate: o.focusSeparate === true,
+					pins,
+				});
+			}
+			if (views.length > 0) base.graphViews[root] = views;
 		}
 	}
 	if (typeof data.timelineManualOrder === 'object' && data.timelineManualOrder !== null) {
