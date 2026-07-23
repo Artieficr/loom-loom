@@ -374,3 +374,20 @@ export const VIEW_LIST = 'loom-loom-list';
 export const VIEW_GRAPH = 'loom-loom-graph';
 export const VIEW_ENTITY = 'loom-loom-entity';
 export const VIEW_GROUP = 'loom-loom-group';
+export const VIEW_MAP = 'loom-loom-map';
+
+/** Maps: a spatial drawing canvas where zones (polygons) are associated with
+ *  locations. Lucide icon + the folder maps/images live under. */
+export const MAPS_ICON = 'map';
+export const MAPS_LABEL = 'Maps';
+export const MAPS_FOLDER = 'Maps';
+export const MAPS_IMAGES_FOLDER = 'Maps/Images';
+
+/** Standard graph/map node sizes (radius px), pickable per node. */
+export const NODE_SIZE_PRESETS = {
+	small: 12,
+	regular: 17,
+	big: 24,
+	'very-big': 34,
+} as const;
+export type NodeSizePreset = keyof typeof NODE_SIZE_PRESETS;

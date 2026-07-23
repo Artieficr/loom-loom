@@ -75,6 +75,8 @@ export interface LoomLoomSettings {
 	/** Color of the virtual Group — its chips, home-wheel button, page header.
 	 *  Its own entity color, distinct from factions. */
 	groupColor: string;
+	/** Color of the Maps feature — its home-wheel button and default new-zone fill. */
+	mapsColor: string;
 	/** Home-wheel Loom button colors. 'original' follows the app theme (light
 	 *  theme: plum bg / cream icon, dark theme: reversed — via body.theme-dark
 	 *  CSS, so it flips live); 'custom' uses the pair below. */
@@ -143,6 +145,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		quest: 17,
 	},
 	groupColor: '#46b5a5',
+	mapsColor: '#c9a36b',
 	loomButtonStyle: 'original',
 	loomButtonBg: '#4c3d57',
 	loomButtonIcon: '#fff8e6',
@@ -242,6 +245,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.groupColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.groupColor)) {
 		base.groupColor = data.groupColor;
+	}
+	if (typeof data.mapsColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.mapsColor)) {
+		base.mapsColor = data.mapsColor;
 	}
 	if (data.loomButtonStyle === 'original' || data.loomButtonStyle === 'custom') {
 		base.loomButtonStyle = data.loomButtonStyle;
@@ -410,6 +416,7 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 		'nodeColors',
 		'nodeSizes',
 		'groupColor',
+		'mapsColor',
 		'loomButtonStyle',
 		'loomButtonBg',
 		'loomButtonIcon',
@@ -625,12 +632,27 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		});
 	}
 
-	/** Home-wheel central Loom button colors — rendered right under the entity
-	 *  colors so all color settings sit together. */
+	/** Other colors (Maps, the home-wheel Loom button) — rendered right under the
+	 *  entity colors so all color settings sit together. */
 	private renderLoomButton(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Loom button').setHeading();
+		new Setting(containerEl).setName('Other colors').setHeading();
+
+		const mapsSetting = new Setting(containerEl)
+			.setName('Maps')
+			.setDesc('Maps home-wheel button and the default new-zone fill color.')
+			.addColorPicker((picker) =>
+				picker.setValue(this.plugin.settings.mapsColor).onChange(async (value) => {
+					this.plugin.settings.mapsColor = value;
+					await this.plugin.saveSettings();
+					this.plugin.indexer.refreshViews();
+				})
+			);
+		this.addReset(mapsSetting, () => {
+			this.plugin.settings.mapsColor = DEFAULT_SETTINGS.mapsColor;
+		});
+
 		const styleSetting = new Setting(containerEl)
-			.setName('Colors')
+			.setName('Loom button')
 			.setDesc('Background and icon colors of the home wheel’s central Loom button.')
 			.addDropdown((dd) =>
 				dd
