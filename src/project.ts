@@ -1423,10 +1423,15 @@ export class CreateEntityModal extends Modal {
 		}
 
 		if (this.type === 'location') {
-			// Sublocation of (optional) + a full-width Description.
+			// Sublocation of (optional) + a full-width Description. Main locations
+			// sort above their sublocations (same ordering as the other pickers).
 			const locations = this.plugin.indexer
 				.getAll('location', this.project.root)
-				.sort((a, b) => a.name.localeCompare(b.name));
+				.sort(
+					(a, b) =>
+						(a.parentLocation === null ? 0 : 1) - (b.parentLocation === null ? 0 : 1) ||
+						a.name.localeCompare(b.name)
+				);
 			let pickedParent: EntityRecord | null = this.options.parentLocation ?? null;
 			if (pickedParent) this.fields.parentLocation = linkTargetOf(pickedParent);
 			const parentSetting = new Setting(this.contentEl).setName('Sublocation of');

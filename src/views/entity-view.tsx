@@ -19,6 +19,7 @@ import {
 	EntityRecord,
 	EntityType,
 	FM,
+	MAPS_FOLDER,
 	PC_GROUP_NAME,
 	PC_GROUP_VALUE,
 	PC_TAG,
@@ -933,6 +934,73 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  location (including sublocations — the whole child hierarchy moves
 	 *  along), minus this location's own descendants so a cycle can't be
 	 *  built. A search, not a plain menu — projects can get huge. */
+	/** The project's map file (multi-map `Maps.json`, or the legacy single-map
+	 *  `Map.json`), or null if none exists. */
+	const mapFileFor = (): TFile | null => {
+		if (!project) return null;
+		const p = (name: string) => normalizePath(project.root === '' ? name : `${project.root}/${name}`);
+		return (
+			plugin.app.vault.getFileByPath(p(`${MAPS_FOLDER}/${project.name} Maps.json`)) ??
+			plugin.app.vault.getFileByPath(p(`${MAPS_FOLDER}/${project.name} Map.json`))
+		);
+	};
+	const zoneIsThisLocation = (z: unknown): boolean => {
+		const loc = (z as { location?: unknown })?.location;
+		if (typeof loc !== 'string' || loc === '') return false;
+		return plugin.indexer.resolve(loc, record.path)?.path === record.path;
+	};
+	const zonesOf = (m: unknown): unknown[] => {
+		const zs = (m as { zones?: unknown })?.zones;
+		return Array.isArray(zs) ? zs : [];
+	};
+	const readMapData = async (): Promise<{ file: TFile; data: { maps?: unknown[]; zones?: unknown[] } } | null> => {
+		const file = mapFileFor();
+		if (!file) return null;
+		try {
+			const data = JSON.parse(await plugin.app.vault.read(file)) as { maps?: unknown[]; zones?: unknown[] };
+			return { file, data };
+		} catch {
+			return null;
+		}
+	};
+	/** Whether this location has a zone on any of the project's maps. */
+	const locationHasZone = async (): Promise<boolean> => {
+		const r = await readMapData();
+		if (!r) return false;
+		const all = Array.isArray(r.data.maps)
+			? r.data.maps.flatMap(zonesOf)
+			: Array.isArray(r.data.zones)
+				? r.data.zones
+				: [];
+		return all.some(zoneIsThisLocation);
+	};
+	/** Removes this location's zones from every map, returning whether any existed.
+	 *  A location becoming a sublocation can't own a map zone (zones associate a
+	 *  main location only). */
+	const dropMapZonesForThisLocation = async (): Promise<boolean> => {
+		const r = await readMapData();
+		if (!r) return false;
+		const { file, data } = r;
+		if (Array.isArray(data.maps)) {
+			let changed = false;
+			const maps = data.maps.map((m) => {
+				const zs = zonesOf(m);
+				const kept = zs.filter((z) => !zoneIsThisLocation(z));
+				if (kept.length !== zs.length) changed = true;
+				return { ...(m as Record<string, unknown>), zones: kept };
+			});
+			if (!changed) return false;
+			await plugin.app.vault.modify(file, JSON.stringify({ ...data, maps }, null, '\t'));
+			return true;
+		}
+		if (Array.isArray(data.zones)) {
+			const kept = data.zones.filter((z) => !zoneIsThisLocation(z));
+			if (kept.length === data.zones.length) return false;
+			await plugin.app.vault.modify(file, JSON.stringify({ ...data, zones: kept }, null, '\t'));
+			return true;
+		}
+		return false;
+	};
 	const openTurnIntoPicker = () => {
 		const candidates = projectLocations
 			.filter((l) => l.path !== record.path && !descendsFromThis(l))
@@ -940,7 +1008,30 @@ function EntityPage({ view }: { view: EntityView }) {
 		new RecordSuggestModal(
 			plugin.app,
 			candidates,
-			(l) => setParentLocation(linkTargetOf(l)),
+			(l) => {
+				const target = linkTargetOf(l);
+				// Warn first if this location has a zone on the map — it gets deleted.
+				void (async () => {
+					const zoneExists = await locationHasZone();
+					if (zoneExists) {
+						new ConfirmModal(
+							plugin.app,
+							'Turn into a sublocation?',
+							'This location has a zone on the map. Turning it into a sublocation will ' +
+								'delete that zone from the map.',
+							() => {
+								void (async () => {
+									await dropMapZonesForThisLocation();
+									setParentLocation(target);
+								})();
+							},
+							'Turn into sublocation'
+						).open();
+					} else {
+						setParentLocation(target);
+					}
+				})();
+			},
 			'Pick the parent location…'
 		).open();
 	};
@@ -1808,9 +1899,32 @@ function EntityPage({ view }: { view: EntityView }) {
 									new EntityTypeSuggestModal(plugin, (type) =>
 										new CreateEntityModal(plugin, type, project, {
 											onCreated: (created) => {
-												const next = [...relationships];
-												next[i] = { ...rel, target: created.basename };
-												commitRelationships(next);
+												// Show the entity's display NAME in the field (not
+												// its managed file name), while writing the link at
+												// the correct basename — the index may not have the
+												// new file yet, so display-name resolution would fail.
+												const prefix = `${project.name} ${ENTITY_META[type].label} `;
+												const display = created.basename.startsWith(prefix)
+													? created.basename.slice(prefix.length)
+													: created.basename;
+												const next = relationships.map((r, j) =>
+													j === i ? { ...rel, target: display } : r
+												);
+												setRelationships(next);
+												writeFm((fm) => {
+													setLoomKey(
+														fm,
+														FM.relationships,
+														next
+															.filter((r) => r.target.trim() !== '')
+															.map((r) => ({
+																type: r.type.trim() === '' ? 'related' : r.type.trim(),
+																target: `[[${
+																	r === next[i] ? created.basename : linkTargetFor(r.target)
+																}]]`,
+															}))
+													);
+												});
 											},
 										}).open()
 									).open(),
