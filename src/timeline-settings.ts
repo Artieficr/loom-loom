@@ -14,11 +14,11 @@ import type LoomLoomPlugin from './main';
 function sampleDate(config: ProjectConfig): LoomDate {
 	const custom = config.customCalendar.enabled;
 	return {
-		raw: '2006-09-15',
+		raw: '2003-03-04',
 		sortKey: 0,
-		year: custom ? 763 : 2006,
-		month: custom ? Math.min(1, config.customCalendar.monthCount) : 9,
-		day: custom ? 3 : 15,
+		year: custom ? 763 : 2003,
+		month: custom ? Math.min(1, config.customCalendar.monthCount) : 3,
+		day: custom ? 3 : 4,
 		calendar: custom ? 'custom' : 'gregorian',
 	};
 }

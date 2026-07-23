@@ -3504,9 +3504,12 @@ span.loom-row-caret {
 	color: var(--text-on-accent);
 }
 
-/* Nested settings rows (quest tag colors under Quest, custom Loom colors). */
+/* Nested settings rows (quest tag colors under Quest, custom Loom colors) —
+   indented with a vertical rail so they read as children of the row above. */
 .loom-setting-nested {
-	padding-left: var(--size-4-6);
+	margin-left: var(--size-4-4);
+	padding-left: var(--size-4-4);
+	border-left: 2px solid var(--background-modifier-border);
 }
 
 .loom-setting-nested .setting-item-name {

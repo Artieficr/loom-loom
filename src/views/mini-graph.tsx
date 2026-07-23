@@ -317,8 +317,15 @@ export function MiniGraph({
 								}}
 							>
 								{short !== label ? <title>{label}</title> : null}
-								<circle r={RADII[n.kind]} fill={plugin.settings.nodeColors[n.record.type]} />
-								<text className="loom-node-label" y={RADII[n.kind] + 16} textAnchor="middle">
+								<circle
+									r={plugin.settings.nodeSizes[n.record.type] ?? RADII[n.kind]}
+									fill={plugin.settings.nodeColors[n.record.type]}
+								/>
+								<text
+									className="loom-node-label"
+									y={(plugin.settings.nodeSizes[n.record.type] ?? RADII[n.kind]) + 16}
+									textAnchor="middle"
+								>
 									{short}
 								</text>
 							</g>
