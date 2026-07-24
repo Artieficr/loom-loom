@@ -1274,6 +1274,22 @@ function EntityPage({ view }: { view: EntityView }) {
 					.map((lp) => plugin.indexer.resolve(lp, record.path))
 					.filter((r): r is EntityRecord => r != null && r.type === 'item')
 			: [];
+		// "Items in sublocations": every descendant sublocation's items, grouped by
+		// the holding sublocation (persistent — shown even if the same item is also
+		// on this location directly), like events propagate up via `places`.
+		const inheritedGroups: { holder: EntityRecord; items: EntityRecord[] }[] = isLocation
+			? projectLocations
+					.filter((l) => descendsFromThis(l))
+					.map((subloc) => ({
+						holder: subloc,
+						items: subloc.items
+							.map((lp) => plugin.indexer.resolve(lp, subloc.path))
+							.filter((it): it is EntityRecord => it != null && it.type === 'item')
+							.sort((a, b) => a.name.localeCompare(b.name)),
+					}))
+					.filter((g) => g.items.length > 0)
+					.sort((a, b) => recordLabel(a.holder, project).localeCompare(recordLabel(b.holder, project)))
+			: [];
 		const currentItemLinks = () => itemRecords.map((r) => `[[${linkTargetOf(r)}]]`);
 		const setItemLinks = (links: string[]) => writeFm((fm) => setLoomKey(fm, FM.items, links));
 		const addItemLink = (linkTarget: string) => {
@@ -2864,6 +2880,30 @@ function EntityPage({ view }: { view: EntityView }) {
 						}
 					>
 						{itemRecords.map((item, i) => itemRow(item, i))}
+					</div>
+				) : null}
+				{inheritedGroups.length > 0 ? (
+					<div className="loom-inherited-items">
+						<span className="loom-field-sublabel">Items in sublocations</span>
+						{inheritedGroups.map((g) => (
+							<div key={g.holder.path} className="loom-locnote-group loom-char-event-group">
+								<div className="loom-tag-row loom-event-group-session">
+									<EntityChip
+										plugin={plugin}
+										record={g.holder}
+										label={recordLabel(g.holder, project)}
+										onOpen={() => view.openEntity(g.holder.path)}
+									/>
+								</div>
+								<div className="loom-event-nest loom-locfac-nest">
+									{g.items.map((item) => (
+										<span key={item.path} className="loom-locfac-member">
+											<EntityChip plugin={plugin} record={item} onOpen={() => view.openEntity(item.path)} />
+										</span>
+									))}
+								</div>
+							</div>
+						))}
 					</div>
 				) : null}
 			</div>

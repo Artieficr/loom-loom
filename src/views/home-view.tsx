@@ -83,7 +83,9 @@ function Home({ view }: { view: HomeView }) {
 				}),
 		},
 		// Maps sits right after Locations (no count — it's a canvas, not a list).
-		...ENTITY_TYPES.flatMap((type) => {
+		// Regions are reached through Locations (the location list groups by
+		// region), so they don't get their own wheel satellite.
+		...ENTITY_TYPES.filter((type) => type !== 'region').flatMap((type) => {
 			const entry = {
 				key: type,
 				icon: ENTITY_META[type].icon,

@@ -553,7 +553,7 @@ export function NavRail({
 					navigator.navigateTo(VIEW_GROUP, { project: project.root, origin });
 				}}
 			/>
-			{ENTITY_TYPES.flatMap((t) => {
+			{ENTITY_TYPES.filter((t) => t !== 'region').flatMap((t) => {
 				const btn = (
 					<RailButton
 						key={t}
