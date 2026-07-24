@@ -1466,6 +1466,31 @@ span.loom-row-caret {
 	color: var(--text-accent);
 }
 
+/* "Items in sublocations": each descendant sublocation heads a group of its
+   items, drag-reorderable on their own nesting rail. */
+.loom-inherited-items {
+	margin-top: var(--size-4-2);
+}
+
+.loom-field-sublabel {
+	display: block;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	margin-bottom: var(--size-2-2);
+}
+
+.loom-inherited-group {
+	margin-bottom: var(--size-2-3);
+}
+
+.loom-inherited-subitem {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+	padding: var(--size-2-1) 0;
+}
+
 /* Region group headers in the location list read as a heavier grouping row. */
 .loom-row-region .loom-row-name {
 	font-weight: var(--font-semibold);
@@ -3828,6 +3853,16 @@ span.loom-row-caret {
 	width: 96px;
 }
 
+/* Embedded Obsidian SliderComponent (matches the settings-tab sliders). */
+.loom-map-obsidian-slider {
+	display: flex;
+	align-items: center;
+}
+
+.loom-map-obsidian-slider .slider {
+	width: 96px;
+}
+
 /* The whole element IS the color: a wide horizontal rectangle filled edge-to-edge
    with the picked color — no visible frame/padding around an inner swatch. */
 .loom-view .loom-map-color {
@@ -3964,6 +3999,21 @@ span.loom-row-caret {
 	vector-effect: non-scaling-stroke;
 }
 
+/* Item pins: item markers dropped inside a zone (gem glyph). */
+.loom-map-item-dot {
+	fill: var(--background-primary);
+	stroke: var(--color-yellow, #d8b13c);
+	stroke-width: 2;
+	vector-effect: non-scaling-stroke;
+}
+
+.loom-map-item-glyph {
+	pointer-events: none;
+	/* stroke color is set inline (contrastInk over the item color) — a CSS
+	   `stroke` here would override the SVG attribute, so it's intentionally omitted. */
+	vector-effect: non-scaling-stroke;
+}
+
 .loom-map-doors-pop {
 	min-width: 200px;
 }
@@ -4008,10 +4058,80 @@ span.loom-row-caret {
 	white-space: nowrap;
 }
 
+/* Sublocation "list" popover: search + Title | Node columns + drag-to-place. */
+.loom-map-subs-search {
+	width: 100%;
+	margin-bottom: var(--size-2-2);
+}
+
+.loom-map-subs-more {
+	color: var(--text-muted);
+	text-align: center;
+	padding: var(--size-2-1);
+}
+
+.loom-view .loom-map-subs-row .loom-map-doors-open[draggable='true'] {
+	cursor: grab;
+}
+
+/* Ghost node preview while dragging a sublocation onto the map. */
+.loom-map-sub-ghost {
+	fill: var(--interactive-accent);
+	fill-opacity: 0.4;
+	stroke: var(--interactive-accent);
+	stroke-dasharray: 3 2;
+	vector-effect: non-scaling-stroke;
+	pointer-events: none;
+}
+
+.loom-map-subs-head {
+	display: flex;
+	justify-content: space-between;
+	padding: var(--size-2-1) var(--size-2-2);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	border-bottom: 1px solid var(--background-modifier-border);
+	margin-bottom: 2px;
+}
+
+.loom-map-subs-row input[type='checkbox'] {
+	flex: none;
+	margin: 0 var(--size-2-2);
+}
+
 .loom-map-node-sel {
 	stroke: var(--interactive-accent);
 	stroke-width: 2;
 	vector-effect: non-scaling-stroke;
+}
+
+/* Sparkle mark inside a main (location) node so it stands out. */
+.loom-map-node-star {
+	pointer-events: none;
+	fill: var(--text-on-accent, #fff);
+	fill-opacity: 0.92;
+}
+
+/* Sublocation graph (click a main node): drawn in the map, screen-anchored at the
+   node. Click-through container — only the tree nodes react, so pan/zoom keeps
+   working over the rest of the (dimmed) map. */
+.loom-map-subgraph {
+	position: absolute;
+	inset: 0;
+	z-index: 40;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+}
+
+.loom-map-subgraph-node {
+	pointer-events: auto;
+}
+
+.loom-map-subgraph-edge {
+	stroke: var(--text-muted);
+	stroke-width: 2;
+	stroke-opacity: 0.6;
 }
 
 .loom-map-hint {
