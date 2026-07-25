@@ -1,4 +1,4 @@
-import { Menu as ObsidianMenu, Notice, SliderComponent, ViewStateResult, debounce, normalizePath } from 'obsidian';
+import { Menu as ObsidianMenu, Notice, SliderComponent, TFile, ViewStateResult, debounce, normalizePath } from 'obsidian';
 import {
 	MouseEvent as ReactMouseEvent,
 	PointerEvent as ReactPointerEvent,
@@ -18,12 +18,14 @@ import {
 	NodeSizePreset,
 	VIEW_MAP,
 } from '../types';
-import { linkTargetOf } from '../indexer';
+import { linkTargetOf, ProjectDef } from '../indexer';
 import { ConfirmModal } from '../project';
 import type LoomLoomPlugin from '../main';
 import { LoomReactView } from './react-view';
 import { EntityChip, Icon, SearchableSelect, ViewShell, noProjectMessage, recordLabel } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
+import { focusNeighborhood } from './mini-graph';
+import { roundedPath } from '../graph/routing';
 
 /** One drawn zone: a polygon associated (optionally) with a location, which
  *  pins a node inside it. */
@@ -82,6 +84,7 @@ const MAX_ZOOM = 4;
 const CLOSE_SNAP = 12; // screen px to the first vertex that closes a draft
 const VERTEX_R = 5; // handle radius (screen px)
 const CLICK_SLOP = 4; // px of movement below which a node press counts as a click
+const NODE_DBL_MS = 220; // short double-click window on a node (open its page)
 const DEFAULT_ROAD_WIDTH = 280; // world units — wide enough that location nodes fit inside
 const ROAD_WIDTH_MIN = 8;
 const ROAD_WIDTH_MAX = 1000;
@@ -371,6 +374,46 @@ function boundaryExit(
 	return { x: from.x + (to.x - from.x) * bestT, y: from.y + (to.y - from.y) * bestT };
 }
 
+/** Translate the moved zone by (dx,dy). If it's a location polygon, also drag the
+ *  matching endpoint of every road attached to that location, so roads stay
+ *  connected when their location is moved (a road stores its own endpoints, which
+ *  otherwise stay frozen and detach). Roads are matched by location link target. */
+function translateZoneWithRoads(list: MapZone[], movedId: string, dx: number, dy: number): MapZone[] {
+	const moved = list.find((z) => z.id === movedId);
+	if (!moved) return list;
+	const shiftPt = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
+	const shiftArr = <T extends { x: number; y: number }>(arr: T[]): T[] =>
+		arr.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy }));
+	const movedLoc = moved.kind !== 'road' ? moved.location : null;
+	const zoneIdForLoc = (lp: string | null | undefined): string | null =>
+		lp ? list.find((z) => z.kind === 'zone' && z.location === lp)?.id ?? null : null;
+	return list.map((z) => {
+		if (z.id === movedId)
+			return {
+				...z,
+				points: z.points.map(shiftPt),
+				node: z.node ? shiftPt(z.node) : null,
+				doors: shiftArr(z.doors),
+				itemPins: shiftArr(z.itemPins),
+				subPins: shiftArr(z.subPins),
+			};
+		if (movedLoc && z.kind === 'road' && z.points.length > 0) {
+			const startHit = zoneIdForLoc(z.startLoc) === movedId;
+			const endHit = zoneIdForLoc(z.endLoc) === movedId;
+			if (startHit || endHit) {
+				const pts = z.points.map((p) => ({ ...p }));
+				if (startHit) pts[0] = shiftPt(pts[0]);
+				if (endHit) pts[pts.length - 1] = shiftPt(pts[pts.length - 1]);
+				// Keep the road's OWN location node on the reshaped centerline, so it
+				// doesn't get left behind in world space when an end is dragged.
+				const node = z.node ? clampToCapsule(z.node, pts, z.width / 2) : null;
+				return { ...z, points: pts, node };
+			}
+		}
+		return z;
+	});
+}
+
 /** Distance from a point to an open polyline (road centerline). */
 function distToPolyline(px: number, py: number, pts: { x: number; y: number }[]): number {
 	let best = Infinity;
@@ -538,6 +581,52 @@ function regionHull(cluster: Pt[], pad: number): Pt[] {
 	});
 }
 
+/** Mean of a ring's points. */
+function ringCentroid(pts: Pt[]): Pt {
+	let x = 0;
+	let y = 0;
+	for (const p of pts) {
+		x += p.x;
+		y += p.y;
+	}
+	const n = pts.length || 1;
+	return { x: x / n, y: y / n };
+}
+
+/** Resample a closed polygon to exactly `n` points evenly spaced by perimeter, so
+ *  two rings with different vertex counts can be morphed index-to-index. */
+function resampleRing(poly: Pt[], n: number): Pt[] {
+	const m = poly.length;
+	if (m === 0) return [];
+	if (m === 1) return Array.from({ length: n }, () => ({ ...poly[0] }));
+	const seg: number[] = [];
+	let total = 0;
+	for (let i = 0; i < m; i++) {
+		const a = poly[i];
+		const b = poly[(i + 1) % m];
+		const d = Math.hypot(b.x - a.x, b.y - a.y);
+		seg.push(d);
+		total += d;
+	}
+	if (total === 0) return Array.from({ length: n }, () => ({ ...poly[0] }));
+	const step = total / n;
+	const out: Pt[] = [];
+	for (let k = 0; k < n; k++) {
+		let rem = k * step;
+		let si = 0;
+		while (si < m && rem > seg[si]) {
+			rem -= seg[si];
+			si++;
+		}
+		if (si >= m) si = m - 1;
+		const a = poly[si];
+		const b = poly[(si + 1) % m];
+		const t = seg[si] > 0 ? rem / seg[si] : 0;
+		out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+	}
+	return out;
+}
+
 interface Camera {
 	tx: number;
 	ty: number;
@@ -687,8 +776,21 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	/** A main node selected by clicking it (separate from zone selection) — only
 	 *  this highlights the node. */
 	const [selectedNode, setSelectedNode] = useState<string | null>(null);
-	/** Zone id whose sublocation graph overlay is open (a main-node click). */
+	/** Zone id whose focus graph is open (a main-node click). */
 	const [subGraph, setSubGraph] = useState<string | null>(null);
+	const subGraphRef = useRef(subGraph);
+	subGraphRef.current = subGraph;
+	/** Zone id whose focus graph is playing its closing (reverse) animation, kept
+	 *  mounted until the animation finishes. */
+	const [focusClosing, setFocusClosing] = useState<string | null>(null);
+	/** Last node click for a short manual double-click window (open the page) that
+	 *  won't swallow a deliberate open-then-close of the focus graph. */
+	const lastNodeClick = useRef<{ id: string; t: number }>({ id: '', t: 0 });
+	// Start the closing animation, keeping the graph mounted via `focusClosing`.
+	const closeFocus = () => {
+		if (subGraphRef.current) setFocusClosing(subGraphRef.current);
+		setSubGraph(null);
+	};
 	const [menu, setMenu] = useState<Menu>(null);
 	/** Where the last menu was opened in world space (a new node lands here). */
 	const menuWorld = useRef<{ x: number; y: number } | null>(null);
@@ -714,44 +816,6 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const base = `${MAPS_FOLDER}/${project.name} Map.json`;
 		return normalizePath(project.root === '' ? base : `${project.root}/${base}`);
 	}, [project]);
-
-	useEffect(() => {
-		if (!mapsPath) return;
-		let cancelled = false;
-		void (async () => {
-			let file: MapsFile | null = null;
-			const existing = plugin.app.vault.getFileByPath(mapsPath);
-			if (existing) {
-				try {
-					file = parseMapsFile(await plugin.app.vault.cachedRead(existing));
-				} catch {
-					file = null;
-				}
-			} else if (legacyMapPath) {
-				// Migrate the old single-map file into a one-page Maps file.
-				const old = plugin.app.vault.getFileByPath(legacyMapPath);
-				if (old) {
-					try {
-						file = parseMapsFile(await plugin.app.vault.cachedRead(old));
-					} catch {
-						file = null;
-					}
-				}
-			}
-			if (cancelled) return;
-			const loaded = file ?? { version: 2, activeId: null, maps: defaultPages() };
-			const first = loaded.maps[0];
-			const active = loaded.maps.find((m) => m.id === loaded.activeId)?.id ?? first.id;
-			activeIdRef.current = active;
-			setPages(loaded.maps);
-			setActiveId(active);
-			setZones(loaded.maps.find((m) => m.id === active)?.zones ?? []);
-			restoreCamera(active);
-		})();
-		return () => {
-			cancelled = true;
-		};
-	}, [mapsPath, legacyMapPath, plugin, restoreCamera]);
 
 	/** Writes the whole Maps file: `pages` with the active page's zones replaced
 	 *  by `activeZones` (the live working copy). */
@@ -785,6 +849,105 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		[mapsPath, plugin]
 	);
 	const saveLater = useMemo(() => debounce((next: MapZone[]) => void writeMaps(next), 500, true), [writeMaps]);
+
+	useEffect(() => {
+		if (!mapsPath) return;
+		let cancelled = false;
+		void (async () => {
+			let file: MapsFile | null = null;
+			const existing = plugin.app.vault.getFileByPath(mapsPath);
+			if (existing) {
+				try {
+					file = parseMapsFile(await plugin.app.vault.cachedRead(existing));
+				} catch {
+					file = null;
+				}
+			} else if (legacyMapPath) {
+				// Migrate the old single-map file into a one-page Maps file.
+				const old = plugin.app.vault.getFileByPath(legacyMapPath);
+				if (old) {
+					try {
+						file = parseMapsFile(await plugin.app.vault.cachedRead(old));
+					} catch {
+						file = null;
+					}
+				}
+			}
+			if (cancelled) return;
+			const loaded = file ?? { version: 2, activeId: null, maps: defaultPages() };
+			// Drop orphaned sublocation/item pins whose entity was deleted while the
+			// map was closed (only when the index is populated, so a cold start can't
+			// wrongly prune). Whole zones are never auto-removed here.
+			const ready = !!project && plugin.indexer.getAll('location', project.root).length > 0;
+			const pruneOrphans = (zs: MapZone[]): MapZone[] =>
+				zs.map((z) => {
+					const subPins = z.subPins.filter((sp) => !!plugin.indexer.resolve(sp.loc, project!.loomPath));
+					const itemPins = z.itemPins.filter((it) => !!plugin.indexer.resolve(it.item, project!.loomPath));
+					return subPins.length === z.subPins.length && itemPins.length === z.itemPins.length
+						? z
+						: { ...z, subPins, itemPins };
+				});
+			const maps = ready ? loaded.maps.map((m) => ({ ...m, zones: pruneOrphans(m.zones) })) : loaded.maps;
+			const pruned = ready && maps.some((m, i) => m.zones !== loaded.maps[i].zones);
+			const first = maps[0];
+			const active = maps.find((m) => m.id === loaded.activeId)?.id ?? first.id;
+			activeIdRef.current = active;
+			setPages(maps);
+			setActiveId(active);
+			const activeZones = maps.find((m) => m.id === active)?.zones ?? [];
+			setZones(activeZones);
+			restoreCamera(active);
+			if (pruned) {
+				pagesRef.current = maps;
+				saveLater(activeZones);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [mapsPath, legacyMapPath, plugin, restoreCamera, project, saveLater]);
+
+	// When an entity note is deleted, scrub its leftovers from every map page:
+	// remove its sublocation/item pins and unassociate any zone/road that pointed
+	// to it (the drawn shape stays; only the dangling link is cleared). Mirrors the
+	// page-deletion cleanup so deleting a location can't leave an undeletable node.
+	useEffect(() => {
+		const scrub = (zs: MapZone[], name: string): MapZone[] => {
+			let changed = false;
+			const out = zs.map((z) => {
+				let nz = z;
+				const subPins = z.subPins.filter((sp) => sp.loc !== name);
+				const itemPins = z.itemPins.filter((it) => it.item !== name);
+				if (subPins.length !== z.subPins.length || itemPins.length !== z.itemPins.length)
+					nz = { ...nz, subPins, itemPins };
+				if (nz.location === name) nz = { ...nz, location: null };
+				if (nz.kind === 'road') {
+					if (nz.startLoc === name) nz = { ...nz, startLoc: null };
+					if (nz.endLoc === name) nz = { ...nz, endLoc: null };
+				}
+				if (nz !== z) changed = true;
+				return nz;
+			});
+			return changed ? out : zs;
+		};
+		const ref = plugin.app.vault.on('delete', (file) => {
+			if (!(file instanceof TFile) || file.extension !== 'md') return;
+			const name = file.basename;
+			const prunedActive = scrub(zonesRef.current, name);
+			const prunedPages = pagesRef.current.map((p) =>
+				p.id === activeIdRef.current ? p : { ...p, zones: scrub(p.zones, name) }
+			);
+			const pagesChanged = prunedPages.some((p, i) => p.zones !== pagesRef.current[i].zones);
+			if (prunedActive === zonesRef.current && !pagesChanged) return;
+			if (pagesChanged) {
+				pagesRef.current = prunedPages;
+				setPages(prunedPages);
+			}
+			if (prunedActive !== zonesRef.current) setZones(prunedActive);
+			saveLater(prunedActive);
+		});
+		return () => plugin.app.vault.offref(ref);
+	}, [plugin, saveLater]);
 
 	const commit = useCallback(
 		(next: MapZone[]) => {
@@ -1078,20 +1241,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				const dx = w.x - d.last.x;
 				const dy = w.y - d.last.y;
 				d.last = { x: w.x, y: w.y };
-				setZones(
-					zonesRef.current.map((z) =>
-						z.id === d.id
-							? {
-									...z,
-									points: z.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
-									node: z.node ? { x: z.node.x + dx, y: z.node.y + dy } : null,
-									doors: z.doors.map((dr) => ({ ...dr, x: dr.x + dx, y: dr.y + dy })),
-									itemPins: z.itemPins.map((it) => ({ ...it, x: it.x + dx, y: it.y + dy })),
-									subPins: z.subPins.map((sp) => ({ ...sp, x: sp.x + dx, y: sp.y + dy })),
-								}
-							: z
-					)
-				);
+				setZones(translateZoneWithRoads(zonesRef.current, d.id, dx, dy));
 				// Keep an open zone menu attached to the moving zone.
 				setMenu((m) => (m && m.kind === 'zone' && m.id === d.id ? { ...m, wx: m.wx + dx, wy: m.wy + dy } : m));
 			} else if (d.kind === 'node') {
@@ -1105,20 +1255,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					const dx = w.x - d.last.x;
 					const dy = w.y - d.last.y;
 					d.last = { x: w.x, y: w.y };
-					setZones(
-						zonesRef.current.map((zz) =>
-							zz.id === d.id
-								? {
-										...zz,
-										points: zz.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
-										node: zz.node ? { x: zz.node.x + dx, y: zz.node.y + dy } : null,
-										doors: zz.doors.map((dr) => ({ ...dr, x: dr.x + dx, y: dr.y + dy })),
-										itemPins: zz.itemPins.map((it) => ({ ...it, x: it.x + dx, y: it.y + dy })),
-										subPins: zz.subPins.map((sp) => ({ ...sp, x: sp.x + dx, y: sp.y + dy })),
-									}
-								: zz
-						)
-					);
+					setZones(translateZoneWithRoads(zonesRef.current, d.id, dx, dy));
 					setMenu((m) => (m && m.kind === 'zone' && m.id === d.id ? { ...m, wx: m.wx + dx, wy: m.wy + dy } : m));
 				} else {
 					const clamped = clampToZone(w, z);
@@ -1159,12 +1296,26 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				selectVertsInBox(d.start, d.end);
 				return;
 			}
-			// A node press without movement is a CLICK: select the node (its own
-			// highlight) and open its sublocation graph.
+			// A node press without movement is a CLICK. A fast second click on the
+			// same node (short window) opens its page; otherwise it toggles the focus
+			// graph — so a normal open-then-close pair isn't swallowed as a dblclick.
 			if (d.kind === 'node' && !d.moved) {
 				const z = zonesRef.current.find((zz) => zz.id === d.id);
+				const now = performance.now();
+				const isDbl = lastNodeClick.current.id === d.id && now - lastNodeClick.current.t < NODE_DBL_MS;
+				lastNodeClick.current = { id: d.id, t: now };
+				if (isDbl) {
+					setSubGraph(null);
+					setFocusClosing(null);
+					if (z?.location) openLocation(z.location);
+					return;
+				}
 				setSelectedNode((cur) => (cur === d.id ? null : d.id));
-				setSubGraph((cur) => (cur === d.id ? null : z && z.location ? d.id : null));
+				if (subGraphRef.current === d.id) closeFocus();
+				else {
+					setFocusClosing(null);
+					setSubGraph(z && z.location ? d.id : null);
+				}
 				return;
 			}
 			// Selection was set on press; only persist if something actually moved.
@@ -1571,7 +1722,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			}
 			if (e.key !== 'Escape') return;
 			if (roadDraft || draft.length > 0) cancelDraft();
-			else if (subGraph) setSubGraph(null);
+			else if (subGraph) closeFocus();
 			else if (menu) setMenu(null);
 			else if (selectedVertsRef.current.size > 0) setSelectedVerts(new Set());
 			else if (selectedNode) setSelectedNode(null);
@@ -1669,6 +1820,118 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		}
 		return out;
 	}, [zones, project, plugin, indexVersion]);
+
+	// --- Region hull morph ---------------------------------------------------
+	// The raw hull recomputes from live positions every frame, so a cluster split
+	// (a location dragged far enough to break off) makes the border snap. We keep a
+	// per-cluster DISPLAY ring that eases toward the freshly computed target ring;
+	// on a split the surviving cluster's border retracts smoothly while a new border
+	// grows out of the split-off location's centroid ("rip out + hug back").
+	const HULL_N = 48;
+	const hullState = useRef<Map<string, { display: Pt[]; region: EntityRecord; alpha: number }>>(new Map());
+	const hullTargets = useRef<Map<string, { ring: Pt[]; centroid: Pt; region: EntityRecord }>>(new Map());
+	// Recompute targets + match this frame's clusters to existing display rings by
+	// nearest centroid (so a moving cluster keeps its key and morphs rather than
+	// snapping). New clusters grow from their centroid when the region already had
+	// clusters (a split); a region seen for the first time appears at final shape.
+	useMemo(() => {
+		const perRegion = new Map<string, { region: EntityRecord; centroid: Pt; ring: Pt[]; weight: number }[]>();
+		for (const { region, vertices } of regionClusters) {
+			const uh = convexHull(vertices);
+			const base = uh.length >= 3 ? uh : regionHull(vertices, NODE_SIZE_PRESETS.regular);
+			if (base.length < 3) continue;
+			const ring = resampleRing(base, HULL_N);
+			const list = perRegion.get(region.path) ?? [];
+			list.push({ region, centroid: ringCentroid(ring), ring, weight: vertices.length });
+			perRegion.set(region.path, list);
+		}
+		const targets = new Map<string, { ring: Pt[]; centroid: Pt; region: EntityRecord }>();
+		const st = hullState.current;
+		for (const [regionPath, clustersRaw] of perRegion) {
+			const prevKeys = [...st.keys()].filter((k) => k.startsWith(regionPath + ' '));
+			const hadPrev = prevKeys.length > 0;
+			const used = new Set<string>();
+			// Biggest cluster claims its nearest prior key first, so on a split the
+			// surviving cluster keeps the border and the split-off piece grows a new one.
+			const clusters = clustersRaw.slice().sort((a, b) => b.weight - a.weight);
+			for (const cl of clusters) {
+				let best: string | null = null;
+				let bestD = Infinity;
+				for (const pk of prevKeys) {
+					if (used.has(pk)) continue;
+					const pc = ringCentroid(st.get(pk)!.display);
+					const d = Math.hypot(pc.x - cl.centroid.x, pc.y - cl.centroid.y);
+					if (d < bestD) {
+						bestD = d;
+						best = pk;
+					}
+				}
+				let key: string;
+				if (best) {
+					key = best;
+					used.add(best);
+					st.get(key)!.region = cl.region;
+				} else {
+					key = `${regionPath} ${Math.round(cl.centroid.x)},${Math.round(cl.centroid.y)}`;
+					if (!st.has(key))
+						st.set(key, {
+							display: hadPrev ? cl.ring.map(() => ({ ...cl.centroid })) : cl.ring.map((p) => ({ ...p })),
+							region: cl.region,
+							alpha: hadPrev ? 0 : 1,
+						});
+				}
+				targets.set(key, cl);
+			}
+		}
+		hullTargets.current = targets;
+		return targets;
+	}, [regionClusters]);
+	// Ease display rings toward their targets each frame while in node view; drop
+	// vanished clusters after they shrink into their centroid.
+	useEffect(() => {
+		if (viewMode !== 'nodeview') return;
+		let raf = 0;
+		const step = () => {
+			const st = hullState.current;
+			const targets = hullTargets.current;
+			let changed = false;
+			for (const [key, s] of st) {
+				const tgt = targets.get(key);
+				if (tgt) {
+					if (s.alpha < 0.999) {
+						s.alpha += (1 - s.alpha) * 0.3;
+						changed = true;
+					}
+					for (let i = 0; i < s.display.length && i < tgt.ring.length; i++) {
+						const dx = tgt.ring[i].x - s.display[i].x;
+						const dy = tgt.ring[i].y - s.display[i].y;
+						if (Math.abs(dx) > 0.05 || Math.abs(dy) > 0.05) {
+							s.display[i] = { x: s.display[i].x + dx * 0.22, y: s.display[i].y + dy * 0.22 };
+							changed = true;
+						}
+					}
+				} else {
+					// Vanished cluster (merged/removed): fade out while collapsing toward
+					// its centroid, then drop — so it shrinks away behind the node instead
+					// of leaving a padded circle.
+					const c = ringCentroid(s.display);
+					s.alpha += (0 - s.alpha) * 0.2;
+					for (let i = 0; i < s.display.length; i++) {
+						const dx = c.x - s.display[i].x;
+						const dy = c.y - s.display[i].y;
+						s.display[i] = { x: s.display[i].x + dx * 0.3, y: s.display[i].y + dy * 0.3 };
+					}
+					changed = true;
+					if (s.alpha < 0.03) st.delete(key);
+				}
+			}
+			if (changed) forceTick((x) => x + 1);
+			raf = window.requestAnimationFrame(step);
+		};
+		raf = window.requestAnimationFrame(step);
+		return () => window.cancelAnimationFrame(raf);
+	}, [viewMode]);
+
 	const openLocation = (target: string | null, newTab = false) => {
 		if (!target) return;
 		const rec = plugin.indexer.resolve(target, project?.loomPath ?? '');
@@ -1882,6 +2145,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				? { x: menu.sx, y: menu.sy }
 				: null;
 	const squish = squishRef.current;
+	// Node/pin/label sizing blends world-fixed (regular/close-up) → screen-space
+	// (node view). At squish 0 the divisor is 1, so markers take a fixed world size
+	// and scale with the map; at squish 1 it is 1/camera.k, i.e. their old constant
+	// on-screen size (preset / camera.k) so node view looks exactly as before.
+	const nodeUnit = (1 - squish) + squish / camera.k;
 
 	// Vertex handles for a zone/road (when selected or marquee-hit). Rendered in a
 	// SEPARATE layer above all zone/road bodies, so a road drawn over a location
@@ -2170,24 +2438,34 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 								strokeDasharray={`${4 / camera.k} ${3 / camera.k}`}
 							/>
 						) : null}
-						{/* Region wraps — node view only: a padded convex hull around each
-						    cluster of a region's location nodes (far-apart members wrap
-						    separately). Behind the nodes; fades in with the squish. */}
+						{/* Region wraps — node view only: a padded hull around each cluster of
+						    a region's location nodes (far-apart members wrap separately).
+						    Drawn from the eased DISPLAY ring (see the hull-morph loop) so a
+						    cluster split retracts/grows smoothly instead of snapping. Behind
+						    the nodes; fades in with the squish. */}
 						{squish > 0.02
-							? regionClusters.map(({ region, vertices }, i) => {
-									// A modest constant-screen margin around the zone areas.
-									const pad = 40 / camera.k;
-									const hull = regionHull(vertices, pad);
-									if (hull.length < 3) return null;
-									const d = hull.map((p, j) => `${j === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') + ' Z';
-									const c = centroid(vertices);
-									const minY = Math.min(...hull.map((p) => p.y));
+							? [...hullState.current.entries()].map(([key, s]) => {
+									if (s.display.length < 3 || s.alpha < 0.02) return null;
+									// A modest constant-screen margin, applied to the eased ring;
+									// it shrinks with alpha so a vanishing cluster doesn't leave a
+									// fixed circle as it collapses.
+									const pad = (40 / camera.k) * s.alpha;
+									const c = ringCentroid(s.display);
+									const padded = s.display.map((p) => {
+										const dx = p.x - c.x;
+										const dy = p.y - c.y;
+										const len = Math.hypot(dx, dy) || 1;
+										return { x: p.x + (dx / len) * pad, y: p.y + (dy / len) * pad };
+									});
+									const d = padded.map((p, j) => `${j === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ') + ' Z';
+									const minY = Math.min(...padded.map((p) => p.y));
 									const fill = plugin.settings.nodeColors.region;
+									const region = s.region;
 									return (
 										<g
-											key={`region-${region.path}-${i}`}
+											key={key}
 											className="loom-map-region"
-											opacity={squish}
+											opacity={squish * s.alpha}
 											onDoubleClick={(e) => {
 												e.stopPropagation();
 												view.openEntity(region.path);
@@ -2230,7 +2508,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							const node = z.node ?? centroid(z.points);
 							const stroke = darker(z.color);
 							const grow = placeholder ? 1 - Math.pow(1 - squish, 3) : 1;
-							const r = (NODE_SIZE_PRESETS[z.nodeSize] / camera.k) * grow;
+							const r = NODE_SIZE_PRESETS[z.nodeSize] * nodeUnit * grow;
 							const opacity = !placeholder && viewMode === 'closeup' ? CLOSEUP_NODE_OPACITY : 1;
 							return (
 								<g
@@ -2266,9 +2544,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										setDragActive(true);
 									}}
 									onDoubleClick={(e) => {
-										// Double-click opens the associated location's page.
+										// Opening is handled by a short manual double-click in onUp;
+										// just keep the dblclick off the canvas (no vertex insert).
 										e.stopPropagation();
-										openLocation(z.location);
 									}}
 									onAuxClick={(e) => {
 										// Middle-click opens the location page in a new tab.
@@ -2301,10 +2579,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									{z.location ? (
 										<text
 											x={node.x}
-											y={node.y + (NODE_SIZE_PRESETS[z.nodeSize] + 14) / camera.k}
+											y={node.y + (NODE_SIZE_PRESETS[z.nodeSize] + 14) * nodeUnit}
 											textAnchor="middle"
 											className="loom-map-node-label"
-											style={{ fontSize: `${13 / camera.k}px` }}
+											style={{ fontSize: `${13 * nodeUnit}px` }}
 										>
 											{clampLabel(locationName(z.location))}
 										</text>
@@ -2352,12 +2630,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										switchMap(dr.page);
 									}}
 								>
-									<circle cx={dr.x} cy={dr.y} r={doorR / camera.k} className="loom-map-door-dot" />
-									{/* Lucide door-open icon, scaled to a constant screen size and
-									    centered on the door (24-unit icon → ~17px). */}
+									<circle cx={dr.x} cy={dr.y} r={doorR * nodeUnit} className="loom-map-door-dot" />
+									{/* Lucide door-open icon, scaled with the door (24-unit icon). */}
 									<g
 										className="loom-map-door-glyph"
-										transform={`translate(${dr.x},${dr.y}) scale(${(doorR * 1.25) / camera.k / 24}) translate(-12,-12)`}
+										transform={`translate(${dr.x},${dr.y}) scale(${(doorR * 1.25) * nodeUnit / 24}) translate(-12,-12)`}
 										fill="none"
 										strokeWidth={2}
 										strokeLinecap="round"
@@ -2371,10 +2648,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									</g>
 									<text
 										x={dr.x}
-										y={dr.y + (doorR + 12) / camera.k}
+										y={dr.y + (doorR + 12) * nodeUnit}
 										textAnchor="middle"
 										className="loom-map-node-label"
-										style={{ fontSize: `${13 / camera.k}px` }}
+										style={{ fontSize: `${13 * nodeUnit}px` }}
 									>
 										{clampLabel(pageName(dr.page))}
 									</text>
@@ -2417,13 +2694,13 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										<circle
 											cx={it.x}
 											cy={it.y}
-											r={itemR / camera.k}
+											r={itemR * nodeUnit}
 											fill={itemColor}
 											className="loom-map-node-dot"
 										/>
 										<g
 											className="loom-map-item-glyph"
-											transform={`translate(${it.x},${it.y}) scale(${(itemR * 1.1) / camera.k / 24}) translate(-12,-12)`}
+											transform={`translate(${it.x},${it.y}) scale(${(itemR * 1.1) * nodeUnit / 24}) translate(-12,-12)`}
 											fill="none"
 											stroke={glyphInk(itemColor)}
 											strokeWidth={2}
@@ -2436,10 +2713,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										</g>
 										<text
 											x={it.x}
-											y={it.y + (itemR + 12) / camera.k}
+											y={it.y + (itemR + 12) * nodeUnit}
 											textAnchor="middle"
 											className="loom-map-node-label"
-											style={{ fontSize: `${11 / camera.k}px` }}
+											style={{ fontSize: `${11 * nodeUnit}px` }}
 										>
 											{clampLabel(itemName(it.item))}
 										</text>
@@ -2481,16 +2758,16 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										<circle
 											cx={sp.x}
 											cy={sp.y}
-											r={subPinRadius(z, sp.loc) / camera.k}
+											r={subPinRadius(z, sp.loc) * nodeUnit}
 											fill={col}
 											className="loom-map-node-dot"
 										/>
 										<text
 											x={sp.x}
-											y={sp.y + (subPinRadius(z, sp.loc) + 9) / camera.k}
+											y={sp.y + (subPinRadius(z, sp.loc) + 9) * nodeUnit}
 											textAnchor="middle"
 											className="loom-map-node-label"
-											style={{ fontSize: `${11 / camera.k}px` }}
+											style={{ fontSize: `${11 * nodeUnit}px` }}
 										>
 											{clampLabel(sublocName(sp.loc))}
 										</text>
@@ -2502,12 +2779,47 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 								? (() => {
 									const gz = zones.find((z) => z.id === pinDrag.zoneId);
 									const gr =
-										(gz ? (pinDrag.kind === 'sub' ? subPinRadius(gz, pinDrag.target) : itemPinRadius(gz)) : 9) /
-										camera.k;
+										(gz ? (pinDrag.kind === 'sub' ? subPinRadius(gz, pinDrag.target) : itemPinRadius(gz)) : 9) *
+										nodeUnit;
 									return <circle cx={pinDragPos.x} cy={pinDragPos.y} r={gr} className="loom-map-sub-ghost" />;
 								})()
 								: null}
 					</g>
+					{/* Focus graph — the clicked location's connected entities in a
+					    maps-specific per-type hierarchy, growing out of the node like a
+					    web. In WORLD space (its own <g> under the same camera transform,
+					    full opacity) so it pans/zooms with the map while the map camera
+					    <g> above stays dimmed. Click the focus node again (or Esc) to
+					    hide; double-click a connected node to open it. */}
+					{(() => {
+						// Stay mounted through the closing animation via `focusClosing`.
+						const activeId = subGraph ?? focusClosing;
+						const fgZone = activeId ? zones.find((z) => z.id === activeId) : null;
+						const fgLoc = fgZone?.location
+							? plugin.indexer.resolve(fgZone.location, project.loomPath)
+							: null;
+						if (!fgZone || !fgLoc) return null;
+						const nodeWorld = fgZone.node ?? centroid(fgZone.points);
+						return (
+							<g transform={`translate(${camera.tx},${camera.ty}) scale(${camera.k})`}>
+								<FocusGraphLayer
+									plugin={plugin}
+									project={project}
+									focusPath={fgLoc.path}
+									nodeWorld={nodeWorld}
+									version={indexVersion}
+									closing={!subGraph}
+									onOpen={(path) => {
+										view.openEntity(path);
+										setSubGraph(null);
+										setFocusClosing(null);
+									}}
+									onClose={closeFocus}
+									onClosed={() => setFocusClosing(null)}
+								/>
+							</g>
+						);
+					})()}
 				</svg>
 
 				{/* Top-left controls: find-a-location search + the 3-stop scale slider. */}
@@ -2691,34 +3003,6 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				{zones.length === 0 && draft.length === 0 ? (
 					<div className="loom-map-hint">Right-click for options, then draw a zone.</div>
 				) : null}
-
-				{/* Sublocation graph — grows straight from the clicked main node (in
-				    the map, screen-anchored so pan/zoom keeps working); the rest of
-				    the map is dimmed. Click the root node again (or Esc) to hide. */}
-				{(() => {
-					const sgZone = subGraph ? zones.find((z) => z.id === subGraph) : null;
-					const sgLoc = sgZone?.location ? plugin.indexer.resolve(sgZone.location, project.loomPath) : null;
-					if (!sgZone || !sgLoc) return null;
-					const nodeWorld = sgZone.node ?? centroid(sgZone.points);
-					const origin = screenOf(nodeWorld.x, nodeWorld.y);
-					return (
-						<SubGraphLayer
-							plugin={plugin}
-							project={project}
-							rootLoc={sgLoc}
-							originX={origin.x}
-							originY={origin.y}
-							baseSize={NODE_SIZE_PRESETS[sgZone.nodeSize]}
-							color={darker(sgZone.color)}
-							starColor="var(--text-on-accent, #fff)"
-							onOpen={(path) => {
-								view.openEntity(path);
-								setSubGraph(null);
-							}}
-							onClose={() => setSubGraph(null)}
-						/>
-					);
-				})()}
 			</div>
 		</ViewShell>
 	);
@@ -3455,101 +3739,233 @@ function MapsPanel({
 	);
 }
 
-/** Sublocation graph — a top-down tree of the clicked main location's
- *  sublocations, drawn IN the map, screen-anchored at the node so pan/zoom keep
- *  working (the rest of the map is dimmed by its own opacity). The container is
- *  click-through (`pointer-events: none`); only the tree nodes react. Root-node
- *  click hides; other nodes double-click to open. */
-function SubGraphLayer({
+/** Maps-specific hierarchy for the focus graph (top → bottom): the region sits
+ *  straight above, then the focus and any other main locations (maps are about
+ *  places), then sublocations, items, quests, characters, factions, events,
+ *  sessions. */
+function focusLayerOf(rec: EntityRecord): number {
+	switch (rec.type) {
+		case 'region':
+			return -1;
+		case 'location':
+			return rec.parentLocation ? 1 : 0;
+		case 'item':
+			return 2;
+		case 'quest':
+			return 3;
+		case 'character':
+			return 4;
+		case 'faction':
+			return 5;
+		case 'event':
+			return 6;
+		case 'session':
+			return 7;
+		default:
+			return 4;
+	}
+}
+const FG_STAGGER = 0.06; // per-layer delay fraction for the web-growth ripple
+const FG_LABEL_PX = 13; // label size in WORLD units (scales with the camera)
+
+/** An orthogonal (elbow) connector between two points, matching the main graph's
+ *  vertical/horizontal edge style: leave `a` vertically, cross at the mid-y, enter
+ *  `b` vertically. Rounded corners; degenerates to a straight segment when aligned. */
+function focusElbow(a: { x: number; y: number }, b: { x: number; y: number }): string {
+	const midY = (a.y + b.y) / 2;
+	return roundedPath([a, { x: a.x, y: midY }, { x: b.x, y: midY }, b], 10);
+}
+
+/** Focus graph — the clicked location's connected entities laid out in a
+ *  maps-specific per-type hierarchy (locations highest). Rendered in WORLD space
+ *  (the parent wraps it in the camera transform), so it pans and zooms with the
+ *  map while the map behind it stays dimmed. On open the nodes grow out of the
+ *  focus location like a web (`focusNeighborhood` gives the records + edges; we do
+ *  our own layered placement + straight-line edges). The group is click-through
+ *  except the nodes: double-click a connected node to open it, click the focus
+ *  node (or Esc) to hide. */
+function FocusGraphLayer({
 	plugin,
 	project,
-	rootLoc,
-	originX,
-	originY,
-	baseSize,
-	color,
-	starColor,
+	focusPath,
+	nodeWorld,
+	version,
+	closing,
 	onOpen,
 	onClose,
+	onClosed,
 }: {
 	plugin: LoomLoomPlugin;
-	project: { root: string; loomPath: string };
-	rootLoc: EntityRecord;
-	originX: number;
-	originY: number;
-	baseSize: number;
-	color: string;
-	starColor: string;
+	project: ProjectDef;
+	focusPath: string;
+	nodeWorld: { x: number; y: number };
+	/** Index version — recompute the neighborhood when the vault changes. */
+	version: number;
+	/** True while the graph should play its reverse (retract) animation. */
+	closing: boolean;
 	onOpen: (path: string) => void;
 	onClose: () => void;
+	/** Called once the closing animation has finished (unmount time). */
+	onClosed: () => void;
 }) {
-	type TNode = { loc: EntityRecord; depth: number; x: number; children: TNode[] };
-	const childrenOf = (loc: EntityRecord): EntityRecord[] =>
-		plugin.indexer
-			.getAll('location', project.root)
-			.filter((l) => l.parentLocation && plugin.indexer.resolve(l.parentLocation, l.path)?.path === loc.path)
-			.sort((a, b) => a.name.localeCompare(b.name));
-	let slot = 0;
-	const build = (loc: EntityRecord, depth: number): TNode => {
-		const kids = childrenOf(loc).map((c) => build(c, depth + 1));
-		const x = kids.length === 0 ? slot++ : (kids[0].x + kids[kids.length - 1].x) / 2;
-		return { loc, depth, x, children: kids };
-	};
-	const root = build(rootLoc, 0);
-	const nodes: TNode[] = [];
-	const edges: [TNode, TNode][] = [];
-	const walk = (n: TNode, parent: TNode | null) => {
-		nodes.push(n);
-		if (parent) edges.push([parent, n]);
-		n.children.forEach((c) => walk(c, n));
-	};
-	walk(root, null);
+	// Web progress: 0→1 on open (nodes grow out), current→0 on close (retract).
+	const [prog, setProg] = useState(0);
+	const progRef = useRef(0);
+	progRef.current = prog;
+	const onClosedRef = useRef(onClosed);
+	onClosedRef.current = onClosed;
+	useEffect(() => {
+		const from = closing ? progRef.current : 0;
+		const to = closing ? 0 : 1;
+		const DUR = closing ? 400 : 650;
+		if (!closing) setProg(0);
+		const start = performance.now();
+		let raf = 0;
+		const step = (now: number) => {
+			const t = Math.min(1, (now - start) / DUR);
+			setProg(from + (to - from) * t);
+			if (t < 1) raf = window.requestAnimationFrame(step);
+			else if (closing) onClosedRef.current();
+		};
+		raf = window.requestAnimationFrame(step);
+		return () => window.cancelAnimationFrame(raf);
+	}, [closing, focusPath, version]);
 
-	const SLOT_W = 110;
-	const LEVEL_H = 100;
-	// Screen coords centered on the clicked node (root at the origin).
-	const px = (n: TNode) => originX + (n.x - root.x) * SLOT_W;
-	const py = (n: TNode) => originY + n.depth * LEVEL_H;
-	const radius = (depth: number) =>
-		depth === 0 ? baseSize : Math.max(MIN_SUB_NODE_SIZE, baseSize * Math.pow(SUB_NODE_SCALE, depth));
+	// Layout is a set of layer-relative OFFSETS from the focus (independent of the
+	// clicked world point, which is applied at render), plus the edge list.
+	const layout = useMemo(() => {
+		const { records, edges } = focusNeighborhood(plugin, focusPath);
+		const focus = records.find((r) => r.path === focusPath);
+		if (!focus) return null;
+		const U = NODE_SIZE_PRESETS.regular;
+		const V_GAP = 6 * U;
+		const H_GAP = 4.4 * U;
+		const STAGGER_Y = 2.1 * U; // checker offset so labels on a row don't collide
+		const rOf = (rec: EntityRecord) => plugin.settings.nodeSizes[rec.type] ?? U;
+		const shortLen = (rec: EntityRecord) => Math.min(22, recordLabel(rec, project).length);
+		const byLayer = new Map<number, EntityRecord[]>();
+		for (const rec of records) {
+			const L = rec.path === focusPath ? 0 : focusLayerOf(rec);
+			(byLayer.get(L) ?? byLayer.set(L, []).get(L)!).push(rec);
+		}
+		type Slot = { ox: number; oy: number; layer: number; r: number; rec: EntityRecord; isFocus: boolean };
+		const slots = new Map<string, Slot>();
+		for (const [L, recs] of byLayer) {
+			// Ordered left→right: layer 0 fans the focus at center; others are a row.
+			let ordered: EntityRecord[];
+			const xOf = new Map<string, number>();
+			if (L === 0) {
+				const others = recs.filter((r) => r.path !== focusPath).sort((a, b) => a.name.localeCompare(b.name));
+				xOf.set(focusPath, 0);
+				others.forEach((rec, j) => {
+					const side = j % 2 === 0 ? 1 : -1;
+					xOf.set(rec.path, side * (Math.floor(j / 2) + 1) * H_GAP);
+				});
+				ordered = [focus, ...others].sort((a, b) => (xOf.get(a.path) ?? 0) - (xOf.get(b.path) ?? 0));
+			} else {
+				ordered = recs.slice().sort((a, b) => a.name.localeCompare(b.name));
+				const m = ordered.length;
+				ordered.forEach((rec, i) => xOf.set(rec.path, (i - (m - 1) / 2) * H_GAP));
+			}
+			// Checker the row only when labels would overlap at this spacing.
+			const maxLabelW = Math.max(0, ...ordered.map((r) => shortLen(r) * FG_LABEL_PX * 0.6));
+			const stagger = ordered.length > 1 && maxLabelW > H_GAP;
+			ordered.forEach((rec, rank) => {
+				const isFocus = rec.path === focusPath;
+				slots.set(rec.path, {
+					ox: xOf.get(rec.path) ?? 0,
+					oy: L * V_GAP + (stagger && !isFocus && rank % 2 === 1 ? STAGGER_Y : 0),
+					layer: L,
+					r: rOf(rec),
+					rec,
+					isFocus,
+				});
+			});
+		}
+		return { slots, edges };
+	}, [plugin, project, focusPath, version]);
+
+	if (!layout) return null;
+	const { slots, edges } = layout;
+
+	const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
+	// Layer distance from the focus (0) drives the ripple; region (−1) and deep
+	// layers reveal after the focus.
+	const layerProg = (layer: number) => {
+		const startAt = Math.abs(layer) * FG_STAGGER;
+		return easeOut(Math.max(0, Math.min(1, (prog - startAt) / (1 - startAt))));
+	};
+	// A node's live (animated) world position + its reveal progress.
+	const posOf = (id: string) => {
+		const s = slots.get(id);
+		if (!s) return null;
+		const np = s.isFocus ? Math.max(prog, layerProg(0)) : layerProg(s.layer);
+		return {
+			x: nodeWorld.x + s.ox * np,
+			y: nodeWorld.y + s.oy * np,
+			np,
+			r: s.r,
+			rec: s.rec,
+			isFocus: s.isFocus,
+		};
+	};
 
 	return (
-		<svg className="loom-map-subgraph">
-			{edges.map(([a, b], i) => (
-				<line key={i} x1={px(a)} y1={py(a)} x2={px(b)} y2={py(b)} className="loom-map-subgraph-edge" />
-			))}
-			{nodes.map((n) => {
-				const r = radius(n.depth);
-				const isRoot = n.depth === 0;
+		<g className="loom-map-focusgraph">
+			{edges.map((edge) => {
+				const a = posOf(edge.a);
+				const b = posOf(edge.b);
+				if (!a || !b) return null;
+				const op = Math.min(a.np, b.np);
+				if (op <= 0.001) return null;
+				return (
+					<path
+						key={edge.a + '|' + edge.b}
+						className="loom-map-focusgraph-edge"
+						d={focusElbow({ x: a.x, y: a.y }, { x: b.x, y: b.y })}
+						opacity={op}
+					/>
+				);
+			})}
+			{[...slots.keys()].map((id) => {
+				const p = posOf(id);
+				if (!p || p.np <= 0.001) return null;
+				const r = p.r * p.np;
+				const label = recordLabel(p.rec, project);
+				const short = label.length > 22 ? label.slice(0, 21).trimEnd() + '…' : label;
 				return (
 					<g
-						key={n.loc.path}
-						className="loom-map-node loom-map-subgraph-node"
-						onClick={() => (isRoot ? onClose() : undefined)}
-						onDoubleClick={() => (isRoot ? undefined : onOpen(n.loc.path))}
+						key={id}
+						className="loom-map-node loom-map-focusgraph-node"
+						opacity={p.np}
+						onClick={() => (p.isFocus ? onClose() : undefined)}
+						onDoubleClick={() => (p.isFocus ? undefined : onOpen(id))}
 					>
-						<circle cx={px(n)} cy={py(n)} r={r} fill={color} className="loom-map-node-dot" />
-						{isRoot ? (
+						{short !== label ? <title>{label}</title> : null}
+						<circle cx={p.x} cy={p.y} r={r} fill={plugin.settings.nodeColors[p.rec.type]} className="loom-map-node-dot" />
+						{p.isFocus ? (
 							<g
-								transform={`translate(${px(n)},${py(n)}) scale(${r / 13}) translate(-12,-12)`}
-								fill={starColor}
+								transform={`translate(${p.x},${p.y}) scale(${r / 13}) translate(-12,-12)`}
+								fill="var(--text-on-accent, #fff)"
 								fillOpacity={0.92}
 							>
 								<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
 							</g>
 						) : null}
-						<text
-							x={px(n)}
-							y={py(n) + r + 14}
-							textAnchor="middle"
-							className="loom-map-node-label"
-							style={{ fontSize: '12px' }}
-						>
-							{clampLabel(n.loc.name)}
-						</text>
+						{p.np > 0.6 ? (
+							<text
+								x={p.x}
+								y={p.y + r + FG_LABEL_PX + 2}
+								textAnchor="middle"
+								className="loom-map-node-label"
+								style={{ fontSize: `${FG_LABEL_PX}px` }}
+							>
+								{short}
+							</text>
+						) : null}
 					</g>
 				);
 			})}
-		</svg>
+		</g>
 	);
 }

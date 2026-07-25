@@ -4112,26 +4112,26 @@ span.loom-row-caret {
 	fill-opacity: 0.92;
 }
 
-/* Sublocation graph (click a main node): drawn in the map, screen-anchored at the
-   node. Click-through container — only the tree nodes react, so pan/zoom keeps
+/* Focus graph (click a main node): the location's connected entities laid out
+   with the main graph's per-type layers, drawn in the map and screen-anchored at
+   the node. Click-through container — only the nodes react, so pan/zoom keeps
    working over the rest of the (dimmed) map. */
-.loom-map-subgraph {
-	position: absolute;
-	inset: 0;
-	z-index: 40;
-	width: 100%;
-	height: 100%;
+/* Focus graph lives in WORLD space (inside the camera <g>), so sizes are world
+   units that scale with zoom. Click-through except the nodes. */
+.loom-map-focusgraph {
 	pointer-events: none;
 }
 
-.loom-map-subgraph-node {
+.loom-map-focusgraph-node {
 	pointer-events: auto;
+	cursor: pointer;
 }
 
-.loom-map-subgraph-edge {
+.loom-map-focusgraph-edge {
 	stroke: var(--text-muted);
 	stroke-width: 2;
 	stroke-opacity: 0.6;
+	fill: none;
 }
 
 .loom-map-hint {
