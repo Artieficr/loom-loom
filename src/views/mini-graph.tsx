@@ -5,7 +5,7 @@ import {
 	useRef,
 	useState,
 } from 'react';
-import { ENTITY_META, ENTITY_TYPES, EntityType } from '../types';
+import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { edgePath } from '../graph/routing';
 import { LoomIndexer, ProjectDef } from '../indexer';
@@ -21,6 +21,86 @@ interface Disp {
 	vx: number;
 	vy: number;
 	dragging: boolean;
+}
+
+/**
+ * The focused neighborhood WITHOUT any layout: the focus record, its direct
+ * connections, and one hop further through connected events, plus the undirected
+ * de-duplicated edges among them. Callers that want their own placement (e.g. the
+ * Maps world-space focus graph) use this instead of `buildFocusLayout`.
+ */
+export function focusNeighborhood(
+	plugin: LoomLoomPlugin,
+	focusId: string
+): { records: EntityRecord[]; edges: { a: string; b: string }[] } {
+	const keep = new Set([focusId]);
+	const direct = plugin.indexer.getConnections(focusId).map((c) => c.record);
+	for (const r of direct) keep.add(r.path);
+	for (const r of direct) {
+		if (r.type !== 'event') continue;
+		for (const c of plugin.indexer.getConnections(r.path)) keep.add(c.record.path);
+	}
+	const records: EntityRecord[] = [];
+	for (const p of keep) {
+		const rec = plugin.indexer.get(p);
+		if (rec) records.push(rec);
+	}
+	const seen = new Set<string>();
+	const edges: { a: string; b: string }[] = [];
+	for (const rec of records) {
+		for (const c of plugin.indexer.getOutgoing(rec.path)) {
+			const b = c.record.path;
+			if (!keep.has(b) || b === rec.path) continue;
+			const key = rec.path < b ? rec.path + '|' + b : b + '|' + rec.path;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			edges.push({ a: rec.path, b });
+		}
+	}
+	return { records, edges };
+}
+
+/**
+ * The focused neighborhood laid out with the main graph's per-type layered
+ * layout: the focus node, its direct connections, and one hop further through
+ * connected events (so a session/location also shows the entities involved in its
+ * events). A thin indexer proxy hides every other record, so columns/rows pack
+ * tight instead of inheriting the full graph's sprawl. Shared by MiniGraph and
+ * the Maps in-canvas focus overlay.
+ */
+export function buildFocusLayout(
+	plugin: LoomLoomPlugin,
+	project: { root: string },
+	focusId: string
+) {
+	const keep = new Set([focusId]);
+	const direct = plugin.indexer.getConnections(focusId).map((c) => c.record);
+	for (const r of direct) keep.add(r.path);
+	for (const r of direct) {
+		if (r.type !== 'event') continue;
+		for (const c of plugin.indexer.getConnections(r.path)) keep.add(c.record.path);
+	}
+	const real = plugin.indexer;
+	const sub = {
+		getAll: (type?: Parameters<LoomIndexer['getAll']>[0], root?: string) =>
+			real.getAll(type, root).filter((r) => keep.has(r.path)),
+		getOutgoing: (path: string) =>
+			real.getOutgoing(path).filter((c) => keep.has(c.record.path)),
+		getConnections: (path: string) =>
+			real.getConnections(path).filter((c) => keep.has(c.record.path)),
+		resolve: (lp: string, sp: string) => real.resolve(lp, sp),
+		get: (p: string) => real.get(p),
+		getProjectByRoot: (r: string) => real.getProjectByRoot(r),
+	} as unknown as LoomIndexer;
+	const full = computeGraphLayout(
+		sub,
+		project.root,
+		plugin.settings.globalLayerOrder,
+		plugin.settings.graphLineGap,
+		new Map(),
+		plugin.settings.graphTrunkGap
+	);
+	return { nodes: full.nodes, edges: full.edges, byId: new Map(full.nodes.map((n) => [n.id, n])) };
 }
 
 /**
@@ -47,42 +127,10 @@ export function MiniGraph({
 	/** Double-click on empty space collapses the section. */
 	onCollapse?: () => void;
 }) {
-	const data = useMemo(() => {
-		// The neighborhood is laid out as if it were the whole project: a thin
-		// indexer proxy hides every other record, so columns/rows pack tight
-		// instead of inheriting the full graph's sprawl.
-		const keep = new Set([focusId]);
-		const direct = plugin.indexer.getConnections(focusId).map((c) => c.record);
-		for (const r of direct) keep.add(r.path);
-		// Reach one hop further through connected events, so a session (or any
-		// focus) also shows the entities involved in its events — they connect to
-		// the event, not the focus, so they'd otherwise be missing.
-		for (const r of direct) {
-			if (r.type !== 'event') continue;
-			for (const c of plugin.indexer.getConnections(r.path)) keep.add(c.record.path);
-		}
-		const real = plugin.indexer;
-		const sub = {
-			getAll: (type?: Parameters<LoomIndexer['getAll']>[0], root?: string) =>
-				real.getAll(type, root).filter((r) => keep.has(r.path)),
-			getOutgoing: (path: string) =>
-				real.getOutgoing(path).filter((c) => keep.has(c.record.path)),
-			getConnections: (path: string) =>
-				real.getConnections(path).filter((c) => keep.has(c.record.path)),
-			resolve: (lp: string, sp: string) => real.resolve(lp, sp),
-			get: (p: string) => real.get(p),
-			getProjectByRoot: (r: string) => real.getProjectByRoot(r),
-		} as unknown as LoomIndexer;
-		const full = computeGraphLayout(
-			sub,
-			project.root,
-			plugin.settings.globalLayerOrder,
-			plugin.settings.graphLineGap,
-			new Map(),
-			plugin.settings.graphTrunkGap
-		);
-		return { nodes: full.nodes, edges: full.edges, byId: new Map(full.nodes.map((n) => [n.id, n])) };
-	}, [plugin, project, focusId, version]);
+	const data = useMemo(
+		() => buildFocusLayout(plugin, project, focusId),
+		[plugin, project, focusId, version]
+	);
 
 	const wrapRef = useRef<HTMLDivElement | null>(null);
 	const [camera, setCamera] = useState({ tx: 0, ty: 0, k: 1 });
