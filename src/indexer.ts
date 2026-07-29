@@ -3,6 +3,7 @@ import {
 	Component,
 	Events,
 	FrontMatterCache,
+	Notice,
 	TAbstractFile,
 	TFile,
 	TFolder,
@@ -167,6 +168,29 @@ export function linkTargetOf(record: EntityRecord): string {
 }
 
 /**
+ * Conflict files a sync client (Dropbox, Syncthing, …) drops straight into the
+ * vault next to the note they clashed on. They carry a full copy of the note's
+ * frontmatter, so indexing them would duplicate every entity — and the managed
+ * file-name migration would then see several notes competing for one target
+ * name. Ignored everywhere: never indexed, never renamed, never stamped.
+ */
+const SYNC_CONFLICT_RE = /conflicted copy|\.sync-conflict-|~syncthing~|\(case[- ]conflict/i;
+
+export function isSyncConflictPath(path: string): boolean {
+	return SYNC_CONFLICT_RE.test(path);
+}
+
+/**
+ * Above this many renames the automatic startup migration stops and asks: a
+ * vault that is already on the managed naming scheme needs zero, so a big
+ * number means the vault is in an unexpected state (a half-finished sync, a
+ * restored backup, conflict copies) and bulk-renaming into it makes it worse.
+ * The user can still run the whole pass from the "Apply managed file names"
+ * command, which skips this cap.
+ */
+const BULK_RENAME_LIMIT = 25;
+
+/**
  * The index cache: entity records built from frontmatter across all projects
  * (any folder holding a .loom file).
  *
@@ -188,10 +212,17 @@ export class LoomIndexer extends Component {
 
 	private rebuilding = false;
 	private rebuildQueued = false;
+	/** The in-flight rebuild (plus anything queued behind it), for `rebuildNow`. */
+	private rebuildChain: Promise<void> = Promise.resolve();
 	private reconciling = false;
 	/** Path -> last time we stamped `loomModified`, so the metadata-change echo
 	 *  from our own write (and rapid edit bursts) don't loop back into a stamp. */
 	private lastStamp = new Map<string, number>();
+	/** Path -> the `loomModified` value the note carried when we last saw it.
+	 *  A change that also moved this value was stamped by whoever wrote it (us,
+	 *  or another machine via sync), so it must not be answered with a stamp of
+	 *  our own — see `stampModified`. */
+	private knownModified = new Map<string, string>();
 
 	constructor(private app: App, private plugin: LoomLoomPlugin) {
 		super();
@@ -201,9 +232,13 @@ export class LoomIndexer extends Component {
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file) => {
 				if (!this.projectForPath(file.path)) return;
+				// Read the stamp we knew *before* re-indexing: whether the change
+				// carried a new one is what decides if it was a local content edit
+				// or an already-stamped write arriving from elsewhere.
+				const prevStamp = this.knownModified.get(file.path);
 				this.indexFile(file);
 				this.bump();
-				void this.stampModified(file);
+				void this.stampModified(file, prevStamp);
 			})
 		);
 		this.registerEvent(
@@ -222,6 +257,7 @@ export class LoomIndexer extends Component {
 					this.rebuild();
 					return;
 				}
+				this.knownModified.delete(file.path);
 				if (this.records.delete(file.path) || this.timelines.delete(file.path)) this.bump();
 			})
 		);
@@ -243,18 +279,33 @@ export class LoomIndexer extends Component {
 	// --- Rebuild -------------------------------------------------------------
 
 	rebuild(): void {
+		void this.rebuildNow();
+	}
+
+	/** `rebuild()` for callers that must wait for the index to be populated — the
+	 *  startup migration reads records and resolves links, so it can't run against
+	 *  a half-built index. Coalesces with an in-flight pass and resolves only once
+	 *  that pass *and* anything queued behind it has finished. */
+	rebuildNow(): Promise<void> {
 		if (this.rebuilding) {
+			// A pass is already running, but it may have started before whatever
+			// prompted this call — queue another and wait for the whole chain.
 			this.rebuildQueued = true;
-			return;
+			return this.rebuildChain;
 		}
 		this.rebuilding = true;
-		void this.doRebuild().finally(() => {
-			this.rebuilding = false;
+		this.rebuildChain = (async () => {
+			try {
+				await this.doRebuild();
+			} finally {
+				this.rebuilding = false;
+			}
 			if (this.rebuildQueued) {
 				this.rebuildQueued = false;
-				this.rebuild();
+				await this.rebuildNow();
 			}
-		});
+		})();
+		return this.rebuildChain;
 	}
 
 	private async doRebuild(): Promise<void> {
@@ -300,10 +351,21 @@ export class LoomIndexer extends Component {
 	 * frontmatter keys to their loom spellings, seeds `loomName` (+ a native
 	 * alias) from the file basename where missing, and renames entity files to
 	 * the managed `<Project> <Type label> <name>` convention (Obsidian updates
-	 * every link). Idempotent — conforming notes are untouched — and automatic:
-	 * it runs on load, no command, since no released vaults predate it.
+	 * every link). Automatic: it runs on load, no command, since no released
+	 * vaults predate it.
+	 *
+	 * **Idempotent means "writes nothing", not "writes the same thing".** Every
+	 * change is decided against the cached frontmatter first and the note is only
+	 * opened for writing when something actually differs, because
+	 * `processFrontMatter` always rewrites the file: touching every note on every
+	 * load makes a synced vault (Dropbox/iCloud/…) re-upload itself at each start,
+	 * and with two machines doing that at once the sync client answers with
+	 * conflicted copies — which are themselves notes, which get migrated, which
+	 * conflict again.
+	 *
+	 * `force` runs the rename half past its safety cap (the manual command).
 	 */
-	async migrateFiles(): Promise<void> {
+	async migrateFiles(force = false): Promise<void> {
 		// Resolve each sublocation's parent name up front (links are stable now,
 		// before any rename moves files around).
 		const parentNameOf = new Map<string, string>();
@@ -321,74 +383,98 @@ export class LoomIndexer extends Component {
 				if (orig && owner) copyNamingOf.set(record.path, { name: orig.name, owner: owner.name });
 			}
 		}
+		// Pass 1 — plan. Decide every write against the cached frontmatter without
+		// touching a single file, so a vault that is already migrated (the normal
+		// case, every single load) comes out of this method having written nothing.
+		const fmWork: { file: TFile; displayName: string; isSession: boolean }[] = [];
+		const renames: { file: TFile; newPath: string }[] = [];
 		for (const record of [...this.records.values()]) {
 			const project = this.getProjectByRoot(record.project);
 			const file = this.app.vault.getFileByPath(record.path);
-			if (!project || !file) continue;
+			if (!project || !file || isSyncConflictPath(file.path)) continue;
 			const isSession = record.type === 'session';
 			// record.name already read loomName-with-basename-fallback, so for an
 			// unmigrated file it is the old display name — exactly what to keep.
 			const displayName = record.name;
-			// This migration write fires a metadata 'changed' echo — guard it so
-			// stampModified doesn't overwrite loomModified with the startup time.
-			this.lastStamp.set(file.path, Date.now());
-			try {
-				await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-					for (const key of Object.values(FM)) {
-						if (key === FM.timelineTypes) continue; // timeline files only
-						const legacyNames = legacyFmKeys(key);
-						if (fmField(fm, key) === undefined) {
-							for (const legacy of legacyNames) {
-								const v = fmField(fm, legacy);
-								if (v !== undefined) {
-									fm[key] = v;
-									break;
-								}
-							}
-						}
-						for (const k of Object.keys(fm)) {
-							const lower = k.toLowerCase();
-							if (k !== key && legacyNames.some((l) => l.toLowerCase() === lower)) delete fm[k];
-						}
-					}
-					if (!isSession) {
-						const cur = fmField(fm, FM.name);
-						if (typeof cur !== 'string' || cur.trim() === '') fm[FM.name] = displayName;
-						const aliases: unknown[] = Array.isArray(fm.aliases) ? (fm.aliases as unknown[]) : [];
-						if (!aliases.includes(displayName)) fm.aliases = [displayName, ...aliases];
-					}
-					// Loom-managed timestamps: seed from the filesystem stats when absent
-					// (capturing the real creation date before cloud-sync overwrites
-					// ctime), and always normalize to the datetime-property format so a
-					// value stamped in another shape (e.g. an ISO string with a Z) renders
-					// in Obsidian's date & time picker. Same instant either way.
-					fm[FM.created] = formatTimestamp(
-						parseTimestamp(fmField(fm, FM.created)) ?? file.stat.ctime
-					);
-					fm[FM.modified] = formatTimestamp(
-						parseTimestamp(fmField(fm, FM.modified)) ?? file.stat.mtime
-					);
-				});
-			} catch (e) {
-				console.error('Loom Loom: frontmatter migration failed for', record.path, e);
-				continue;
+			const cached = this.app.metadataCache.getFileCache(file)?.frontmatter;
+			// Dry run on a copy: the mutator reports whether it changes anything.
+			if (this.applyFmMigration({ ...(cached ?? {}) }, displayName, isSession, file.stat)) {
+				fmWork.push({ file, displayName, isSession });
 			}
 			// Sessions already follow their own managed scheme (from the date).
 			if (isSession) continue;
+			// The managed name of a sublocation embeds its parent's name, and an
+			// item copy's embeds its original and owner. If those links don't
+			// resolve the note isn't conforming — its target name is simply not
+			// known yet (a half-synced vault resolves nothing), and renaming on a
+			// guess only has to be undone once the missing note turns up.
+			if (record.type === 'location' && record.parentLocation !== null && !parentNameOf.has(record.path)) {
+				continue;
+			}
+			if (
+				record.type === 'item' &&
+				record.itemOrigin !== null &&
+				record.itemOwner !== null &&
+				!copyNamingOf.has(record.path)
+			) {
+				continue;
+			}
 			const copyNaming = copyNamingOf.get(record.path);
 			const base = copyNaming
 				? managedEntityFileName(project.name, record.type, copyNaming.name, undefined, copyNaming.owner)
 				: managedEntityFileName(project.name, record.type, displayName, parentNameOf.get(record.path));
 			if (file.basename === base) continue;
 			const parent = file.parent?.path ?? '';
-			let newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
-			for (let i = 2; this.app.vault.getAbstractFileByPath(newPath) !== null; i++) {
-				newPath = normalizePath(parent === '' ? `${base} ${i}.md` : `${parent}/${base} ${i}.md`);
+			const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+			// The managed name is taken by another note. Historically this appended
+			// " 2", " 3", … — which, on a synced vault where the same collision
+			// happens on both machines, manufactures an unbounded pile of numbered
+			// duplicates that then sync into each other. Leave the note alone and
+			// say so instead; the two notes need a human to tell them apart.
+			const clash = this.app.vault.getAbstractFileByPath(newPath);
+			if (clash !== null && clash.path !== file.path) {
+				console.warn(
+					'Loom Loom: skipped renaming',
+					file.path,
+					'— the managed name is already taken by',
+					newPath
+				);
+				continue;
 			}
+			renames.push({ file, newPath });
+		}
+
+		// Pass 2 — apply. The rename cap only guards the automatic run.
+		for (const { file, displayName, isSession } of fmWork) {
+			// This migration write fires a metadata 'changed' echo — guard it so
+			// stampModified doesn't overwrite loomModified with the startup time.
+			this.lastStamp.set(file.path, Date.now());
 			try {
-				await this.app.fileManager.renameFile(file, newPath);
+				await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+					this.applyFmMigration(fm, displayName, isSession, file.stat);
+				});
 			} catch (e) {
-				console.error('Loom Loom: file rename migration failed for', record.path, e);
+				console.error('Loom Loom: frontmatter migration failed for', file.path, e);
+			}
+		}
+		if (renames.length > BULK_RENAME_LIMIT && !force) {
+			console.warn(`Loom Loom: ${renames.length} notes are off the managed naming scheme — not renaming.`);
+			new Notice(
+				`Loom Loom: ${renames.length} notes don't match the managed file names. ` +
+					'This is unusual — if the vault is mid-sync, wait for it to finish. ' +
+					'Run the "Apply managed file names" command to rename them.',
+				15000
+			);
+		} else {
+			for (const { file, newPath } of renames) {
+				// Re-check: an earlier rename in this same loop may have taken the name.
+				const clash = this.app.vault.getAbstractFileByPath(newPath);
+				if (clash !== null && clash.path !== file.path) continue;
+				try {
+					await this.app.fileManager.renameFile(file, newPath);
+				} catch (e) {
+					console.error('Loom Loom: file rename migration failed for', file.path, e);
+				}
 			}
 		}
 		// Timeline definition files: same key rewrite (name/types/tags are
@@ -396,26 +482,109 @@ export class LoomIndexer extends Component {
 		for (const def of [...this.timelines.values()]) {
 			const file = this.app.vault.getFileByPath(def.path);
 			if (!file) continue;
-			try {
-				await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-					for (const [legacy, key] of [
-						['name', FM.name],
-						['types', FM.timelineTypes],
-						['tags', FM.tags],
-					] as const) {
-						if (fmField(fm, key) === undefined && fmField(fm, legacy) !== undefined) {
-							fm[key] = fmField(fm, legacy);
-						}
-						for (const k of Object.keys(fm)) {
-							if (k !== key && k.toLowerCase() === legacy) delete fm[k];
+			const migrate = (fm: Record<string, unknown>): boolean => {
+				let changed = false;
+				for (const [legacy, key] of [
+					['name', FM.name],
+					['types', FM.timelineTypes],
+					['tags', FM.tags],
+				] as const) {
+					if (fmField(fm, key) === undefined && fmField(fm, legacy) !== undefined) {
+						fm[key] = fmField(fm, legacy);
+						changed = true;
+					}
+					for (const k of Object.keys(fm)) {
+						if (k !== key && k.toLowerCase() === legacy) {
+							delete fm[k];
+							changed = true;
 						}
 					}
+				}
+				return changed;
+			};
+			// Same dry run first: a timeline file with nothing to migrate must not
+			// be rewritten, or every load re-uploads it to the sync provider.
+			const cached = this.app.metadataCache.getFileCache(file)?.frontmatter;
+			if (!migrate({ ...(cached ?? {}) })) continue;
+			try {
+				await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+					migrate(fm);
 				});
 			} catch (e) {
 				console.error('Loom Loom: timeline migration failed for', def.path, e);
 			}
 		}
 		await this.reconcileItemCopies();
+	}
+
+	/**
+	 * The frontmatter rewrite the startup migration performs, as a mutator that
+	 * reports whether it actually changed anything. Run it on a shallow copy of
+	 * the cached frontmatter to find out whether a note needs a write at all
+	 * (see `migrateFiles` on why writing unconditionally is destructive on a
+	 * synced vault), then for real inside `processFrontMatter`.
+	 */
+	private applyFmMigration(
+		fm: Record<string, unknown>,
+		displayName: string,
+		isSession: boolean,
+		stat: { ctime: number; mtime: number }
+	): boolean {
+		let changed = false;
+		for (const key of Object.values(FM)) {
+			if (key === FM.timelineTypes) continue; // timeline files only
+			const legacyNames = legacyFmKeys(key);
+			if (fmField(fm, key) === undefined) {
+				for (const legacy of legacyNames) {
+					const v = fmField(fm, legacy);
+					if (v !== undefined) {
+						fm[key] = v;
+						changed = true;
+						break;
+					}
+				}
+			}
+			for (const k of Object.keys(fm)) {
+				const lower = k.toLowerCase();
+				if (k !== key && legacyNames.some((l) => l.toLowerCase() === lower)) {
+					delete fm[k];
+					changed = true;
+				}
+			}
+		}
+		if (!isSession) {
+			const cur = fmField(fm, FM.name);
+			if (typeof cur !== 'string' || cur.trim() === '') {
+				fm[FM.name] = displayName;
+				changed = true;
+			}
+			const aliases: unknown[] = Array.isArray(fm.aliases) ? (fm.aliases as unknown[]) : [];
+			if (!aliases.includes(displayName)) {
+				fm.aliases = [displayName, ...aliases];
+				changed = true;
+			}
+		}
+		// Loom-managed timestamps: seed from the filesystem stats when absent
+		// (capturing the real creation date before cloud-sync overwrites ctime),
+		// and normalize to the datetime-property format so a value stamped in
+		// another shape (e.g. an ISO string with a Z) renders in Obsidian's date &
+		// time picker. Only write when the note doesn't already say the same
+		// thing — a value the YAML parser handed back as a Date is already stored
+		// unquoted, exactly as we'd write it, so rewriting it changes nothing but
+		// the file's mtime (and on a synced vault, that is a fresh upload of every
+		// note on every load).
+		const stamp = (key: string, fallback: number) => {
+			const cur = fmField(fm, key);
+			const parsed = parseTimestamp(cur);
+			if (parsed !== null && typeof cur !== 'string') return; // stored as a Date — canonical enough
+			const want = formatTimestamp(parsed ?? fallback);
+			if (cur === want) return;
+			fm[key] = want;
+			changed = true;
+		};
+		stamp(FM.created, stat.ctime);
+		stamp(FM.modified, stat.mtime);
+		return changed;
 	}
 
 	/**
@@ -468,15 +637,14 @@ export class LoomIndexer extends Component {
 				const base = managedEntityFileName(project.name, 'item', origin.name, undefined, owner.name);
 				if (file.basename !== base) {
 					const parent = file.parent?.path ?? '';
-					let newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
-					for (
-						let i = 2;
-						this.app.vault.getAbstractFileByPath(newPath) !== null && newPath !== file.path;
-						i++
-					) {
-						newPath = normalizePath(parent === '' ? `${base} ${i}.md` : `${parent}/${base} ${i}.md`);
-					}
-					if (newPath !== file.path) {
+					const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+					// Never invent " 2", " 3", … on a clash: on a synced vault the same
+					// clash occurs on every machine, and the numbered copies then sync
+					// into each other without bound. Leave the file where it is.
+					const clash = this.app.vault.getAbstractFileByPath(newPath);
+					if (clash !== null && clash.path !== file.path) {
+						console.warn('Loom Loom: item copy', file.path, 'cannot take its managed name', newPath);
+					} else if (newPath !== file.path) {
 						try {
 							await this.app.fileManager.renameFile(file, newPath);
 						} catch (e) {
@@ -520,6 +688,15 @@ export class LoomIndexer extends Component {
 	private indexFile(file: TFile): void {
 		const project = this.projectForPath(file.path);
 		if (!project) return;
+		if (isSyncConflictPath(file.path)) {
+			// A sync client's conflict copy: a byte-for-byte duplicate entity.
+			// Indexing it would double the entity everywhere and hand the
+			// migration two notes fighting over one managed file name.
+			this.records.delete(file.path);
+			this.timelines.delete(file.path);
+			this.knownModified.delete(file.path);
+			return;
+		}
 		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
 		if (this.isTimelineDefPath(file.path, project)) {
 			this.records.delete(file.path);
@@ -529,8 +706,14 @@ export class LoomIndexer extends Component {
 		const record = fm ? this.parseEntity(file, project, fm) : null;
 		if (record) {
 			this.records.set(file.path, record);
+			// Compare as an instant, not as raw YAML: the parser can hand the same
+			// stamp back as a string on one machine and a Date on another, and a
+			// spurious difference there would re-open the stamping loop.
+			const stamp = fm ? parseTimestamp(fmLoom(fm, FM.modified)) : null;
+			this.knownModified.set(file.path, stamp === null ? '' : String(stamp));
 		} else {
 			this.records.delete(file.path);
+			this.knownModified.delete(file.path);
 		}
 	}
 
@@ -702,13 +885,26 @@ export class LoomIndexer extends Component {
 	 * Stamps `loomModified` on a loom entity note whenever its content changes.
 	 * Every edit — plugin write or a manual markdown edit — flows through the
 	 * `metadataCache.on('changed')` handler, so this is the single place the
-	 * modification time is maintained. The write itself re-fires `changed`; a
-	 * short per-path guard swallows that echo (and coalesces rapid edit bursts)
-	 * so it never loops. Only stamps indexed entity notes, never .loom/timeline
-	 * files. Absence of `loomModified` still falls back to the filesystem mtime.
+	 * modification time is maintained. Only stamps indexed entity notes, never
+	 * .loom/timeline files. Absence of `loomModified` still falls back to the
+	 * filesystem mtime.
+	 *
+	 * **Never answer a stamp with a stamp.** If the change that triggered this
+	 * already moved `loomModified` (`prevStamp` differs from what the note now
+	 * carries) it was written by us or by another machine that stamped it before
+	 * syncing. Re-stamping it would write the file again, which syncs back, which
+	 * fires `changed` over there, which stamps again — two vaults on one Dropbox
+	 * folder ping-pong writes forever and the sync client turns every collision
+	 * into a conflicted copy. Comparing the stamp itself (rather than trusting a
+	 * timer) breaks that by construction: a stamped write is never re-stamped, on
+	 * any machine, in any session. A brand-new path (`prevStamp === undefined`)
+	 * is skipped too — notes are born with both timestamps, so a first sighting
+	 * is a note arriving from sync, not an edit.
 	 */
-	private async stampModified(file: TFile): Promise<void> {
+	private async stampModified(file: TFile, prevStamp: string | undefined): Promise<void> {
 		if (!this.records.has(file.path)) return;
+		if (prevStamp === undefined) return;
+		if ((this.knownModified.get(file.path) ?? '') !== prevStamp) return;
 		const now = Date.now();
 		if (now - (this.lastStamp.get(file.path) ?? 0) < 2000) return;
 		this.lastStamp.set(file.path, now);

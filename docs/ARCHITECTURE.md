@@ -179,6 +179,34 @@ list entries (`session`/`text`/`involved`, `type`/`target`, `character`/`role`) 
 unprefixed — they only exist inside a loom-prefixed parent. `aliases` is
 deliberately Obsidian's native key.
 
+## Playing nicely with file sync (Dropbox, iCloud, Obsidian Sync…)
+
+A vault living in a synced folder — often open on two machines at once — turns any
+write the plugin makes on its own initiative into traffic, and any write it makes
+*in response to* a change into a feedback loop. Three rules keep that from running
+away, all of them in `src/indexer.ts`:
+
+1. **Idempotent means "writes nothing".** `processFrontMatter` rewrites the file
+   unconditionally, so `migrateFiles` decides every change against the *cached*
+   frontmatter first (`applyFmMigration` on a copy reports whether it would change
+   anything) and only opens notes that genuinely need it. Rewriting every note on
+   every load re-uploads the whole vault at each start; two machines doing that at
+   once collide, and the sync client answers with conflict copies — which are
+   themselves notes, which get migrated, which conflict again.
+2. **Never answer a stamp with a stamp.** `stampModified` skips a change that
+   already moved `loomModified` (comparing against `knownModified`, the value the
+   note carried when last indexed). A stamped write arriving from the other machine
+   is not re-stamped, so the write ping-pong cannot start — this is structural, not
+   a timer. Conflict-copy files (`isSyncConflictPath`) are never indexed at all.
+3. **Never rename on a guess.** The managed-name migration skips a note whose target
+   name it can't fully determine (a sublocation whose parent link doesn't resolve
+   yet), and on a name collision it *skips* rather than appending " 2", " 3", … —
+   numbered fallbacks multiply across machines without bound. Startup waits for the
+   metadata cache and for the vault to stop changing (`waitForVaultSettled` in
+   `main.ts`) before migrating, and an automatic run that wants more than
+   `BULK_RENAME_LIMIT` renames stops and points at the "Apply managed file names"
+   command instead.
+
 ## Calendar & date formats (src/calendar.ts)
 
 `LoomDate` = `{ raw, sortKey, year, month, day, calendar }`. The sort key packs

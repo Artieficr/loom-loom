@@ -85,6 +85,7 @@ const CLOSE_SNAP = 12; // screen px to the first vertex that closes a draft
 const VERTEX_R = 5; // handle radius (screen px)
 const CLICK_SLOP = 4; // px of movement below which a node press counts as a click
 const NODE_DBL_MS = 220; // short double-click window on a node (open its page)
+const DELETE_SCRUB_MS = 3000; // grace period before a deleted note's map pins are cleared
 const DEFAULT_ROAD_WIDTH = 280; // world units — wide enough that location nodes fit inside
 const ROAD_WIDTH_MIN = 8;
 const ROAD_WIDTH_MAX = 1000;
@@ -930,9 +931,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			});
 			return changed ? out : zs;
 		};
-		const ref = plugin.app.vault.on('delete', (file) => {
-			if (!(file instanceof TFile) || file.extension !== 'md') return;
-			const name = file.basename;
+		const scrubDeleted = (name: string) => {
+			// It came back (or never really left) — leave the maps alone.
+			if (plugin.app.metadataCache.getFirstLinkpathDest(name, '') !== null) return;
 			const prunedActive = scrub(zonesRef.current, name);
 			const prunedPages = pagesRef.current.map((p) =>
 				p.id === activeIdRef.current ? p : { ...p, zones: scrub(p.zones, name) }
@@ -945,8 +946,22 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			}
 			if (prunedActive !== zonesRef.current) setZones(prunedActive);
 			saveLater(prunedActive);
+		};
+		// A sync client (Dropbox, iCloud, …) delivers a moved or re-created note as
+		// a delete followed by a create, and drops files briefly while it settles.
+		// Scrubbing on the delete alone would silently strip zone associations from
+		// notes that are about to come straight back — and write the maps file to
+		// sync that loss out to every machine. Confirm the note is really gone.
+		const pending: number[] = [];
+		const ref = plugin.app.vault.on('delete', (file) => {
+			if (!(file instanceof TFile) || file.extension !== 'md') return;
+			const name = file.basename;
+			pending.push(window.setTimeout(() => scrubDeleted(name), DELETE_SCRUB_MS));
 		});
-		return () => plugin.app.vault.offref(ref);
+		return () => {
+			plugin.app.vault.offref(ref);
+			pending.forEach((t) => window.clearTimeout(t));
+		};
 	}, [plugin, saveLater]);
 
 	const commit = useCallback(
