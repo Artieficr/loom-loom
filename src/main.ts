@@ -64,6 +64,14 @@ export default class LoomLoomPlugin extends Plugin {
 			callback: () => new SetupProjectModal(this).open(),
 		});
 		this.addCommand({
+			id: 'apply-managed-file-names',
+			name: 'Apply managed file names',
+			callback: () => {
+				new Notice('Loom Loom: applying managed file names…');
+				void this.indexer.rebuildNow().then(() => this.indexer.migrateFiles(true));
+			},
+		});
+		this.addCommand({
 			id: 'create-entity',
 			name: 'Create entity in current project',
 			callback: () =>
@@ -128,12 +136,68 @@ export default class LoomLoomPlugin extends Plugin {
 
 		this.app.workspace.onLayoutReady(() => {
 			this.registerTimestampPropertyTypes();
-			void this.migrateLegacyProject().then(() => {
-				this.indexer.rebuild();
-				// Frontmatter-key + managed-file-name migration of existing notes;
-				// idempotent, so running it on every load is safe and cheap.
-				void this.indexer.migrateFiles();
+			void this.migrateLegacyProject().then(async () => {
+				await this.indexer.rebuildNow();
+				// Frontmatter-key + managed-file-name migration of existing notes.
+				// It reads records and resolves links, so it needs a built index and
+				// a vault that has stopped moving under it — see `waitForVaultSettled`.
+				await this.waitForVaultSettled();
+				await this.indexer.rebuildNow();
+				await this.indexer.migrateFiles();
 			});
+		});
+	}
+
+	/**
+	 * Resolves once the vault has stopped changing on its own: the metadata cache
+	 * has finished its initial pass and no file has been created/modified/renamed
+	 * /deleted for a few seconds.
+	 *
+	 * The startup migration renames notes and rewrites frontmatter. Running that
+	 * against a vault a sync client is still filling in means acting on notes
+	 * whose links don't resolve yet (so their managed name comes out wrong) and on
+	 * transient duplicates — the renames then sync back out, the other machine
+	 * does the same, and the two vaults generate conflict copies faster than
+	 * either can index them. Waiting costs nothing: the migration is idempotent
+	 * and there is always the next load.
+	 */
+	private waitForVaultSettled(quietMs = 5000, maxWaitMs = 10 * 60 * 1000): Promise<void> {
+		return new Promise((resolve) => {
+			const started = Date.now();
+			let lastEvent = started;
+			let cacheResolved = false;
+			let done = false;
+			const bump = () => {
+				lastEvent = Date.now();
+			};
+			const vaultRefs = [
+				this.app.vault.on('create', bump),
+				this.app.vault.on('modify', bump),
+				this.app.vault.on('delete', bump),
+				this.app.vault.on('rename', bump),
+			];
+			// Fires when the cache finishes resolving links. In a vault that was
+			// already indexed it may have fired before we got here, so it is a
+			// hint, not a requirement — the elapsed-time floor below covers that.
+			const cacheRef = this.app.metadataCache.on('resolved', () => {
+				cacheResolved = true;
+			});
+			[...vaultRefs, cacheRef].forEach((ref) => this.registerEvent(ref));
+			const finish = () => {
+				if (done) return;
+				done = true;
+				window.clearInterval(timer);
+				vaultRefs.forEach((ref) => this.app.vault.offref(ref));
+				this.app.metadataCache.offref(cacheRef);
+				resolve();
+			};
+			const timer = window.setInterval(() => {
+				const now = Date.now();
+				const quiet = now - lastEvent >= quietMs;
+				const settled = cacheResolved || now - started >= 15000;
+				if ((quiet && settled) || now - started >= maxWaitMs) finish();
+			}, 1000);
+			this.registerInterval(timer);
 		});
 	}
 

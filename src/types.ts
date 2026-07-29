@@ -152,6 +152,11 @@ export function legacyFmKeys(key: string): string[] {
  *  to epoch milliseconds, or null when absent/unparseable. */
 export function parseTimestamp(value: unknown): number | null {
 	if (typeof value === 'number' && Number.isFinite(value)) return value;
+	// An unquoted `2026-07-29T10:00:00` can come back from a YAML parser as a
+	// Date rather than a string. Reading that as "no timestamp" would make the
+	// startup migration re-seed the field from the file stats on every load —
+	// losing the real creation date and rewriting the note each time.
+	if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.getTime();
 	if (typeof value === 'string' && value.trim() !== '') {
 		const ms = Date.parse(value);
 		if (!Number.isNaN(ms)) return ms;
