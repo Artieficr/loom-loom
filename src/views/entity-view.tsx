@@ -61,6 +61,9 @@ import { fmLoomValue, setLoomKey } from '../fm';
 import { MiniGraph } from './mini-graph';
 import { findMapsFile } from './map-view';
 import { useIndexVersion } from './hooks';
+import { editScript, pushChapterTitles, sceneScriptText, useScriptText } from './script-view';
+import { moveSceneToSection, replaceSceneBody, removeScene } from '../fountain';
+import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
 import type LoomLoomPlugin from '../main';
 
 
@@ -231,13 +234,19 @@ function EntityPage({ view }: { view: EntityView }) {
 	const file = view.file;
 	const record = file ? plugin.indexer.get(file.path) : undefined;
 	const project = record ? plugin.indexer.getProjectByRoot(record.project) ?? null : null;
+	// The project's script, for a Scene page's read-only excerpt. Read here (a
+	// hook, so it can't sit behind the early returns below) and unused by every
+	// other entity type.
+	const scriptText = useScriptText(plugin, project);
+	/** Draft of the scene's script body (everything under its heading). */
+	const [sceneBody, setSceneBody] = useState<string | null>(null);
 	const writeFm = useFrontmatterWriter(plugin, file);
 
 	/** Label a record is searched/shown by in free-text draft inputs: the
 	 *  display name — for sessions, their formatted date (their file name is
 	 *  managed and never user-facing). */
 	const draftLabel = (r: EntityRecord) =>
-		r.type === 'session'
+		roleOf(r.type) === 'anchor'
 			? recordLabel(r, plugin.indexer.getProjectByRoot(r.project) ?? null)
 			: r.name;
 
@@ -247,6 +256,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [description, setDescription] = useState(record?.description ?? '');
 	const [reward, setReward] = useState(record?.reward ?? '');
 	const [date, setDate] = useState(record?.date?.raw ?? '');
+	/** Chapters: the title emitted into the exported script. */
+	const [displayTitle, setDisplayTitle] = useState(record?.displayTitle ?? '');
 	const [relationships, setRelationships] = useState<RelationshipDraft[]>(
 		record?.relationships.map((r) => {
 			const target = plugin.indexer.resolve(r.linkpath, record.path);
@@ -461,7 +472,8 @@ function EntityPage({ view }: { view: EntityView }) {
 						: entered;
 					insert(created.basename === label ? label : `${created.basename}|${label}`);
 				},
-			}).open()
+			}).open(),
+			proj
 		).open();
 	};
 
@@ -474,23 +486,50 @@ function EntityPage({ view }: { view: EntityView }) {
 		);
 	}
 
-	const isSession = record.type === 'session';
+	// The page shell is role-based: `isSession` means "this is the project's
+	// chronological anchor" (a Session, or a Chapter in a writer project), and
+	// the parts that really are session-only (dates, attendance) gate on the
+	// kind's features instead.
+	const anchorType = projectRoleType(project?.config, 'anchor');
+	const beatType = projectRoleType(project?.config, 'beat');
+	const anchorLabel = ENTITY_META[anchorType].label.toLowerCase();
+	const beatLabel = ENTITY_META[beatType].label.toLowerCase();
+	const kindFeatures = features(project?.config);
+	/** Writer projects: the writing lives in the script, not in note fields. */
+	const scriptMode = kindFeatures.script;
+	/** Named by the script rather than here — see the Name field. */
+	const scriptNamed =
+		scriptMode && (record.type === 'chapter' ? record.chapterId !== '' : record.sceneId !== '');
+	const sceneChapterRecord =
+		record.sceneChapter !== '' ? plugin.indexer.resolve(record.sceneChapter, record.path) : null;
+	const sceneExcerpt = sceneScriptText(scriptText, record.sceneId);
+	// The heading line is the script's, not the note's — only what follows it is
+	// editable here, so the title and its hidden id can't be typed over.
+	const sceneBodyOf = (excerpt: string) => excerpt.split('\n').slice(1).join('\n').trim();
+	const sceneDraft = sceneBody ?? (sceneExcerpt === null ? '' : sceneBodyOf(sceneExcerpt));
+	/** Chapter pages: the scenes pointing at this chapter, in script order. */
+	const chapterScenes = plugin.indexer
+		.getAll('scene', record.project)
+		.filter((sc) => sc.sceneChapter !== '' && plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === record.path)
+		.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+	const isSession = roleOf(record.type) === 'anchor';
+	const isBeat = roleOf(record.type) === 'beat';
 	const vocab = ENTITY_TAGS[record.type];
 	const allTags = [...new Set([...vocab, ...record.loomTags])];
-	const sessions = project ? plugin.indexer.getAll('session', project.root) : [];
+	const sessions = project ? plugin.indexer.getAll(anchorType, project.root) : [];
 	const targetRecords = project ? plugin.indexer.getAll(undefined, project.root) : [];
 
-	// This session's chronological number: its 1-based position among all the
-	// project's sessions ordered by date. Computed live (never stored), so it
-	// self-corrects when a session is deleted or its date is edited. Ties on the
-	// same date fall back to creation time, then path, for a stable order.
+	// This anchor's chronological number: its 1-based position among all the
+	// project's anchors — sessions ordered by date, chapters by their manual
+	// sequence. Computed live (never stored), so it self-corrects when one is
+	// deleted or reordered. Ties fall back to creation time, then path.
+	const anchorKey = (r: EntityRecord) =>
+		kindFeatures.anchorOrder === 'sequence' ? r.seq ?? r.created : r.date?.sortKey ?? 0;
 	const sessionNumber = isSession
 		? [...sessions]
 				.sort(
 					(a, b) =>
-						(a.date?.sortKey ?? 0) - (b.date?.sortKey ?? 0) ||
-						a.created - b.created ||
-						a.path.localeCompare(b.path)
+						anchorKey(a) - anchorKey(b) || a.created - b.created || a.path.localeCompare(b.path)
 				)
 				.findIndex((s) => s.path === record.path) + 1
 		: 0;
@@ -581,7 +620,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		writeFm((fm) => {
 			setLoomKey(fm, FM.date, value);
 		});
-		if (isSession && project && value !== '') {
+		if (record.type === 'session' && project && value !== '') {
 			const base = sessionFileName(project, value);
 			const parent = file.parent?.path ?? '';
 			const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
@@ -589,6 +628,18 @@ function EntityPage({ view }: { view: EntityView }) {
 				await plugin.app.fileManager.renameFile(file, newPath);
 			}
 		}
+	};
+
+	const commitDisplayTitle = (raw: string = displayTitle) => {
+		const value = raw.trim();
+		if (value === record.displayTitle) return;
+		writeFm((fm) => {
+			setLoomKey(fm, FM.displayTitle, value);
+		});
+		// A section never exports, so the title has to reach the script as its
+		// own centered-bold line — otherwise editing this field changed nothing
+		// anyone would ever see in the output.
+		if (project) void pushChapterTitles(plugin, project);
 	};
 
 	/** Resolves a draft value — display name or link target — to its record. */
@@ -746,7 +797,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				.filter((c) => {
 					if (c.alive || !c.deathSession || !record.date) return true;
 					const death = plugin.indexer.resolve(c.deathSession, c.path);
-					if (!death || death.type !== 'session' || !death.date) return true;
+					if (!death || roleOf(death.type) !== 'anchor' || !death.date) return true;
 					return record.date.sortKey <= death.date.sortKey;
 				})
 				.sort((a, b) => a.name.localeCompare(b.name))
@@ -1198,7 +1249,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		record.type === 'quest';
 	const pageEventEntries: LocNoteEntry[] = showsEvents
 		? plugin.indexer
-				.getAll('event', record.project)
+				.getAll(beatType, record.project)
 				.flatMap((owner) =>
 					owner.sessionNotes
 						.map((n, idx) => ({ owner, idx, session: n.session, text: n.text, seq: n.seq, involved: n.involved, group: n.group, places: n.places }))
@@ -1228,7 +1279,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			const map = new Map<string, { session: EntityRecord | null; entries: LocNoteEntry[] }>();
 			for (const e of pageEventEntries) {
 				const ses = e.session !== null ? plugin.indexer.resolve(e.session, e.owner.path) : null;
-				const session = ses?.type === 'session' ? ses : null;
+				const session = ses && roleOf(ses.type) === 'anchor' ? ses : null;
 				const key = session?.path ?? 'none';
 				if (!map.has(key)) map.set(key, { session, entries: [] });
 				map.get(key)?.entries.push(e);
@@ -1739,7 +1790,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		(isSession || showsEvents) && project
 			? plugin.indexer
 					.getAll(undefined, project.root)
-					.filter((r) => r.type !== 'session' && r.type !== 'event')
+					.filter((r) => roleOf(r.type) === null)
 					.sort((a, b) => a.name.localeCompare(b.name))
 			: [];
 	/** The note's involved entities, resolved and grouped by type then name. */
@@ -1786,7 +1837,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				.getAll(undefined, project.root)
 				// Locations can be involved (a place discussed/featured in the event)
 				// as well as a `places` entry (where it happened) — both are allowed.
-				.filter((r) => r.type !== 'session' && r.type !== 'event' && r.path !== record.path)
+				.filter((r) => roleOf(r.type) === null && r.path !== record.path)
 				.sort((a, b) => a.name.localeCompare(b.name))
 		: [];
 	/** The current party (alive + active PCs, minus this page's own entity) —
@@ -1865,7 +1916,10 @@ function EntityPage({ view }: { view: EntityView }) {
 		.sort((a, b) => (a.quest.seq ?? a.quest.created) - (b.quest.seq ?? b.quest.created));
 
 	// PC life state: unticking Alive reveals the death-session picker.
-	const isPc = record.type === 'character' && record.loomTags.includes(PC_TAG);
+	// Gated on the kind: a writer project's cast has no party to be away from,
+	// and a character's death is a scene rather than a flag.
+	const isPc =
+		record.type === 'character' && record.loomTags.includes(PC_TAG) && kindFeatures.pcLifecycle;
 	const deathSession =
 		record.deathSession !== null ? plugin.indexer.resolve(record.deathSession, record.path) : null;
 	const clearDeathKey = (fm: Record<string, unknown>) => {
@@ -2026,7 +2080,8 @@ function EntityPage({ view }: { view: EntityView }) {
 													);
 												});
 											},
-										}).open()
+										}).open(),
+										project
 									).open(),
 							}
 						: undefined
@@ -2075,7 +2130,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		// Quests and events carry a per-note location in the note's own `places`
 		// (picked right of Involve). Legacy event-level `location` relationships
 		// are still shown (and removable) so older notes don't lose their place.
-		const hasNoteLocation = record.type === 'quest' || record.type === 'event';
+		const hasNoteLocation = record.type === 'quest' || isBeat;
 		const noteLocs: { key: string; target: EntityRecord | null; remove: () => void }[] = hasNoteLocation
 			? [
 					...note.places
@@ -2114,7 +2169,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			<div key={i} className="loom-note-row" onBlur={() => commitSessionNotes(sessionNotes)}>
 				<div className="loom-note-head">
 				<div className="loom-note-session">
-					{picked && picked.type === 'session' ? (
+					{picked && roleOf(picked.type) === 'anchor' ? (
 						<div className="loom-tag-row">
 							<EntityChip
 								plugin={plugin}
@@ -2137,7 +2192,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									? {
 											label: '+ New session…',
 											onPick: () =>
-												new CreateEntityModal(plugin, 'session', project, {
+												new CreateEntityModal(plugin, anchorType, project, {
 													onCreated: (created) => setNote({ session: created.basename }, true),
 												}).open(),
 										}
@@ -2186,12 +2241,13 @@ function EntityPage({ view }: { view: EntityView }) {
 													new CreateEntityModal(plugin, type, project, {
 														// A quest involved via a session-pinned note defaults its
 														// "Received in session" to that session.
-														...(picked && picked.type === 'session'
+														...(picked && roleOf(picked.type) === 'anchor'
 															? { receivedSession: picked }
 															: {}),
 														onCreated: (created) =>
 															setNote({ involved: [...note.involved, created.basename] }, true),
-													}).open()
+													}).open(),
+													project
 												).open(),
 										}
 									: undefined
@@ -2211,7 +2267,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										.setChecked(current === null)
 										.onClick(() => setHubFilter({ ...hubFilter, [fkey]: null }))
 								);
-								for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
+								for (const t of projectTypes(project?.config).filter((t) => roleOf(t) === null)) {
 									menu.addItem((item) =>
 										item
 											.setTitle(ENTITY_META[t].plural)
@@ -2602,12 +2658,13 @@ function EntityPage({ view }: { view: EntityView }) {
 													: null;
 												new EntityTypeSuggestModal(plugin, (type) =>
 													new CreateEntityModal(plugin, type, project, {
-														...(entrySession && entrySession.type === 'session'
+														...(entrySession && roleOf(entrySession.type) === 'anchor'
 															? { receivedSession: entrySession }
 															: {}),
 														onCreated: (created) =>
 															writeEntryInvolved(en, (list) => [...list, `[[${created.basename}]]`]),
-													}).open()
+													}).open(),
+													project
 												).open();
 											},
 										}
@@ -2627,7 +2684,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										.setChecked(current === null)
 										.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: null }))
 								);
-								for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
+								for (const t of projectTypes(project?.config).filter((t) => roleOf(t) === null)) {
 									menu.addItem((item) =>
 										item
 											.setTitle(ENTITY_META[t].plural)
@@ -2774,12 +2831,12 @@ function EntityPage({ view }: { view: EntityView }) {
 	const eventsSection =
 		showsEvents && project ? (
 			<div className="loom-field loom-field-sep">
-				<span className="loom-field-label">Events</span>
+				<span className="loom-field-label">{ENTITY_META[beatType].plural}</span>
 				<div className="loom-hub-add-row">
 					<SearchableSelect
-						placeholder="Add an event…"
+						placeholder={`Add ${/^[aeiou]/.test(beatLabel) ? 'an' : 'a'} ${beatLabel}…`}
 						options={plugin.indexer
-							.getAll('event', record.project)
+							.getAll(beatType, record.project)
 							.filter((ev) => !pageEventEntries.some((e) => e.owner.path === ev.path))
 							.sort((a, b) => a.name.localeCompare(b.name))
 							.map((ev) => ({ value: linkTargetOf(ev), label: ev.name }))}
@@ -2788,9 +2845,9 @@ function EntityPage({ view }: { view: EntityView }) {
 							if (ev) addExistingEventToPage(ev);
 						}}
 						action={{
-							label: '+ Create new event',
+							label: `+ Create new ${beatLabel}`,
 							onPick: () =>
-								new CreateEntityModal(plugin, 'event', project, {
+								new CreateEntityModal(plugin, beatType, project, {
 									...(isLocation
 										? { defaultPlace: linkTargetOf(record) }
 										: { defaultInvolved: [linkTargetOf(record)] }),
@@ -2947,7 +3004,12 @@ function EntityPage({ view }: { view: EntityView }) {
 						new ConfirmModal(
 							plugin.app,
 							`Delete "${recordLabel(record, project)}"?`,
-							'The note is moved to the trash.',
+							// A scene IS its stretch of the script — deleting the note
+							// while leaving the writing behind would just resurrect the
+							// note on the next parse, so the two go together.
+							record.sceneId !== '' && scriptMode
+								? 'The note is moved to the trash, and this scene is removed from the script.'
+								: 'The note is moved to the trash.',
 							() => {
 								// Leave the page first so the view never sits on a
 								// trashed file, then delete.
@@ -2955,6 +3017,10 @@ function EntityPage({ view }: { view: EntityView }) {
 								if (origin) view.navigateTo(origin.type, origin.state);
 								else if (project) {
 									view.navigateTo(VIEW_LIST, { project: project.root, entityType: record.type });
+								}
+								if (record.sceneId !== '' && scriptMode && project) {
+									const sceneId = record.sceneId;
+									void editScript(plugin, project, (raw) => removeScene(raw, sceneId));
 								}
 								void purgeEntityReferences(plugin, record.path, record.project).finally(() =>
 									plugin.app.fileManager.trashFile(file)
@@ -2999,13 +3065,20 @@ function EntityPage({ view }: { view: EntityView }) {
 					<div className="loom-name-alias-row">
 						<label className="loom-name-col">
 							<span className="loom-field-label">Name</span>
+							{/* Chapters and scenes in a writer project are named by the
+							    script — their `#` section / scene heading is the source
+							    of truth, and the sync renames the note to match. Editing
+							    it here would be undone on the next parse, so the field
+							    reads rather than lies. */}
 							<input
 								type="text"
 								value={name}
+								readOnly={scriptNamed}
+								title={scriptNamed ? 'Named by the script — edit its heading instead.' : undefined}
 								onChange={(e) => setName(e.target.value)}
-								onBlur={() => void commitName()}
+								onBlur={() => void (scriptNamed ? undefined : commitName())}
 								onKeyDown={(e) => {
-									if (e.key === 'Enter') void commitName();
+									if (e.key === 'Enter' && !scriptNamed) void commitName();
 								}}
 							/>
 						</label>
@@ -3125,7 +3198,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{isSession ? (
+			{record.type === 'session' ? (
 				<label className="loom-field">
 					<span className="loom-field-label loom-field-label-row">
 						Date
@@ -3144,7 +3217,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{record.type === 'event' ? (
+			{isBeat ? (
 				<label className="loom-field">
 					<span className="loom-field-label">Date</span>
 					<input
@@ -3179,7 +3252,32 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{isSession ? (
+			{record.type === 'chapter' ? (
+				<label className="loom-field">
+					<span className="loom-field-label loom-field-label-row">
+						Display title
+						{sessionNumber > 0 ? (
+							<span className="loom-session-number">Chapter {sessionNumber}</span>
+						) : null}
+					</span>
+					<input
+						type="text"
+						placeholder={record.name}
+						value={displayTitle}
+						onChange={(e) => setDisplayTitle(e.target.value)}
+						onBlur={() => void commitDisplayTitle()}
+						onKeyDown={(e) => {
+							if (e.key === 'Enter') void commitDisplayTitle();
+						}}
+					/>
+					<span className="loom-field-hint">
+						How the chapter is titled in the exported script. Left empty, the chapter's own
+						name is used.
+					</span>
+				</label>
+			) : null}
+
+			{isSession && kindFeatures.attendance ? (
 				<div className="loom-field">
 					<span className="loom-field-label">Attendance</span>
 					{attendancePcs.length > 0 ? (
@@ -3305,7 +3403,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													</div>
 													<div className="loom-quest-card-row">
 													<span className="loom-quest-card-label">Received on:</span>
-<span className="loom-quest-card-value">														{received && received.type === 'session' ? (
+<span className="loom-quest-card-value">														{received && roleOf(received.type) === 'anchor' ? (
 															received.path === record.path ? (
 																<span>This session</span>
 															) : (
@@ -3337,7 +3435,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														<>
 															<div className="loom-quest-card-row">
 															<span className="loom-quest-card-label">Completed on:</span>
-<span className="loom-quest-card-value">																{outcomeSes && outcomeSes.type === 'session' ? (
+<span className="loom-quest-card-value">																{outcomeSes && roleOf(outcomeSes.type) === 'anchor' ? (
 																	outcomeSes.path === record.path ? (
 																		<span>This session</span>
 																	) : (
@@ -3442,7 +3540,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						<div className="loom-quest-sessions">
 							<div className="loom-field">
 								<span className="loom-field-label">Received in session</span>
-								{questReceived && questReceived.type === 'session' ? (
+								{questReceived && roleOf(questReceived.type) === 'anchor' ? (
 									sessionChip(questReceived, () => setQuestSession('questReceived', null))
 								) : (
 									<SearchableSelect
@@ -3457,7 +3555,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									<span className="loom-field-label">
 										{record.questOutcome[0].toUpperCase() + record.questOutcome.slice(1)} in session
 									</span>
-									{questOutcomeSession && questOutcomeSession.type === 'session' ? (
+									{questOutcomeSession && roleOf(questOutcomeSession.type) === 'anchor' ? (
 										sessionChip(questOutcomeSession, () => setQuestSession('questOutcomeSession', null))
 									) : (
 										<SearchableSelect
@@ -3554,7 +3652,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				{isPc && !record.alive ? (
 					<div className="loom-death-row">
 						<span className="loom-field-label">Death session</span>
-						{deathSession && deathSession.type === 'session' ? (
+						{deathSession && roleOf(deathSession.type) === 'anchor' ? (
 							<div className="loom-tag-row">
 								<EntityChip
 									plugin={plugin}
@@ -3595,7 +3693,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				<div className="loom-field loom-graph-under">
 					<button className="loom-section-header" onClick={() => setGraphOpen(!graphOpen)}>
 						<span className={graphOpen ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
-						Session graph
+						{ENTITY_META[anchorType].label} graph
 					</button>
 					{graphOpen ? (
 						<MiniGraph
@@ -3610,30 +3708,74 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{isSession && project ? (
+			{/* A writer project's chapter owns its scenes through their own
+			    `loomSceneChapter` link — parsed straight out of the script's `#`
+			    sections — rather than through the note hub the session page uses.
+			    Without this a chapter imported from a script looked empty even
+			    though every scene under it pointed at it. */}
+			{isSession && scriptMode && project ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Events</span>
-					{/* Creation first, as always. The modal's Name field searches
-					    existing events — picking one pins it here instead of
-					    creating a duplicate. */}
+					<span className="loom-field-label">{ENTITY_META[beatType].plural}</span>
 					<div className="loom-hub-add-row">
 						<button
 							className="loom-rel-add"
 							onClick={() =>
-								new CreateEntityModal(plugin, 'event', project, {
+								new CreateEntityModal(plugin, beatType, project, {
 									noteSession: record,
 									onCreated: () => {},
 								}).open()
 							}
 						>
-							+ Add an event
+							+ Add {/^[aeiou]/.test(beatLabel) ? 'an' : 'a'} {beatLabel}
+						</button>
+					</div>
+					{chapterScenes.length === 0 ? (
+						<div className="loom-attendance-empty">
+							No {ENTITY_META[beatType].plural.toLowerCase()} yet — a heading under this{' '}
+							<code># {record.name}</code> section in the script creates them.
+						</div>
+					) : (
+						<div className="loom-subloc-list">
+							{chapterScenes.map((sc, i) => (
+								<div key={sc.path} className="loom-script-scene-row">
+									<span className="loom-script-scene-num">{i + 1}</span>
+									<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
+										{sc.name}
+									</button>
+									<span className="loom-row-desc">
+										{[sc.sceneIntExt, sc.sceneTime].filter((v) => v !== '').join(' · ')}
+									</span>
+								</div>
+							))}
+						</div>
+					)}
+				</div>
+			) : null}
+
+			{isSession && !scriptMode && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">{ENTITY_META[beatType].plural}</span>
+					{/* Creation first, as always. The modal's Name field searches
+					    existing beats — picking one pins it here instead of
+					    creating a duplicate. */}
+					<div className="loom-hub-add-row">
+						<button
+							className="loom-rel-add"
+							onClick={() =>
+								new CreateEntityModal(plugin, beatType, project, {
+									noteSession: record,
+									onCreated: () => {},
+								}).open()
+							}
+						>
+							+ Add {/^[aeiou]/.test(beatLabel) ? 'an' : 'a'} {beatLabel}
 						</button>
 					</div>
 					{ENTITY_TYPES.filter((t) => hubEntries.some((e) => e.owner.type === t)).map((t) => {
 						const entries = hubEntries.filter((e) => e.owner.type === t);
 						// Event and quest notes are drag-reorderable by loomSeq (events
 						// share it with the timeline); other hub groups keep note order.
-						if (t !== 'event' && t !== 'quest') {
+						if (roleOf(t) !== 'beat' && t !== 'quest') {
 							return (
 								<div key={t} className="loom-hub-section">
 									<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
@@ -3724,7 +3866,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									/>
 								</div>
 								<div className="loom-obj-finished">
-									{finished && finished.type === 'session' ? (
+									{finished && roleOf(finished.type) === 'anchor' ? (
 										sessionChip(finished, () => commitSet(idx, { finishedOn: '' }))
 									) : (
 										<SearchableSelect
@@ -3953,15 +4095,88 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : null}
 
 
-			{record.type === 'event' ? (
+			{isBeat && scriptMode ? (
+				<>
+					{/* Mandatory, and re-assignable: picking a different chapter
+					    MOVES this scene's block in the script, so the note and the
+					    writing can never drift apart. */}
+					<div className="loom-field loom-field-sep">
+						<span className="loom-field-label">{ENTITY_META[anchorType].label}</span>
+						<div className="loom-tag-row">
+							{sceneChapterRecord ? (
+								<EntityChip
+									plugin={plugin}
+									record={sceneChapterRecord}
+									onOpen={() => view.openEntity(sceneChapterRecord.path)}
+								/>
+							) : null}
+							<SearchableSelect
+								placeholder={
+									sceneChapterRecord ? `Move to another ${anchorLabel}…` : `Pick the ${anchorLabel}…`
+								}
+								options={plugin.indexer
+									.getAll(anchorType, record.project)
+									.filter((c) => c.path !== sceneChapterRecord?.path)
+									.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+									.map((c) => ({ value: c.path, label: c.name }))}
+								onPick={(path) => {
+									const target = plugin.indexer.get(path);
+									if (!target || !project) return;
+									// Move the writing first; the sync then re-derives the
+									// scene's chapter link from where it now sits.
+									void editScript(plugin, project, (raw) =>
+										moveSceneToSection(raw, record.sceneId, target.chapterId)
+									).then((moved) => {
+										if (!moved) {
+											writeFm((fm) => setLoomKey(fm, FM.sceneChapter, `[[${linkTargetOf(target)}]]`));
+										}
+									});
+								}}
+							/>
+						</div>
+						{sceneChapterRecord ? null : (
+							<span className="loom-field-hint">
+								Every scene belongs to a chapter — that's where its writing lives in the script.
+							</span>
+						)}
+					</div>
+					{/* A focused window onto this scene's stretch of the script. The
+					    heading (and the hidden id on it) stays owned by the script,
+					    so only the writing beneath it is editable here. */}
+					<div className="loom-field loom-field-sep">
+						<span className="loom-field-label">Script</span>
+						{sceneExcerpt !== null ? (
+							<>
+								<div className="loom-scene-heading">{sceneExcerpt.split('\n')[0]}</div>
+								<textarea
+									className="loom-scene-script"
+									spellCheck={false}
+									value={sceneDraft}
+									onChange={(e) => setSceneBody(e.target.value)}
+									onBlur={() => {
+										if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
+										void editScript(plugin, project, (raw) =>
+											replaceSceneBody(raw, record.sceneId, sceneDraft)
+										).then(() => setSceneBody(null));
+									}}
+								/>
+							</>
+						) : (
+							<div className="loom-attendance-empty">This scene isn't in the script yet.</div>
+						)}
+					</div>
+				</>
+			) : isBeat ? (
 				<div className="loom-field loom-field-sep">
-					{sessionNotes.length > 0 ? <span className="loom-field-label">Session notes</span> : null}
+					{sessionNotes.length > 0 ? (
+						<span className="loom-field-label">{ENTITY_META[anchorType].label} notes</span>
+					) : null}
 					<div className="loom-hub-add-row">
 						<button
 							className="loom-rel-add"
 							onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [], group: [], seq: Date.now(), idx: null }])}
 						>
-							+ Add a session note
+							+ Add a {anchorLabel} note
 						</button>
 						{sessionNotes.length > 0 ? orderToggle : null}
 					</div>

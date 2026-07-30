@@ -1,5 +1,14 @@
-import { App, PluginSettingTab, Setting, setIcon } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting, setIcon } from 'obsidian';
 import { ENTITY_META, ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera } from './types';
+import {
+	DEFAULT_PROJECT_KIND,
+	PROJECT_KIND_META,
+	PROJECT_KINDS,
+	ProjectKind,
+	typesFor,
+} from './project-kind';
+import { serializeProjectConfig } from './calendar';
+import { ProjectDef } from './indexer';
 import { ConfirmModal } from './project';
 import { TimelineSettingsEditor } from './timeline-settings';
 import type LoomLoomPlugin from './main';
@@ -148,6 +157,11 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	nodeColors: {
 		session: '#7c5cff',
 		event: '#e08e45',
+		// Writer projects hold Chapters/Scenes where player and GM ones hold
+		// Sessions/Events — same structural role, so they start from the same
+		// colors and can be tuned apart.
+		chapter: '#7c5cff',
+		scene: '#e08e45',
 		character: '#58b478',
 		location: '#4aa3d8',
 		// Region is not user-configurable — always kept as a darker shade of the
@@ -160,6 +174,8 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	nodeSizes: {
 		session: 26,
 		event: 20,
+		chapter: 26,
+		scene: 20,
 		character: 17,
 		location: 17,
 		region: 17,
@@ -512,12 +528,71 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			this.plugin.settings.textSize = DEFAULT_SETTINGS.textSize;
 		});
 
+		this.renderProjectKinds(containerEl);
+
 		this.addRestoreDefaults(
 			containerEl,
 			'general',
 			'Restore general defaults',
 			'Reset all general settings on this tab to their defaults.'
 		);
+	}
+
+	/**
+	 * Per-project kind, stored in the project's .loom file. Switching does not
+	 * move any note: the entity folders a kind doesn't use simply stop being
+	 * listed, and their notes come back if the kind is switched back. Converting
+	 * Sessions into Chapters (or the reverse) is deliberately not automatic —
+	 * they carry different fields, so it would have to drop data.
+	 */
+	private renderProjectKinds(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Projects').setHeading();
+		const projects = this.plugin.indexer.getProjects();
+		if (projects.length === 0) {
+			containerEl.createEl('p', {
+				text: 'No Loom projects in this vault yet.',
+				cls: 'setting-item-description',
+			});
+			return;
+		}
+		for (const project of projects) {
+			const setting = new Setting(containerEl)
+				.setName(project.name)
+				.setDesc(PROJECT_KIND_META[project.config.kind].description)
+				.addDropdown((dd) => {
+					for (const kind of PROJECT_KINDS) dd.addOption(kind, PROJECT_KIND_META[kind].label);
+					dd.setValue(project.config.kind).onChange((value) =>
+						void (async () => {
+							await this.setProjectKind(project, value as ProjectKind);
+							this.redisplay();
+						})()
+					);
+				});
+			setting.descEl.createDiv({
+				cls: 'setting-item-description',
+				text: `Holds: ${typesFor(project.config.kind)
+					.map((t) => ENTITY_META[t].plural)
+					.join(', ')}.`,
+			});
+		}
+	}
+
+	private async setProjectKind(project: ProjectDef, kind: ProjectKind): Promise<void> {
+		if (kind === project.config.kind) return;
+		const file = this.plugin.app.vault.getFileByPath(project.loomPath);
+		if (!file) {
+			new Notice('Project file not found.');
+			return;
+		}
+		try {
+			await this.plugin.app.vault.process(file, () =>
+				serializeProjectConfig({ ...project.config, kind })
+			);
+			this.plugin.indexer.rebuild();
+		} catch (e) {
+			console.error('Loom Loom: failed to change project type', e);
+			new Notice('Could not change the project type.');
+		}
 	}
 
 	/** Adds the circled-arrow restore-default button on a setting's right side. */
@@ -561,7 +636,15 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		this.addReset(groupSetting, () => {
 			this.plugin.settings.groupColor = DEFAULT_SETTINGS.groupColor;
 		});
+		// Only the types the vault's projects actually hold: a vault with no
+		// writer project has no reason to show Chapter and Scene rows (and vice
+		// versa). With no projects yet, fall back to the default kind's set.
+		const inUse = new Set<EntityType>(
+			this.plugin.indexer.getProjects().flatMap((p) => [...typesFor(p.config.kind)])
+		);
+		const shown = inUse.size > 0 ? inUse : new Set<EntityType>(typesFor(DEFAULT_PROJECT_KIND));
 		for (const type of ENTITY_TYPES) {
+			if (!shown.has(type)) continue;
 			// Region has no color/size row — its color is auto-derived from the
 			// location color (a darker shade), and it isn't a map node.
 			if (type === 'region') continue;

@@ -24,22 +24,37 @@ import {
 	FM,
 	LOOM_EXTENSION,
 	PC_GROUP_VALUE,
+	SCRIPT_EXTENSION,
 	TIMELINES_FOLDER,
 	VIEW_LIST,
 	formatTimestamp,
 	pcGroupStub,
 } from './types';
 import { defaultProjectConfig, formatLoomDate, groupNameOf, serializeProjectConfig, todayRaw } from './calendar';
+import {
+	DEFAULT_PROJECT_KIND,
+	PROJECT_KIND_META,
+	PROJECT_KINDS,
+	ProjectKind,
+	featuresOf,
+	projectRoleType,
+	projectTypes,
+	roleOf,
+	roleType,
+	typesFor,
+} from './project-kind';
 import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
 import { ProjectDef, extractLinkpath, linkTargetOf } from './indexer';
 import { fmLoomValue, setLoomKey } from './fm';
 import type LoomLoomPlugin from './main';
 
-const PROJECT_SUBFOLDERS = [
-	'Entities',
-	...ENTITY_TYPES.map((t) => ENTITY_META[t].folder),
-	TIMELINES_FOLDER,
-];
+/** Folders scaffolded for a new project: only the entity types its kind
+ *  actually holds, so a writer project gets Chapters/Scenes and a player one
+ *  Sessions/Events rather than both. Types added to a kind later are covered
+ *  by `createEntity`, which ensures its folder on the way in. */
+function projectSubfolders(kind: ProjectKind): string[] {
+	return ['Entities', ...typesFor(kind).map((t) => ENTITY_META[t].folder), TIMELINES_FOLDER];
+}
 
 async function ensureFolder(app: App, path: string): Promise<void> {
 	let current = '';
@@ -63,12 +78,18 @@ function projectPath(project: ProjectDef, sub: string): string {
  * Creates the project structure inside `rootPath` and its .loom home file
  * (named after the folder). Returns the .loom file.
  */
-export async function scaffoldProject(app: App, rootPath: string): Promise<TFile> {
+export async function scaffoldProject(
+	app: App,
+	rootPath: string,
+	kind: ProjectKind = DEFAULT_PROJECT_KIND
+): Promise<TFile> {
 	const root = normalizePath(rootPath);
 	await ensureFolder(app, root);
-	for (const sub of PROJECT_SUBFOLDERS) {
+	for (const sub of projectSubfolders(kind)) {
 		await ensureFolder(app, root + '/' + sub);
 	}
+	const anchorType = roleType(kind, 'anchor');
+	const beatType = roleType(kind, 'beat');
 	const timelinePath = root + '/' + TIMELINES_FOLDER + '/Main timeline.md';
 	if (!app.vault.getFileByPath(timelinePath)) {
 		await app.vault.create(
@@ -76,12 +97,12 @@ export async function scaffoldProject(app: App, rootPath: string): Promise<TFile
 			[
 				'---',
 				`${FM.name}: Main timeline`,
-				`${FM.timelineTypes}: [session, event]`,
+				`${FM.timelineTypes}: [${anchorType}, ${beatType}]`,
 				`${FM.tags}: []`,
 				'---',
 				'',
 				`Timeline definition. \`${FM.timelineTypes}\` lists which entity types populate it`,
-				`(session, event); \`${FM.tags}\` optionally filters to entities carrying one`,
+				`(${anchorType}, ${beatType}); \`${FM.tags}\` optionally filters to entities carrying one`,
 				'of those plugin tags.',
 				'',
 			].join('\n')
@@ -89,9 +110,21 @@ export async function scaffoldProject(app: App, rootPath: string): Promise<TFile
 	}
 	const baseName = root.split('/').pop() ?? 'Project';
 	const loomPath = normalizePath(`${root}/${baseName}.${LOOM_EXTENSION}`);
+	// Writer projects get their Fountain script up front — it's the spine of the
+	// kind, and an empty one carrying a title page is friendlier than an empty
+	// view with a "create it" button.
+	if (featuresOf(kind).script) {
+		const scriptPath = normalizePath(`${root}/${baseName}.${SCRIPT_EXTENSION}`);
+		if (!app.vault.getFileByPath(scriptPath)) {
+			await app.vault.create(
+				scriptPath,
+				[`Title: ${baseName}`, 'Credit: Written by', 'Author:', 'Draft date:', '', ''].join('\n')
+			);
+		}
+	}
 	const existing = app.vault.getFileByPath(loomPath);
 	if (existing) return existing;
-	return app.vault.create(loomPath, serializeProjectConfig(defaultProjectConfig()));
+	return app.vault.create(loomPath, serializeProjectConfig(defaultProjectConfig(kind)));
 }
 
 export { sanitizeFileName } from './naming';
@@ -218,6 +251,9 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	if (type === 'character') lines.push(`${FM.alive}: true`);
 	if (type === 'event' || type === 'session') lines.push(`${FM.date}: ${yamlQuote(fields.date)}`);
 	if (type === 'session') lines.push(`${FM.attendance}: []`);
+	// Chapters aren't dated — they carry a manual order (stamped on the first
+	// reorder) and the title that goes into the exported script.
+	if (type === 'chapter') lines.push(`${FM.displayTitle}: ""`);
 	if (type === 'quest') {
 		const link = (name?: string) => (name && name !== '' ? yamlQuote(`[[${name}]]`) : '""');
 		const givers = (fields.questGivers ?? []).filter((n) => n !== '');
@@ -380,7 +416,7 @@ export class TextInputModal extends Modal {
 /** Search/display label of a record in pickers: session dates, sublocations
  *  as "Tavern, City A", everything else its name. */
 export function recordPickLabel(plugin: LoomLoomPlugin, project: ProjectDef, r: EntityRecord): string {
-	if (r.type === 'session' && r.date) return formatLoomDate(r.date, project.config);
+	if (roleOf(r.type) === 'anchor' && r.date) return formatLoomDate(r.date, project.config);
 	if (r.type === 'location' && r.parentLocation !== null) {
 		const parent = plugin.indexer.resolve(r.parentLocation, r.path);
 		if (parent?.type === 'location') return `${r.name}, ${parent.name}`;
@@ -938,7 +974,8 @@ export class CreateEntityModal extends Modal {
 			// search over existing ones: picking a match pins it to the session on
 			// submit; typing a new name just creates it.
 			const searchable =
-				(this.type === 'event' || this.type === 'quest') && this.options.noteSession !== undefined;
+				(roleOf(this.type) === 'beat' || this.type === 'quest') &&
+				this.options.noteSession !== undefined;
 			const noun = meta.label.toLowerCase();
 			const article = /^[aeiou]/.test(noun) ? 'an' : 'a';
 			new Setting(this.contentEl).setName('Name').addText((text) => {
@@ -985,7 +1022,7 @@ export class CreateEntityModal extends Modal {
 			const sessionLabel = (s: EntityRecord) =>
 				s.date ? formatLoomDate(s.date, this.project.config) : s.name;
 			const sessions = this.plugin.indexer
-				.getAll('session', this.project.root)
+				.getAll(projectRoleType(this.project.config, 'anchor'), this.project.root)
 				.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
 			const characters = this.plugin.indexer
 				.getAll('character', this.project.root)
@@ -1076,7 +1113,7 @@ export class CreateEntityModal extends Modal {
 			});
 		}
 
-	if (this.type === 'event') {
+	if (roleOf(this.type) === 'beat') {
 			// Birth session (skipped only when the session page already provides
 			// it): search over sessions, the pick becomes a session tag with ✕.
 			// Every event is created through this one session flow.
@@ -1084,11 +1121,21 @@ export class CreateEntityModal extends Modal {
 				const sessionLabel = (s: EntityRecord) =>
 					s.date ? formatLoomDate(s.date, this.project.config) : s.name;
 				const sessions = this.plugin.indexer
-					.getAll('session', this.project.root)
+					.getAll(projectRoleType(this.project.config, 'anchor'), this.project.root)
 					.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
+				// A scene MUST have a chapter — that's where its writing lives, so
+				// a chapterless scene has nowhere to belong. An event may be a
+				// session-less lore event, so there the pick stays optional.
+				const anchorMeta = ENTITY_META[projectRoleType(this.project.config, 'anchor')];
 				const sessionSetting = new Setting(this.contentEl)
-					.setName('Session')
-					.setDesc('When it happened; leave unspecified for a lore event with no session.');
+					.setName(anchorMeta.label)
+					.setDesc(
+						this.anchorRequired()
+							? `Which ${anchorMeta.label.toLowerCase()} this ${ENTITY_META[
+									this.type
+								].label.toLowerCase()} belongs to.`
+							: 'When it happened; leave unspecified for a lore event with no session.'
+					);
 				const sessionEl = sessionSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 				const refreshSession = () => {
 					sessionEl.empty();
@@ -1100,7 +1147,11 @@ export class CreateEntityModal extends Modal {
 					} else {
 						const input = sessionEl.createEl('input', {
 							type: 'text',
-							attr: { placeholder: 'Not specified' },
+							attr: {
+								placeholder: this.anchorRequired()
+									? `Pick the ${anchorMeta.label.toLowerCase()}…`
+									: 'Not specified',
+							},
 						});
 						new RecordInputSuggest(
 							this.app,
@@ -1140,7 +1191,7 @@ export class CreateEntityModal extends Modal {
 					: []),
 				...this.plugin.indexer
 					.getAll(undefined, this.project.root)
-					.filter((r) => r.type !== 'session' && r.type !== 'event')
+					.filter((r) => roleOf(r.type) === null)
 					.filter((r) => involveFilter === null || r.type === involveFilter)
 					.filter((r) => !taken(r))
 					.sort((a, b) => a.name.localeCompare(b.name)),
@@ -1173,7 +1224,7 @@ export class CreateEntityModal extends Modal {
 									btn.setIcon('filter');
 								})
 						);
-						for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
+						for (const t of projectTypes(this.project.config).filter((t) => roleOf(t) === null)) {
 							menu.addItem((item) =>
 								item
 									.setTitle(ENTITY_META[t].plural)
@@ -1251,7 +1302,7 @@ export class CreateEntityModal extends Modal {
 		// Events born from a session page need no date — the session carries it.
 		// (The Involved picker below writes into that session note, so it only
 		// appears for session-born events.)
-		if (this.type === 'event' && !this.options.noteSession) {
+		if (roleOf(this.type) === 'beat' && !this.options.noteSession) {
 			let dateText: TextComponent;
 			new Setting(this.contentEl)
 				.setName('Date')
@@ -1512,7 +1563,7 @@ export class CreateEntityModal extends Modal {
 			regDesc.setClass('loom-modal-wide');
 		}
 
-		if (this.type === 'event') {
+		if (roleOf(this.type) === 'beat') {
 			// When an existing event is picked (session-page add), its description
 			// is shown read-only — you're adding it to the session, not editing it.
 			const evDesc = new Setting(this.contentEl).setName('Description');
@@ -1559,6 +1610,16 @@ export class CreateEntityModal extends Modal {
 		this.submitBtn?.setButtonText(this.pickedExisting ? 'Add' : 'Create');
 	}
 
+	/**
+	 * Whether this entity cannot be created without an anchor. A Scene's writing
+	 * lives inside its Chapter's section of the script, so a chapterless scene
+	 * has nowhere to be stored; an Event, by contrast, may legitimately be a
+	 * session-less lore event.
+	 */
+	private anchorRequired(): boolean {
+		return this.type === 'scene';
+	}
+
 	private async submit(): Promise<void> {
 		// Name search matched an existing event/quest: pin it to the session
 		// rather than creating a duplicate.
@@ -1572,6 +1633,11 @@ export class CreateEntityModal extends Modal {
 		}
 		if (this.type === 'session' && this.fields.date === '') {
 			new Notice('Date is required.');
+			return;
+		}
+		if (this.anchorRequired() && !this.options.noteSession && !this.pickedSession) {
+			const anchorMeta = ENTITY_META[projectRoleType(this.project.config, 'anchor')];
+			new Notice(`${anchorMeta.label} is required.`);
 			return;
 		}
 		const connectTo = this.options.connectTo;
@@ -1726,6 +1792,7 @@ export class SetupProjectModal extends Modal {
 	private mode: 'create' | 'use' = 'create';
 	private dir = '';
 	private name = '';
+	private kind: ProjectKind = DEFAULT_PROJECT_KIND;
 
 	constructor(private plugin: LoomLoomPlugin) {
 		super(plugin.app);
@@ -1787,6 +1854,25 @@ export class SetupProjectModal extends Modal {
 				});
 			});
 
+		// The kind decides which entity types the project holds, so it is
+		// picked up front — switching later is possible but moves files.
+		new Setting(this.contentEl)
+			.setName('Project type')
+			.setDesc(PROJECT_KIND_META[this.kind].description)
+			.addDropdown((dd) => {
+				for (const kind of PROJECT_KINDS) dd.addOption(kind, PROJECT_KIND_META[kind].label);
+				dd.setValue(this.kind).onChange((v) => {
+					this.kind = v as ProjectKind;
+					this.render();
+				});
+			});
+		this.contentEl.createEl('p', {
+			cls: 'setting-item-description',
+			text: `Holds: ${typesFor(this.kind)
+				.map((t) => ENTITY_META[t].plural)
+				.join(', ')}.`,
+		});
+
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
 				.setButtonText('Create project')
@@ -1812,7 +1898,7 @@ export class SetupProjectModal extends Modal {
 			root = this.dir;
 		}
 		try {
-			const loomFile = await scaffoldProject(this.app, root);
+			const loomFile = await scaffoldProject(this.app, root, this.kind);
 			this.plugin.indexer.rebuild();
 			this.close();
 			new Notice('Project ready.');
@@ -1888,7 +1974,9 @@ export class ConfirmModal extends Modal {
 
 	onOpen(): void {
 		this.setTitle(this.heading);
-		this.contentEl.createEl('p', { text: this.detail });
+		// pre-line so a multi-paragraph detail (e.g. the script-import warning,
+		// which has to spell out what is and isn't destroyed) keeps its breaks.
+		this.contentEl.createEl('p', { cls: 'loom-confirm-detail', text: this.detail });
 		new Setting(this.contentEl)
 			.addButton((btn) => btn.setButtonText('Cancel').onClick(() => this.close()))
 			.addButton((btn) => {
@@ -1908,13 +1996,19 @@ export class ConfirmModal extends Modal {
 }
 
 export class EntityTypeSuggestModal extends FuzzySuggestModal<EntityType> {
-	constructor(plugin: LoomLoomPlugin, private onPick: (type: EntityType) => void) {
+	constructor(
+		plugin: LoomLoomPlugin,
+		private onPick: (type: EntityType) => void,
+		/** Offers only the types this project's kind holds; without it, every
+		 *  type the plugin knows (both chronologies) is listed. */
+		private project?: ProjectDef
+	) {
 		super(plugin.app);
 		this.setPlaceholder('Pick the entity type');
 	}
 
 	getItems(): EntityType[] {
-		return [...ENTITY_TYPES];
+		return this.project ? [...projectTypes(this.project.config)] : [...ENTITY_TYPES];
 	}
 
 	getItemText(type: EntityType): string {

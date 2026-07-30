@@ -2,11 +2,12 @@ import { TAbstractFile } from 'obsidian';
 import { CSSProperties, ReactElement, useEffect, useState } from 'react';
 import {
 	ENTITY_META,
-	ENTITY_TYPES,
 	EntityType,
 	LOOM_EXTENSION,
 	MAPS_ICON,
 	MAPS_LABEL,
+	SCRIPT_ICON,
+	SCRIPT_LABEL,
 	PC_GROUP_ICON,
 	VIEW_GRAPH,
 	VIEW_GROUP,
@@ -15,10 +16,12 @@ import {
 	VIEW_MAP,
 } from '../types';
 import { groupNameOf } from '../calendar';
+import { features, projectTypes } from '../project-kind';
 import { LoomFileReactView } from './react-view';
 import { Icon } from './common';
 import { useIndexVersion } from './hooks';
 import { countMapPages, mapsFilePath } from './map-view';
+import { createScriptFile, scriptFilePath } from './script-view';
 import type LoomLoomPlugin from '../main';
 
 /**
@@ -111,23 +114,48 @@ function Home({ view }: { view: HomeView }) {
 		count?: number;
 		open: () => void;
 	}[] = [
-		{
-			key: 'group',
-			icon: PC_GROUP_ICON,
-			label: groupNameOf(project.config),
-			color: plugin.settings.groupColor,
-			count: plugin.indexer.getGroupMembers(project.root).length,
-			open: () =>
-				view.navigateTo(VIEW_GROUP, {
-					...state,
-					origin: { type: view.getViewType(), state: view.getState() },
-				}),
-		},
+		// The script takes the 12 o'clock slot the Group holds in the other
+		// kinds, so every entity satellite below keeps its usual place. It counts
+		// its scenes — the one satellite that isn't an entity list.
+		...(features(project.config).script
+			? [
+					{
+						key: 'script',
+						icon: SCRIPT_ICON,
+						label: SCRIPT_LABEL,
+						color: plugin.settings.nodeColors.scene,
+						// No count: a project has exactly one script, so "1" is noise.
+						open: () => {
+							const path = scriptFilePath(project);
+							const scriptFile = plugin.app.vault.getFileByPath(path);
+							if (scriptFile) view.openLoomFile(path);
+							else void createScriptFile(plugin, project).then((f) => view.openLoomFile(f.path));
+						},
+					},
+				]
+			: []),
+		// The Group is the party — it only exists in kinds that have one.
+		...(features(project.config).group
+			? [
+					{
+						key: 'group',
+						icon: PC_GROUP_ICON,
+						label: groupNameOf(project.config),
+						color: plugin.settings.groupColor,
+						count: plugin.indexer.getGroupMembers(project.root).length,
+						open: () =>
+							view.navigateTo(VIEW_GROUP, {
+								...state,
+								origin: { type: view.getViewType(), state: view.getState() },
+							}),
+					},
+				]
+			: []),
 		// Maps sits right after Locations, counting the project's map PAGES (its
 		// entities aren't notes, so the count comes from the Maps file, not the
 		// index). Regions are reached through Locations (the location list groups by
 		// region), so they don't get their own wheel satellite.
-		...ENTITY_TYPES.filter((type) => type !== 'region').flatMap((type) => {
+		...projectTypes(project.config).filter((t) => t !== 'region').flatMap((type) => {
 			const entry = {
 				key: type,
 				icon: ENTITY_META[type].icon,

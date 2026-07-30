@@ -35,6 +35,7 @@ import { LoomReactView } from './react-view';
 import { EntityChip, Icon, SearchableSelect, ViewShell, noProjectMessage, recordLabel } from './common';
 import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
+import { projectRoleType, projectTypes, roleOf } from '../project-kind';
 
 type Camera = GraphCamera;
 
@@ -88,7 +89,9 @@ export class GraphView extends LoomReactView {
 	}
 }
 
-const RADII = { session: 26, event: 20, global: 17 } as const;
+/** Fallback node radius per layout row (anchor / beat / global layers),
+ *  used when the type has no configured size. */
+const RADII = { anchor: 26, beat: 20, global: 17 } as const;
 /** Pointer movement below this is a click (select/clear), above it a drag/pan. */
 const CLICK_SLOP = 4;
 /** World-space margin outside the viewport before nodes are culled. */
@@ -515,6 +518,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const plugin = view.plugin;
 	const version = useIndexVersion(plugin.indexer);
 	const project = resolveProject(plugin.indexer, projectRoot);
+	const anchorType = projectRoleType(project?.config, 'anchor');
 	const layerKey = plugin.settings.globalLayerOrder.join(',');
 	/** Bumped when a drag-reorder writes a new manual x, to re-run the layout. */
 	const [manualVersion, setManualVersion] = useState(0);
@@ -1553,7 +1557,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			});
 		}
 
-		const questSession = pair('quest', 'session');
+		const questSession = pair('quest', anchorType);
 		if (questSession) {
 			const { a: quest, b: session } = questSession;
 			const resolve = resolvesFrom(quest);
@@ -1611,9 +1615,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		// (a place discussed in the event) and a `places` entry (where it
 		// happened, surfaced on the location page), so a location offers both.
 		const eventOther =
-			from.record.type === 'event' && to.record.type !== 'event' && to.record.type !== 'session'
+			roleOf(from.record.type) === 'beat' && roleOf(to.record.type) === null
 				? { event: from, other: to }
-				: to.record.type === 'event' && from.record.type !== 'event' && from.record.type !== 'session'
+				: roleOf(to.record.type) === 'beat' && roleOf(from.record.type) === null
 					? { event: to, other: from }
 					: null;
 		if (eventOther) {
@@ -1636,9 +1640,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		// (empty text, filled in on its page) alongside the generic relationship;
 		// a PC also gets "Mark as attending" (the session's attendance list).
 		const sessionPair =
-			from.record.type === 'session' && to.record.type !== 'session'
+			roleOf(from.record.type) === 'anchor' && roleOf(to.record.type) !== 'anchor'
 				? { session: from, other: to }
-				: to.record.type === 'session' && from.record.type !== 'session'
+				: roleOf(to.record.type) === 'anchor' && roleOf(from.record.type) !== 'anchor'
 					? { session: to, other: from }
 					: null;
 		if (sessionPair) {
@@ -1826,7 +1830,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		e.preventDefault();
 		if (!project) return;
 		const menu = new Menu();
-		for (const type of ENTITY_TYPES) {
+		for (const type of projectTypes(project.config)) {
 			menu.addItem((item) =>
 				item
 					.setTitle(`New ${ENTITY_META[type].label.toLowerCase()}`)
@@ -1943,7 +1947,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						.getAll(undefined, project.root)
 						.map((r) => {
 							const target = linkTargetOf(r);
-							const label = r.type === 'session' ? recordLabel(r, project) : r.name;
+							const label = roleOf(r.type) === 'anchor' ? recordLabel(r, project) : r.name;
 							return { label, insert: target === label ? label : `${target}|${label}` };
 						})
 						.sort((a, b) => a.label.localeCompare(b.label))
@@ -2236,7 +2240,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 											}
 										/>
 									</div>
-									{ENTITY_TYPES.map((t) => (
+									{projectTypes(project?.config).map((t) => (
 										<label key={t} className="loom-check">
 											<input
 												type="checkbox"

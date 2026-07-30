@@ -242,19 +242,186 @@ A spatial drawing canvas per project — zones (polygons) associated with locati
   - Why it's still off: those constants were tuned by feel for one map, and `inferScale` is a single-number guess (median polygon zone ≈ `REF_ZONE_UNITS = 5` regular nodes across). One scalar can't express both "how big is a marker" *and* "at what zoom should zones collapse" — a map of a few huge continents and a map of many small rooms want different threshold *ratios*, not just a different scale.
   - Directions to weigh (don't just re-tune the numbers): derive the thresholds from the map's actual content instead of constants — e.g. node view starts when the median zone's on-screen size drops below N px, close up when it exceeds M px, which is scale-free by construction; and/or split the one `scale` into a marker scale and an independent set of threshold stops; and/or let a page pin its own thresholds (the ruler popover is the natural home). Check how it reads on the real campaign map AND a small interior map before committing.
 
-## Project types (the next big feature)
+## Project types
 
-A per-project **mode** that reshapes the plugin for a different workflow. Player mode is
-what exists today. Chosen at project creation (and switchable), stored in the .loom config.
+A per-project **kind** that reshapes the plugin for a different workflow, chosen at project
+creation and switchable in settings, stored in the .loom config. Player mode is the baseline.
 
-- [ ] **Player** — the current experience (playing in a campaign as a party of PCs). This is the baseline; the mode selector defaults here.
-- [ ] **DM** — running a campaign. Events gain planning tags:
+- [x] **The kind layer itself** — `src/project-kind.ts`: `PROJECT_KINDS` + meta, per-kind type
+  lists (`typesFor`), the anchor/beat **role map** (`roleType`/`roleOf`) and `KindFeatures`.
+  `ProjectConfig.kind` in the .loom file (absent = `player`); kind picker in
+  `SetupProjectModal`; a **Projects** section on the settings General tab to switch a kind.
+  Scaffolding creates only the kind's folders; `EntityTypeSuggestModal`, the nav rail, home
+  wheel, graph type filter and graph right-click menu all offer only that kind's types.
+  See CLAUDE.md "Project kinds" for the design rule.
+- [x] **Roles instead of type literals** in the shared machinery, so one implementation serves
+  both chronologies: `columns.ts`, `graph/layout.ts` (its `NodeKind` is now
+  `anchor`/`beat`/`global`), `timeline-strip.tsx`, `list-view.tsx`, `entity-view.tsx`,
+  `graph-view.tsx`, `group-view.tsx`, `mini-graph.tsx`, `common.tsx`.
+- [x] **Player** — the current experience; the default kind, unchanged.
+- [ ] **Game Master** — running a campaign. Frontmatter and index are in place
+  (`FM.eventKind` / `FM.happened` / `FM.npcLines`, `EVENT_KINDS`, the `eventPlanning` +
+  `npcLines` feature flags); **no UI yet**.
   - `planned` — a pre-planned event that *may* happen in a session.
-  - `locked` — a planned event ruled out by player action (e.g. an NPC is killed, so events depending on that NPC become locked). Likely a cascade: when a required entity dies/is removed, dependent planned events auto-lock.
-  - `improvised` — an event the DM added during/after the game that wasn't in the "book" (players made it happen).
-  - Open questions: how dependencies are declared (which entity's fate locks which event), and how the tags read on the timeline/graph.
-- [ ] **Writing** — authoring/plot planning. **Sessions are replaced by Chapters** (same anchoring role, renamed + re-iconed). Leans on the modular data set so encounters can be swapped back and forth while planning. Adds a **Fountain-style script editor** for dialogues and scenes (Fountain screenplay syntax). The **Map view** is a core part of this mode (spatial level/room layout — see the Map view entry).
-- Cross-cutting: the mode likely gates which entity types, tags, sections, and terminology ("Session" vs "Chapter") appear. Design a clean abstraction so a mode is a config layer over the shared data model, not a fork.
+  - `locked` — a planned event ruled out by player action (an NPC it needed is dead), kept
+    on file rather than deleted. Likely a cascade: when a required entity dies or is
+    removed, dependent planned events auto-lock.
+  - `improvised` — an event the GM added during/after the game that wasn't in the "book".
+  - `happened` — the tick that turns a speculative planned event into a real one.
+  - Most-likely NPC replies: preplanned lines or speech-style examples on the character page.
+  - Open questions: how dependencies are declared (which entity's fate locks which event),
+    and how the states read on the timeline and graph.
+- [ ] **Writer** — authoring/plot planning. Entity types, kind features and terminology are
+  in place; the script is not. See "Writer: Fountain script" below.
+  - [x] Chapters replace Sessions and Scenes replace Events, as their **own** entity types
+    playing the same roles (`Entities/Chapters`, `Entities/Scenes`).
+  - [x] Attendance is gone (`attendance: false`), and so is the virtual Group
+    (`group: false` — it's the party, built on the PC tag).
+  - [x] Chapters order by `loomSeq` rather than by a date (`anchorOrder: 'sequence'`), and
+    carry a **Display title** field (`FM.displayTitle`) — see the export note below.
+  - [x] Quests and descriptions are kept as-is (game design / main plot pushers).
+  - [x] The session graph is the Chapter graph — same code, role-driven label.
+  - [ ] Chapter reordering UI (drag to re-stamp `loomSeq`), and a Scene page shell beyond
+    the shared one.
+  - The Map view is a core part of this kind (spatial level/room layout).
+
+## Writer: Fountain script (in progress)
+
+The script is a **single `<Project>.fountain` file at the project root**, registered like the
+.loom home file rather than stored as markdown (`SCRIPT_EXTENSION` in types.ts). Two reasons
+it can't be a .md note: Fountain's note syntax **is** `[[…]]`, so Obsidian would index every
+non-exporting script note as a wikilink and pollute backlinks and the graph; and an own
+extension round-trips byte-for-byte with external Fountain apps (Better Fountain, Highland,
+Fade In), which is what makes an "Open in external app" button honest. The cost, accepted:
+Obsidian core search only indexes .md, so searching script text needs our own index.
+
+Fountain facts the design has to respect (several corrected during design):
+
+- **Fountain has no page concept.** Pagination is computed by the renderer from fixed
+  screenplay metrics (Courier 12, ~55 lines/page, per-element margins). So a scene's page
+  range must be **derived, never stored** — which is exactly what makes it shift for free
+  when an earlier scene grows.
+- **INT./EXT. and time of day belong to the scene, not the location.** The same house is
+  `INT. HOUSE - DAY` in one scene and `EXT. HOUSE - NIGHT` in the next. The Scene entity
+  stores the actual one (parsed from its heading); a Location page may hold a *default* the
+  autocomplete offers first. Separator is a hyphen, not an em dash.
+- **Scene numbers go at the end of the heading** (`INT. HOUSE - DAY #7#`); a leading `.` is
+  the *forced scene heading* marker. Production numbers are deliberately locked (hence 12A,
+  12B), so auto-renumber on reorder needs a "lock numbers" escape hatch eventually.
+- **Character detection** is an uppercase line preceded by a blank line **and followed by a
+  non-blank line** — that trailing condition is the only thing separating `SARAH` from the
+  transition `CUT TO:`. Extensions (`(V.O.)`, `(CONT'D)`) must be stripped before resolving
+  to a Character entity; `@` force-marks a name.
+- **Sections (`#`) never export.** An act/chapter title that must appear in the PDF has to be
+  emitted separately as centered bold (`>**ACT ONE**<`) — hence `FM.displayTitle` on chapters.
+- **Title page keys**: Title, Credit, Author, Draft date (plus Source, Contact, Copyright,
+  Notes). These live in the .fountain file's own title page — no sidecar needed, exact
+  round-trip.
+
+Built so far:
+
+- [x] **Parser** (`src/fountain.ts`): title page (unknown keys and their order preserved),
+  full element tokenizer, scene-heading parts, and derived pagination. Dependency-free and
+  side-effect-free, so the grammar is testable on its own.
+- [x] **Scene ids**: `ensureSceneIds` / `readLoomId` / `stripLoomIds`. Additive and
+  idempotent — an existing id is never changed or removed.
+- [x] **Script view** (`src/views/script-view.tsx`, `.fountain` registered like `.loom`):
+  title-page editor (body stays byte-identical across rewrites), scene outline grouped by
+  section with page ranges and cast, "Open in external app", interim plain-Fountain textarea.
+- [x] **Scene → note mirroring** (`syncScenes`): matched by loom id, additive only (a removed
+  heading leaves an orphan, surfaced in the view, never deleted), and skipped entirely when a
+  note's data already matches, so it doesn't re-upload notes through the user's sync. Ids are
+  written on load and on blur, never mid-typing. Scenes get `loomSceneIntExt`/`loomSceneTime`
+  plus visible links to their location and cast, so they connect in the graph.
+- [x] **Backward compatible import**: dropping an existing script in gives every heading an
+  id and creates its Scene notes; characters and locations found in it are matched by name
+  and offered as an explicit "create N" button (they're shared entities that may already
+  exist, so bulk-creating them on load isn't the plugin's call).
+
+Still to build:
+
+- [x] **Chapters ↔ sections.** A scene's chapter is the TOP-level `#` section it sits under
+  (`FM.sceneChapter`, a visible link — which is also what stacks it under its chapter in the
+  graph and timeline, since `buildColumns` takes any connection to an anchor). Chapters are
+  created automatically from the sections and ordered by first appearance (`loomSeq`), like
+  scenes: the script owns them, unlike characters/locations which are shared and stay
+  explicit. **A scene must always have a chapter** — the create modal requires it
+  (`anchorRequired`), and the script view lists any scene sitting outside every `#` section.
+- [x] **Import** (`reattachSceneIds` + the Export menu's "Import a script…"). Replaces the
+  script from an OS file picker after a confirmation that spells out exactly what is
+  destroyed (the script text) and what is not (every entity — existing characters and
+  locations keep their pages and are simply referenced by the incoming script). An incoming
+  file that still carries its `[[loom:…]]` markers re-attaches exactly; one that lost them
+  (export → edit elsewhere → import) is matched back by heading text, walking in script order
+  so repeated headings pair up in sequence. Unmatched scene notes become orphans; nothing is
+  deleted.
+- [x] **`loomDisplayTitle` reaches the script** as `>**…**<` under its section
+  (`applyDisplayTitles`) — idempotent, updates in place, and clearing the field removes the
+  line. Written on script commit and whenever the field is edited on a Chapter page
+  (`pushChapterTitles`), since the script view may not be open.
+- [ ] Scene identity across edits: **a hidden `[[loom:<id>]]` Fountain note in the scene
+  heading** (decided). Non-exporting by spec, survives any rewrite or reorder, and our editor
+  hides it entirely; the accepted cost is that it shows as a small note if the file is opened
+  in Better Fountain or a plain text editor. Chosen deliberately over heuristic re-matching:
+  a scene renamed *and* moved in one edit would silently detach under heuristics, taking its
+  relationships, notes and quest links with it, and a silent data loss is worse than a
+  visible token.
+  - **Strip the ids on export, never on "Open in external app".** Export produces a *copy*,
+    so a clean `.fountain` (or PDF) is right. "Open in external app" hands over the *live*
+    file, which the external editor writes back to in place — stripping there would destroy
+    every id on the first external save.
+  - That leaves exactly one lossy path: export stripped → edit externally → import back over
+    the same project. **Heuristic matching (heading text + position + content hash) belongs
+    there and only there** — as a recovery fallback for a round trip that already lost the
+    ids, not as the primary identity mechanism.
+  - A script imported with no ids at all (written elsewhere) simply gets fresh ones on parse,
+    which is the same path as the backward-compatible import above — nothing to detach from.
+- [x] **Pages are modular editing windows.** A Scene page edits its own stretch of the script
+  (`replaceSceneBody` — the heading and its hidden id stay owned by the script, only the body
+  is editable), re-assigning its chapter MOVES the block in the script
+  (`moveSceneToSection`), and deleting the note removes the scene from the script
+  (`removeScene`) — otherwise the next parse would just resurrect it. All three go through
+  `editScript`, so the .fountain file stays the single home of the writing.
+
+- [ ] **Reordering scenes within a chapter should move them in the script.** The Chapter page
+  lists its scenes in script order but they can't be dragged yet. A drop should splice the
+  scene's block to its new position in the section (the `moveSceneToSection` machinery
+  already does the lift-and-insert; this needs an insert-at-index variant plus the drag UI
+  reusing the existing `seqDrag` pattern from the session page).
+- [ ] **Chapters can't be created or reordered from the app** — only by writing a `#` section
+  in the script. "Add a chapter" should insert a section (with a fresh `[[loom:…]]`), and
+  reordering chapters should move their whole section blocks.
+- [ ] **Deleting a scene from the file explorer** (rather than from its page) still leaves it
+  in the script. The page's Delete handles both; a `vault.on('delete')` listener would need
+  the record's `sceneId` cached before the record is dropped from the index.
+- [ ] **A chapter deleted from its page doesn't remove its `#` section** (and would strand its
+  scenes). Needs a decision first: delete the scenes with it, or move them out?
+- [ ] Live-preview editor: raw at the cursor, formatted once it leaves — same model as
+  `markdown-field.tsx`, which is the head start here (CodeMirror, rendered-vs-raw
+  decorations, `[[` completion). Character/location names stay **plain text in the file** but
+  render as clickable entity chips inside the plugin; uppercase-after-blank-line triggers the
+  character suggester, and scene-heading position triggers INT./EXT. + location suggestions.
+- [ ] Scene page: exposes only that slice of the script, plus its derived page range.
+- [ ] Modular reordering: move a scene between chapters / reorder, with the main script and
+  scene numbers following. "Add a scene" from inside Chapter 1 inserts after Chapter 1's last
+  scene and before Chapter 2's first.
+- [ ] Plain-writing mode: keep Fountain syntax and it formats; write plain prose and it stays
+  prose (valid Fountain — it's all Action), just without the automatic scene counter.
+- [x] **Real PDF export** (`src/pdf.ts`) — a hand-rolled writer, no dependency, affordable
+  because a screenplay is Courier-only (a PDF standard font: nothing to embed, monospaced so
+  no metrics needed). Correct typeset geometry, widow control, title page, page numbers.
+  `pdfPages` is the single pagination source, so the in-app preview and the exported file
+  agree page for page.
+- [x] **Export / import / open, in one `⋯` menu.** *Export as PDF…* and *Export as
+  .fountain…* both go through a real OS save dialog (`showSaveFilePicker`, so an export can
+  land outside the vault), falling back to a download then to writing beside the script.
+  *Open in the default app* / *Show in system file manager* — **Electron exposes no
+  cross-platform app-chooser dialog**, so those are the honest two, and both hand over the
+  LIVE file so ids are never stripped there.
+- [x] **Pages preview + search + script navigation.** A Script / Pages tab pair; the preview
+  shows one page at a time with page-number navigation; a shared search works in both panes
+  (selects the match while editing, jumps to and highlights it in the preview); a left panel
+  navigates to a place in the SCRIPT rather than to entity pages.
 
 ## Next session (committed)
 

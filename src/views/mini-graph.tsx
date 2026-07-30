@@ -6,13 +6,16 @@ import {
 	useState,
 } from 'react';
 import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
+import { projectTypes, roleOf } from '../project-kind';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { edgePath } from '../graph/routing';
 import { LoomIndexer, ProjectDef } from '../indexer';
 import { Icon, recordLabel } from './common';
 import type LoomLoomPlugin from '../main';
 
-const RADII = { session: 26, event: 20, global: 17 } as const;
+/** Fallback node radius per layout row (anchor / beat / global layers),
+ *  used when the type has no configured size. */
+const RADII = { anchor: 26, beat: 20, global: 17 } as const;
 const CLICK_SLOP = 4;
 
 interface Disp {
@@ -37,7 +40,7 @@ export function focusNeighborhood(
 	const direct = plugin.indexer.getConnections(focusId).map((c) => c.record);
 	for (const r of direct) keep.add(r.path);
 	for (const r of direct) {
-		if (r.type !== 'event') continue;
+		if (roleOf(r.type) !== 'beat') continue;
 		for (const c of plugin.indexer.getConnections(r.path)) keep.add(c.record.path);
 	}
 	const records: EntityRecord[] = [];
@@ -77,7 +80,7 @@ export function buildFocusLayout(
 	const direct = plugin.indexer.getConnections(focusId).map((c) => c.record);
 	for (const r of direct) keep.add(r.path);
 	for (const r of direct) {
-		if (r.type !== 'event') continue;
+		if (roleOf(r.type) !== 'beat') continue;
 		for (const c of plugin.indexer.getConnections(r.path)) keep.add(c.record.path);
 	}
 	const real = plugin.indexer;
@@ -402,7 +405,7 @@ export function MiniGraph({
 									onClick={() => setFilterMode(filterMode === 'dim' ? 'hide' : 'dim')}
 								/>
 							</div>
-							{ENTITY_TYPES.map((t) => (
+							{projectTypes(project.config).map((t) => (
 								<label key={t} className="loom-check">
 									<input
 										type="checkbox"

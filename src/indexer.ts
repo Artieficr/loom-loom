@@ -16,6 +16,7 @@ import {
 	DEFAULT_MEMBER_ROLE,
 	EntityRecord,
 	EntityType,
+	EventKind,
 	FM,
 	FactionMemberDecl,
 	LOOM_EXTENSION,
@@ -27,6 +28,7 @@ import {
 	TIMELINES_FOLDER,
 	TimelineDef,
 	isEntityType,
+	isEventKind,
 	legacyFmKeys,
 	formatTimestamp,
 	parseTimestamp,
@@ -866,6 +868,43 @@ export class LoomIndexer extends Component {
 			reward: typeof rewardValue === 'string' ? rewardValue : '',
 			objectives,
 			seq: typeof fmLoom(fm, FM.seq) === 'number' ? (fmLoom(fm, FM.seq) as number) : null,
+			eventKind: (() => {
+				const v = fmLoom(fm, FM.eventKind);
+				return typeof v === 'string' && isEventKind(v.toLowerCase()) ? (v.toLowerCase() as EventKind) : '';
+			})(),
+			happened: fmLoom(fm, FM.happened) === true,
+			npcLines: parseTagList(fmLoom(fm, FM.npcLines)),
+			displayTitle: (() => {
+				const v = fmLoom(fm, FM.displayTitle);
+				return typeof v === 'string' ? v.trim() : '';
+			})(),
+			sceneId: (() => {
+				const v = fmLoom(fm, FM.sceneId);
+				return typeof v === 'string' ? v.trim() : '';
+			})(),
+			sceneIntExt: (() => {
+				const v = fmLoom(fm, FM.sceneIntExt);
+				return typeof v === 'string' ? v.trim() : '';
+			})(),
+			sceneTime: (() => {
+				const v = fmLoom(fm, FM.sceneTime);
+				return typeof v === 'string' ? v.trim() : '';
+			})(),
+			sceneLocation: (() => {
+				const v = fmLoom(fm, FM.sceneLocation);
+				const lp = typeof v === 'string' ? extractLinkpath(v) : null;
+				return lp ?? '';
+			})(),
+			sceneCast: parseLinkList(fmLoom(fm, FM.sceneCast)),
+			sceneChapter: (() => {
+				const v = fmLoom(fm, FM.sceneChapter);
+				const lp = typeof v === 'string' ? extractLinkpath(v) : null;
+				return lp ?? '';
+			})(),
+			chapterId: (() => {
+				const v = fmLoom(fm, FM.chapterId);
+				return typeof v === 'string' ? v.trim() : '';
+			})(),
 			// Loom-managed timestamps win over the filesystem stats (cloud-sync can
 			// overwrite ctime/mtime with the sync time); stats are the fallback for
 			// notes not yet stamped.

@@ -11,10 +11,11 @@ import {
 } from 'react';
 import {
 	ENTITY_META,
-	ENTITY_TYPES,
 	EntityRecord,
 	MAPS_ICON,
 	MAPS_LABEL,
+	SCRIPT_ICON,
+	SCRIPT_LABEL,
 	PC_GROUP_ICON,
 	PC_GROUP_VALUE,
 	VIEW_GRAPH,
@@ -23,6 +24,8 @@ import {
 	VIEW_MAP,
 } from '../types';
 import { formatLoomDate, groupNameOf } from '../calendar';
+import { features, projectTypes, roleOf } from '../project-kind';
+import { createScriptFile, scriptFilePath as scriptPathOf } from './script-view';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
 import type LoomLoomPlugin from '../main';
@@ -348,11 +351,12 @@ export function SearchableSelect({
 }
 
 /**
- * User-facing label of a record. Sessions display their date — their file
- * name is managed and never exposed inside the plugin.
+ * User-facing label of a record. Dated anchors (Sessions) display their date —
+ * their file name is managed and never exposed inside the plugin. Chapters are
+ * named, so they fall through to the name like everything else.
  */
 export function recordLabel(record: EntityRecord, project: ProjectDef | null): string {
-	if (record.type === 'session' && record.date && project) {
+	if (roleOf(record.type) === 'anchor' && record.date && project) {
 		return formatLoomDate(record.date, project.config);
 	}
 	return record.name;
@@ -536,6 +540,28 @@ export function NavRail({
 		<nav className="loom-rail">
 			<RailButton icon="home" label="Home" onClick={() => navigator.openLoomFile(project.loomPath)} />
 			<div className="loom-rail-sep" />
+			{/* The script leads, in the slot the Group takes in the other kinds,
+			    so every entity button below keeps its usual position. */}
+			{features(project.config).script ? (
+				<RailButton
+					icon={SCRIPT_ICON}
+					label={SCRIPT_LABEL}
+					active={active === 'script'}
+					onClick={() => {
+						// Created on demand: a project switched to Writer after
+						// setup has no script file yet.
+						const path = scriptPathOf(project);
+						if (navigator.plugin.app.vault.getFileByPath(path)) navigator.openLoomFile(path);
+						else {
+							void createScriptFile(navigator.plugin, project).then((f) =>
+								navigator.openLoomFile(f.path)
+							);
+						}
+					}}
+				/>
+			) : null}
+			{/* The Group is the party — present only in kinds that have one. */}
+			{features(project.config).group ? (
 			<RailButton
 				icon={PC_GROUP_ICON}
 				iconFallback="star"
@@ -553,7 +579,8 @@ export function NavRail({
 					navigator.navigateTo(VIEW_GROUP, { project: project.root, origin });
 				}}
 			/>
-			{ENTITY_TYPES.filter((t) => t !== 'region').flatMap((t) => {
+			) : null}
+			{projectTypes(project.config).filter((t) => t !== 'region').flatMap((t) => {
 				const btn = (
 					<RailButton
 						key={t}
