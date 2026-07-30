@@ -205,6 +205,8 @@ export interface FountainElement {
 	extension?: string;
 	/** Characters only: `^` — this block plays alongside the previous one. */
 	dual?: boolean;
+	/** Scene headings only: production number from `#7#`, without the hashes. */
+	sceneNumber?: string;
 	/** 1-based page this element renders on. Derived on every parse, never
 	 *  stored — see the pagination note at the top of the file. */
 	page?: number;
@@ -508,8 +510,9 @@ export function parseFountain(text: string): ParsedScript {
 			const parts = parseSceneHeading(line);
 			elements.push({
 				type: 'scene-heading',
-				text: renderSceneHeading({ ...parts, loomId: null }).replace(/^\./, ''),
+				text: renderSceneHeading({ ...parts, sceneNumber: '', loomId: null }).replace(/^\./, ''),
 				line: i,
+				sceneNumber: parts.sceneNumber || undefined,
 			});
 			i++;
 			continue;
@@ -529,16 +532,31 @@ export function parseFountain(text: string): ParsedScript {
 			const name = stripAnnotations(withoutDual.replace(CHARACTER_EXT_RE, '')).trim();
 			elements.push({ type: 'character', text: name, line: i, extension, dual });
 			i++;
-			// Everything up to the next blank line belongs to this cue.
+			// Everything up to the next blank line belongs to this cue. Per the
+			// Fountain spec, successive dialogue lines are NOT separate
+			// paragraphs the way action lines are — they're one continuous
+			// speech, so consecutive non-parenthetical lines are joined into a
+			// single dialogue element (only a parenthetical breaks the run).
+			let dialogue: string[] = [];
+			let dialogueLine = i;
+			const flushDialogue = () => {
+				if (dialogue.length === 0) return;
+				elements.push({ type: 'dialogue', text: dialogue.join('\n'), line: dialogueLine });
+				dialogue = [];
+			};
 			while (i < lines.length && lines[i].trim() !== '') {
 				const block = lines[i].trim();
 				if (block.startsWith('(') && block.endsWith(')')) {
+					flushDialogue();
 					elements.push({ type: 'parenthetical', text: block, line: i });
+					dialogueLine = i + 1;
 				} else {
-					elements.push({ type: 'dialogue', text: stripAnnotations(block), line: i });
+					if (dialogue.length === 0) dialogueLine = i;
+					dialogue.push(stripAnnotations(block));
 				}
 				i++;
 			}
+			flushDialogue();
 			continue;
 		}
 
@@ -899,6 +917,43 @@ export function reattachSceneIds(
 }
 
 /**
+ * Re-attaches an incoming script's top-level sections (chapters) to the ids
+ * they had before — the same recovery heuristic as `reattachSceneIds`, and for
+ * the same reason: an export → edit elsewhere → import round trip strips every
+ * `[[loom:…]]` marker, sections included. Without this, every reimport created
+ * brand-new Chapter notes and orphaned the old ones, which is what silently
+ * dropped their display titles.
+ *
+ * Matching is conservative, same as scenes: an incoming section claims an old
+ * id only on an exact case-insensitive title match, walking in script order.
+ */
+export function reattachSectionIds(
+	incoming: string,
+	/** Existing chapters' ids keyed in script order: `{ id, title }`. */
+	known: { id: string; title: string }[]
+): { text: string; matched: number } {
+	const parsed = parseFountain(incoming);
+	const lines = incoming.split(/\r?\n/);
+	const taken = new Set(
+		parsed.sections.map((s) => s.loomId).filter((id): id is string => id !== null)
+	);
+	const pool = known.filter((k) => !taken.has(k.id));
+	const used = new Set<string>();
+
+	let matched = 0;
+	for (const section of parsed.sections) {
+		if (section.level !== 1 || section.loomId !== null) continue;
+		const title = section.text.trim().toLowerCase();
+		const hit = pool.find((k) => !used.has(k.id) && k.title.trim().toLowerCase() === title);
+		if (!hit) continue;
+		used.add(hit.id);
+		matched++;
+		lines[section.line] = `${lines[section.line].trimEnd()} [[loom:${hit.id}]]`;
+	}
+	return { text: lines.join('\n'), matched };
+}
+
+/**
  * Replaces a scene's body — everything after its heading line — leaving the
  * heading (and the hidden id on it) untouched.
  *
@@ -954,5 +1009,180 @@ export function moveSceneToSection(text: string, sceneId: string, sectionId: str
 	const clean = [...block];
 	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
 	lines.splice(insertAt, 0, '', ...clean, '');
+	return lines.join('\n');
+}
+
+/**
+ * Splits a scene heading's location text into a main location and an
+ * optional sublocation — `"CAFE - COUNTER"` → `{ main: "CAFE", sub:
+ * "COUNTER" }`. Splits on the FIRST ` - `, mirroring the time-of-day split
+ * (which uses the LAST): a location name that itself contains ` - ` is an
+ * accepted, documented limitation, the same class of tradeoff already made
+ * there.
+ */
+export function splitLocationSub(location: string): { main: string; sub: string } {
+	const dash = location.indexOf(' - ');
+	if (dash < 0) return { main: location.trim(), sub: '' };
+	return { main: location.slice(0, dash).trim(), sub: location.slice(dash + 3).trim() };
+}
+
+/** Composes a scene heading's location text from a main location and an
+ *  optional sublocation — the inverse of `splitLocationSub`. */
+export function joinLocationSub(main: string, sub: string): string {
+	return sub.trim() === '' ? main.trim() : `${main.trim()} - ${sub.trim()}`;
+}
+
+/**
+ * Rewrites a scene heading's editable parts (INT./EXT., location, time of
+ * day) — what the Scene page's modular heading editor writes through. The
+ * production number and hidden loom id are read straight off the RAW line and
+ * carried over untouched, so nothing here can lose or duplicate either.
+ */
+export function setSceneHeadingParts(
+	text: string,
+	sceneId: string,
+	updates: Partial<Pick<SceneHeadingParts, 'intExt' | 'location' | 'timeOfDay'>>
+): string | null {
+	const parsed = parseFountain(text);
+	const scene = parsed.scenes.find((sc) => sc.loomId === sceneId);
+	if (!scene) return null;
+	const lines = text.split(/\r?\n/);
+	const current = parseSceneHeading(lines[scene.line]);
+	lines[scene.line] = renderSceneHeading({ ...current, ...updates });
+	return lines.join('\n');
+}
+
+/**
+ * Moves a scene's block to sit immediately before another scene, wherever
+ * that scene is.
+ *
+ * Reordering within one chapter (drag-and-drop on the Chapter page) and
+ * moving to a specific spot in a DIFFERENT chapter (the Scene page's two-step
+ * "pick a chapter, then place it" move) are the same operation: relocate the
+ * text, and the scene inherits whichever section it now physically sits
+ * under — there is no separate "which chapter" field to also update.
+ */
+export function moveSceneBefore(text: string, sceneId: string, beforeSceneId: string): string | null {
+	const parsed = parseFountain(text);
+	const scene = parsed.scenes.find((sc) => sc.loomId === sceneId);
+	const target = parsed.scenes.find((sc) => sc.loomId === beforeSceneId);
+	if (!scene || !target || scene.loomId === target.loomId) return null;
+
+	const lines = text.split(/\r?\n/);
+	const block = lines.slice(scene.line, scene.endLine);
+	let insertAt = target.line;
+
+	lines.splice(scene.line, scene.endLine - scene.line);
+	if (insertAt > scene.line) insertAt -= scene.endLine - scene.line;
+	while (insertAt > 0 && lines[insertAt - 1]?.trim() === '') insertAt--;
+	const clean = [...block];
+	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+	lines.splice(insertAt, 0, '', ...clean, '');
+	return lines.join('\n');
+}
+
+/**
+ * Reorders every scene within one chapter (top-level section) to match
+ * `orderedSceneIds` exactly, in one pass — the Chapter page's drag-to-reorder
+ * uses this (rather than one `moveSceneBefore` call) because a big jump (the
+ * last scene dragged to the front) is one atomic rewrite instead of an
+ * "insert before this computed sibling" reasoned from a single moved scene,
+ * which is more failure-prone as the distance grows.
+ *
+ * Only scenes already in this section are touched. A scene's own block
+ * (heading + everything up to the next scene) is captured BEFORE the removal,
+ * so nested content between scenes travels with the scene it follows — the
+ * removal/reinsertion is bounded to the section (the next top-level `#`, or
+ * the file end), never reaching into a following chapter, since the LAST
+ * scene in a section has its raw `endLine` extended by the parser to
+ * whatever scene-heading comes next in the whole file, chapter boundary or
+ * not.
+ */
+export function reorderScenesInSection(
+	text: string,
+	sectionId: string,
+	orderedSceneIds: string[]
+): string | null {
+	const parsed = parseFountain(text);
+	const section = parsed.sections.find((sec) => sec.loomId === sectionId);
+	if (!section) return null;
+	const lines = text.split(/\r?\n/);
+	const nextSection = parsed.sections
+		.filter((sec) => sec.level === 1 && sec.line > section.line)
+		.sort((a, b) => a.line - b.line)[0];
+	const sectionEnd = nextSection ? nextSection.line : lines.length;
+
+	const inSection = parsed.scenes
+		.filter((sc) => sc.line > section.line && sc.line < sectionEnd)
+		.sort((a, b) => a.line - b.line);
+	if (inSection.length === 0) return null;
+	const trueEnd = (sc: ParsedScene) => Math.min(sc.endLine, sectionEnd);
+
+	const insertAt = inSection[0].line;
+	const removeEnd = trueEnd(inSection[inSection.length - 1]);
+	const blocks = new Map<string, string[]>(
+		inSection.map((sc) => [sc.loomId as string, lines.slice(sc.line, trueEnd(sc))])
+	);
+
+	const order = [
+		...orderedSceneIds.filter((id) => blocks.has(id)),
+		...inSection.map((sc) => sc.loomId as string).filter((id) => !orderedSceneIds.includes(id)),
+	];
+	const rebuilt: string[] = [];
+	for (const id of order) {
+		const block = blocks.get(id);
+		if (!block) continue;
+		const clean = [...block];
+		while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+		rebuilt.push('', ...clean, '');
+	}
+
+	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
+	return lines.join('\n');
+}
+
+/**
+ * Renumbers every scene that already carries a production number (`#N#`) to
+ * match its current script order.
+ *
+ * Production numbers are traditionally LOCKED in screenwriting (hence 12A,
+ * 12B on a real set) precisely so they don't move — but this app's reorder
+ * actions (chapter drag reorder, move to another chapter) physically relocate
+ * a scene's whole block, number included, which would otherwise leave a
+ * stale number sitting on the wrong scene. Called after every such move.
+ * Scenes with no number are left untouched and never given one — this only
+ * keeps an EXISTING numbering scheme in sync, it never starts one.
+ */
+export function renumberScenes(text: string): string {
+	const parsed = parseFountain(text);
+	const numbered = parsed.scenes.filter((sc) => sc.sceneNumber !== '');
+	if (numbered.length === 0) return text;
+	const lines = text.split(/\r?\n/);
+	numbered.forEach((sc, i) => {
+		const parts = parseSceneHeading(lines[sc.line]);
+		const wanted = String(i + 1);
+		if (parts.sceneNumber === wanted) return;
+		lines[sc.line] = renderSceneHeading({ ...parts, sceneNumber: wanted });
+	});
+	return lines.join('\n');
+}
+
+/**
+ * Renames a top-level section's (chapter's) title — the text of its `#` line
+ * — leaving its level, nesting and hidden loom id untouched.
+ *
+ * The Chapter page's Title field writes through this: chapters are otherwise
+ * "named by the script" (the note reads the section, never the other way),
+ * but that direction of truth is about not authoring a RIVAL copy of the
+ * text, not about the field being read-only — same relationship the Scene
+ * page's modular heading fields have with the scene heading.
+ */
+export function renameSectionTitle(text: string, sectionId: string, newTitle: string): string | null {
+	const parsed = parseFountain(text);
+	const section = parsed.sections.find((sec) => sec.loomId === sectionId);
+	if (!section) return null;
+	const lines = text.split(/\r?\n/);
+	const level = /^#+/.exec(lines[section.line].trim())?.[0].length ?? section.level;
+	lines[section.line] = `${'#'.repeat(level)} ${newTitle.trim()} [[loom:${sectionId}]]`;
 	return lines.join('\n');
 }

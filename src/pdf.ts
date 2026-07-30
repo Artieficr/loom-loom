@@ -1,4 +1,4 @@
-import { FountainElement, ParsedScript, TitlePage, elementText, hasTitlePage, paginate } from './fountain';
+import { FountainElement, ParsedScript, TitlePage, elementText, hasTitlePage } from './fountain';
 
 /**
  * A minimal PDF writer, just wide enough for a screenplay.
@@ -132,6 +132,13 @@ function layoutElement(element: FountainElement, top: number): { lines: PdfLine[
 		else if (spec.align === 'center') x = MARGIN_LEFT + (TEXT_W - line.length * CHAR_W) / 2;
 		lines.push({ x, y: top - i * LINE_H, text: line });
 	});
+	// Production scene number: right margin, same row as the heading — never
+	// part of the wrapped heading text itself. Shown as a plain number (the
+	// `#…#` in the source is Fountain markup, not print convention).
+	if (element.type === 'scene-heading' && element.sceneNumber) {
+		const label = element.sceneNumber;
+		lines.push({ x: MARGIN_LEFT + TEXT_W - label.length * CHAR_W, y: top, text: label });
+	}
 	return { lines, height: wrapped.length * LINE_H };
 }
 
@@ -146,6 +153,11 @@ function isTight(type: string): boolean {
  * Re-flowed here rather than reusing the parser's page numbers: those are an
  * estimate from a line budget, while this is the real typeset geometry, and the
  * two must not disagree inside the file the user actually sends out.
+ *
+ * Walks `parsed.elements` directly rather than `paginate()` (which drops
+ * `page-break` entirely for the soft/estimated pagination) — a `===` line has
+ * to force a real page break here, or the syntax would do nothing in the file
+ * the user actually exports.
  */
 function layoutPages(parsed: ParsedScript): PdfPage[] {
 	const pages: PdfPage[] = [];
@@ -159,13 +171,19 @@ function layoutPages(parsed: ParsedScript): PdfPage[] {
 		y = PAGE_H - MARGIN_TOP;
 	};
 
-	const flat = paginate(parsed).flat();
+	const flat = parsed.elements.filter((e) => e.type !== 'section' && e.type !== 'synopsis');
 	for (let i = 0; i < flat.length; i++) {
 		const element = flat[i];
+		if (element.type === 'page-break') {
+			// Forces a break even mid-page; an empty resulting page is dropped
+			// by the filter below, same as a page with no content ever gets one.
+			if (current.lines.length > 0) newPage();
+			continue;
+		}
 		const { lines, height } = layoutElement(element, y);
 		// Keep a character cue with what follows it.
 		let need = height;
-		if (isTight(element.type) && i + 1 < flat.length) {
+		if (isTight(element.type) && i + 1 < flat.length && flat[i + 1].type !== 'page-break') {
 			need += layoutElement(flat[i + 1], y).height;
 		}
 		if (y - need < bottom && current.lines.length > 0) {

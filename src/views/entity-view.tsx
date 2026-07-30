@@ -33,9 +33,11 @@ import {
 	CreateEntityModal,
 	EntityTypeSuggestModal,
 	RecordSuggestModal,
+	createEntity,
 	createItemCopy,
 	entityFileName,
 	purgeEntityReferences,
+	renameEntityRecord,
 	sessionFileName,
 } from '../project';
 import { formatLoomDateShort, groupNameOf, todayRaw } from '../calendar';
@@ -61,8 +63,17 @@ import { fmLoomValue, setLoomKey } from '../fm';
 import { MiniGraph } from './mini-graph';
 import { findMapsFile } from './map-view';
 import { useIndexVersion } from './hooks';
-import { editScript, pushChapterTitles, sceneScriptText, useScriptText } from './script-view';
-import { moveSceneToSection, replaceSceneBody, removeScene } from '../fountain';
+import { editScript, editScriptAndSync, pushChapterTitles, sceneScriptText, useScriptText } from './script-view';
+import {
+	moveSceneToSection,
+	moveSceneBefore,
+	reorderScenesInSection,
+	renameSectionTitle,
+	replaceSceneBody,
+	removeScene,
+	joinLocationSub,
+	setSceneHeadingParts,
+} from '../fountain';
 import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
 import type LoomLoomPlugin from '../main';
 
@@ -258,6 +269,34 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [date, setDate] = useState(record?.date?.raw ?? '');
 	/** Chapters: the title emitted into the exported script. */
 	const [displayTitle, setDisplayTitle] = useState(record?.displayTitle ?? '');
+	/** Scenes: step 2 of "move to another chapter" — the chapter picked in step
+	 *  1, whose scene list is then shown for drag placement. Null = step 1
+	 *  (just the chapter picker). */
+	const [moveTargetChapter, setMoveTargetChapter] = useState<EntityRecord | null>(null);
+	/** Step 2's pending drop position among the target chapter's scenes (index
+	 *  into its sibling list, 0 = the very top) — dragging only updates this;
+	 *  nothing actually moves until "Move the scene" commits it. */
+	const [movePlaceAt, setMovePlaceAt] = useState(0);
+	/** Scenes: the modular heading editor's four parts, seeded from the
+	 *  resolved `sceneLocation` entity (not the raw heading text) — that's what
+	 *  lets Location/Sublocation reuse the app's normal rename-in-place
+	 *  semantics instead of re-parsing a hyphen-joined string every render. */
+	const initialSceneLocation =
+		record?.type === 'scene' && record.sceneLocation !== ''
+			? plugin.indexer.resolve(record.sceneLocation, record.path)
+			: null;
+	const initialSceneLocationParent =
+		initialSceneLocation?.parentLocation != null
+			? plugin.indexer.resolve(initialSceneLocation.parentLocation, initialSceneLocation.path)
+			: null;
+	const [sceneIntExt, setSceneIntExt] = useState(record?.sceneIntExt ?? '');
+	const [sceneMain, setSceneMain] = useState(
+		initialSceneLocationParent?.name ?? initialSceneLocation?.name ?? ''
+	);
+	const [sceneSub, setSceneSub] = useState(
+		initialSceneLocationParent ? (initialSceneLocation?.name ?? '') : ''
+	);
+	const [sceneTime, setSceneTime] = useState(record?.sceneTime ?? '');
 	const [relationships, setRelationships] = useState<RelationshipDraft[]>(
 		record?.relationships.map((r) => {
 			const target = plugin.indexer.resolve(r.linkpath, record.path);
@@ -590,6 +629,18 @@ function EntityPage({ view }: { view: EntityView }) {
 		await plugin.app.fileManager.renameFile(file, newPath);
 	};
 
+	/** Chapter page's Title field: writes straight into the script's `#`
+	 *  section line — the note itself is updated by the sync that follows,
+	 *  not directly here, so the script stays the one place that authors it. */
+	const commitChapterTitle = async () => {
+		const entered = name.trim();
+		if (entered === '' || entered === record.name || !project || record.type !== 'chapter') {
+			setName(record.name);
+			return;
+		}
+		await editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, record.chapterId, entered));
+	};
+
 	// Aliases live in Obsidian's native `aliases` frontmatter — that's what
 	// link suggestions read — so edits here go straight to that key. The alias
 	// equal to the display name is plugin-managed (kept in sync by renames)
@@ -640,6 +691,143 @@ function EntityPage({ view }: { view: EntityView }) {
 		// own centered-bold line — otherwise editing this field changed nothing
 		// anyone would ever see in the output.
 		if (project) void pushChapterTitles(plugin, project);
+	};
+
+	/** Scene page: INT./EXT. and time-of-day are plain script-heading text —
+	 *  no entity behind them, so a commit is just a heading rewrite. */
+	const commitSceneIntExt = (raw: string = sceneIntExt) => {
+		if (!project || record.type !== 'scene') return;
+		const value = raw.trim();
+		if (value === record.sceneIntExt) return;
+		void editScriptAndSync(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { intExt: value }));
+	};
+	const commitSceneTime = (raw: string = sceneTime) => {
+		if (!project || record.type !== 'scene') return;
+		const value = raw.trim();
+		if (value === record.sceneTime) return;
+		void editScriptAndSync(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { timeOfDay: value }));
+	};
+
+	/**
+	 * Scene page: commits the Location + Sublocation fields together (they're
+	 * interdependent — changing one can mean reparenting the other).
+	 *
+	 * Location/Sublocation ARE the linked entity's Name field, same as
+	 * everywhere else in the app: if a location/sublocation is already linked
+	 * to this scene, editing the text renames THAT entity rather than
+	 * creating a differently-named duplicate and silently detaching the old
+	 * one. Only when nothing is linked yet does it fall back to matching an
+	 * existing location by name, or creating a new one.
+	 */
+	const commitSceneLocation = async () => {
+		if (!project || record.type !== 'scene') return;
+		const mainName = sceneMain.trim();
+		if (mainName === '') return;
+		const subName = sceneSub.trim();
+		const mainKey = mainName.toLowerCase();
+		const topLevel = plugin.indexer.getAll('location', record.project).filter((r) => r.parentLocation === null);
+
+		const resolveOrRename = async (
+			name: string,
+			key: string,
+			current: EntityRecord | null,
+			candidates: EntityRecord[],
+			onCreate: () => Promise<EntityRecord>
+		): Promise<EntityRecord> => {
+			if (current) {
+				if (current.name.trim().toLowerCase() === key) return current;
+				const other = candidates.find((r) => r.name.trim().toLowerCase() === key && r.path !== current.path);
+				if (other) return other;
+				await renameEntityRecord(plugin, project, current, name);
+				return { ...current, name };
+			}
+			const existing = candidates.find((r) => r.name.trim().toLowerCase() === key);
+			return existing ?? (await onCreate());
+		};
+
+		const currentSub = initialSceneLocationParent ? initialSceneLocation : null;
+		const currentMain = initialSceneLocationParent ?? initialSceneLocation;
+		const mainRecord = await resolveOrRename(mainName, mainKey, currentMain, topLevel, async () => {
+			const created = await createEntity(plugin, project, 'location', {
+				name: mainName,
+				tag: '',
+				date: '',
+				description: '',
+			});
+			return { ...pcGroupStub(record.project), path: created.path, name: mainName, type: 'location' };
+		});
+
+		let target = mainRecord;
+		if (subName !== '') {
+			const subKey = subName.toLowerCase();
+			const siblings = plugin.indexer
+				.getAll('location', record.project)
+				.filter(
+					(r) =>
+						r.parentLocation !== null &&
+						plugin.indexer.resolve(r.parentLocation, r.path)?.path === mainRecord.path
+				);
+			const subUnderSameParent =
+				currentSub &&
+				currentSub.parentLocation != null &&
+				plugin.indexer.resolve(currentSub.parentLocation, currentSub.path)?.path === mainRecord.path;
+			if (subUnderSameParent) {
+				target = await resolveOrRename(subName, subKey, currentSub, siblings, async () => {
+					const created = await createEntity(plugin, project, 'location', {
+						name: subName,
+						tag: '',
+						date: '',
+						description: '',
+						parentLocation: linkTargetOf(mainRecord),
+					});
+					return {
+						...pcGroupStub(record.project),
+						path: created.path,
+						name: subName,
+						type: 'location',
+						parentLocation: linkTargetOf(mainRecord),
+					};
+				});
+			} else if (currentSub) {
+				// The main location changed while a sublocation was already
+				// linked — follow it onto the new parent instead of spawning a
+				// second sublocation with the same name.
+				const other = siblings.find((r) => r.name.trim().toLowerCase() === subKey);
+				if (other) target = other;
+				else {
+					await reparentLocation(currentSub, mainRecord);
+					target = { ...currentSub, name: subName, parentLocation: linkTargetOf(mainRecord) };
+					if (currentSub.name.trim().toLowerCase() !== subKey) {
+						await renameEntityRecord(plugin, project, target, subName);
+					}
+				}
+			} else {
+				const existing = siblings.find((r) => r.name.trim().toLowerCase() === subKey);
+				target =
+					existing ??
+					(await (async () => {
+						const created = await createEntity(plugin, project, 'location', {
+							name: subName,
+							tag: '',
+							date: '',
+							description: '',
+							parentLocation: linkTargetOf(mainRecord),
+						});
+						return {
+							...pcGroupStub(record.project),
+							path: created.path,
+							name: subName,
+							type: 'location',
+							parentLocation: linkTargetOf(mainRecord),
+						};
+					})());
+			}
+		}
+
+		writeFm((fm) => setLoomKey(fm, FM.sceneLocation, `[[${linkTargetOf(target)}]]`));
+		void editScriptAndSync(plugin, project, (raw) =>
+			setSceneHeadingParts(raw, record.sceneId, { location: joinLocationSub(mainRecord.name, subName) })
+		);
 	};
 
 	/** Resolves a draft value — display name or link target — to its record. */
@@ -1067,6 +1255,19 @@ function EntityPage({ view }: { view: EntityView }) {
 			await renameLocationFile(record, parent?.type === 'location' ? parent.name : undefined);
 		})();
 	};
+	/** Reparents an ARBITRARY location entity onto a new parent (unlike
+	 *  `setParentLocation`, which always acts on this page's own `record`) —
+	 *  used by the Scene page's modular location editor when a scene's main
+	 *  location changes while a sublocation stays linked, so that same
+	 *  sublocation note follows rather than a second one being created. */
+	const reparentLocation = async (rec: EntityRecord, parent: EntityRecord) => {
+		const f = plugin.app.vault.getFileByPath(rec.path);
+		if (!f) return;
+		await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+			setLoomKey(fm, FM.parentLocation, `[[${linkTargetOf(parent)}]]`);
+		});
+		await renameLocationFile(rec, parent.name);
+	};
 	/** "Turn to a sublocation": fuzzy-searchable picker over every other
 	 *  location (including sublocations — the whole child hierarchy moves
 	 *  along), minus this location's own descendants so a cycle can't be
@@ -1331,6 +1532,33 @@ function EntityPage({ view }: { view: EntityView }) {
 							.sort((a, b) => a.name.localeCompare(b.name)),
 					}))
 					.filter((g) => g.items.length > 0)
+					.sort((a, b) => recordLabel(a.holder, project).localeCompare(recordLabel(b.holder, project)))
+			: [];
+		// A writer project's Scenes section: this location page never authored
+		// these — they're read-only, following straight from `sceneLocation`
+		// (the scene's own most-specific place) the same way Items-in-
+		// sublocations follows `loomItems`.
+		const locationScenes: EntityRecord[] = isLocation
+			? plugin.indexer
+					.getAll('scene', record.project)
+					.filter((sc) => sc.sceneLocation !== '' && plugin.indexer.resolve(sc.sceneLocation, sc.path)?.path === record.path)
+					.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+			: [];
+		const inheritedSceneGroups: { holder: EntityRecord; scenes: EntityRecord[] }[] = isLocation
+			? projectLocations
+					.filter((l) => descendsFromThis(l))
+					.map((subloc) => ({
+						holder: subloc,
+						scenes: plugin.indexer
+							.getAll('scene', record.project)
+							.filter(
+								(sc) =>
+									sc.sceneLocation !== '' &&
+									plugin.indexer.resolve(sc.sceneLocation, sc.path)?.path === subloc.path
+							)
+							.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created)),
+					}))
+					.filter((g) => g.scenes.length > 0)
 					.sort((a, b) => recordLabel(a.holder, project).localeCompare(recordLabel(b.holder, project)))
 			: [];
 		const currentItemLinks = () => itemRecords.map((r) => `[[${linkTargetOf(r)}]]`);
@@ -1635,7 +1863,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		group: string,
 		records: EntityRecord[],
 		commit: boolean,
-		onCommit?: (reordered: EntityRecord[]) => void
+		onCommit?: (reordered: EntityRecord[], moved: EntityRecord) => void
 	) => {
 		seqDragRef.current = null;
 		const drag = seqDrag;
@@ -1645,8 +1873,10 @@ function EntityPage({ view }: { view: EntityView }) {
 		const [moved] = next.splice(drag.from, 1);
 		next.splice(drag.over, 0, moved);
 		// Default order home is each record's loomSeq; callers with their own
-		// stored order (e.g. a page's item list) pass onCommit instead.
-		if (onCommit) onCommit(next);
+		// stored order (e.g. a page's item list, or a script to rewrite) pass
+		// onCommit instead — it also gets the single record that moved, since a
+		// script rewrite only needs to relocate that one block.
+		if (onCommit) onCommit(next, moved);
 		else {
 			const base = Date.now();
 			next.forEach((r, i) => writeRecordSeq(r.path, base + i));
@@ -1657,7 +1887,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		group: string,
 		i: number,
 		records: EntityRecord[],
-		onCommit?: (reordered: EntityRecord[]) => void
+		onCommit?: (reordered: EntityRecord[], moved: EntityRecord) => void
 	) => (
 		<span
 			className="loom-subloc-grip"
@@ -3060,25 +3290,29 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{!isSession && !isItemCopy ? (
+			{!isSession && !isItemCopy && record.type !== 'scene' ? (
 				<div className="loom-field">
 					<div className="loom-name-alias-row">
 						<label className="loom-name-col">
-							<span className="loom-field-label">Name</span>
-							{/* Chapters and scenes in a writer project are named by the
-							    script — their `#` section / scene heading is the source
-							    of truth, and the sync renames the note to match. Editing
-							    it here would be undone on the next parse, so the field
-							    reads rather than lies. */}
+							{/* Chapters (and scenes, on their own modular heading editor)
+							    are named by the script — their `#` section / scene
+							    heading is the source of truth. That's about not
+							    authoring a RIVAL copy of the text, not about the field
+							    being read-only: a Chapter page edit here writes straight
+							    into the script's `#` line (`renameSectionTitle`), and the
+							    sync round-trips it back into this same field — modularly
+							    editable everywhere, same as the rest of the plugin.
+							    Labeled "Title" rather than "Name" when it's script-owned,
+							    since that's what pairs with the chapter's editable
+							    "Display title" below. */}
+							<span className="loom-field-label">{scriptNamed ? 'Title' : 'Name'}</span>
 							<input
 								type="text"
 								value={name}
-								readOnly={scriptNamed}
-								title={scriptNamed ? 'Named by the script — edit its heading instead.' : undefined}
 								onChange={(e) => setName(e.target.value)}
-								onBlur={() => void (scriptNamed ? undefined : commitName())}
+								onBlur={() => void (record.type === 'chapter' ? commitChapterTitle() : commitName())}
 								onKeyDown={(e) => {
-									if (e.key === 'Enter' && !scriptNamed) void commitName();
+									if (e.key === 'Enter') void (record.type === 'chapter' ? commitChapterTitle() : commitName());
 								}}
 							/>
 						</label>
@@ -3114,6 +3348,89 @@ function EntityPage({ view }: { view: EntityView }) {
 							))}
 						</div>
 					) : null}
+				</div>
+			) : null}
+
+			{/* A scene's heading, broken into its modular parts instead of one
+			    freeform line: INT./EXT. (a small autocomplete — INT./EXT./
+			    INT./EXT. — arrow keys cycle, Enter picks), Location and
+			    Sublocation (free text with existing-location suggestions;
+			    editing an ALREADY-linked one renames that entity everywhere,
+			    same as any other Name field, rather than creating a duplicate;
+			    a name matching nothing creates a fresh location/sublocation),
+			    and Time (plain free text). All four write straight back into
+			    the script heading — this field group IS the heading. */}
+			{record.type === 'scene' ? (
+				<div className="loom-field">
+					<span className="loom-field-label">Scene heading</span>
+					<div className="loom-scene-heading-fields">
+						<SuggestInput
+							className="loom-scene-heading-intext"
+							placeholder="INT./EXT."
+							value={sceneIntExt}
+							options={['INT.', 'EXT.', 'INT./EXT.', 'EST.']}
+							onChange={setSceneIntExt}
+							onPick={(v) => {
+								setSceneIntExt(v);
+								commitSceneIntExt(v);
+							}}
+							onBlur={() => commitSceneIntExt()}
+						/>
+						<SuggestInput
+							className="loom-scene-heading-location"
+							placeholder="Location"
+							value={sceneMain}
+							options={plugin.indexer
+								.getAll('location', record.project)
+								.filter((r) => r.parentLocation === null)
+								.map((r) => r.name)}
+							onChange={setSceneMain}
+							onPick={(v) => {
+								setSceneMain(v);
+								void commitSceneLocation();
+							}}
+							onBlur={() => void commitSceneLocation()}
+						/>
+						<SuggestInput
+							className="loom-scene-heading-location"
+							placeholder="Sublocation (optional)"
+							value={sceneSub}
+							options={(() => {
+								const mainRecord = plugin.indexer
+									.getAll('location', record.project)
+									.find((r) => r.parentLocation === null && r.name.trim().toLowerCase() === sceneMain.trim().toLowerCase());
+								if (!mainRecord) return [];
+								return plugin.indexer
+									.getAll('location', record.project)
+									.filter(
+										(r) =>
+											r.parentLocation !== null &&
+											plugin.indexer.resolve(r.parentLocation, r.path)?.path === mainRecord.path
+									)
+									.map((r) => r.name);
+							})()}
+							onChange={setSceneSub}
+							onPick={(v) => {
+								setSceneSub(v);
+								void commitSceneLocation();
+							}}
+							onBlur={() => void commitSceneLocation()}
+						/>
+						<input
+							type="text"
+							className="loom-scene-heading-time"
+							placeholder="Time"
+							value={sceneTime}
+							onChange={(e) => setSceneTime(e.target.value)}
+							onBlur={() => commitSceneTime()}
+							onKeyDown={(e) => {
+								if (e.key === 'Enter') commitSceneTime();
+							}}
+						/>
+					</div>
+					<span className="loom-field-hint">
+						{joinLocationSub(sceneMain || '…', sceneSub) + (sceneTime.trim() !== '' ? ` - ${sceneTime.trim()}` : '')}
+					</span>
 				</div>
 			) : null}
 
@@ -3255,11 +3572,32 @@ function EntityPage({ view }: { view: EntityView }) {
 			{record.type === 'chapter' ? (
 				<label className="loom-field">
 					<span className="loom-field-label loom-field-label-row">
-						Display title
+						Title
 						{sessionNumber > 0 ? (
 							<span className="loom-session-number">Chapter {sessionNumber}</span>
 						) : null}
 					</span>
+					{/* The script's `# section` line — editing it writes straight into
+					    the script (`renameSectionTitle`); the note's own name/file are
+					    then reflected back by the sync that follows. Chapters don't
+					    render the generic Name field above (they take the `isSession`
+					    branch of the page shell), so this is the ONLY place the title
+					    is exposed and edited. */}
+					<input
+						type="text"
+						value={name}
+						onChange={(e) => setName(e.target.value)}
+						onBlur={() => void commitChapterTitle()}
+						onKeyDown={(e) => {
+							if (e.key === 'Enter') void commitChapterTitle();
+						}}
+					/>
+				</label>
+			) : null}
+
+			{record.type === 'chapter' ? (
+				<label className="loom-field">
+					<span className="loom-field-label">Display title</span>
 					<input
 						type="text"
 						placeholder={record.name}
@@ -3270,10 +3608,6 @@ function EntityPage({ view }: { view: EntityView }) {
 							if (e.key === 'Enter') void commitDisplayTitle();
 						}}
 					/>
-					<span className="loom-field-hint">
-						How the chapter is titled in the exported script. Left empty, the chapter's own
-						name is used.
-					</span>
 				</label>
 			) : null}
 
@@ -3735,18 +4069,48 @@ function EntityPage({ view }: { view: EntityView }) {
 							<code># {record.name}</code> section in the script creates them.
 						</div>
 					) : (
-						<div className="loom-subloc-list">
-							{chapterScenes.map((sc, i) => (
-								<div key={sc.path} className="loom-script-scene-row">
-									<span className="loom-script-scene-num">{i + 1}</span>
-									<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
-										{sc.name}
-									</button>
-									<span className="loom-row-desc">
-										{[sc.sceneIntExt, sc.sceneTime].filter((v) => v !== '').join(' · ')}
-									</span>
-								</div>
-							))}
+						<div
+							className={
+								seqDrag?.group === 'chapter-scenes'
+									? 'loom-subloc-list loom-subloc-dragging'
+									: 'loom-subloc-list'
+							}
+						>
+							{chapterScenes.map((sc, i) => {
+								const grabbed = seqDrag?.group === 'chapter-scenes' && seqDrag.from === i;
+								return (
+									<div
+										key={sc.path}
+										className={
+											grabbed
+												? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
+												: 'loom-script-scene-row loom-subloc-row-slide'
+										}
+										style={seqRowStyle('chapter-scenes', i)}
+										data-seq-row=""
+									>
+										{seqGrip('chapter-scenes', i, chapterScenes, (reordered) => {
+											if (!project) return;
+											// One atomic rewrite of the whole section's scene order,
+											// rather than reasoning about a single "insert before its
+											// new neighbor" move — robust to any jump distance.
+											void editScriptAndSync(plugin, project, (raw) =>
+												reorderScenesInSection(
+													raw,
+													record.chapterId,
+													reordered.map((r) => r.sceneId)
+												)
+											);
+										})}
+										<span className="loom-scene-row-num">{i + 1}</span>
+										<span className="loom-scene-row-intext">{sc.sceneIntExt}</span>
+										<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
+											{sc.name}
+										</button>
+										{sc.sceneTime !== '' ? <span className="loom-row-desc">{sc.sceneTime}</span> : null}
+									</div>
+								);
+							})}
 						</div>
 					)}
 				</div>
@@ -4097,9 +4461,14 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{isBeat && scriptMode ? (
 				<>
-					{/* Mandatory, and re-assignable: picking a different chapter
-					    MOVES this scene's block in the script, so the note and the
-					    writing can never drift apart. */}
+					{/* Mandatory, and re-assignable. Moving is two steps, since a
+					    single dropdown pick can't say WHERE in the target chapter
+					    the scene should land: (1) pick the chapter, (2) drag the
+					    scene into position among that chapter's existing scenes.
+					    Either step physically moves the writing in the script, so
+					    the note's chapter link and the script can never drift
+					    apart — a chapter link edited any other way would just be
+					    undone by the next sync. */}
 					<div className="loom-field loom-field-sep">
 						<span className="loom-field-label">{ENTITY_META[anchorType].label}</span>
 						<div className="loom-tag-row">
@@ -4110,35 +4479,127 @@ function EntityPage({ view }: { view: EntityView }) {
 									onOpen={() => view.openEntity(sceneChapterRecord.path)}
 								/>
 							) : null}
-							<SearchableSelect
-								placeholder={
-									sceneChapterRecord ? `Move to another ${anchorLabel}…` : `Pick the ${anchorLabel}…`
-								}
-								options={plugin.indexer
-									.getAll(anchorType, record.project)
-									.filter((c) => c.path !== sceneChapterRecord?.path)
-									.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
-									.map((c) => ({ value: c.path, label: c.name }))}
-								onPick={(path) => {
-									const target = plugin.indexer.get(path);
-									if (!target || !project) return;
-									// Move the writing first; the sync then re-derives the
-									// scene's chapter link from where it now sits.
-									void editScript(plugin, project, (raw) =>
-										moveSceneToSection(raw, record.sceneId, target.chapterId)
-									).then((moved) => {
-										if (!moved) {
-											writeFm((fm) => setLoomKey(fm, FM.sceneChapter, `[[${linkTargetOf(target)}]]`));
-										}
-									});
-								}}
-							/>
+							{moveTargetChapter ? null : (
+								<SearchableSelect
+									placeholder={
+										sceneChapterRecord ? `Move to another ${anchorLabel}…` : `Pick the ${anchorLabel}…`
+									}
+									options={plugin.indexer
+										.getAll(anchorType, record.project)
+										.filter((c) => c.path !== sceneChapterRecord?.path)
+										.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+										.map((c) => ({ value: c.path, label: c.name }))}
+									onPick={(path) => {
+										const target = plugin.indexer.get(path);
+										if (!target) return;
+										setMoveTargetChapter(target);
+										setMovePlaceAt(0);
+									}}
+								/>
+							)}
 						</div>
-						{sceneChapterRecord ? null : (
+						{sceneChapterRecord || moveTargetChapter ? null : (
 							<span className="loom-field-hint">
 								Every scene belongs to a chapter — that's where its writing lives in the script.
 							</span>
 						)}
+						{moveTargetChapter && project
+							? (() => {
+									const siblings = plugin.indexer
+										.getAll('scene', record.project)
+										.filter(
+											(sc) =>
+												sc.path !== record.path &&
+												sc.sceneChapter !== '' &&
+												plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === moveTargetChapter.path
+										)
+										.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+									const placeAt = Math.max(0, Math.min(siblings.length, movePlaceAt));
+									// Dragging only updates `movePlaceAt` (a pending placement);
+									// nothing moves in the script until this commits it — a drop
+									// that fired instantly gave no chance to readjust.
+									const finishMove = () => {
+										const nextSibling = siblings[placeAt];
+										void editScriptAndSync(plugin, project, (raw) =>
+											nextSibling
+												? moveSceneBefore(raw, record.sceneId, nextSibling.sceneId)
+												: moveSceneToSection(raw, record.sceneId, moveTargetChapter.chapterId)
+										).then(() => {
+											setMoveTargetChapter(null);
+											setMovePlaceAt(0);
+										});
+									};
+									return (
+										<>
+											<div className="loom-field-hint">
+												{siblings.length === 0
+													? `"${moveTargetChapter.name}" has no scenes yet — this will be its first.`
+													: `Drag this scene into position among "${moveTargetChapter.name}"'s scenes, then confirm.`}
+											</div>
+											{siblings.length > 0 ? (
+												<div
+													className={
+														seqDrag?.group === 'scene-move'
+															? 'loom-subloc-list loom-subloc-dragging'
+															: 'loom-subloc-list'
+													}
+												>
+													{(() => {
+														const display = [
+															...siblings.slice(0, placeAt),
+															record,
+															...siblings.slice(placeAt),
+														];
+														return display.map((sc, i) => {
+															const grabbed = seqDrag?.group === 'scene-move' && seqDrag.from === i;
+															const isSelf = sc.path === record.path;
+															return (
+																<div
+																	key={sc.path}
+																	className={
+																		grabbed
+																			? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
+																			: 'loom-script-scene-row loom-subloc-row-slide'
+																	}
+																	style={seqRowStyle('scene-move', i)}
+																	data-seq-row=""
+																>
+																	{isSelf
+																		? seqGrip('scene-move', i, display, (reordered, moved) => {
+																				const idx = reordered.findIndex(
+																					(r) => r.path === moved.path
+																				);
+																				setMovePlaceAt(idx);
+																			})
+																		: <span className="loom-subloc-grip loom-subloc-grip-static" />}
+																	<span className="loom-scene-row-num">{i + 1}</span>
+																	<span className={isSelf ? 'loom-subloc-link loom-hub-name-static' : ''}>
+																		{sc.name}
+																	</span>
+																</div>
+															);
+														});
+													})()}
+												</div>
+											) : null}
+											<div className="loom-hub-add-row">
+												<button className="loom-rel-add" onClick={finishMove}>
+													Move the scene
+												</button>
+												<button
+													className="loom-rel-filter"
+													onClick={() => {
+														setMoveTargetChapter(null);
+														setMovePlaceAt(0);
+													}}
+												>
+													Cancel
+												</button>
+											</div>
+										</>
+									);
+								})()
+							: null}
 					</div>
 					{/* A focused window onto this scene's stretch of the script. The
 					    heading (and the hidden id on it) stays owned by the script,
@@ -4155,7 +4616,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									onChange={(e) => setSceneBody(e.target.value)}
 									onBlur={() => {
 										if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
-										void editScript(plugin, project, (raw) =>
+										void editScriptAndSync(plugin, project, (raw) =>
 											replaceSceneBody(raw, record.sceneId, sceneDraft)
 										).then(() => setSceneBody(null));
 									}}
@@ -4408,6 +4869,63 @@ function EntityPage({ view }: { view: EntityView }) {
 								</div>
 								);
 							})}
+						</div>
+					) : null}
+				</div>
+			) : null}
+
+			{/* A writer project's Scenes section: this is where the location shows
+			    up in the script, read-only (the scene page owns the heading that
+			    puts it there) — the same "Items in sublocations" grouping the
+			    Items section uses, since a sublocation may host scenes of its
+			    own. Sits where Events would on any other project's location
+			    page — a writer project has no Event type to show instead. */}
+			{isLocation && scriptMode && (locationScenes.length > 0 || inheritedSceneGroups.length > 0) ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Scenes</span>
+					{locationScenes.length > 0 ? (
+						<div className="loom-subloc-list">
+							{locationScenes.map((sc, i) => (
+								<div key={sc.path} className="loom-script-scene-row">
+									<span className="loom-scene-row-num">{i + 1}</span>
+									<span className="loom-scene-row-intext">{sc.sceneIntExt}</span>
+									<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
+										{sc.name}
+									</button>
+									{sc.sceneTime !== '' ? <span className="loom-row-desc">{sc.sceneTime}</span> : null}
+								</div>
+							))}
+						</div>
+					) : null}
+					{inheritedSceneGroups.length > 0 ? (
+						<div className="loom-inherited-items">
+							<span className="loom-field-sublabel">Scenes in sublocations</span>
+							{inheritedSceneGroups.map((g) => (
+								<div key={g.holder.path} className="loom-locnote-group loom-char-event-group">
+									<div className="loom-tag-row loom-event-group-session">
+										<EntityChip
+											plugin={plugin}
+											record={g.holder}
+											label={recordLabel(g.holder, project)}
+											onOpen={() => view.openEntity(g.holder.path)}
+										/>
+									</div>
+									<div className="loom-event-nest loom-locfac-nest loom-subloc-list">
+										{g.scenes.map((sc, i) => (
+											<div key={sc.path} className="loom-script-scene-row">
+												<span className="loom-scene-row-num">{i + 1}</span>
+												<span className="loom-scene-row-intext">{sc.sceneIntExt}</span>
+												<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
+													{sc.name}
+												</button>
+												{sc.sceneTime !== '' ? (
+													<span className="loom-row-desc">{sc.sceneTime}</span>
+												) : null}
+											</div>
+										))}
+									</div>
+								</div>
+							))}
 						</div>
 					) : null}
 				</div>

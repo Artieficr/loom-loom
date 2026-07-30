@@ -182,6 +182,9 @@ export function SuggestInput({
 	action?: { label: string; onPick: () => void };
 }) {
 	const [open, setOpen] = useState(false);
+	// Keyboard highlight into the filtered list — Arrow Down/Up move it, Enter
+	// takes whichever entry is highlighted (defaults to the top match).
+	const [active, setActive] = useState(0);
 	const wrapRef = useRef<HTMLDivElement>(null);
 
 	// Close on any press outside the component.
@@ -196,6 +199,7 @@ export function SuggestInput({
 
 	const query = value.trim().toLowerCase();
 	const filtered = options.filter((o) => o.toLowerCase().includes(query));
+	const activeIndex = Math.min(active, Math.max(0, filtered.length - 1));
 
 	const pick = (v: string) => {
 		setOpen(false);
@@ -210,6 +214,7 @@ export function SuggestInput({
 				value={value}
 				onChange={(e) => {
 					onChange(e.target.value);
+					setActive(0);
 					setOpen(true);
 				}}
 				onFocus={() => setOpen(true)}
@@ -217,8 +222,15 @@ export function SuggestInput({
 				onBlur={onBlur}
 				onKeyDown={(e) => {
 					if (e.key === 'Escape') setOpen(false);
-					if (e.key === 'Enter') {
-						if (open && filtered.length > 0 && filtered[0] !== value) pick(filtered[0]);
+					else if (e.key === 'ArrowDown') {
+						e.preventDefault();
+						setOpen(true);
+						setActive((a) => Math.min(filtered.length - 1, a + 1));
+					} else if (e.key === 'ArrowUp') {
+						e.preventDefault();
+						setActive((a) => Math.max(0, a - 1));
+					} else if (e.key === 'Enter') {
+						if (open && filtered.length > 0 && filtered[activeIndex] !== value) pick(filtered[activeIndex]);
 						else setOpen(false);
 					}
 				}}
@@ -238,8 +250,13 @@ export function SuggestInput({
 							{action.label}
 						</button>
 					) : null}
-					{filtered.map((o) => (
-						<button key={o} className="loom-combo-item" onClick={() => pick(o)}>
+					{filtered.map((o, i) => (
+						<button
+							key={o}
+							className={i === activeIndex ? 'loom-combo-item loom-combo-item-active' : 'loom-combo-item'}
+							onMouseEnter={() => setActive(i)}
+							onClick={() => pick(o)}
+						>
 							{o}
 						</button>
 					))}
