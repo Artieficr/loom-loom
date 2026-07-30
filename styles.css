@@ -1462,6 +1462,12 @@ span.loom-row-caret {
 	background: var(--background-modifier-hover);
 }
 
+/* Arrow-key highlight (SuggestInput) — a plain :hover would fight the
+   keyboard-driven selection whenever the cursor happens to sit over a row. */
+.loom-combo-menu .loom-combo-item-active {
+	background: var(--background-modifier-hover);
+}
+
 .loom-combo-menu .loom-combo-action {
 	color: var(--text-accent);
 }
@@ -2264,6 +2270,14 @@ span.loom-row-caret {
 	color: var(--text-faint);
 	cursor: grab;
 	touch-action: none;
+}
+
+/* A reference row in a drag list that isn't itself draggable (e.g. every
+   sibling scene but the one being placed) — keeps the same gutter width so
+   numbers/names still line up with the draggable row's real grip icon. */
+.loom-subloc-grip-static {
+	width: var(--icon-s);
+	flex: none;
 }
 
 .loom-subloc-grip .loom-icon svg {
@@ -4533,6 +4547,16 @@ span.loom-row-caret {
 	min-width: 0;
 }
 
+/* Zero-height sticky anchor: stays pinned to the top of the scrolling view
+   (`.loom-shell-body`) as the page scrolls, so the toggle and the open panel
+   never scroll away with the title-page fields/toolbar above the editor. */
+.loom-view .loom-script-nav-sticky {
+	position: sticky;
+	top: 0;
+	height: 0;
+	z-index: 5;
+}
+
 /* The panel floats over the page instead of sitting in the flow: as a flex
    column it permanently narrowed the working area, which is the opposite of
    what a navigation aid should do. */
@@ -4660,8 +4684,6 @@ span.loom-row-caret {
 }
 
 .loom-view .loom-script-tabs {
-	display: flex;
-	gap: 0.25em;
 	margin: 0.5em 0;
 }
 
@@ -4672,9 +4694,12 @@ span.loom-row-caret {
 	margin-bottom: 0.5em;
 }
 
+/* Fixed rather than flex:1 — Script and Pages preview carry different sets of
+   sibling controls in the toolbar, so a flexible search box changed width
+   switching between them, breaking the illusion that it's the same element. */
 .loom-view .loom-script-search {
-	flex: 1;
-	min-width: 8em;
+	flex: none;
+	width: 21em;
 }
 
 .loom-view .loom-script-pagenum {
@@ -4836,8 +4861,18 @@ span.loom-row-caret {
 }
 
 .loom-view .loom-sp-scene-heading {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	gap: 1em;
 	font-weight: bold;
 	text-transform: uppercase;
+}
+
+/* Production scene number: right margin, never part of the wrapped heading. */
+.loom-view .loom-sp-scene-num {
+	flex: none;
+	font-weight: bold;
 }
 
 .loom-view .loom-sp-character {
@@ -4874,8 +4909,11 @@ span.loom-row-caret {
 	white-space: pre-line;
 }
 
-/* A scene's stretch of the script, shown read-only on its page — the .fountain
-   file stays the single home of the writing, never copied into the note. */
+/* A scene's stretch of the script, edited on its page — the .fountain file
+   stays the single home of the writing, never copied elsewhere. Height/resize
+   are set on the more specific `textarea.loom-scene-script` rule further
+   down; a `max-height` here would win on specificity and clamp it back down
+   below A4, which is exactly the bug that rule used to cause. */
 .loom-view .loom-scene-script {
 	margin: 0;
 	padding: 0.6em 0.8em;
@@ -4886,20 +4924,48 @@ span.loom-row-caret {
 	line-height: 1.45;
 	white-space: pre-wrap;
 	overflow-x: auto;
-	max-height: 24em;
-	overflow-y: auto;
 }
 
-/* Chapter page scene rows: number in a fixed gutter so titles line up. */
+/* Chapter/Location page scene rows: fixed-width number + INT./EXT. columns
+   (own classes, not the outline's `.loom-script-scene-num` — that one relies
+   on an external grid-template it doesn't have here) so a row never shifts
+   depending on how many digits its number has, and INT./EXT. sits in its
+   native reading position, before the title. */
 .loom-view .loom-script-scene-row {
 	display: flex;
 	align-items: baseline;
-	gap: 0.6em;
+	gap: 0.5em;
 	padding: 0.1em 0;
 	min-width: 0;
 }
 
+.loom-view .loom-scene-row-num {
+	flex: 0 0 3ch;
+	text-align: right;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+.loom-view .loom-scene-row-intext {
+	flex: 0 0 4.5em;
+	color: var(--text-muted);
+	font-size: 0.85em;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-view .loom-script-scene-row .loom-subloc-link {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	text-align: left;
+}
+
 .loom-view .loom-script-scene-row .loom-row-desc {
+	flex: 0 0 auto;
 	color: var(--text-muted);
 	font-size: 0.85em;
 	overflow: hidden;
@@ -4916,8 +4982,35 @@ span.loom-row-caret {
 	padding: 0 0 0.3em;
 }
 
+/* The Scene page's modular heading editor: INT./EXT. + Location + Sublocation
+   + Time, laid out left to right the way the rendered heading reads. */
+.loom-view .loom-scene-heading-fields {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5em;
+	align-items: flex-start;
+}
+
+.loom-view .loom-scene-heading-intext {
+	flex: 0 0 8em;
+}
+
+.loom-view .loom-scene-heading-location {
+	flex: 1 1 12em;
+}
+
+.loom-view .loom-scene-heading-time {
+	flex: 1 1 8em;
+}
+
+/* Fixed height by default (not user-resizable) — long scenes scroll inside
+   the box instead of growing the page around them. 210mm: A4's own WIDTH,
+   not an arbitrary "297mm * 0.7" — ISO 216's ratio is 1:√2, so A4's width is
+   already ~70.7% of its height, landing at "around 70% shorter" from a real
+   physical measurement of the same sheet rather than a made-up fraction. */
 textarea.loom-scene-script {
 	width: 100%;
-	min-height: 12em;
-	resize: vertical;
+	height: 210mm;
+	resize: none;
+	overflow-y: auto;
 }

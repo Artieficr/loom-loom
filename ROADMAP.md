@@ -356,9 +356,51 @@ Still to build:
   so repeated headings pair up in sequence. Unmatched scene notes become orphans; nothing is
   deleted.
 - [x] **`loomDisplayTitle` reaches the script** as `>**…**<` under its section
-  (`applyDisplayTitles`) — idempotent, updates in place, and clearing the field removes the
-  line. Written on script commit and whenever the field is edited on a Chapter page
-  (`pushChapterTitles`), since the script view may not be open.
+  (`applyDisplayTitles`) — idempotent, updates in place. **Falls back to the chapter's own
+  name** when the display title is left blank (never drops the line entirely), which is also
+  what fixed display titles getting lost on reimport — a blank line meant a reimported script
+  had nothing for `reattachSectionIds` (below) to even match against. Written on script commit
+  and whenever the field is edited on a Chapter page (`pushChapterTitles`).
+- [x] **Chapter (section) reattachment on import** (`reattachSectionIds`, mirrors
+  `reattachSceneIds`): an export → edit elsewhere → reimport round trip strips `[[loom:…]]`
+  markers from top-level sections too, not just scenes — without matching those back by title,
+  every reimport orphaned the old Chapter notes (silently losing their display titles, which
+  looked like "chapter names get stripped on import"). Chained after scene reattachment in
+  `importScript`; the confirmation dialog reports both counts.
+- [x] **Chapter page exposes both Title and Display title, both editable.** A dedicated **Title**
+  field (the script's `#` section text) now sits above the existing **Display title**. The first
+  attempt at this relabeled the generic top-of-page "Name" field — which turned out to never
+  render for chapters at all (chapters take the `isSession`/anchor branch of the page shell,
+  which the generic Name block explicitly excludes), so the "fix" was invisible. The real Title
+  field is editable (`renameSectionTitle`, `commitChapterTitle`): typing a new title writes into
+  the script's `#` line, and `syncScenes` reflects it back into the note's own frontmatter/file
+  name. "The script owns names" was always about not authoring a rival copy of the text, not
+  about the field being read-only — same relationship the Scene page's modular fields have with
+  the scene heading. Along the way, fixed a related gap: `syncScenes`'s chapter-matching only
+  ever updated a renamed chapter's `loomName` frontmatter, never its FILE, so the managed name
+  and the actual file silently disagreed after any title change (from the script OR the page) —
+  `src/fountain.ts`, `src/views/script-view.tsx`, `src/views/entity-view.tsx`
+- [x] **Chapter page: scenes are draggable to reorder**, via `reorderScenesInSection` (new) — a
+  single atomic rewrite of the whole section's scene order from the full post-drop array,
+  rather than reasoning about one "insert before its new neighbor" move. That single-move
+  approach (still used for the Scene page's cross-chapter move, where it fits) turned out
+  fragile at distance: dragging the 14th of 14 scenes to the front once left only 7 visible.
+  `reorderScenesInSection` captures every scene's block in the section up front, removes the
+  whole contiguous range in one splice bounded to the section end (never the next chapter — a
+  section's LAST scene has its raw `endLine` extended by the parser to whatever scene heading
+  comes next in the WHOLE file, chapter boundary or not, so the removal is explicitly capped at
+  the next top-level section's line), then reinserts every block in the requested order.
+  Verified with a standalone Node harness (fountain.ts has no Obsidian dependency, so `node
+  file.ts` runs it directly) against last→first / first→last / reversed / middle→front /
+  multi-chapter cases — `src/fountain.ts`, `src/views/entity-view.tsx`
+- [x] **Scene production numbers (`#N#`) auto-renumber on reorder** (`renumberScenes`) — a
+  drag/move relocates a scene's whole block, number included, which would otherwise leave a
+  stale number on the wrong scene; screenwriting convention normally LOCKS these (12A, 12B),
+  but the app's own reorder actions keep an already-numbered script sequential instead. Scenes
+  with no number are never given one. Folded into `editScriptAndSync` so it rides every
+  structural edit automatically. Also: the number now renders as a plain number, not `#7#` —
+  the hashes are Fountain source markup, not print convention — `src/fountain.ts`, `src/pdf.ts`,
+  `src/views/script-view.tsx`
 - [ ] Scene identity across edits: **a hidden `[[loom:<id>]]` Fountain note in the scene
   heading** (decided). Non-exporting by spec, survives any rewrite or reorder, and our editor
   hides it entirely; the accepted cost is that it shows as a small note if the file is opened
@@ -380,14 +422,63 @@ Still to build:
   (`replaceSceneBody` — the heading and its hidden id stay owned by the script, only the body
   is editable), re-assigning its chapter MOVES the block in the script
   (`moveSceneToSection`), and deleting the note removes the scene from the script
-  (`removeScene`) — otherwise the next parse would just resurrect it. All three go through
-  `editScript`, so the .fountain file stays the single home of the writing.
-
-- [ ] **Reordering scenes within a chapter should move them in the script.** The Chapter page
-  lists its scenes in script order but they can't be dragged yet. A drop should splice the
-  scene's block to its new position in the section (the `moveSceneToSection` machinery
-  already does the lift-and-insert; this needs an insert-at-index variant plus the drag UI
-  reusing the existing `seqDrag` pattern from the session page).
+  (`removeScene`) — otherwise the next parse would just resurrect it.
+- [x] **`editScriptAndSync`** (`src/views/script-view.tsx`, wraps `editScript` +
+  `syncScenes`): a structural script edit made from the Scene/Chapter pages (move, reorder,
+  reword the body, rewrite the heading) used to leave the note's own derived fields (chapter
+  link, location, cast, script order) stale until the Script view was next opened and
+  committed — which is what made "move to another chapter" look broken. Every scene-mutating
+  call site in `entity-view.tsx` now goes through this instead of bare `editScript`, so the
+  note agrees with the script immediately.
+- [x] **Reordering scenes within a chapter moves them in the script** — see the Chapter-page
+  bullet above (`reorderScenesInSection`).
+- [x] **Modular chapter move + reorder, two-step — and drag ≠ commit.** The Scene page's chapter
+  picker doesn't move on pick: step 1 picks the target chapter, step 2 shows that chapter's
+  scene list with the current scene inserted as the only draggable row, defaulting to the TOP
+  of the list (`movePlaceAt` state, seeded to 0 on every fresh pick). Dragging only updates that
+  pending position — it does NOT fire the move (the first cut instantly moved the scene on
+  drop, giving no chance to readjust); an explicit **"Move the scene"** button commits whatever
+  position is currently shown, via `moveSceneBefore`/`moveSceneToSection`, which is also what
+  reassigns its chapter (no separate field to keep in sync) — `src/views/entity-view.tsx`
+- [x] **Scene page: modular, editable heading.** Four fields replace the old read-only heading
+  text — an INT./EXT. autocomplete (type-ahead + arrow-key cycling, `SuggestInput` in
+  `common.tsx` gained arrow-key highlight navigation for this), a Location field, an optional
+  Sublocation field, and a free-text Time field — writing straight back into the script heading
+  via `setSceneHeadingParts` (new in `fountain.ts`, rewrites just the editable parts, leaving
+  the production number and hidden loom id exactly as they were). **Location/Sublocation ARE
+  the linked entity's Name field**: editing text on an already-linked location/sublocation
+  renames that entity everywhere (same as every other Name field in the app) rather than
+  creating a duplicate; nothing linked yet falls back to matching-by-name-or-creating. Changing
+  the main location while a sublocation stays linked **reparents that same sublocation** rather
+  than spawning a second one. `splitLocationSub`/`joinLocationSub` (new in `fountain.ts`) split/
+  compose the heading's location text into main + sublocation (first ` - `, mirroring the
+  time-of-day split's LAST-`-` convention) — used both here and by `syncScenes`, which is now
+  sublocation-aware itself (previously a compound heading location like `CAFE - COUNTER` never
+  matched any location by its flat name, so `sceneLocation` silently stayed empty for any scene
+  with a sublocation; `syncScenes` now auto-creates missing sublocations exactly like it already
+  auto-created missing top-level locations) — `src/fountain.ts`, `src/views/script-view.tsx`,
+  `src/views/entity-view.tsx`, `src/views/common.tsx`
+- [x] **Location page shows its Scenes** — a location's own scenes (`sceneLocation` resolves
+  here directly) plus a "Scenes in sublocations" group (same layout as "Items in sublocations"),
+  read-only, sitting where Events would on a non-writer project's location page. Uses the SAME
+  row layout as the Chapter page's scene list (see below) — `src/views/entity-view.tsx`
+- [x] **Scene page script editor: a real, fixed height, not a resize handle.** It first looked
+  capped at ~24em despite `height: 297mm` on `textarea.loom-scene-script`: an older,
+  higher-specificity rule (`.loom-view .loom-scene-script`, two classes vs. one class + one
+  element) still carried a stale `max-height: 24em` from when this box was a read-only
+  `<pre>`-style excerpt, and CSS specificity doesn't care which rule is more specific to the
+  CURRENT purpose — it always wins on selector weight. Removed from the older rule. Full A4
+  (297mm) then turned out too tall in practice; rather than an arbitrary `* 0.7`, it's set to
+  **210mm — A4's own WIDTH**, which lands at the same ~70% by definition (ISO 216's 1:√2 ratio
+  means a sheet's width is already ~70.7% of its height) — a real measurement of the same paper
+  rather than a made-up fraction.
+- [x] **Chapter/Location page scene rows: fixed-width columns.** INT./EXT. now sits in its
+  native reading position (before the title, not after — it had been tacked on after the link);
+  the number and INT./EXT. columns are fixed-width (`loom-scene-row-num` 3ch right-aligned,
+  `loom-scene-row-intext` 4.5em) instead of borrowing the Script outline's `.loom-script-scene-num`
+  (which relies on an external grid-template it doesn't have in a plain flex row), so a
+  double-digit scene number no longer shifts every title's start position — `styles.css`,
+  `src/views/entity-view.tsx`
 - [ ] **Chapters can't be created or reordered from the app** — only by writing a `#` section
   in the script. "Add a chapter" should insert a section (with a fresh `[[loom:…]]`), and
   reordering chapters should move their whole section blocks.
@@ -399,29 +490,64 @@ Still to build:
 - [ ] Live-preview editor: raw at the cursor, formatted once it leaves — same model as
   `markdown-field.tsx`, which is the head start here (CodeMirror, rendered-vs-raw
   decorations, `[[` completion). Character/location names stay **plain text in the file** but
-  render as clickable entity chips inside the plugin; uppercase-after-blank-line triggers the
-  character suggester, and scene-heading position triggers INT./EXT. + location suggestions.
-- [ ] Scene page: exposes only that slice of the script, plus its derived page range.
-- [ ] Modular reordering: move a scene between chapters / reorder, with the main script and
-  scene numbers following. "Add a scene" from inside Chapter 1 inserts after Chapter 1's last
-  scene and before Chapter 2's first.
+  render as clickable entity chips inside the plugin.
 - [ ] Plain-writing mode: keep Fountain syntax and it formats; write plain prose and it stays
   prose (valid Fountain — it's all Action), just without the automatic scene counter.
+- [ ] **Narrative branching.** A player-facing game plot needs branches, which classic linear
+  Fountain has no native syntax for; a `.BRANCH …` forced-heading convention the user tried gets
+  misread by other Fountain tools as a new top-level scene rather than nesting under the real
+  one. Parked deliberately for a dedicated design conversation — nothing implemented.
+- [ ] **Pre-scene descriptions (e.g. "TEXT OVER BLACK")** — action text written before the
+  first scene heading currently has nowhere to show outside the Script view itself. Parked
+  deliberately for a dedicated design conversation — nothing implemented.
 - [x] **Real PDF export** (`src/pdf.ts`) — a hand-rolled writer, no dependency, affordable
   because a screenplay is Courier-only (a PDF standard font: nothing to embed, monospaced so
   no metrics needed). Correct typeset geometry, widow control, title page, page numbers.
   `pdfPages` is the single pagination source, so the in-app preview and the exported file
-  agree page for page.
+  agree page for page. **Page-break (`===`) syntax actually forces a page break**: `layoutPages`
+  used to flatten `paginate()`, which drops `page-break` elements entirely for the soft/estimate
+  pagination — the real typeset layout now walks `parsed.elements` directly and starts a new
+  page on one. **Production scene numbers (`#7#`) render at the right margin**, not inline after
+  the heading text — `FountainElement` carries `sceneNumber` as its own field now rather than
+  leaving it embedded in the heading's display text.
+- [x] **Dialogue lines merge into one paragraph**, per the Fountain spec — the parser used to
+  emit one `dialogue` element per physical line, which rendered every manually-wrapped line of
+  the same speech with a full paragraph gap between them; consecutive non-parenthetical lines in
+  a cue block now join into a single element (still split by any parenthetical in between).
 - [x] **Export / import / open, in one `⋯` menu.** *Export as PDF…* and *Export as
   .fountain…* both go through a real OS save dialog (`showSaveFilePicker`, so an export can
   land outside the vault), falling back to a download then to writing beside the script.
   *Open in the default app* / *Show in system file manager* — **Electron exposes no
   cross-platform app-chooser dialog**, so those are the honest two, and both hand over the
   LIVE file so ids are never stripped there.
-- [x] **Pages preview + search + script navigation.** A Script / Pages tab pair; the preview
-  shows one page at a time with page-number navigation; a shared search works in both panes
-  (selects the match while editing, jumps to and highlights it in the preview); a left panel
-  navigates to a place in the SCRIPT rather than to entity pages.
+- [x] **Pages preview + search + script navigation.** A **Script / Pages preview** segmented
+  pill (`.loom-seg`, the same style as the creation-modal tags) switches panes; the preview
+  shows one page at a time, its page-number readout now **tracking manual scroll** too (not just
+  the Prev/Next buttons — a scroll listener reads whichever page is topmost); a shared search
+  works in both panes. The navigation panel is a **zero-height sticky wrapper** (`position:
+  sticky` inside the scrolling shell body) so the toggle — and the open panel — stay reachable
+  regardless of how far the title-page/toolbar above the editor has scrolled, instead of
+  scrolling away with them. The Script-mode textarea's manually-resized height is **remembered
+  per file** (`localStorage`, a UI preference — not vault data) instead of resetting on reload.
+  The search box is a **fixed width**, not `flex:1` — Script and Pages preview carry different
+  sibling controls in the toolbar, so a flexible box changed width switching modes, breaking
+  the illusion that it's the same element. Fixed a nav-jump off-by-one (`pageOfLine`): its
+  fallback — used whenever the target line has no rendered element of its own, e.g. a `#`
+  chapter heading, which never reaches the page — picked the LAST page whose first element
+  preceded the target line, which under-shoots by one page whenever what follows starts fresh
+  on a NEW page; now finds the FIRST page containing anything strictly after the target line.
+  A scene-heading's production number renders as a **plain number** at the right margin, not
+  `#7#` — the hashes are Fountain source markup, never print convention. Search's "N of M" /
+  "No matches" readout sits AFTER the Prev/Next-match buttons, not before, so those buttons
+  don't shift position as the readout's text appears/changes length; the search box is 1.5×
+  wider and a fixed width in both modes now (was `flex: 1`, changing size between Script and
+  Pages preview since they carry different sibling controls). The page-number input is no
+  longer bound straight to the live page (clearing it to type a new number used to immediately
+  snap back to the old one, since a controlled input re-fills itself the instant it goes empty,
+  before a new digit can land) — it now holds its own draft text and only jumps on Enter; an
+  emptied-then-abandoned field (blur, or Enter with nothing typed) just reverts to showing the
+  current page, no jump. The `⋯` script-actions button is a burger (`menu`) icon, not
+  horizontal dots.
 
 ## Next session (committed)
 

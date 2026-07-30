@@ -20,15 +20,18 @@ import {
 	hasTitlePage,
 	parseFountain,
 	reattachSceneIds,
+	reattachSectionIds,
 	renderInline,
+	renumberScenes,
 	stripLoomIds,
 	renderTitlePage,
+	splitLocationSub,
 	splitTitlePage,
 } from '../fountain';
 import { pdfPages, renderScreenplayPdf } from '../pdf';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { setLoomKey } from '../fm';
-import { ConfirmModal, createEntity } from '../project';
+import { ConfirmModal, createEntity, entityFileName } from '../project';
 import { LoomFileReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage } from './common';
 import { useIndexVersion } from './hooks';
@@ -99,7 +102,7 @@ export class ScriptView extends LoomFileReactView {
  * an orphan (surfaced in the view) rather than silently destroying whatever was
  * written on it.
  */
-async function syncScenes(
+export async function syncScenes(
 	plugin: LoomLoomPlugin,
 	project: ProjectDef,
 	parsed: ParsedScript
@@ -118,13 +121,20 @@ async function syncScenes(
 		return map;
 	};
 	const characters = byName('character');
-	const locations = byName('location');
+	// Only TOP-LEVEL locations, keyed by name — a heading's "main" location part
+	// (see `splitLocationSub`) names a place the same way the modular Scene-page
+	// editor does, and matching against every location including sublocations
+	// would risk matching an unrelated sublocation that happens to share a name.
+	const mainLocations = new Map<string, EntityRecord>();
+	for (const r of plugin.indexer.getAll('location', project.root)) {
+		if (r.parentLocation === null) mainLocations.set(r.name.trim().toLowerCase(), r);
+	}
 
-	// Characters and locations the script names but the project doesn't have
-	// yet are created automatically, so importing or writing a script never
-	// leaves a cue pointing at nothing. Matching is by name, so an entity that
-	// already exists is REFERENCED, never duplicated or overwritten — its page,
-	// description and relationships are untouched.
+	// Characters and top-level locations the script names but the project
+	// doesn't have yet are created automatically, so importing or writing a
+	// script never leaves a cue pointing at nothing. Matching is by name, so an
+	// entity that already exists is REFERENCED, never duplicated or
+	// overwritten — its page, description and relationships are untouched.
 	const ensureNamed = async (type: 'character' | 'location', names: string[], map: Map<string, EntityRecord>) => {
 		for (const raw of names) {
 			const name = raw.trim();
@@ -139,8 +149,49 @@ async function syncScenes(
 			map.set(key, { ...pcGroupStub(project.root), path: created.path, name, type });
 		}
 	};
+	const mainLocationNames = [
+		...new Set(parsed.scenes.map((s) => splitLocationSub(s.location).main).filter((n) => n !== '')),
+	];
 	await ensureNamed('character', parsed.characters, characters);
-	await ensureNamed('location', parsed.locations, locations);
+	await ensureNamed('location', mainLocationNames, mainLocations);
+
+	/** Resolves the most specific location a scene's heading names — the
+	 *  sublocation itself when the heading includes one (`CAFE - COUNTER`),
+	 *  else the top-level location — creating the sublocation if it doesn't
+	 *  exist yet. Mirrors exactly what the Scene page's modular location editor
+	 *  writes, so a heading typed straight into the script (or imported)
+	 *  connects the same way a script edited through that editor would. */
+	const resolveSceneLocation = async (scene: ParsedScene): Promise<EntityRecord | undefined> => {
+		const { main, sub } = splitLocationSub(scene.location);
+		if (main === '') return undefined;
+		const mainRecord = mainLocations.get(main.toLowerCase());
+		if (!mainRecord) return undefined;
+		if (sub === '') return mainRecord;
+		const key = sub.toLowerCase();
+		const existingSub = plugin.indexer
+			.getAll('location', project.root)
+			.find(
+				(r) =>
+					r.name.trim().toLowerCase() === key &&
+					r.parentLocation !== null &&
+					plugin.indexer.resolve(r.parentLocation, r.path)?.path === mainRecord.path
+			);
+		if (existingSub) return existingSub;
+		const created = await createEntity(plugin, project, 'location', {
+			name: sub,
+			tag: '',
+			date: '',
+			description: '',
+			parentLocation: linkTargetOf(mainRecord),
+		});
+		return {
+			...pcGroupStub(project.root),
+			path: created.path,
+			name: sub,
+			type: 'location',
+			parentLocation: linkTargetOf(mainRecord),
+		};
+	};
 
 	// Chapters come from the script's `#` sections — the TOP level of a scene's
 	// section path, since `# Chapter` is what the user writes. Unlike characters
@@ -179,16 +230,36 @@ async function syncScenes(
 			if (found.seq !== section.seq || found.name !== section.title) {
 				const chapterFile = plugin.app.vault.getFileByPath(found.path);
 				if (chapterFile) {
+					const renamed = found.name !== section.title;
 					await plugin.app.fileManager.processFrontMatter(
 						chapterFile,
 						(fm: Record<string, unknown>) => {
 							setLoomKey(fm, FM.seq, section.seq);
-							if (found.name !== section.title) {
+							if (renamed) {
 								setLoomKey(fm, FM.name, section.title);
 								fm.aliases = [section.title];
 							}
 						}
 					);
+					// The managed file name embeds the title too — without this the
+					// note's `loomName` and its actual file name silently disagree
+					// the moment the title is edited (from the script OR from the
+					// Chapter page's own Title field).
+					if (renamed) {
+						const base = entityFileName(project, 'chapter', section.title);
+						const dir = chapterFile.parent?.path ?? '';
+						let newPath = normalizePath(dir === '' ? `${base}.md` : `${dir}/${base}.md`);
+						for (let i = 2; plugin.app.vault.getAbstractFileByPath(newPath) !== null; i++) {
+							newPath = normalizePath(dir === '' ? `${base} ${i}.md` : `${dir}/${base} ${i}.md`);
+						}
+						if (newPath !== chapterFile.path) {
+							try {
+								await plugin.app.fileManager.renameFile(chapterFile, newPath);
+							} catch (e) {
+								console.error('Loom Loom: chapter rename failed', e);
+							}
+						}
+					}
 				}
 			}
 			chapterById.set(id, found);
@@ -218,7 +289,7 @@ async function syncScenes(
 		if (scene.loomId === null) continue;
 		const name = sceneName(scene);
 		const chapter = chapterById.get(sectionIdOf(scene));
-		const location = locations.get(scene.location.trim().toLowerCase());
+		const location = await resolveSceneLocation(scene);
 		const cast = scene.characters
 			.map((c) => characters.get(c.trim().toLowerCase()))
 			.filter((c): c is EntityRecord => c !== undefined);
@@ -300,6 +371,13 @@ function Script({ view }: { view: ScriptView }) {
 	const [mode, setMode] = useState<'script' | 'pages'>('script');
 	/** Page shown in the pages preview (1-based). */
 	const [page, setPage] = useState(1);
+	/** The page-number input's own typed text while being edited — separate
+	 *  from `page` so clearing the field to type a new number doesn't
+	 *  immediately snap back to showing the current page (a controlled input
+	 *  bound straight to `page` re-filled itself with the old value the
+	 *  instant the field went empty, before a new digit could be typed).
+	 *  Null = not being edited, show the real current page. */
+	const [pageDraft, setPageDraft] = useState<string | null>(null);
 	/** Search across the script; shared by both panes. */
 	const [query, setQuery] = useState('');
 	/** Navigation panel, overlaid rather than taking width from the page. */
@@ -339,6 +417,45 @@ function Script({ view }: { view: ScriptView }) {
 		return () => document.removeEventListener('mousedown', onDown);
 	}, [navOpen]);
 
+	// Remembers the script textarea's manually-resized height across reloads —
+	// a UI preference, not vault data, so it's kept in localStorage rather than
+	// project settings. Restored before the ResizeObserver starts watching so
+	// its own initial callback doesn't immediately overwrite what we just set.
+	useEffect(() => {
+		if (mode !== 'script' || !file) return;
+		const editor = editorRef.current;
+		if (!editor) return;
+		const key = `loom-script-editor-height:${file.path}`;
+		const saved = window.localStorage.getItem(key);
+		if (saved) editor.style.height = saved;
+		const observer = new ResizeObserver(() => {
+			if (editor.style.height) window.localStorage.setItem(key, editor.style.height);
+		});
+		observer.observe(editor);
+		return () => observer.disconnect();
+	}, [file?.path, mode]);
+
+	// Pages preview: the page-number readout should track manual scrolling, not
+	// just the explicit jump buttons — otherwise it silently goes stale the
+	// moment the user scrolls with the wheel instead of clicking Next/Prev.
+	useEffect(() => {
+		if (mode !== 'pages') return;
+		const el = pagesRef.current;
+		if (!el) return;
+		const onScroll = () => {
+			const top = el.getBoundingClientRect().top;
+			const threshold = top + el.clientHeight / 3;
+			let current = 1;
+			for (const node of el.querySelectorAll<HTMLElement>('[data-page]')) {
+				if (node.getBoundingClientRect().top <= threshold) current = Number(node.dataset.page);
+			}
+			setPage(current);
+		};
+		el.addEventListener('scroll', onScroll, { passive: true });
+		onScroll();
+		return () => el.removeEventListener('scroll', onScroll);
+	}, [mode]);
+
 	// The outline re-parses on every keystroke — that's cheap and needs no ids.
 	const parsed = useMemo(() => (text === null ? null : parseFountain(text)), [text]);
 
@@ -364,10 +481,16 @@ function Script({ view }: { view: ScriptView }) {
 		// The one thing that flows the other way: a chapter's display title.
 		// Fountain sections never export, so a title that must appear in the PDF
 		// has to be emitted as a separate centered-bold line — the note owns it,
-		// and this is what puts it into the script.
+		// and this is what puts it into the script. Falls back to the chapter's
+		// own name (the `#` section's title) when the display title is left
+		// blank, so the exported line is never simply dropped — a blank display
+		// title always renders something, and a script re-imported later still
+		// carries a title to reattach against.
 		const titles = new Map<string, string>();
 		for (const chapter of plugin.indexer.getAll('chapter', project.root)) {
-			if (chapter.chapterId !== '') titles.set(chapter.chapterId, chapter.displayTitle);
+			if (chapter.chapterId !== '') {
+				titles.set(chapter.chapterId, chapter.displayTitle.trim() !== '' ? chapter.displayTitle : chapter.name);
+			}
 		}
 		const titled = applyDisplayTitles(withIds.text, titles);
 		if (titled !== onDisk.current) {
@@ -468,13 +591,16 @@ function Script({ view }: { view: ScriptView }) {
 		for (let i = 0; i < bodyPages.length; i++) {
 			if (bodyPages[i].some((el) => el.line === line)) return i + offset;
 		}
-		// Between elements (a blank line): fall back to the last page that
-		// starts at or before it.
-		let best = offset;
-		bodyPages.forEach((elements, i) => {
-			if (elements.length > 0 && elements[0].line <= line) best = i + offset;
-		});
-		return best;
+		// Nothing rendered sits exactly on this line — a section (`#` chapter)
+		// heading never reaches the page itself. Land on whichever page holds
+		// the first thing that comes AFTER it, so a chapter that starts fresh
+		// on a new page jumps to that page rather than the one before it (the
+		// last page whose first element preceded the target would always be
+		// one page too early in exactly that case).
+		for (let i = 0; i < bodyPages.length; i++) {
+			if (bodyPages[i].some((el) => el.line > line)) return i + offset;
+		}
+		return Math.max(offset, bodyPages.length - 1 + offset);
 	};
 
 	const gotoMatch = (index: number) => {
@@ -626,8 +752,17 @@ function Script({ view }: { view: ScriptView }) {
 		const known = parsed.scenes
 			.filter((sc): sc is ParsedScene & { loomId: string } => sc.loomId !== null)
 			.map((sc) => ({ id: sc.loomId, heading: sc.heading }));
+		// Top-level sections (chapters) need the same recovery: an export → edit
+		// elsewhere → import round trip strips their `[[loom:…]]` markers too, and
+		// without reattaching them every reimport orphaned the old Chapter notes
+		// (silently losing their display titles).
+		const knownSections = parsed.sections
+			.filter((sec): sec is typeof sec & { loomId: string } => sec.level === 1 && sec.loomId !== null)
+			.map((sec) => ({ id: sec.loomId, title: sec.text }));
 		const incoming = parseFountain(raw);
-		const result = reattachSceneIds(raw, known);
+		const sceneResult = reattachSceneIds(raw, known);
+		const sectionResult = reattachSectionIds(sceneResult.text, knownSections);
+		const result = { ...sceneResult, text: sectionResult.text };
 
 		const known2 = new Set(
 			plugin.indexer.getAll('character', project.root).map((r) => r.name.trim().toLowerCase())
@@ -642,13 +777,16 @@ function Script({ view }: { view: ScriptView }) {
 			'Your entities are NOT touched: characters and locations that already exist keep their pages, descriptions and relationships, and the imported script just references them. Anything new is created for you.',
 		];
 		if (newCast.length > 0) lines.push('', `New characters to create: ${newCast.join(', ')}.`);
-		if (known.length > 0) {
+		if (known.length > 0 || knownSections.length > 0) {
 			lines.push(
 				'',
 				result.matched > 0
 					? `${result.matched} scene note(s) re-attach to the imported scenes.`
 					: 'No existing scene notes could be re-attached.',
-				'Any scene note left without a match stays as an orphan — nothing is deleted.'
+				sectionResult.matched > 0
+					? `${sectionResult.matched} chapter note(s) re-attach to the imported chapters.`
+					: 'No existing chapter notes could be re-attached.',
+				'Anything left without a match stays as an orphan — nothing is deleted.'
 			);
 		}
 
@@ -776,7 +914,7 @@ function Script({ view }: { view: ScriptView }) {
 						{parsed.scenes.length} scenes · {pageCount} pages
 					</span>
 					<button className="loom-rel-filter" aria-label="Script actions" onClick={actionMenu}>
-						<Icon name="ellipsis" fallback="more-horizontal" />
+						<Icon name="menu" fallback="more-horizontal" />
 					</button>
 				</div>
 			}
@@ -787,16 +925,21 @@ function Script({ view }: { view: ScriptView }) {
 				    page the whole time it was open. Chapters are jump targets
 				    too: the script has a `# Chapter` line, so it's a place to go,
 				    not a label. Unlike "Outline links" below, everything here
-				    navigates within the SCRIPT rather than opening a page. */}
-				<button
-					className="loom-script-nav-toggle"
-					aria-label={navOpen ? 'Hide navigation' : 'Show navigation'}
-					onClick={() => setNavOpen(!navOpen)}
-				>
-					<Icon name={navOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
-				</button>
-				{navOpen ? (
-					<aside className="loom-script-nav">
+				    navigates within the SCRIPT rather than opening a page.
+				    The zero-height sticky wrapper keeps the toggle (and the
+				    panel, when open) pinned to the top of the scrolling view
+				    instead of scrolling away with the title-page/toolbar above
+				    the editor. */}
+				<div className="loom-script-nav-sticky">
+					<button
+						className="loom-script-nav-toggle"
+						aria-label={navOpen ? 'Hide navigation' : 'Show navigation'}
+						onClick={() => setNavOpen(!navOpen)}
+					>
+						<Icon name={navOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
+					</button>
+					{navOpen ? (
+						<aside className="loom-script-nav">
 						<div className="loom-script-nav-head">
 							Navigate
 							<button
@@ -835,6 +978,7 @@ function Script({ view }: { view: ScriptView }) {
 						))}
 					</aside>
 				) : null}
+				</div>
 
 				<div className="loom-script-main">
 					<details className="loom-script-section">
@@ -855,15 +999,15 @@ function Script({ view }: { view: ScriptView }) {
 						</div>
 					</details>
 
-					<div className="loom-script-tabs">
+					<div className="loom-script-tabs loom-seg">
 						<button
-							className={mode === 'script' ? 'loom-tab loom-tab-active' : 'loom-tab'}
+							className={mode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
 							onClick={() => setMode('script')}
 						>
 							Script
 						</button>
 						<button
-							className={mode === 'pages' ? 'loom-tab loom-tab-active' : 'loom-tab'}
+							className={mode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
 							onClick={() => setMode('pages')}
 						>
 							Pages preview
@@ -886,13 +1030,6 @@ function Script({ view }: { view: ScriptView }) {
 								gotoMatch(e.shiftKey ? matchIndex - 1 : matchIndex + 1);
 							}}
 						/>
-						<span className="loom-script-stat">
-							{query.trim() === ''
-								? ''
-								: matches.length === 0
-									? 'No matches'
-									: `${(matchIndex % matches.length) + 1} of ${matches.length}`}
-						</span>
 						<button
 							className="loom-rel-filter"
 							aria-label="Previous match"
@@ -909,6 +1046,15 @@ function Script({ view }: { view: ScriptView }) {
 						>
 							<Icon name="chevron-down" />
 						</button>
+						{/* After the buttons, not before — so their position doesn't
+						    shift when this text appears/disappears/changes length. */}
+						<span className="loom-script-stat">
+							{query.trim() === ''
+								? ''
+								: matches.length === 0
+									? 'No matches'
+									: `${(matchIndex % matches.length) + 1} of ${matches.length}`}
+						</span>
 						{mode === 'pages' ? (
 							<>
 								<div className="loom-shell-spacer" />
@@ -925,8 +1071,16 @@ function Script({ view }: { view: ScriptView }) {
 									type="number"
 									min={1}
 									max={pageCount}
-									value={currentPage}
-									onChange={(e) => scrollToPage(Number(e.target.value) || 1)}
+									value={pageDraft ?? currentPage}
+									onChange={(e) => setPageDraft(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key !== 'Enter') return;
+										e.preventDefault();
+										const n = Number(pageDraft);
+										if (pageDraft && pageDraft.trim() !== '' && n > 0) scrollToPage(n);
+										setPageDraft(null);
+									}}
+									onBlur={() => setPageDraft(null)}
 								/>
 								<span className="loom-script-stat">of {pageCount}</span>
 								<button
@@ -972,15 +1126,28 @@ function Script({ view }: { view: ScriptView }) {
 								return (
 									<div key={number} className="loom-screenplay-page" data-page={number}>
 										<div className="loom-screenplay-pagenum">{number}.</div>
-										{elements.map((el, j) => (
-											<p
-												key={j}
-												className={`loom-sp-${el.type}`}
-												dangerouslySetInnerHTML={{
-													__html: highlight(renderInline(elementText(el)), query),
-												}}
-											/>
-										))}
+										{elements.map((el, j) =>
+											el.type === 'scene-heading' ? (
+												<p key={j} className="loom-sp-scene-heading">
+													<span
+														dangerouslySetInnerHTML={{
+															__html: highlight(renderInline(elementText(el)), query),
+														}}
+													/>
+													{el.sceneNumber ? (
+														<span className="loom-sp-scene-num">{el.sceneNumber}</span>
+													) : null}
+												</p>
+											) : (
+												<p
+													key={j}
+													className={`loom-sp-${el.type}`}
+													dangerouslySetInnerHTML={{
+														__html: highlight(renderInline(elementText(el)), query),
+													}}
+												/>
+											)
+										)}
 									</div>
 								);
 							})}
@@ -1032,9 +1199,7 @@ function Script({ view }: { view: ScriptView }) {
 														scene.heading
 													)}
 												</span>
-												<span className="loom-script-scene-no">
-													{scene.sceneNumber !== '' ? `#${scene.sceneNumber}#` : ''}
-												</span>
+												<span className="loom-script-scene-no">{scene.sceneNumber}</span>
 												<span className="loom-script-scene-page">p. {scenePages(scene)}</span>
 												<span className="loom-script-scene-cast">{scene.characters.join(', ')}</span>
 											</div>
@@ -1166,7 +1331,9 @@ export async function pushChapterTitles(plugin: LoomLoomPlugin, project: Project
 	if (!scriptFile) return;
 	const titles = new Map<string, string>();
 	for (const chapter of plugin.indexer.getAll('chapter', project.root)) {
-		if (chapter.chapterId !== '') titles.set(chapter.chapterId, chapter.displayTitle);
+		if (chapter.chapterId !== '') {
+			titles.set(chapter.chapterId, chapter.displayTitle.trim() !== '' ? chapter.displayTitle : chapter.name);
+		}
 	}
 	if (titles.size === 0) return;
 	try {
@@ -1203,4 +1370,40 @@ export async function editScript(
 		new Notice('Could not write to the script.');
 		return false;
 	}
+}
+
+/**
+ * Like `editScript`, but also re-syncs Scene/Chapter notes from the result.
+ *
+ * `editScript` alone only rewrites the .fountain file — the notes' derived
+ * fields (chapter link, location, cast, script order, …) are otherwise
+ * re-synced only when the Script view itself is open and commits. Structural
+ * edits made from elsewhere (the Chapter/Scene pages' own move/reorder/
+ * delete/heading actions) need that sync to happen immediately, or the note
+ * silently disagrees with the script until the Script view is next opened —
+ * which is what made "move to another chapter" look broken from the Scene
+ * page: the script moved, but the note's own chapter link never updated.
+ */
+export async function editScriptAndSync(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	apply: (text: string) => string | null
+): Promise<boolean> {
+	// Renumbering rides along with every structural edit: a move/reorder
+	// physically relocates a scene's block, number included, so an existing
+	// `#N#` numbering scheme is kept sequential rather than traveling with
+	// the scene to its new, wrong position. A script with no numbers at all
+	// is untouched (`renumberScenes` is a no-op when nothing is numbered).
+	const changed = await editScript(plugin, project, (raw) => {
+		const applied = apply(raw);
+		return applied === null ? null : renumberScenes(applied);
+	});
+	if (changed) {
+		const scriptFile = findScriptFile(plugin, project);
+		if (scriptFile) {
+			const raw = await plugin.app.vault.read(scriptFile);
+			await syncScenes(plugin, project, parseFountain(raw));
+		}
+	}
+	return changed;
 }
