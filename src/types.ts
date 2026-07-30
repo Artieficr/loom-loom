@@ -400,11 +400,13 @@ export const VIEW_GROUP = 'loom-loom-group';
 export const VIEW_MAP = 'loom-loom-map';
 
 /** Maps: a spatial drawing canvas where zones (polygons) are associated with
- *  locations. Lucide icon + the folder maps/images live under. */
+ *  locations. Lucide icon + the folders maps/images live under. Maps sit under
+ *  `Entities/` beside the entity-type folders — they belong to the project's
+ *  content, not next to it. */
 export const MAPS_ICON = 'map';
 export const MAPS_LABEL = 'Maps';
-export const MAPS_FOLDER = 'Maps';
-export const MAPS_IMAGES_FOLDER = 'Maps/Images';
+export const MAPS_FOLDER = 'Entities/Maps';
+export const MAPS_IMAGES_FOLDER = `${MAPS_FOLDER}/Images`;
 
 /** Standard graph/map node sizes (radius px), pickable per node. */
 export const NODE_SIZE_PRESETS = {
