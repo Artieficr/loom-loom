@@ -1,3 +1,13 @@
+/**
+ * Every entity type the plugin knows. A given project only shows the subset its
+ * kind declares (`typesFor` in project-kind.ts) — Session/Event are the
+ * player + GM chronology, Chapter/Scene the writer one. They're separate types
+ * rather than one renamed pair because they carry genuinely different fields
+ * (a session has a date and attendance; a chapter has an order and a display
+ * title), but they play the same structural *roles*, so the shared layout,
+ * timeline and page code addresses them through `roleType`/`roleOf` and never
+ * by name.
+ */
 export const ENTITY_TYPES = [
 	'character',
 	'location',
@@ -7,6 +17,8 @@ export const ENTITY_TYPES = [
 	'quest',
 	'event',
 	'session',
+	'scene',
+	'chapter',
 ] as const;
 
 export type EntityType = (typeof ENTITY_TYPES)[number];
@@ -33,6 +45,8 @@ export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 	quest: { label: 'Quest', plural: 'Quests', folder: 'Entities/Quests', icon: 'scroll' },
 	event: { label: 'Event', plural: 'Events', folder: 'Entities/Events', icon: 'calendar-days' },
 	session: { label: 'Session', plural: 'Sessions', folder: 'Entities/Sessions', icon: 'book-open' },
+	scene: { label: 'Scene', plural: 'Scenes', folder: 'Entities/Scenes', icon: 'clapperboard' },
+	chapter: { label: 'Chapter', plural: 'Chapters', folder: 'Entities/Chapters', icon: 'book-open' },
 };
 
 /**
@@ -48,6 +62,8 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 	quest: ['main', 'important', 'side'],
 	event: [],
 	session: [],
+	scene: [],
+	chapter: [],
 };
 
 /** Characters tagged PC appear in session attendance and carry the alive flag. */
@@ -67,8 +83,10 @@ export const PC_GROUP_VALUE = 'loom:pc-group';
 export const PC_GROUP_ICON = 'circle-star';
 
 
-/** Entity types that live on the timeline layers of the graph. */
-export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event'];
+/** Entity types that live on the timeline layers of the graph, across all
+ *  kinds. A project only ever holds one pair (see `ANCHOR_TYPES`/`BEAT_TYPES`
+ *  in project-kind.ts for the role split). */
+export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event', 'chapter', 'scene'];
 /** Entity types that live on the fixed lower axis of the graph. */
 export const GLOBAL_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest'];
 
@@ -128,6 +146,46 @@ export const FM = {
 	/** Character-specific item copy only: link to the owning character. Hidden
 	 *  from the link pass — the character already connects via its `loomItems`. */
 	itemOwner: 'loomItemOwner',
+	/** GM projects, beat entities: planning state — see `EVENT_KINDS`. Absent/''
+	 *  on anything that was simply recorded. */
+	eventKind: 'loomEventKind',
+	/** GM projects, beat entities: whether the beat actually happened at the
+	 *  table. A `planned` event is speculative until this is ticked. */
+	happened: 'loomHappened',
+	/** GM projects, characters: preplanned lines / speech-style examples for an
+	 *  NPC, one entry per line. Free-form text, no links resolved. */
+	npcLines: 'loomNpcLines',
+	/** Writer projects, chapters: the title as it should appear in the exported
+	 *  script. Fountain sections (`# Chapter`) are navigation-only and never
+	 *  export, so an exported act/chapter title has to be emitted separately as
+	 *  centered bold (`>**ACT ONE**<`); this field is what goes inside it. */
+	displayTitle: 'loomDisplayTitle',
+	/** Scenes only: the `[[loom:<id>]]` marker in the script's scene heading —
+	 *  what ties this note to its slice of the .fountain file. Survives any
+	 *  rename or reorder, which heuristic re-matching would not. */
+	sceneId: 'loomSceneId',
+	/** Scenes only: `INT.` / `EXT.` / … as parsed from the heading. It belongs to
+	 *  the SCENE, not the location — the same house is INT. in one scene and
+	 *  EXT. in the next. */
+	sceneIntExt: 'loomSceneIntExt',
+	/** Scenes only: trailing time of day from the heading (`DAY`, `NIGHT`, …). */
+	sceneTime: 'loomSceneTime',
+	/** Scenes only: link to the Location the heading names. A visible link, so
+	 *  the scene connects to its place in the graph. */
+	sceneLocation: 'loomSceneLocation',
+	/** Scenes only: links to the Characters with a cue in this scene. Visible,
+	 *  so the cast connects in the graph. */
+	sceneCast: 'loomSceneCast',
+	/** Scenes only: link to the Chapter this scene belongs to — derived from the
+	 *  `#` section enclosing it in the script. A scene's writing lives inside its
+	 *  chapter's stretch of the script, so a chapterless scene has nowhere to be
+	 *  stored. Visible, and it is what makes the scene stack under its chapter in
+	 *  the graph and timeline (`buildColumns` takes any connection to an anchor). */
+	sceneChapter: 'loomSceneChapter',
+	/** Chapters only: the `[[loom:<id>]]` marker on the script's `#` section
+	 *  line. Same job as a scene's — it survives a rename or a move, where
+	 *  matching the section text would not. */
+	chapterId: 'loomChapterId',
 	/** Timeline definition files. */
 	timelineTypes: 'loomTypes',
 	/** Loom-managed creation timestamp (ISO 8601). Authoritative over the
@@ -316,8 +374,36 @@ export interface EntityRecord {
 	 *  are resolved; the rest are still active. */
 	objectives: QuestObjective[];
 	/** Manual order stamp (events + quests). Null = never reordered; callers
-	 *  fall back to `created` so unstamped entries stay chronological. */
+	 *  fall back to `created` so unstamped entries stay chronological.
+	 *  Chapters order by this instead of by a date (`anchorOrder: 'sequence'`). */
 	seq: number | null;
+	/** Beat entities in a GM project: planning state, '' when none. */
+	eventKind: EventKind | '';
+	/** Beat entities in a GM project: whether it actually happened at the table. */
+	happened: boolean;
+	/** Characters in a GM project: preplanned lines / speech-style examples. */
+	npcLines: string[];
+	/** Chapters: title as it should appear in the exported script; '' falls back
+	 *  to the chapter's own name. */
+	displayTitle: string;
+	/** Scenes: the `[[loom:<id>]]` marker tying this note to its scene heading in
+	 *  the script; '' for a scene note not (yet) backed by one. */
+	sceneId: string;
+	/** Scenes: `INT.` / `EXT.` / … from the heading. A property of the scene, not
+	 *  of its location. */
+	sceneIntExt: string;
+	/** Scenes: time of day from the heading (`DAY`, `NIGHT`, …). */
+	sceneTime: string;
+	/** Scenes: linkpath of the Location the heading names, or ''. Visible link —
+	 *  the scene connects to its place in the graph. */
+	sceneLocation: string;
+	/** Scenes: linkpaths of the Characters with a cue in this scene, in
+	 *  first-appearance order. Visible links, so the cast connects in the graph. */
+	sceneCast: string[];
+	/** Scenes: linkpath of the owning Chapter, or ''. */
+	sceneChapter: string;
+	/** Chapters: the `[[loom:<id>]]` marker on their script section line. */
+	chapterId: string;
 	created: number;
 	modified: number;
 }
@@ -355,6 +441,17 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		reward: '',
 		objectives: [],
 		seq: null,
+		eventKind: '',
+		happened: false,
+		npcLines: [],
+		displayTitle: '',
+		sceneId: '',
+		sceneIntExt: '',
+		sceneTime: '',
+		sceneLocation: '',
+		sceneCast: [],
+		sceneChapter: '',
+		chapterId: '',
 		created: 0,
 		modified: 0,
 	};
@@ -362,6 +459,24 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 
 /** How a quest can end; '' in `questOutcome` means it's still active. */
 export const QUEST_OUTCOMES = ['completed', 'abandoned', 'failed'] as const;
+
+/**
+ * GM planning state of a beat entity ('' = none, just something that happened).
+ *
+ * - `planned` — written ahead of the session; may or may not come to pass.
+ * - `locked` — a planned beat that player action has ruled out for good (the
+ *   NPC it needed is dead), kept on file rather than deleted.
+ * - `improvised` — happened at the table without being planned, written up
+ *   afterwards.
+ *
+ * Placeholder: the field is indexed, the UI that sets it isn't built yet.
+ */
+export const EVENT_KINDS = ['planned', 'locked', 'improvised'] as const;
+export type EventKind = (typeof EVENT_KINDS)[number];
+
+export function isEventKind(value: unknown): value is EventKind {
+	return typeof value === 'string' && (EVENT_KINDS as readonly string[]).includes(value);
+}
 
 /** A resolved connection between two indexed entities. */
 export interface Connection {
@@ -398,6 +513,7 @@ export const VIEW_GRAPH = 'loom-loom-graph';
 export const VIEW_ENTITY = 'loom-loom-entity';
 export const VIEW_GROUP = 'loom-loom-group';
 export const VIEW_MAP = 'loom-loom-map';
+export const VIEW_SCRIPT = 'loom-loom-script';
 
 /** Maps: a spatial drawing canvas where zones (polygons) are associated with
  *  locations. Lucide icon + the folders maps/images live under. Maps sit under
@@ -407,6 +523,23 @@ export const MAPS_ICON = 'map';
 export const MAPS_LABEL = 'Maps';
 export const MAPS_FOLDER = 'Entities/Maps';
 export const MAPS_IMAGES_FOLDER = `${MAPS_FOLDER}/Images`;
+
+/**
+ * Writer projects: the Fountain script lives in its own file at the project
+ * root (`<Project>.fountain`), registered like the .loom home file rather than
+ * stored as markdown. Two reasons it can't be a .md note: Fountain's note
+ * syntax **is** `[[…]]`, so Obsidian would index every non-exporting script
+ * note as a wikilink; and an own extension round-trips byte-for-byte with
+ * external Fountain apps (Better Fountain, Highland, Fade In), which is what
+ * makes "Open in external app" honest. Scenes and chapters are parsed out of
+ * it into their own entity notes.
+ *
+ * Placeholder: the constants pin the decision down; the parser and editor
+ * aren't built yet.
+ */
+export const SCRIPT_EXTENSION = 'fountain';
+export const SCRIPT_LABEL = 'Script';
+export const SCRIPT_ICON = 'file-text';
 
 /** Standard graph/map node sizes (radius px), pickable per node. */
 export const NODE_SIZE_PRESETS = {

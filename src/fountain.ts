@@ -1,0 +1,958 @@
+/**
+ * Fountain screenplay parsing.
+ *
+ * Deliberately dependency-free and side-effect-free: it takes the text of a
+ * `.fountain` file and returns its structure. Everything that touches the vault
+ * (creating Scene notes, writing ids back) lives in the view, so the grammar
+ * stays testable on its own.
+ *
+ * Two things about the format drive most of the design here:
+ *
+ * - **Fountain has no page concept.** Pagination is the renderer's job, computed
+ *   from fixed screenplay metrics. So a scene's page range is DERIVED on every
+ *   parse and never stored — which is exactly what makes it shift by itself when
+ *   an earlier scene grows.
+ * - **Notes are `[[…]]`**, which is also Obsidian's wikilink syntax. That's why
+ *   the script is its own file extension rather than a markdown note, and it's
+ *   also the slot we hide the scene id in (`[[loom:<id>]]`): non-exporting by
+ *   spec, invisible in our editor, and it survives any rewrite or reorder.
+ */
+
+// --- Scene ids -------------------------------------------------------------
+
+/** Marks a hidden loom note: `[[loom:a1b2c3d4]]`. */
+const LOOM_ID_RE = /\[\[loom:([A-Za-z0-9]+)\]\]/;
+const LOOM_ID_RE_G = /\s*\[\[loom:[A-Za-z0-9]+\]\]/g;
+
+export function newSceneId(): string {
+	// Short, url-safe, and collision-resistant enough for one script: 8 chars of
+	// base36 randomness plus a time component so two scenes created in the same
+	// millisecond in different sessions still differ.
+	const rand = Math.floor(Math.random() * 36 ** 5).toString(36).padStart(5, '0');
+	const time = (Date.now() % 36 ** 4).toString(36).padStart(4, '0');
+	return `${time}${rand}`;
+}
+
+/** The loom id carried by a line, or null. */
+export function readLoomId(line: string): string | null {
+	return LOOM_ID_RE.exec(line)?.[1] ?? null;
+}
+
+/**
+ * Removes every `[[loom:…]]` marker from the text.
+ *
+ * For EXPORT only — producing a clean copy to hand to another tool or to render.
+ * Never run this over the live file: "Open in external app" hands the real file
+ * to an editor that writes back in place, and stripping there would destroy
+ * every scene's identity on the first external save.
+ */
+export function stripLoomIds(text: string): string {
+	return text.replace(LOOM_ID_RE_G, '');
+}
+
+// --- Title page ------------------------------------------------------------
+
+/**
+ * The title page. Fountain's own keys, so a script round-trips exactly through
+ * Better Fountain / Highland / Fade In — there is no sidecar for these.
+ * `extra` keeps any key we don't model (and the original key order) so writing
+ * the page back never drops what someone else put there.
+ */
+export interface TitlePage {
+	title: string;
+	credit: string;
+	author: string;
+	source: string;
+	draftDate: string;
+	contact: string;
+	copyright: string;
+	notes: string;
+	/** Unmodelled keys, in the order they appeared. */
+	extra: { key: string; value: string }[];
+}
+
+/** Whether the script carries a title page worth rendering as page 1. */
+export function hasTitlePage(title: TitlePage): boolean {
+	return title.title.trim() !== '' || title.author.trim() !== '' || title.credit.trim() !== '';
+}
+
+export function emptyTitlePage(): TitlePage {
+	return {
+		title: '',
+		credit: '',
+		author: '',
+		source: '',
+		draftDate: '',
+		contact: '',
+		copyright: '',
+		notes: '',
+		extra: [],
+	};
+}
+
+/** Canonical key spellings, and the aliases Fountain accepts for them. */
+const TITLE_KEYS: { field: keyof TitlePage; key: string; aliases: string[] }[] = [
+	{ field: 'title', key: 'Title', aliases: [] },
+	{ field: 'credit', key: 'Credit', aliases: [] },
+	{ field: 'author', key: 'Author', aliases: ['authors'] },
+	{ field: 'source', key: 'Source', aliases: [] },
+	{ field: 'draftDate', key: 'Draft date', aliases: ['draft'] },
+	{ field: 'contact', key: 'Contact', aliases: [] },
+	{ field: 'copyright', key: 'Copyright', aliases: [] },
+	{ field: 'notes', key: 'Notes', aliases: [] },
+];
+
+function titleFieldFor(key: string): keyof TitlePage | null {
+	const k = key.trim().toLowerCase();
+	for (const entry of TITLE_KEYS) {
+		if (entry.key.toLowerCase() === k || entry.aliases.includes(k)) return entry.field;
+	}
+	return null;
+}
+
+const TITLE_KEY_RE = /^([A-Za-z][A-Za-z ]*):(.*)$/;
+
+/**
+ * Splits the title page off the body. A title page exists only if the very
+ * first non-empty line is a `Key:` line; otherwise the whole text is body
+ * (a script can legitimately start straight into a scene).
+ *
+ * Values may continue on following indented lines, which is how multi-line
+ * Contact/Notes blocks are written.
+ */
+export function splitTitlePage(lines: string[]): { title: TitlePage; bodyStart: number } {
+	const title = emptyTitlePage();
+	let i = 0;
+	while (i < lines.length && lines[i].trim() === '') i++;
+	if (i >= lines.length || !TITLE_KEY_RE.test(lines[i])) return { title, bodyStart: 0 };
+
+	const raw: { key: string; value: string }[] = [];
+	let current: { key: string; value: string } | null = null;
+	for (; i < lines.length; i++) {
+		const line = lines[i];
+		if (line.trim() === '') {
+			// A blank line ends the title page — but only once we've read at
+			// least one key, and only if what follows isn't another key.
+			let j = i + 1;
+			while (j < lines.length && lines[j].trim() === '') j++;
+			if (j >= lines.length || !TITLE_KEY_RE.test(lines[j])) {
+				i = j;
+				break;
+			}
+			i = j - 1;
+			continue;
+		}
+		const m = TITLE_KEY_RE.exec(line);
+		if (m) {
+			current = { key: m[1].trim(), value: m[2].trim() };
+			raw.push(current);
+		} else if (current) {
+			// Indented continuation of the previous value.
+			current.value = current.value === '' ? line.trim() : `${current.value}\n${line.trim()}`;
+		} else {
+			break;
+		}
+	}
+
+	for (const entry of raw) {
+		const field = titleFieldFor(entry.key);
+		if (field && field !== 'extra') title[field] = entry.value;
+		else title.extra.push(entry);
+	}
+	return { title, bodyStart: i };
+}
+
+/** Renders a title page back to Fountain lines (empty fields are omitted). */
+export function renderTitlePage(title: TitlePage): string[] {
+	const out: string[] = [];
+	const push = (key: string, value: string) => {
+		if (value.trim() === '') return;
+		const parts = value.split('\n');
+		out.push(`${key}: ${parts[0]}`);
+		// Continuations are indented, which is what marks them as part of the
+		// same value rather than a new key.
+		for (const extra of parts.slice(1)) out.push(`\t${extra}`);
+	};
+	for (const entry of TITLE_KEYS) push(entry.key, title[entry.field] as string);
+	for (const entry of title.extra) push(entry.key, entry.value);
+	return out;
+}
+
+// --- Elements --------------------------------------------------------------
+
+export type ElementType =
+	| 'scene-heading'
+	| 'action'
+	| 'character'
+	| 'dialogue'
+	| 'parenthetical'
+	| 'transition'
+	| 'section'
+	| 'synopsis'
+	| 'centered'
+	| 'lyrics'
+	| 'page-break';
+
+export interface FountainElement {
+	type: ElementType;
+	/** Display text: forcing marks (`.`/`!`/`@`/`>`), scene numbers and loom ids removed. */
+	text: string;
+	/** 0-based line index in the file. */
+	line: number;
+	/** Sections only: 1 for `#`, 2 for `##`, … */
+	level?: number;
+	/** Characters only: `(V.O.)`-style extension, without the parentheses. */
+	extension?: string;
+	/** Characters only: `^` — this block plays alongside the previous one. */
+	dual?: boolean;
+	/** 1-based page this element renders on. Derived on every parse, never
+	 *  stored — see the pagination note at the top of the file. */
+	page?: number;
+}
+
+/** A scene heading's parts. `INT. HOUSE - DAY` → `INT.` + `HOUSE` + `DAY`. */
+export interface SceneHeadingParts {
+	/** `INT.`, `EXT.`, `EST.`, `INT./EXT.`, … as written; '' for a forced heading. */
+	intExt: string;
+	/** The place, uppercased as written — what resolves to a Location entity. */
+	location: string;
+	/** Trailing time of day (`DAY`, `NIGHT`, `CONTINUOUS`, …), or ''. */
+	timeOfDay: string;
+	/** Production scene number from `#7#`, or ''. */
+	sceneNumber: string;
+	/** Our hidden `[[loom:…]]` id, or null when the heading has none yet. */
+	loomId: string | null;
+}
+
+/**
+ * Scene-heading prefixes. A line starting with one of these (followed by a
+ * space or a period) and preceded by a blank line is a scene heading; a leading
+ * `.` forces one for anything else (`.BLACK SCREEN`).
+ */
+const SCENE_PREFIXES = ['INT./EXT.', 'INT/EXT.', 'INT./EXT', 'I/E.', 'I/E', 'INT.', 'EXT.', 'EST.', 'INT', 'EXT', 'EST'];
+
+function scenePrefixOf(line: string): string | null {
+	const upper = line.trim().toUpperCase();
+	for (const prefix of SCENE_PREFIXES) {
+		if (!upper.startsWith(prefix)) continue;
+		const rest = upper.slice(prefix.length);
+		// "INTERIOR" must not match "INT" — the prefix has to end the word.
+		if (rest === '' || rest.startsWith(' ') || rest.startsWith('.')) return prefix;
+	}
+	return null;
+}
+
+/**
+ * Parses a scene-heading line into its parts.
+ *
+ * The time of day is split on the LAST ` - `, because a location can legitimately
+ * contain a hyphen (`INT. SAINT-GERMAIN CAFE - NIGHT`). Note the separator is a
+ * hyphen: Fountain has no em-dash form.
+ */
+export function parseSceneHeading(rawLine: string): SceneHeadingParts {
+	let line = rawLine.trim();
+	const loomId = readLoomId(line);
+	line = line.replace(LOOM_ID_RE_G, '').trim();
+
+	// Production scene number, at the END of the line: `INT. HOUSE - DAY #7#`.
+	let sceneNumber = '';
+	const numMatch = /#([^#\s][^#]*)#\s*$/.exec(line);
+	if (numMatch) {
+		sceneNumber = numMatch[1].trim();
+		line = line.slice(0, numMatch.index).trim();
+	}
+
+	let intExt = '';
+	if (line.startsWith('.') && !line.startsWith('..')) {
+		line = line.slice(1).trim(); // forced heading — no INT./EXT. of its own
+	} else {
+		const prefix = scenePrefixOf(line);
+		if (prefix) {
+			intExt = line.slice(0, prefix.length).trim().toUpperCase();
+			if (!intExt.endsWith('.')) intExt += '.';
+			line = line.slice(prefix.length).replace(/^\.?\s*/, '').trim();
+		}
+	}
+
+	let location = line;
+	let timeOfDay = '';
+	const dash = line.lastIndexOf(' - ');
+	if (dash > 0) {
+		location = line.slice(0, dash).trim();
+		timeOfDay = line.slice(dash + 3).trim();
+	}
+	return { intExt, location, timeOfDay, sceneNumber, loomId };
+}
+
+/** Rebuilds a heading line from its parts (loom id appended last). */
+export function renderSceneHeading(parts: SceneHeadingParts): string {
+	const head = parts.intExt === '' ? `.${parts.location}` : `${parts.intExt} ${parts.location}`;
+	let line = parts.timeOfDay === '' ? head : `${head} - ${parts.timeOfDay}`;
+	if (parts.sceneNumber !== '') line += ` #${parts.sceneNumber}#`;
+	if (parts.loomId !== null) line += ` [[loom:${parts.loomId}]]`;
+	return line;
+}
+
+const CHARACTER_EXT_RE = /\(([^)]*)\)\s*\^?\s*$/;
+
+/** Whether a line reads as a character cue: uppercase, and carrying a letter. */
+function looksLikeCharacter(line: string): boolean {
+	const text = line.replace(CHARACTER_EXT_RE, '').replace(/\^\s*$/, '').trim();
+	if (text === '') return false;
+	if (!/[A-Za-z]/.test(text)) return false;
+	return text === text.toUpperCase();
+}
+
+/** Transitions are uppercase and end in `TO:` (`CUT TO:`, `DISSOLVE TO:`). */
+function looksLikeTransition(line: string): boolean {
+	const text = line.trim();
+	return text === text.toUpperCase() && /[A-Za-z]/.test(text) && /TO:$/.test(text);
+}
+
+/** Strips inline notes and boneyard comments from displayed text. */
+function stripAnnotations(text: string): string {
+	return text
+		.replace(/\/\*[\s\S]*?\*\//g, '')
+		.replace(/\[\[[\s\S]*?\]\]/g, '')
+		.trim();
+}
+
+// --- Pagination ------------------------------------------------------------
+
+/**
+ * US screenplay metrics at 12pt Courier (10 characters per inch). Fountain
+ * itself says nothing about pages — these are the standard render widths, and
+ * they're what makes a page count mean roughly a minute of screen time.
+ */
+const LINES_PER_PAGE = 55;
+const WIDTH: Record<ElementType, number> = {
+	'scene-heading': 61,
+	action: 61,
+	character: 38,
+	dialogue: 35,
+	parenthetical: 26,
+	transition: 61,
+	section: 61,
+	synopsis: 61,
+	centered: 61,
+	lyrics: 35,
+	'page-break': 61,
+};
+
+/** How many rendered lines an element occupies once wrapped to its width. */
+function renderedLines(element: FountainElement): number {
+	// Sections and synopses are structural — they never reach the page.
+	if (element.type === 'section' || element.type === 'synopsis') return 0;
+	const width = WIDTH[element.type] ?? 61;
+	const text = element.text;
+	if (text.trim() === '') return 1;
+	// Wrap on words, the way a renderer would.
+	let lines = 0;
+	for (const paragraph of text.split('\n')) {
+		let used = 0;
+		let count = 1;
+		for (const word of paragraph.split(/\s+/).filter((w) => w !== '')) {
+			const need = used === 0 ? word.length : used + 1 + word.length;
+			if (need > width) {
+				count++;
+				used = word.length;
+			} else {
+				used = need;
+			}
+		}
+		lines += count;
+	}
+	return lines;
+}
+
+// --- Scenes ----------------------------------------------------------------
+
+export interface ParsedScene extends SceneHeadingParts {
+	/** Heading as displayed (no scene number, no loom id). */
+	heading: string;
+	/** 0-based line of the heading. */
+	line: number;
+	/** 0-based line after the scene's last line (exclusive). */
+	endLine: number;
+	/** Enclosing section titles, outermost first — the chapters a scene sits in. */
+	sectionPath: string[];
+	/** 1-based page the scene starts on. Derived, never stored. */
+	firstPage: number;
+	/** 1-based page the scene ends on. */
+	lastPage: number;
+	/** Character cues speaking in this scene, in first-appearance order. */
+	characters: string[];
+	/** 1-based position in the script, ignoring sections. */
+	index: number;
+}
+
+export interface ParsedSection {
+	level: number;
+	text: string;
+	line: number;
+	/** Hidden `[[loom:…]]` marker, like a scene heading's — what ties a top-level
+	 *  section to its Chapter note across a rename or a move. */
+	loomId: string | null;
+}
+
+export interface ParsedScript {
+	titlePage: TitlePage;
+	/** 0-based line the body starts on (after any title page). */
+	bodyStart: number;
+	elements: FountainElement[];
+	scenes: ParsedScene[];
+	sections: ParsedSection[];
+	/** Distinct character cues across the script, alphabetical. */
+	characters: string[];
+	/** Distinct scene locations across the script, alphabetical. */
+	locations: string[];
+	/** Total derived page count. */
+	pages: number;
+}
+
+/**
+ * Parses a whole `.fountain` file.
+ *
+ * The element rules that actually matter, since they're the ones easy to get
+ * wrong: a scene heading needs a blank line before it; a CHARACTER cue is an
+ * uppercase line with a blank line before **and a non-blank line after** — that
+ * trailing condition is the only thing separating `SARAH` from `CUT TO:`.
+ */
+export function parseFountain(text: string): ParsedScript {
+	const lines = text.split(/\r?\n/);
+	const { title, bodyStart } = splitTitlePage(lines);
+
+	// Boneyards can span lines, so track whether we're inside one.
+	let inBoneyard = false;
+	const elements: FountainElement[] = [];
+	const sections: ParsedSection[] = [];
+
+	const isBlank = (i: number) => i < 0 || i >= lines.length || lines[i].trim() === '';
+
+	let i = bodyStart;
+	while (i < lines.length) {
+		const rawLine = lines[i];
+		const line = rawLine.trim();
+
+		if (inBoneyard) {
+			if (line.includes('*/')) inBoneyard = false;
+			i++;
+			continue;
+		}
+		if (line.includes('/*') && !line.includes('*/')) {
+			inBoneyard = true;
+			i++;
+			continue;
+		}
+		if (line === '') {
+			i++;
+			continue;
+		}
+
+		// Page break: three or more `=`. Checked before synopsis, which is `=`.
+		if (/^={3,}$/.test(line)) {
+			elements.push({ type: 'page-break', text: '', line: i });
+			i++;
+			continue;
+		}
+		// Section — structural only, never exported. This is why a chapter that
+		// must appear in the PDF also needs a centered-bold title.
+		if (line.startsWith('#')) {
+			const level = /^#+/.exec(line)?.[0].length ?? 1;
+			const loomId = readLoomId(line);
+			const heading = {
+				level,
+				text: line.slice(level).replace(LOOM_ID_RE_G, '').trim(),
+				line: i,
+				loomId,
+			};
+			sections.push(heading);
+			elements.push({ type: 'section', text: heading.text, line: i, level });
+			i++;
+			continue;
+		}
+		if (line.startsWith('=')) {
+			elements.push({ type: 'synopsis', text: line.slice(1).trim(), line: i });
+			i++;
+			continue;
+		}
+		// Centered: `> text <`. Must be checked before forced transitions.
+		if (line.startsWith('>') && line.endsWith('<')) {
+			elements.push({ type: 'centered', text: line.slice(1, -1).trim(), line: i });
+			i++;
+			continue;
+		}
+		if (line.startsWith('>')) {
+			elements.push({ type: 'transition', text: line.slice(1).trim(), line: i });
+			i++;
+			continue;
+		}
+		if (line.startsWith('!')) {
+			elements.push({ type: 'action', text: stripAnnotations(line.slice(1)), line: i });
+			i++;
+			continue;
+		}
+		if (line.startsWith('~')) {
+			elements.push({ type: 'lyrics', text: line.slice(1).trim(), line: i });
+			i++;
+			continue;
+		}
+
+		// Scene heading: a prefix (or a forcing `.`) with a blank line before it.
+		const forced = line.startsWith('.') && !line.startsWith('..');
+		if ((forced || scenePrefixOf(line) !== null) && isBlank(i - 1)) {
+			// DISPLAY text: the hidden loom id and the forcing `.` are stripped,
+			// so nothing that renders this (preview, HTML export) can leak the
+			// id. The scene derivation below re-parses the RAW line instead, and
+			// that is where the id is read from.
+			const parts = parseSceneHeading(line);
+			elements.push({
+				type: 'scene-heading',
+				text: renderSceneHeading({ ...parts, loomId: null }).replace(/^\./, ''),
+				line: i,
+			});
+			i++;
+			continue;
+		}
+
+		// Character cue: uppercase, blank line before, non-blank line after.
+		const forcedCharacter = line.startsWith('@');
+		const cueLine = forcedCharacter ? line.slice(1).trim() : line;
+		if (
+			(forcedCharacter || (looksLikeCharacter(cueLine) && !looksLikeTransition(cueLine))) &&
+			isBlank(i - 1) &&
+			!isBlank(i + 1)
+		) {
+			const dual = /\^\s*$/.test(cueLine);
+			const withoutDual = cueLine.replace(/\^\s*$/, '').trim();
+			const extension = CHARACTER_EXT_RE.exec(withoutDual)?.[1].trim();
+			const name = stripAnnotations(withoutDual.replace(CHARACTER_EXT_RE, '')).trim();
+			elements.push({ type: 'character', text: name, line: i, extension, dual });
+			i++;
+			// Everything up to the next blank line belongs to this cue.
+			while (i < lines.length && lines[i].trim() !== '') {
+				const block = lines[i].trim();
+				if (block.startsWith('(') && block.endsWith(')')) {
+					elements.push({ type: 'parenthetical', text: block, line: i });
+				} else {
+					elements.push({ type: 'dialogue', text: stripAnnotations(block), line: i });
+				}
+				i++;
+			}
+			continue;
+		}
+
+		// Unforced transition: uppercase, ends in TO:, blank lines both sides.
+		if (looksLikeTransition(line) && isBlank(i - 1) && isBlank(i + 1)) {
+			elements.push({ type: 'transition', text: line, line: i });
+			i++;
+			continue;
+		}
+
+		const action = stripAnnotations(rawLine);
+		if (action !== '') elements.push({ type: 'action', text: action, line: i });
+		i++;
+	}
+
+	// --- Derive scenes, their page ranges and their casts --------------------
+	//
+	// Page numbers are computed here and thrown away with the parse: nothing is
+	// stored, so adding five pages to an earlier scene shifts every later scene
+	// automatically, which is the whole point.
+	const scenes: ParsedScene[] = [];
+	const sectionStack: { level: number; text: string }[] = [];
+	let usedLines = 0;
+	let current: ParsedScene | null = null;
+
+	const closeScene = (endLine: number) => {
+		if (!current) return;
+		current.endLine = endLine;
+		current.lastPage = Math.max(current.firstPage, Math.floor(usedLines / LINES_PER_PAGE) + 1);
+		scenes.push(current);
+		current = null;
+	};
+
+	for (const element of elements) {
+		if (element.type === 'section') {
+			while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].level >= (element.level ?? 1)) {
+				sectionStack.pop();
+			}
+			sectionStack.push({ level: element.level ?? 1, text: element.text });
+			continue;
+		}
+		if (element.type === 'page-break') {
+			usedLines = Math.ceil((usedLines + 1) / LINES_PER_PAGE) * LINES_PER_PAGE;
+			element.page = Math.floor(usedLines / LINES_PER_PAGE) + 1;
+			continue;
+		}
+		element.page = Math.floor(usedLines / LINES_PER_PAGE) + 1;
+		if (element.type === 'scene-heading') {
+			closeScene(element.line);
+			// From the raw line, so the loom id is seen — the element's own text
+			// has already had it stripped for display.
+			const parts = parseSceneHeading(lines[element.line]);
+			current = {
+				...parts,
+				heading: renderSceneHeading({ ...parts, sceneNumber: '', loomId: null }).replace(/^\./, ''),
+				line: element.line,
+				endLine: element.line + 1,
+				sectionPath: sectionStack.map((s) => s.text),
+				firstPage: Math.floor(usedLines / LINES_PER_PAGE) + 1,
+				lastPage: Math.floor(usedLines / LINES_PER_PAGE) + 1,
+				characters: [],
+				index: scenes.length + 1,
+			};
+		}
+		if (current && element.type === 'character' && !current.characters.includes(element.text)) {
+			current.characters.push(element.text);
+		}
+		// Elements are separated by a blank line in the render.
+		usedLines += renderedLines(element) + (element.type === 'dialogue' || element.type === 'parenthetical' ? 0 : 1);
+	}
+	closeScene(lines.length);
+
+	const characters = [
+		...new Set(elements.filter((e) => e.type === 'character').map((e) => e.text)),
+	].sort((a, b) => a.localeCompare(b));
+	const locations = [...new Set(scenes.map((s) => s.location).filter((l) => l !== ''))].sort((a, b) =>
+		a.localeCompare(b)
+	);
+
+	return {
+		titlePage: title,
+		bodyStart,
+		elements,
+		scenes,
+		sections,
+		characters,
+		locations,
+		pages: Math.max(1, Math.floor(usedLines / LINES_PER_PAGE) + 1),
+	};
+}
+
+/**
+ * Gives every scene heading a `[[loom:…]]` id, returning the rewritten text.
+ *
+ * This is the one write that has to happen before scenes can be mirrored into
+ * entity notes — an id is what survives a rename-and-move that heuristics would
+ * lose. It only ever ADDS: an existing id is never changed or removed, so the
+ * operation is idempotent and safe to run on every load.
+ */
+export function ensureSceneIds(text: string): { text: string; changed: boolean } {
+	const parsed = parseFountain(text);
+	// Top-level sections are chapters, and they need a stable identity for the
+	// same reason scenes do: a renamed-and-moved heading must not detach its
+	// note. Nested sections are structure inside a chapter, not chapters.
+	const missing: number[] = [
+		...parsed.scenes.filter((s) => s.loomId === null).map((s) => s.line),
+		...parsed.sections.filter((s) => s.level === 1 && s.loomId === null).map((s) => s.line),
+	];
+	if (missing.length === 0) return { text, changed: false };
+
+	const lines = text.split(/\r?\n/);
+	const seen = new Set(
+		[...parsed.scenes, ...parsed.sections]
+			.map((s) => s.loomId)
+			.filter((id): id is string => id !== null)
+	);
+	for (const line of missing) {
+		let id = newSceneId();
+		while (seen.has(id)) id = newSceneId();
+		seen.add(id);
+		lines[line] = `${lines[line].trimEnd()} [[loom:${id}]]`;
+	}
+	return { text: lines.join('\n'), changed: true };
+}
+
+/**
+ * Writes each chapter's display title into the script as a centered-bold line
+ * under its section.
+ *
+ * Fountain sections never export, so a chapter title that has to appear in the
+ * PDF must be emitted separately — `>**ACT ONE**<` is the convention. That
+ * makes the note's `loomDisplayTitle` the source of truth for this one line,
+ * and this function is what keeps the script matching it. Passing '' removes
+ * the line again.
+ *
+ * Only ever touches the centered line directly beneath a section, so nothing
+ * else in the script can be disturbed.
+ */
+export function applyDisplayTitles(
+	text: string,
+	/** Display title per top-level section loom id; '' or absent removes it. */
+	titles: Map<string, string>
+): string {
+	const parsed = parseFountain(text);
+	const lines = text.split(/\r?\n/);
+	// Back to front, so earlier line numbers stay valid as lines are spliced.
+	const sections = parsed.sections
+		.filter((sec) => sec.level === 1 && sec.loomId !== null)
+		.sort((a, b) => b.line - a.line);
+
+	for (const section of sections) {
+		const wanted = (titles.get(section.loomId as string) ?? '').trim();
+		// The centered line immediately below, skipping one blank.
+		let at = section.line + 1;
+		while (at < lines.length && lines[at].trim() === '') at++;
+		const existing = at < lines.length && /^>.*<$/.test(lines[at].trim()) ? at : -1;
+
+		if (wanted === '') {
+			if (existing !== -1) {
+				lines.splice(existing, lines[existing + 1]?.trim() === '' ? 2 : 1);
+			}
+			continue;
+		}
+		const rendered = `>**${wanted}**<`;
+		if (existing !== -1) {
+			if (lines[existing].trim() !== rendered) lines[existing] = rendered;
+		} else {
+			lines.splice(section.line + 1, 0, '', rendered);
+		}
+	}
+	return lines.join('\n');
+}
+
+/** The scene a line falls inside, or null. */
+export function sceneAtLine(parsed: ParsedScript, line: number): ParsedScene | null {
+	return parsed.scenes.find((s) => line >= s.line && line < s.endLine) ?? null;
+}
+
+/** `"10–23"`, or `"10"` when a scene fits on one page. */
+export function pageRangeLabel(scene: ParsedScene): string {
+	return scene.firstPage === scene.lastPage
+		? String(scene.firstPage)
+		: `${scene.firstPage}–${scene.lastPage}`;
+}
+
+// --- Rendering -------------------------------------------------------------
+
+/**
+ * Elements grouped into pages, for anything that displays the script the way it
+ * will print. Sections and synopses are dropped — they're structural and never
+ * reach the page, which is exactly why a chapter title that must appear in the
+ * output has to be written separately as centered bold.
+ */
+export function paginate(parsed: ParsedScript): FountainElement[][] {
+	const pages: FountainElement[][] = [];
+	for (const element of parsed.elements) {
+		if (element.type === 'section' || element.type === 'synopsis') continue;
+		if (element.type === 'page-break') continue;
+		const page = (element.page ?? 1) - 1;
+		while (pages.length <= page) pages.push([]);
+		pages[page].push(element);
+	}
+	return pages.length > 0 ? pages : [[]];
+}
+
+/**
+ * An element's full display text. A character cue keeps its `(V.O.)`-style
+ * extension, which the parser splits off into its own field — every renderer
+ * has to put it back or the printed cue reads as a different character.
+ */
+export function elementText(element: FountainElement): string {
+	if (element.type === 'character' && element.extension !== undefined && element.extension !== '') {
+		return `${element.text} (${element.extension})`;
+	}
+	return element.text;
+}
+
+function escapeHtml(text: string): string {
+	return text
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;');
+}
+
+/**
+ * Fountain's inline emphasis: `**bold**`, `*italic*`, `_underline_`. Applied
+ * after escaping, so script text can contain `<` and `&` safely.
+ */
+export function renderInline(text: string): string {
+	return escapeHtml(text)
+		.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+		.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+		.replace(/\*(.+?)\*/g, '<em>$1</em>')
+		.replace(/_(.+?)_/g, '<u>$1</u>');
+}
+
+/** Screenplay CSS: US Letter margins, 12pt Courier, standard element indents. */
+const SCREENPLAY_CSS = `
+@page { size: Letter; margin: 1in 1in 1in 1.5in; }
+body { background: #525659; margin: 0; padding: 24px 0; font-family: "Courier New", Courier, monospace; font-size: 12pt; line-height: 1; }
+.page { background: #fff; color: #000; width: 8.5in; min-height: 11in; box-sizing: border-box; padding: 1in 1in 1in 1.5in; margin: 0 auto 24px; position: relative; box-shadow: 0 2px 12px rgba(0,0,0,.4); }
+.page-number { position: absolute; top: .5in; right: 1in; font-size: 12pt; }
+.title-page { text-align: center; }
+.title-page .title { margin-top: 3.5in; text-transform: uppercase; font-weight: bold; }
+.title-page .byline { margin-top: .5in; }
+.title-page .lower-left { position: absolute; left: 1.5in; bottom: 1in; text-align: left; }
+p { margin: 0 0 1em; white-space: pre-wrap; }
+.scene-heading { font-weight: bold; text-transform: uppercase; }
+.action { }
+.character { margin-left: 2.2in; margin-bottom: 0; text-transform: uppercase; }
+.parenthetical { margin-left: 1.6in; margin-bottom: 0; }
+.dialogue { margin-left: 1in; margin-right: 1.5in; margin-bottom: 1em; }
+.transition { text-align: right; text-transform: uppercase; }
+.centered { text-align: center; }
+.lyrics { margin-left: 1in; font-style: italic; }
+@media print {
+  body { background: #fff; padding: 0; }
+  .page { box-shadow: none; margin: 0; width: auto; min-height: 0; padding: 0; page-break-after: always; }
+  .page:last-child { page-break-after: auto; }
+}
+`;
+
+/**
+ * Renders the script as standalone, print-ready HTML — the export path to PDF.
+ *
+ * Deliberately not a PDF generator: a browser's own "Print → Save as PDF"
+ * produces a correct screenplay from this with no bundled PDF library, and the
+ * file is readable and re-styleable on its own. Loom ids never reach it, since
+ * everything rendered comes from the parse rather than the raw text.
+ */
+export function renderScreenplayHtml(parsed: ParsedScript): string {
+	const t = parsed.titlePage;
+	const pages = paginate(parsed);
+
+	const titleBlock =
+		t.title.trim() === '' && t.author.trim() === ''
+			? ''
+			: `<div class="page title-page">
+	<div class="title">${renderInline(t.title)}</div>
+	${t.credit.trim() !== '' ? `<div class="byline">${renderInline(t.credit)}</div>` : ''}
+	${t.author.trim() !== '' ? `<div class="byline">${renderInline(t.author)}</div>` : ''}
+	${t.source.trim() !== '' ? `<div class="byline">${renderInline(t.source)}</div>` : ''}
+	<div class="lower-left">
+		${t.draftDate.trim() !== '' ? `<div>${renderInline(t.draftDate)}</div>` : ''}
+		${t.contact.trim() !== '' ? `<div>${renderInline(t.contact)}</div>` : ''}
+		${t.copyright.trim() !== '' ? `<div>${renderInline(t.copyright)}</div>` : ''}
+	</div>
+</div>`;
+
+	const body = pages
+		.map(
+			(elements, i) => `<div class="page">
+	${i > 0 ? `<div class="page-number">${i + 1}.</div>` : ''}
+	${elements.map((e) => `<p class="${e.type}">${renderInline(elementText(e))}</p>`).join('\n\t')}
+</div>`
+		)
+		.join('\n');
+
+	return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>${escapeHtml(t.title.trim() === '' ? 'Screenplay' : t.title.replace(/\n/g, ' '))}</title>
+<style>${SCREENPLAY_CSS}</style>
+</head>
+<body>
+${titleBlock}
+${body}
+</body>
+</html>
+`;
+}
+
+// --- Import ----------------------------------------------------------------
+
+/**
+ * Re-attaches an incoming script's scenes to the ids they had before.
+ *
+ * This is the ONE place heuristic matching belongs (see ROADMAP, "Scene
+ * identity"): a script that went out through export, got edited elsewhere and
+ * came back has had its `[[loom:…]]` markers stripped, so there is nothing else
+ * left to match on. Everywhere else, identity is the marker and only the marker.
+ *
+ * Matching is conservative — an incoming scene claims an old id only when its
+ * heading text is an exact (case-insensitive) match and that id hasn't already
+ * been claimed, walking in script order so repeated headings ("INT. HOUSE -
+ * DAY" three times) pair up in sequence rather than all grabbing the first.
+ * Anything unmatched is left alone and simply becomes a new scene.
+ */
+export function reattachSceneIds(
+	incoming: string,
+	/** Existing scenes' ids keyed in script order: `{ id, heading }`. */
+	known: { id: string; heading: string }[]
+): { text: string; matched: number; added: number; orphaned: number } {
+	const parsed = parseFountain(incoming);
+	const lines = incoming.split(/\r?\n/);
+	const taken = new Set(parsed.scenes.map((s) => s.loomId).filter((id): id is string => id !== null));
+	const pool = known.filter((k) => !taken.has(k.id));
+	const used = new Set<string>();
+
+	let matched = 0;
+	for (const scene of parsed.scenes) {
+		if (scene.loomId !== null) continue;
+		const heading = scene.heading.trim().toLowerCase();
+		const hit = pool.find((k) => !used.has(k.id) && k.heading.trim().toLowerCase() === heading);
+		if (!hit) continue;
+		used.add(hit.id);
+		matched++;
+		lines[scene.line] = `${lines[scene.line].trimEnd()} [[loom:${hit.id}]]`;
+	}
+	return {
+		text: lines.join('\n'),
+		matched,
+		added: parsed.scenes.length - matched - parsed.scenes.filter((s) => s.loomId !== null).length,
+		orphaned: known.length - matched - [...taken].filter((id) => known.some((k) => k.id === id)).length,
+	};
+}
+
+/**
+ * Replaces a scene's body — everything after its heading line — leaving the
+ * heading (and the hidden id on it) untouched.
+ *
+ * This is what lets a Scene page edit its own stretch of the script: the page
+ * is a focused window onto the file, not a copy, so the heading stays owned by
+ * the script and only the writing beneath it is editable from the note.
+ */
+export function replaceSceneBody(text: string, sceneId: string, body: string): string | null {
+	const parsed = parseFountain(text);
+	const scene = parsed.scenes.find((sc) => sc.loomId === sceneId);
+	if (!scene) return null;
+	const lines = text.split(/\r?\n/);
+	const next = body.replace(/\s+$/, '').split('\n');
+	// Keep one blank line between the heading and the body, and one after it,
+	// so the surrounding elements still parse as their own blocks.
+	lines.splice(scene.line + 1, scene.endLine - scene.line - 1, '', ...next, '');
+	return lines.join('\n');
+}
+
+/** Removes a scene — heading and body — from the script entirely. */
+export function removeScene(text: string, sceneId: string): string | null {
+	const parsed = parseFountain(text);
+	const scene = parsed.scenes.find((sc) => sc.loomId === sceneId);
+	if (!scene) return null;
+	const lines = text.split(/\r?\n/);
+	lines.splice(scene.line, scene.endLine - scene.line);
+	return lines.join('\n');
+}
+
+/**
+ * Moves a scene under a different chapter: its whole block is lifted out and
+ * re-inserted at the end of the target section, so re-assigning a chapter on
+ * the Scene page actually moves the writing in the script.
+ */
+export function moveSceneToSection(text: string, sceneId: string, sectionId: string): string | null {
+	const parsed = parseFountain(text);
+	const scene = parsed.scenes.find((sc) => sc.loomId === sceneId);
+	const target = parsed.sections.find((sec) => sec.loomId === sectionId);
+	if (!scene || !target) return null;
+
+	const lines = text.split(/\r?\n/);
+	const block = lines.slice(scene.line, scene.endLine);
+	// Where the target section ends: the next top-level section, or the file end.
+	const nextSection = parsed.sections
+		.filter((sec) => sec.level === 1 && sec.line > target.line)
+		.sort((a, b) => a.line - b.line)[0];
+	let insertAt = nextSection ? nextSection.line : lines.length;
+
+	lines.splice(scene.line, scene.endLine - scene.line);
+	// Removing the block shifts everything after it up.
+	if (insertAt > scene.line) insertAt -= scene.endLine - scene.line;
+	while (insertAt > 0 && lines[insertAt - 1]?.trim() === '') insertAt--;
+	const clean = [...block];
+	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+	lines.splice(insertAt, 0, '', ...clean, '');
+	return lines.join('\n');
+}

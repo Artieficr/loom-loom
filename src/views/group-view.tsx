@@ -13,6 +13,7 @@ import {
 	pcGroupStub,
 } from '../types';
 import { formatLoomDateShort, groupNameOf, serializeProjectConfig } from '../calendar';
+import { projectRoleType, projectTypes, roleOf } from '../project-kind';
 import { linkTargetOf } from '../indexer';
 import { LoomReactView } from './react-view';
 import {
@@ -150,7 +151,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 		);
 	const entrySession = (en: GroupNoteEntry): EntityRecord | null => {
 		const ses = en.session !== null ? plugin.indexer.resolve(en.session, en.owner.path) : null;
-		return ses?.type === 'session' ? ses : null;
+		return ses && roleOf(ses.type) === 'anchor' ? ses : null;
 	};
 	const matchesMonths = (en: GroupNoteEntry) => {
 		if (monthFilter.length === 0) return true;
@@ -160,7 +161,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 	const q = query.trim().toLowerCase();
 	const entries: GroupNoteEntry[] = plugin.indexer
 		.getAll(undefined, project.root)
-		.filter((r) => r.type === 'event' || r.type === 'quest')
+		.filter((r) => roleOf(r.type) === 'beat' || r.type === 'quest')
 		.flatMap((owner) =>
 			owner.sessionNotes
 				.map((n) => ({
@@ -191,7 +192,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 		const map = new Map<string, { session: EntityRecord | null; entries: GroupNoteEntry[] }>();
 		for (const e of entries) {
 			const ses = e.session !== null ? plugin.indexer.resolve(e.session, e.owner.path) : null;
-			const session = ses?.type === 'session' ? ses : null;
+			const session = ses && roleOf(ses.type) === 'anchor' ? ses : null;
 			const key = session?.path ?? 'none';
 			if (!map.has(key)) map.set(key, { session, entries: [] });
 			map.get(key)?.entries.push(e);
@@ -230,7 +231,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 	const sessionYears = [
 		...new Set(
 			plugin.indexer
-				.getAll('session', project.root)
+				.getAll(projectRoleType(project.config, 'anchor'), project.root)
 				.map((s) => s.date?.year)
 				.filter((y): y is number => y !== undefined)
 		),
@@ -253,7 +254,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 				.setChecked(filterType === null)
 				.onClick(() => setFilterType(null))
 		);
-		for (const t of ENTITY_TYPES.filter((t) => t !== 'session' && t !== 'event')) {
+		for (const t of projectTypes(project.config).filter((t) => roleOf(t) === null)) {
 			menu.addItem((item) =>
 				item
 					.setTitle(ENTITY_META[t].plural)
@@ -271,7 +272,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 		.getAll(undefined, project.root)
 		.map((r) => {
 			const target = linkTargetOf(r);
-			const label = r.type === 'session' ? recordLabel(r, project) : r.name;
+			const label = roleOf(r.type) === 'anchor' ? recordLabel(r, project) : r.name;
 			return { label, insert: target === label ? label : `${target}|${label}` };
 		})
 		.sort((a, b) => a.label.localeCompare(b.label));
@@ -430,7 +431,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 											record={c}
 											onOpen={() => view.openEntity(c.path)}
 										/>
-										{death && death.type === 'session' ? (
+										{death && roleOf(death.type) === 'anchor' ? (
 											<EntityChip
 												plugin={plugin}
 												record={death}
@@ -510,7 +511,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 									placeholder="Filter by entity…"
 									options={plugin.indexer
 										.getAll(undefined, project.root)
-										.filter((r) => r.type !== 'session' && r.type !== 'event')
+										.filter((r) => roleOf(r.type) === null)
 										.filter((r) => filterType === null || r.type === filterType)
 										.filter((r) => !entityFilter.includes(r.path))
 										.sort((a, b) => a.name.localeCompare(b.name))

@@ -15,6 +15,7 @@ import {
 	isEntityType,
 	pcGroupStub,
 } from '../types';
+import { projectRoleType, roleOf } from '../project-kind';
 import {
 	AddRelationshipModal,
 	AddToHoldersModal,
@@ -46,7 +47,7 @@ import {
 } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
 
-type SortMode = 'name' | 'created' | 'modified' | 'date';
+type SortMode = 'name' | 'created' | 'modified' | 'date' | 'order';
 
 export class EntityListView extends LoomReactView {
 	entityType: EntityType = 'character';
@@ -101,6 +102,13 @@ function compare(a: EntityRecord, b: EntityRecord, mode: SortMode): number {
 			const kb = b.date?.sortKey ?? Number.POSITIVE_INFINITY;
 			return ka === kb ? a.name.localeCompare(b.name) : ka - kb;
 		}
+		case 'order': {
+			// Script order for chapters and scenes: `loomSeq` is stamped from the
+			// script itself, so this reads the story front to back.
+			const ka = a.seq ?? a.created;
+			const kb = b.seq ?? b.created;
+			return ka === kb ? a.name.localeCompare(b.name) : ka - kb;
+		}
 		default:
 			return a.name.localeCompare(b.name);
 	}
@@ -122,8 +130,16 @@ function EntityList({
 	const plugin = view.plugin;
 	const version = useIndexVersion(plugin.indexer);
 	const dated = type === 'event' || type === 'session';
+	const role = roleOf(type);
+	// Chapters and scenes carry a script order rather than a date, and a story
+	// reads front to back — where a campaign log wants the latest session on
+	// top, a script wants chapter one. So they default to script order, oldest
+	// first, and everything else keeps its existing default.
+	const scripted = type === 'chapter' || type === 'scene';
 	const [query, setQuery] = useState('');
-	const [sort, setSort] = useState<SortMode>(type === 'session' ? 'date' : 'name');
+	const [sort, setSort] = useState<SortMode>(
+		type === 'session' ? 'date' : scripted ? 'order' : 'name'
+	);
 	/** Flips the active sort's natural direction. */
 	const [sortAsc, setSortAsc] = useState(true);
 	const [tagFilter, setTagFilter] = useState('');
@@ -140,6 +156,14 @@ function EntityList({
 
 	const project = resolveProject(plugin.indexer, projectRoot);
 	const vocab = ENTITY_TAGS[type];
+	// The project's own chronology: Sessions/Events in a player or GM project,
+	// Chapters/Scenes in a writer one. The menus and pickers below address
+	// these rather than naming a type.
+	const anchorType = projectRoleType(project?.config, 'anchor');
+	const beatType = projectRoleType(project?.config, 'beat');
+	const anchorLabel = ENTITY_META[anchorType].label.toLowerCase();
+	const beatLabel = ENTITY_META[beatType].label.toLowerCase();
+	const addBeatTitle = `Add ${/^[aeiou]/.test(beatLabel) ? 'an' : 'a'} ${beatLabel}`;
 
 	// --- Event filter matching (involved incl. group snapshots; a location
 	// matches its own events and every descendant's, like location pages). ---
@@ -184,10 +208,10 @@ function EntityList({
 					questStatus === '' ||
 					(questStatus === 'active' ? r.questOutcome === '' : r.questOutcome === questStatus)
 			)
-			.filter((r) => type !== 'event' || eventInvolved === null || eventHasInvolved(r, eventInvolved))
-			.filter((r) => type !== 'event' || eventLocation === null || eventAtLocation(r, eventLocation))
+			.filter((r) => role !== 'beat' || eventInvolved === null || eventHasInvolved(r, eventInvolved))
+			.filter((r) => role !== 'beat' || eventLocation === null || eventAtLocation(r, eventLocation))
 			.sort((a, b) => dir * compare(a, b, sort));
-	}, [plugin.indexer, version, project, type, query, sort, sortAsc, tagFilter, questStatus, eventInvolved, eventLocation]);
+	}, [plugin.indexer, version, project, type, query, sort, sortAsc, tagFilter, questStatus, eventInvolved, eventLocation, role]);
 
 	// Locations nest under their parentLocation, items under their original (a
 	// character-specific copy under the item it derives from). Searching flattens
@@ -335,18 +359,18 @@ function EntityList({
 		new RecordSuggestModal(
 			plugin.app,
 			plugin.indexer
-				.getAll('event', project.root)
+				.getAll(beatType, project.root)
 				.filter((ev) => !already(ev))
 				.sort((a, b) => a.name.localeCompare(b.name)),
 			(ev) => involveInEvent(ev, r),
-			'Pick the event…'
+			`Pick the ${beatLabel}…`
 		).open();
 	};
 	const pickSessionNoteFor = (r: EntityRecord) =>
 		new RecordSuggestModal(
 			plugin.app,
 			plugin.indexer
-				.getAll('session', project.root)
+				.getAll(anchorType, project.root)
 				.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)),
 			(ses) =>
 				appendFmList(r, FM.sessionNotes, {
@@ -354,7 +378,7 @@ function EntityList({
 					text: '',
 					seq: Date.now(),
 				}),
-			'Pick the session…',
+			`Pick the ${anchorLabel}…`,
 			pickLabel
 		).open();
 	const changeSessionDate = (r: EntityRecord) =>
@@ -384,7 +408,7 @@ function EntityList({
 			.filter((c) => {
 				if (c.alive || !c.deathSession || !ses.date) return true;
 				const death = plugin.indexer.resolve(c.deathSession, c.path);
-				if (!death || death.type !== 'session' || !death.date) return true;
+				if (!death || roleOf(death.type) !== 'anchor' || !death.date) return true;
 				return ses.date.sortKey <= death.date.sortKey;
 			})
 			.sort((a, b) => a.name.localeCompare(b.name));
@@ -491,7 +515,7 @@ function EntityList({
 					)
 			);
 			menu.addItem((i) =>
-				i.setTitle('Add an event').setIcon(ENTITY_META.event.icon).onClick(() => pickEventFor(r))
+				i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r))
 			);
 			menu.addItem((i) =>
 				i
@@ -518,7 +542,7 @@ function EntityList({
 		if (r.type === 'location') {
 			menu.addSeparator();
 			menu.addItem((i) =>
-				i.setTitle('Add an event').setIcon(ENTITY_META.event.icon).onClick(() => pickEventFor(r))
+				i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r))
 			);
 			menu.addItem((i) =>
 				i
@@ -608,14 +632,14 @@ function EntityList({
 					)
 			);
 			menu.addItem((i) =>
-				i.setTitle('Add an event').setIcon(ENTITY_META.event.icon).onClick(() => pickEventFor(r))
+				i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r))
 			);
 		}
 
 		if (r.type === 'item') {
 			menu.addSeparator();
 			menu.addItem((i) =>
-				i.setTitle('Add an event').setIcon(ENTITY_META.event.icon).onClick(() => pickEventFor(r))
+				i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r))
 			);
 			menu.addItem((i) =>
 				i
@@ -690,18 +714,18 @@ function EntityList({
 			);
 			menu.addItem((i) =>
 				i
-					.setTitle('Add a session note')
-					.setIcon(ENTITY_META.session.icon)
+					.setTitle(`Add a ${anchorLabel} note`)
+					.setIcon(ENTITY_META[anchorType].icon)
 					.onClick(() => pickSessionNoteFor(r))
 			);
 		}
 
-		if (r.type === 'event') {
+		if (roleOf(r.type) === 'beat') {
 			menu.addSeparator();
 			menu.addItem((i) =>
 				i
-					.setTitle('Add a session note')
-					.setIcon(ENTITY_META.session.icon)
+					.setTitle(`Add a ${anchorLabel} note`)
+					.setIcon(ENTITY_META[anchorType].icon)
 					.onClick(() => pickSessionNoteFor(r))
 			);
 			menu.addItem((i) =>
@@ -720,7 +744,7 @@ function EntityList({
 			);
 		}
 
-		if (r.type === 'session') {
+		if (roleOf(r.type) === 'anchor') {
 			menu.addSeparator();
 			menu.addItem((i) =>
 				i.setTitle('Change the date').setIcon('calendar').onClick(() => changeSessionDate(r))
@@ -741,10 +765,10 @@ function EntityList({
 			menu.addSeparator();
 			menu.addItem((i) =>
 				i
-					.setTitle('Add an event')
-					.setIcon(ENTITY_META.event.icon)
+					.setTitle(addBeatTitle)
+					.setIcon(ENTITY_META[beatType].icon)
 					.onClick(() =>
-						new CreateEntityModal(plugin, 'event', project, {
+						new CreateEntityModal(plugin, beatType, project, {
 							noteSession: r,
 							onCreated: () => {},
 						}).open()
@@ -802,6 +826,7 @@ function EntityList({
 				onChange={(e) => setQuery(e.target.value)}
 			/>
 			<select className="dropdown" value={sort} onChange={(e) => setSort(e.target.value as SortMode)}>
+				{scripted ? <option value="order">Sort: script order</option> : null}
 				{type !== 'session' ? <option value="name">Sort: name</option> : null}
 				<option value="created">Sort: created</option>
 				<option value="modified">Sort: modified</option>
@@ -848,7 +873,7 @@ function EntityList({
 					</button>
 				</>
 			) : null}
-			{type === 'event' ? (
+			{role === 'beat' ? (
 				<>
 					{involvedFilterRecord ? (
 						<EntityChip
@@ -863,7 +888,7 @@ function EntityList({
 								placeholder="Involved…"
 								options={plugin.indexer
 									.getAll(undefined, project.root)
-									.filter((c) => c.type !== 'session' && c.type !== 'event' && c.type !== 'location')
+									.filter((c) => roleOf(c.type) === null && c.type !== 'location')
 									.sort((a, b) => a.name.localeCompare(b.name))
 									.map((c) => ({ value: c.path, label: c.name }))}
 								onPick={(path) => setEventInvolved(path)}
@@ -1045,7 +1070,7 @@ function EntityList({
 				<div className="loom-quest-card-row">
 					<span className="loom-quest-card-label">Received on:</span>
 					<span className="loom-quest-card-value">
-						{received && received.type === 'session' ? (
+						{received && roleOf(received.type) === 'anchor' ? (
 							<button className="loom-subloc-link" onClick={() => view.openEntity(received.path)}>
 								{recordLabel(received, project)}
 							</button>
@@ -1060,7 +1085,7 @@ function EntityList({
 						{q.questOutcome === '' ? 'Active' : q.questOutcome[0].toUpperCase() + q.questOutcome.slice(1)}
 					</span>
 				</div>
-				{q.questOutcome !== '' && outcomeSes && outcomeSes.type === 'session' ? (
+				{q.questOutcome !== '' && outcomeSes && roleOf(outcomeSes.type) === 'anchor' ? (
 					<div className="loom-quest-card-row">
 						<span className="loom-quest-card-label">Completed on:</span>
 						<span className="loom-quest-card-value">

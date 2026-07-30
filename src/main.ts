@@ -3,12 +3,14 @@ import {
 	EntityOrigin,
 	FM,
 	LOOM_EXTENSION,
+	SCRIPT_EXTENSION,
 	VIEW_ENTITY,
 	VIEW_GRAPH,
 	VIEW_GROUP,
 	VIEW_HOME,
 	VIEW_LIST,
 	VIEW_MAP,
+	VIEW_SCRIPT,
 } from './types';
 import { DEFAULT_SETTINGS, LoomLoomSettingTab, LoomLoomSettings, mergeSettings } from './settings';
 import { LoomIndexer, ProjectDef } from './indexer';
@@ -25,6 +27,7 @@ import { GraphView } from './views/graph-view';
 import { EntityView } from './views/entity-view';
 import { GroupView } from './views/group-view';
 import { MapView } from './views/map-view';
+import { ScriptView } from './views/script-view';
 
 export default class LoomLoomPlugin extends Plugin {
 	settings: LoomLoomSettings = DEFAULT_SETTINGS;
@@ -42,9 +45,15 @@ export default class LoomLoomPlugin extends Plugin {
 		this.registerView(VIEW_ENTITY, (leaf) => new EntityView(leaf, this));
 		this.registerView(VIEW_GROUP, (leaf) => new GroupView(leaf, this));
 		this.registerView(VIEW_MAP, (leaf) => new MapView(leaf, this));
+		this.registerView(VIEW_SCRIPT, (leaf) => new ScriptView(leaf, this));
 		// Project home files show up in the file explorer like .canvas/.base
 		// files and open straight into the plugin.
 		this.registerExtensions([LOOM_EXTENSION], VIEW_HOME);
+		// The Fountain script gets its own extension for the same reason, plus
+		// one of its own: Fountain's note syntax IS `[[…]]`, so keeping the
+		// script out of markdown is what stops Obsidian indexing every
+		// non-exporting script note as a wikilink.
+		this.registerExtensions([SCRIPT_EXTENSION], VIEW_SCRIPT);
 
 		this.addRibbonIcon('dices', 'Open Loom Loom home', () => this.openHome());
 
@@ -76,7 +85,11 @@ export default class LoomLoomPlugin extends Plugin {
 			name: 'Create entity in current project',
 			callback: () =>
 				this.withProject((p) =>
-					new EntityTypeSuggestModal(this, (type) => new CreateEntityModal(this, type, p).open()).open()
+					new EntityTypeSuggestModal(
+						this,
+						(type) => new CreateEntityModal(this, type, p).open(),
+						p
+					).open()
 				),
 		});
 

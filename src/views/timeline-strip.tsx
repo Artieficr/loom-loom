@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { ENTITY_META, EntityRecord, FM, TimelineDef } from '../types';
+import { projectRoleType, roleOf } from '../project-kind';
 import { buildColumns } from '../columns';
 import { ProjectDef, extractLinkpath, linkTargetOf } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
@@ -94,7 +95,7 @@ function Bubble({
 	clickSuppressed,
 }: {
 	record: EntityRecord;
-	kind: 'session' | 'event';
+	kind: 'anchor' | 'beat';
 	label: string;
 	navigator: LoomNavigator;
 	setTooltip: (t: TooltipState | null) => void;
@@ -190,6 +191,12 @@ export const TimelineStrip = memo(function TimelineStrip({
 	const plugin = navigator.plugin;
 	const indexer = plugin.indexer;
 	const version = useIndexVersion(indexer);
+	// Sessions/Events here, Chapters/Scenes in a writer project — the strip
+	// itself is the same either way.
+	const anchorType = projectRoleType(project.config, 'anchor');
+	const beatType = projectRoleType(project.config, 'beat');
+	const anchorLabel = ENTITY_META[anchorType].label.toLowerCase();
+	const beatLabel = ENTITY_META[beatType].label.toLowerCase();
 	const [tooltip, setTooltip] = useState<TooltipState | null>(null);
 	const [open, setOpenState] = useState(nodateOpen);
 	const setOpen = (v: boolean) => {
@@ -245,12 +252,12 @@ export const TimelineStrip = memo(function TimelineStrip({
 		const all = buildColumns(indexer, def, project.root);
 		// Dateless session-less events dock in the panel instead of anchoring
 		// their own columns (dated ones keep their chronological spot).
-		const cols = all.filter((c) => !(c.anchor.type === 'event' && c.anchor.date === null));
+		const cols = all.filter((c) => !(roleOf(c.anchor.type) === 'beat' && c.anchor.date === null));
 		for (const c of cols) c.events = applyOrder(c.events);
 		return {
 			columns: cols,
 			undated: applyOrder(
-				all.filter((c) => c.anchor.type === 'event' && c.anchor.date === null).map((c) => c.anchor)
+				all.filter((c) => roleOf(c.anchor.type) === 'beat' && c.anchor.date === null).map((c) => c.anchor)
 			),
 		};
 		// A reorder rewrites loomSeq, bumping the index version → re-sorts here.
@@ -264,7 +271,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 		const seen = new Set<string>();
 		return indexer
 			.getConnections(event.path)
-			.filter((c) => c.record.type === 'session')
+			.filter((c) => c.record.type === anchorType)
 			.filter((c) => (seen.has(c.record.path) ? false : (seen.add(c.record.path), true)))
 			.map((c) => c.record);
 	};
@@ -389,7 +396,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 
 	const handleDropPath = (path: string, to: EntityRecord | null) => {
 		const event = indexer.get(path);
-		if (!event || event.type !== 'event') return;
+		if (!event || roleOf(event.type) !== 'beat') return;
 		const from = sessionsOf(event);
 		if (to !== null && from.some((s) => s.path === to.path)) return;
 		if (to === null && from.length === 0 && event.date === null) return;
@@ -668,7 +675,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 		const bubble = bubblePath ? indexer.get(bubblePath) : undefined;
 		const menu = new Menu();
 
-		if (bubble?.type === 'event') {
+		if (bubble && roleOf(bubble.type) === 'beat') {
 			// Event node: move it to a session picked from a fuzzy search.
 			menu.addItem((item) =>
 				item
@@ -676,14 +683,14 @@ export const TimelineStrip = memo(function TimelineStrip({
 					.setIcon('move')
 					.onClick(() => {
 						const sessions = indexer
-							.getAll('session', project.root)
+							.getAll(anchorType, project.root)
 							.slice()
 							.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
 						new RecordSuggestModal(
 							plugin.app,
 							sessions,
 							(session) => handleDropPath(bubble.path, session),
-							'Move event to session…',
+							`Move ${beatLabel} to ${anchorLabel}…`,
 							(s) => recordLabel(s, project)
 						).open();
 					})
@@ -695,13 +702,13 @@ export const TimelineStrip = memo(function TimelineStrip({
 		// Session node → new event pinned there. Detection is the bubble itself,
 		// not the column dropzone (which extends over the empty area below the
 		// events, where a right-click should offer creation instead).
-		if (bubble?.type === 'session') {
+		if (bubble && roleOf(bubble.type) === 'anchor') {
 			menu.addItem((item) =>
 				item
-					.setTitle(`New event in ${recordLabel(bubble, project)}`)
-					.setIcon(ENTITY_META.event.icon)
+					.setTitle(`New ${beatLabel} in ${recordLabel(bubble, project)}`)
+					.setIcon(ENTITY_META[beatType].icon)
 					.onClick(() =>
-						new CreateEntityModal(plugin, 'event', project, {
+						new CreateEntityModal(plugin, beatType, project, {
 							noteSession: bubble,
 							onCreated: () => {},
 						}).open()
@@ -715,18 +722,18 @@ export const TimelineStrip = memo(function TimelineStrip({
 		// session or a session-less event.
 		menu.addItem((item) =>
 			item
-				.setTitle('New session')
-				.setIcon(ENTITY_META.session.icon)
+				.setTitle(`New ${anchorLabel}`)
+				.setIcon(ENTITY_META[anchorType].icon)
 				.onClick(() =>
-					new CreateEntityModal(plugin, 'session', project, { onCreated: () => {} }).open()
+					new CreateEntityModal(plugin, anchorType, project, { onCreated: () => {} }).open()
 				)
 		);
 		menu.addItem((item) =>
 			item
-				.setTitle('New event')
-				.setIcon(ENTITY_META.event.icon)
+				.setTitle(`New ${beatLabel}`)
+				.setIcon(ENTITY_META[beatType].icon)
 				.onClick(() =>
-					new CreateEntityModal(plugin, 'event', project, { onCreated: () => {} }).open()
+					new CreateEntityModal(plugin, beatType, project, { onCreated: () => {} }).open()
 				)
 		);
 		menu.showAtMouseEvent(e.nativeEvent);
@@ -750,7 +757,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 							<Bubble
 								key={ev.path}
 								record={ev}
-								kind="event"
+								kind="beat"
 								label={ev.name}
 								{...bubbleProps}
 								{...bubbleDragProps(ev, 'nodate', i)}
@@ -792,7 +799,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 				<div className="loom-timeline" style={{ zoom }}>
 					<div className="loom-timeline-columns">
 						{columns.map((col, ci) => {
-							const isSession = col.anchor.type === 'session';
+							const isSession = roleOf(col.anchor.type) === 'anchor';
 							return (
 								<div
 									key={col.anchor.path}
@@ -809,7 +816,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 											<>
 												<Bubble
 													record={col.anchor}
-													kind="session"
+													kind="anchor"
 													label={recordLabel(col.anchor, project) || 'No date'}
 													suppressTooltip={drag !== null}
 													{...bubbleProps}
@@ -840,7 +847,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 													<Bubble
 														key={ev.path}
 														record={ev}
-														kind="event"
+														kind="beat"
 														label={ev.name}
 														{...bubbleProps}
 														{...bubbleDragProps(ev, col.anchor.path, i)}
@@ -852,7 +859,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 										<div className="loom-col-events loom-col-events-root">
 											<Bubble
 												record={col.anchor}
-												kind="event"
+												kind="beat"
 												label={col.anchor.name}
 												{...bubbleProps}
 												{...bubbleDragProps(col.anchor, null, 0)}

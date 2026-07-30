@@ -4817,8 +4817,10 @@ function focusLayerOf(rec: EntityRecord): number {
 		case 'faction':
 			return 5;
 		case 'event':
+		case 'scene':
 			return 6;
 		case 'session':
+		case 'chapter':
 			return 7;
 		default:
 			return 4;

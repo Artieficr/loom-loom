@@ -4512,3 +4512,412 @@ span.loom-row-caret {
 	color: var(--text-faint);
 	white-space: nowrap;
 }
+
+/* --- Fountain script view ------------------------------------------------ */
+
+.loom-view .loom-script-actions {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+}
+
+.loom-view .loom-script-stat {
+	color: var(--text-muted);
+	font-size: 0.85em;
+	white-space: nowrap;
+}
+
+/* Navigation panel beside the working area. */
+.loom-view .loom-script-layout {
+	position: relative;
+	min-width: 0;
+}
+
+/* The panel floats over the page instead of sitting in the flow: as a flex
+   column it permanently narrowed the working area, which is the opposite of
+   what a navigation aid should do. */
+.loom-view .loom-script-nav-toggle {
+	position: absolute;
+	top: 0;
+	left: 0;
+	z-index: 3;
+	background: none;
+	box-shadow: none;
+	border: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	padding: 0.2em;
+}
+
+.loom-view .loom-script-nav-toggle:hover {
+	color: var(--text-normal);
+}
+
+.loom-view .loom-script-nav {
+	position: absolute;
+	top: 0;
+	left: 0;
+	z-index: 4;
+	width: 17em;
+	max-height: 80vh;
+	overflow-y: auto;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+	padding: 0.4em 0.6em 0.6em;
+}
+
+.loom-view .loom-script-nav-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	color: var(--text-muted);
+	font-size: 0.8em;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	padding: 0.2em 0 0.4em;
+}
+
+/* Chapters are jump targets, not labels — the script has a `# Chapter` line. */
+.loom-view button.loom-script-nav-chapter {
+	display: block;
+	width: 100%;
+	background: none;
+	box-shadow: none;
+	border: none;
+	text-align: left;
+	font-weight: 600;
+	color: var(--text-normal);
+	cursor: pointer;
+	padding: 0.25em 0.3em;
+	margin-top: 0.4em;
+	border-radius: var(--radius-s);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-view button.loom-script-nav-chapter:hover {
+	background: var(--background-modifier-hover);
+}
+
+.loom-view button.loom-script-nav-chapter:disabled {
+	color: var(--text-faint);
+	cursor: default;
+	background: none;
+}
+
+.loom-view .loom-script-nav-empty {
+	color: var(--text-faint);
+	font-size: 0.85em;
+}
+
+/* Scene entries: number in a fixed gutter so titles line up. */
+.loom-view .loom-script-nav-scene {
+	display: flex;
+	gap: 0.5em;
+	width: 100%;
+	background: none;
+	box-shadow: none;
+	border: none;
+	padding: 0.15em 0.3em;
+	text-align: left;
+	color: var(--text-muted);
+	cursor: pointer;
+	border-radius: var(--radius-s);
+}
+
+.loom-view .loom-script-nav-scene:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.loom-view .loom-script-nav-num {
+	flex: none;
+	min-width: 2ch;
+	text-align: right;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+.loom-view .loom-script-nav-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-view .loom-script-main {
+	min-width: 0;
+	/* Room for the floating navigation toggle in the top-left corner. */
+	padding-left: 2em;
+}
+
+.loom-view .loom-script-section > summary {
+	cursor: pointer;
+	color: var(--text-muted);
+	padding: 0.4em 0;
+}
+
+.loom-view .loom-script-tabs {
+	display: flex;
+	gap: 0.25em;
+	margin: 0.5em 0;
+}
+
+.loom-view .loom-script-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 0.4em;
+	margin-bottom: 0.5em;
+}
+
+.loom-view .loom-script-search {
+	flex: 1;
+	min-width: 8em;
+}
+
+.loom-view .loom-script-pagenum {
+	width: 4.5em;
+	text-align: center;
+}
+
+/* Title-page fields in a compact grid — they are short values. */
+.loom-view .loom-field-group {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+	gap: 0.5em 1em;
+	align-items: end;
+}
+
+.loom-view .loom-field-hint {
+	color: var(--text-muted);
+	font-size: 0.85em;
+	line-height: 1.4;
+}
+
+/* Outline rows: a grid, so every column lines up down the whole list rather
+   than wrapping around whatever each heading happens to be. */
+.loom-view .loom-script-scenes {
+	display: grid;
+	grid-template-columns: 2.5ch minmax(10em, 2fr) 5em 5em minmax(0, 1fr);
+	align-items: baseline;
+	gap: 0.15em 0.6em;
+}
+
+.loom-view .loom-script-scene {
+	display: contents;
+}
+
+.loom-view .loom-script-scene-num {
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+	text-align: right;
+}
+
+.loom-view .loom-script-scene-head,
+.loom-view .loom-script-scene-cast {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-view .loom-script-scene-no,
+.loom-view .loom-script-scene-page {
+	color: var(--text-muted);
+	font-size: 0.85em;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.loom-view .loom-script-scene-cast {
+	color: var(--text-muted);
+	font-size: 0.85em;
+}
+
+/* The raw editor: one page tall and scrolling inside itself, so the view's own
+   scroll position doesn't jump around a long script. Monospace because
+   screenplay formatting is column-based. */
+.loom-view .loom-script-editor::-webkit-scrollbar,
+.loom-view .loom-script-editor::-webkit-scrollbar-thumb,
+.loom-view .loom-script-editor::-webkit-scrollbar-track,
+.loom-view .loom-screenplay::-webkit-scrollbar,
+.loom-view .loom-screenplay::-webkit-scrollbar-thumb,
+.loom-view .loom-screenplay::-webkit-scrollbar-track,
+.loom-view .loom-script-nav::-webkit-scrollbar,
+.loom-view .loom-script-nav::-webkit-scrollbar-thumb,
+.loom-view .loom-script-nav::-webkit-scrollbar-track {
+	/* A textarea paints `cursor: text` over its whole box, scrollbar included. */
+	cursor: default;
+}
+
+.loom-view .loom-script-editor {
+	width: 100%;
+	height: 11in;
+	max-height: 70vh;
+	overflow-y: auto;
+	resize: vertical;
+	font-family: var(--font-monospace);
+	font-size: 0.9em;
+	line-height: 1.45;
+	tab-size: 4;
+}
+
+/* --- Screenplay preview --------------------------------------------------
+   Mirrors the PDF's geometry so what is on screen is what prints: 12pt
+   Courier, standard element indents, one page at a time in a scroll box. */
+
+.loom-view .loom-screenplay {
+	max-height: 70vh;
+	overflow: auto;
+	background: var(--background-secondary);
+	border-radius: var(--radius-s);
+	padding: 1em;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 1em;
+	scroll-behavior: smooth;
+}
+
+.loom-view .loom-screenplay-page {
+	position: relative;
+	background: #fff;
+	color: #000;
+	width: 8.5in;
+	min-height: 11in;
+	box-sizing: border-box;
+	padding: 1in 1in 1in 1.5in;
+	font-family: "Courier New", Courier, monospace;
+	font-size: 12pt;
+	line-height: 1;
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+	flex: none;
+}
+
+.loom-view .loom-screenplay-pagenum {
+	position: absolute;
+	top: 0.5in;
+	right: 1in;
+}
+
+.loom-view .loom-screenplay p {
+	margin: 0 0 1em;
+	white-space: pre-wrap;
+}
+
+.loom-view .loom-screenplay mark {
+	background: #ffe58a;
+	color: inherit;
+}
+
+.loom-view .loom-sp-titlepage {
+	text-align: center;
+}
+
+.loom-view .loom-sp-title {
+	margin-top: 2.5in;
+	text-transform: uppercase;
+	font-weight: bold;
+	white-space: pre-line;
+}
+
+.loom-view .loom-sp-byline {
+	margin-top: 0.4in;
+	white-space: pre-line;
+}
+
+.loom-view .loom-sp-lowerleft {
+	position: absolute;
+	left: 1.5in;
+	bottom: 1in;
+	text-align: left;
+	white-space: pre-line;
+}
+
+.loom-view .loom-sp-scene-heading {
+	font-weight: bold;
+	text-transform: uppercase;
+}
+
+.loom-view .loom-sp-character {
+	margin-left: 2.2in;
+	margin-bottom: 0;
+	text-transform: uppercase;
+}
+
+.loom-view .loom-sp-parenthetical {
+	margin-left: 1.6in;
+	margin-bottom: 0;
+}
+
+.loom-view .loom-sp-dialogue {
+	margin-left: 1in;
+	margin-right: 1.5in;
+}
+
+.loom-view .loom-sp-transition {
+	text-align: right;
+	text-transform: uppercase;
+}
+
+.loom-view .loom-sp-centered {
+	text-align: center;
+}
+
+.loom-view .loom-sp-lyrics {
+	margin-left: 1in;
+	font-style: italic;
+}
+
+.loom-confirm-detail {
+	white-space: pre-line;
+}
+
+/* A scene's stretch of the script, shown read-only on its page — the .fountain
+   file stays the single home of the writing, never copied into the note. */
+.loom-view .loom-scene-script {
+	margin: 0;
+	padding: 0.6em 0.8em;
+	background: var(--background-secondary);
+	border-radius: var(--radius-s);
+	font-family: var(--font-monospace);
+	font-size: 0.85em;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	overflow-x: auto;
+	max-height: 24em;
+	overflow-y: auto;
+}
+
+/* Chapter page scene rows: number in a fixed gutter so titles line up. */
+.loom-view .loom-script-scene-row {
+	display: flex;
+	align-items: baseline;
+	gap: 0.6em;
+	padding: 0.1em 0;
+	min-width: 0;
+}
+
+.loom-view .loom-script-scene-row .loom-row-desc {
+	color: var(--text-muted);
+	font-size: 0.85em;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Scene heading above its editable body: owned by the script, shown not typed. */
+.loom-view .loom-scene-heading {
+	font-family: var(--font-monospace);
+	font-weight: 600;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	padding: 0 0 0.3em;
+}
+
+textarea.loom-scene-script {
+	width: 100%;
+	min-height: 12em;
+	resize: vertical;
+}

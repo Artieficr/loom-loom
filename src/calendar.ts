@@ -1,4 +1,5 @@
 import { CalendarId, LoomDate, PC_GROUP_NAME } from './types';
+import { DEFAULT_PROJECT_KIND, ProjectKind, isProjectKind } from './project-kind';
 
 /**
  * Calendar & date-format model.
@@ -36,14 +37,18 @@ export const DATE_FORMATS = [
 export type DateFormat = (typeof DATE_FORMATS)[number];
 
 export interface ProjectConfig {
+	/** The project's workflow — which entity types it holds, which features are
+	 *  on. See project-kind.ts; everything reads it through the helpers there. */
+	kind: ProjectKind;
 	dateFormat: DateFormat;
 	customCalendar: CustomCalendarConfig;
 	/** Display name of the virtual Group (the party); '' = the default "Group". */
 	groupName: string;
 }
 
-export function defaultProjectConfig(): ProjectConfig {
+export function defaultProjectConfig(kind: ProjectKind = DEFAULT_PROJECT_KIND): ProjectConfig {
 	return {
+		kind,
 		dateFormat: 'MMM Do, YYYY',
 		customCalendar: { enabled: false, monthCount: 12, months: [], useShortNames: false },
 		groupName: '',
@@ -66,6 +71,9 @@ export function parseProjectConfig(text: string): ProjectConfig {
 	}
 	if (typeof data !== 'object' || data === null) return config;
 	const d = data as Partial<ProjectConfig>;
+	// Projects written before kinds existed are Player projects — that was the
+	// only workflow, so the absent field means the default, not "unknown".
+	if (isProjectKind(d.kind)) config.kind = d.kind;
 	if (typeof d.dateFormat === 'string' && (DATE_FORMATS as readonly string[]).includes(d.dateFormat)) {
 		config.dateFormat = d.dateFormat;
 	}

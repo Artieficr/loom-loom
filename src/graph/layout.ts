@@ -3,8 +3,12 @@ import { formatLoomDate } from '../calendar';
 import { TimelineColumn, buildColumns } from '../columns';
 import { LoomIndexer } from '../indexer';
 import { EdgeRoute, LANE_EPSILON, RoutedEdge } from './routing';
+import { roleOf } from '../project-kind';
 
-export type NodeKind = 'session' | 'event' | 'global';
+/** Which row a node sits in. `anchor` = the column-owning row (Sessions /
+ *  Chapters), `beat` = the row stacked beneath it (Events / Scenes),
+ *  `global` = the fixed lower layers. Structural, not an entity type. */
+export type NodeKind = 'anchor' | 'beat' | 'global';
 
 export interface LayoutNode {
 	id: string;
@@ -230,7 +234,9 @@ export function computeGraphLayout(
 	// slightly above/below their row; nodes with enough room stay put.
 	const projectDef = indexer.getProjectByRoot(projectRoot);
 	const labelOf = (r: EntityRecord) =>
-		r.type === 'session' && r.date && projectDef ? formatLoomDate(r.date, projectDef.config) : r.name;
+		roleOf(r.type) === 'anchor' && r.date && projectDef
+			? formatLoomDate(r.date, projectDef.config)
+			: r.name;
 	applyLabelChecker(
 		[...placed.nodes.values()].filter((n) => n.id !== liveDragId),
 		labelOf,
@@ -333,7 +339,7 @@ function placeNodes(
 	// corridors — pull them out of the column flow and let them float freely
 	// in the events row (drag-reorderable via manualX, like loose globals).
 	const isFreeEvent = (c: TimelineColumn) =>
-		c.anchor.type === 'event' &&
+		roleOf(c.anchor.type) === 'beat' &&
 		c.anchor.date === null &&
 		c.events.length === 0 &&
 		(neighbors.get(c.anchor.path)?.size ?? 0) === 0;
@@ -394,17 +400,17 @@ function placeNodes(
 	// alone at its own column, row 0).
 	orderedCols.forEach(({ col }, i) => {
 		const x = colX[i];
-		const anchorKind = col.anchor.type === 'session' ? 'session' : 'event';
+		const anchorKind: NodeKind = roleOf(col.anchor.type) === 'anchor' ? 'anchor' : 'beat';
 		nodes.set(col.anchor.path, {
 			id: col.anchor.path,
 			record: col.anchor,
 			x,
-			y: anchorKind === 'session' ? SESSION_Y : EVENT_Y0,
+			y: anchorKind === 'anchor' ? SESSION_Y : EVENT_Y0,
 			kind: anchorKind,
 			zone: 0,
 		});
 		colOf.set(col.anchor.path, i);
-		if (anchorKind === 'event') occupy(0, x);
+		if (anchorKind === 'beat') occupy(0, x);
 	});
 	// Sub-events: single-session at their column's x, multi-session centered
 	// between the columns they span; y from the shared grid row.
@@ -418,7 +424,7 @@ function placeNodes(
 			record: ev,
 			x,
 			y: EVENT_Y0 + row * EVENT_DY,
-			kind: 'event',
+			kind: 'beat',
 			zone: 0,
 		});
 		colOf.set(ev.path, cols.length > 1 ? nearestColumn(colX, x) : cols[0] ?? 0);
@@ -457,7 +463,7 @@ function placeNodes(
 			record,
 			x,
 			y: EVENT_Y0,
-			kind: 'event',
+			kind: 'beat',
 			zone: 0,
 		});
 		colOf.set(record.path, nearestColumn(colX, x));
@@ -529,7 +535,7 @@ function placeNodes(
 		if (g.type !== 'quest') continue;
 		const sessionX = (lp: string | null): number | undefined => {
 			const target = lp !== null ? indexer.resolve(lp, g.path) : null;
-			return target?.type === 'session' ? nodes.get(target.path)?.x : undefined;
+			return target && roleOf(target.type) === 'anchor' ? nodes.get(target.path)?.x : undefined;
 		};
 		const received = sessionX(g.questReceived);
 		const outcome = sessionX(g.questOutcomeSession);
@@ -858,7 +864,7 @@ function classifyEdges(raw: RawEdge[], placement: Placement): CEdge[] {
 				// Same timeline row: sessions U above their row, events below
 				// the event zone (band 0).
 				e.kind = 'rowU';
-				e.uBand = na.kind === 'session' ? -1 : 0;
+				e.uBand = na.kind === 'anchor' ? -1 : 0;
 			} else {
 				if (na.y > nb.y) swapEnds();
 				e.kind =
