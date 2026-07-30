@@ -3715,6 +3715,76 @@ span.loom-row-caret {
 	white-space: nowrap;
 }
 
+/* The global (empty-space) menu stacks VERTICALLY, so each entry can carry a
+   short label next to its icon instead of being a bare glyph to guess at. */
+.loom-map-menu-vert {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 2px;
+	padding: var(--size-2-2);
+	/* Anchored above the cursor by its bottom-left corner — a centered transform
+	   would put a wide row half off the cursor. */
+	transform: translate(0, calc(-100% - 12px));
+}
+
+.loom-view .loom-map-menu-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	width: 100%;
+	padding: var(--size-2-1) var(--size-2-2);
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	border-radius: var(--radius-s);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	text-align: left;
+	cursor: pointer;
+}
+
+.loom-view .loom-map-menu-row:hover {
+	background: var(--background-modifier-hover);
+}
+
+/* The label takes the slack, pushing the trailing chevron to the right edge.
+   (`.loom-icon` is the Icon component's own span — exclude it.) */
+.loom-map-menu-row > span:not(.loom-icon) {
+	flex: 1;
+}
+
+.loom-map-menu-row .loom-icon {
+	display: flex;
+	align-items: center;
+	color: var(--text-muted);
+}
+
+/* Background-image page of the global menu: wide enough for file names, and its
+   row list scrolls (a project can hold plenty of images). */
+.loom-map-image-picker {
+	width: 260px;
+}
+
+.loom-map-image-picker .loom-map-subs-search {
+	margin: var(--size-2-1) 0;
+}
+
+/* A file name alone rarely says which map an image is — show a thumbnail. */
+.loom-map-image-thumb {
+	flex: none;
+	width: 28px;
+	height: 28px;
+	border-radius: var(--radius-s);
+	object-fit: cover;
+	background: var(--background-modifier-border);
+}
+
+.loom-view .loom-map-image-row > span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 /* Icon-style menu items: a bare icon (no button box), tinting only on hover.
    Qualified with .loom-view so it beats Obsidian's default button chrome. */
 .loom-view .loom-map-icon-btn {
@@ -4018,13 +4088,6 @@ span.loom-row-caret {
 	min-width: 200px;
 }
 
-.loom-map-doors-list {
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
-	margin-top: var(--size-2-2);
-}
-
 .loom-map-doors-row {
 	display: flex;
 	align-items: center;
@@ -4068,6 +4131,18 @@ span.loom-row-caret {
 	color: var(--text-muted);
 	text-align: center;
 	padding: var(--size-2-1);
+}
+
+/* The row list scrolls instead of the popover growing: the whole list is always
+   there (no truncation), the panel just never gets taller than it is now — about
+   ten rows, which is what it used to cap at. Search + column head stay pinned. */
+.loom-map-subs-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-height: 260px;
+	overflow-y: auto;
+	overflow-x: hidden;
 }
 
 .loom-view .loom-map-subs-row .loom-map-doors-open[draggable='true'] {
@@ -4353,4 +4428,87 @@ span.loom-row-caret {
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
 	font-weight: var(--font-semibold);
+}
+
+/* Background images — the bottom layer of a map. Click-through: the svg's own
+   handlers decide what a press hits (zones first, then images), so a backdrop
+   never swallows a zone's click. */
+.loom-map-image {
+	pointer-events: none;
+}
+
+/* Selected background image: dashed box + the eight aspect-locked resize grips.
+   The box must be its OWN class, not `> rect` — that also matched the grip rects
+   and (out-specifying .loom-map-vertex) made every one of them click-through.
+   Stroke width + dash are divided by the zoom inline, so they stay screen-sized
+   and must NOT also be non-scaling. */
+.loom-map-image-box {
+	fill: none;
+	stroke: var(--interactive-accent);
+	pointer-events: none;
+}
+
+/* A locked image still outlines when clicked (that's the only hint that its edge
+   is where the context menu lives), but in a quieter colour — nothing about it
+   is draggable. */
+.loom-map-image-sel-locked .loom-map-image-box {
+	stroke: var(--text-muted);
+}
+
+/* Invisible wide band along each side: grabbing the EDGE resizes, not just the
+   small square at its midpoint. */
+.loom-map-image-band {
+	stroke: transparent;
+	fill: none;
+	/* Explicit, so the invisible stroke is hit-tested regardless of how a browser
+	   treats a transparent paint under `visiblePainted`. */
+	pointer-events: stroke;
+}
+
+.loom-map-grip-ns {
+	cursor: ns-resize;
+}
+
+.loom-map-grip-ew {
+	cursor: ew-resize;
+}
+
+.loom-map-grip-nwse {
+	cursor: nwse-resize;
+}
+
+.loom-map-grip-nesw {
+	cursor: nesw-resize;
+}
+
+/* The background-image file picker is opened from the global menu, never shown. */
+.loom-map-file-input {
+	display: none;
+}
+
+/* Element size — the page's marker-scale anchor, next to the view-scale stops. */
+.loom-map-elemsize {
+	position: relative;
+	display: flex;
+}
+
+.loom-view .loom-map-elemsize > .loom-map-icon-btn {
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+}
+
+/* Anchor the popover to the control's right edge — it sits at the view's right
+   side, so a centered pop would hang off the canvas. */
+.loom-map-elemsize .loom-map-palette-pop {
+	left: auto;
+	right: 0;
+	transform: none;
+}
+
+.loom-map-elemsize-readout {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	white-space: nowrap;
 }

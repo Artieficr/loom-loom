@@ -1,4 +1,5 @@
-import { CSSProperties, ReactElement } from 'react';
+import { TAbstractFile } from 'obsidian';
+import { CSSProperties, ReactElement, useEffect, useState } from 'react';
 import {
 	ENTITY_META,
 	ENTITY_TYPES,
@@ -17,6 +18,8 @@ import { groupNameOf } from '../calendar';
 import { LoomFileReactView } from './react-view';
 import { Icon } from './common';
 import { useIndexVersion } from './hooks';
+import { countMapPages, mapsFilePath } from './map-view';
+import type LoomLoomPlugin from '../main';
 
 /**
  * Project home: a FileView over the project's .loom file, so every project
@@ -45,12 +48,50 @@ export class HomeView extends LoomFileReactView {
 	}
 }
 
+/**
+ * The project's map-page count for the wheel's Maps entry. Maps live in a JSON
+ * file, not in the entity index, so this reads that file directly and re-reads it
+ * whenever it changes — the index version never moves for a maps edit.
+ */
+function useMapPageCount(plugin: LoomLoomPlugin, project: { root: string; name: string } | undefined): number {
+	const [count, setCount] = useState(0);
+	const root = project?.root;
+	const name = project?.name;
+	useEffect(() => {
+		if (root === undefined || name === undefined) return;
+		const proj = { root, name };
+		const mapsPath = mapsFilePath(proj);
+		let cancelled = false;
+		const refresh = () => {
+			void countMapPages(plugin.app, proj).then((n) => {
+				if (!cancelled) setCount(n);
+			});
+		};
+		refresh();
+		const touched = (file: TAbstractFile) => {
+			if (file.path === mapsPath) refresh();
+		};
+		const refs = [
+			plugin.app.vault.on('modify', touched),
+			plugin.app.vault.on('create', touched),
+			plugin.app.vault.on('delete', touched),
+		];
+		return () => {
+			cancelled = true;
+			for (const ref of refs) plugin.app.vault.offref(ref);
+		};
+	}, [plugin, root, name]);
+	return count;
+}
+
 function Home({ view }: { view: HomeView }) {
 	const plugin = view.plugin;
 	useIndexVersion(plugin.indexer);
 
 	const loomPath = view.file?.path;
 	const project = loomPath ? plugin.indexer.getProjectByLoomPath(loomPath) : undefined;
+	// Before the early return — hooks can't live behind a condition.
+	const mapCount = useMapPageCount(plugin, project);
 	if (!project) {
 		return <div className="loom-empty">Loading project…</div>;
 	}
@@ -82,8 +123,9 @@ function Home({ view }: { view: HomeView }) {
 					origin: { type: view.getViewType(), state: view.getState() },
 				}),
 		},
-		// Maps sits right after Locations (no count — it's a canvas, not a list).
-		// Regions are reached through Locations (the location list groups by
+		// Maps sits right after Locations, counting the project's map PAGES (its
+		// entities aren't notes, so the count comes from the Maps file, not the
+		// index). Regions are reached through Locations (the location list groups by
 		// region), so they don't get their own wheel satellite.
 		...ENTITY_TYPES.filter((type) => type !== 'region').flatMap((type) => {
 			const entry = {
@@ -102,6 +144,7 @@ function Home({ view }: { view: HomeView }) {
 						icon: MAPS_ICON,
 						label: MAPS_LABEL,
 						color: plugin.settings.mapsColor,
+						count: mapCount,
 						open: () => view.navigateTo(VIEW_MAP, state),
 					},
 				];

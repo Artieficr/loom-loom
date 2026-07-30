@@ -19,7 +19,6 @@ import {
 	EntityRecord,
 	EntityType,
 	FM,
-	MAPS_FOLDER,
 	PC_GROUP_NAME,
 	PC_GROUP_VALUE,
 	PC_TAG,
@@ -60,6 +59,7 @@ import { MarkdownField } from './markdown-field';
 import { extractLinkpath, linkTargetOf, memberEntryLinkpath } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
 import { MiniGraph } from './mini-graph';
+import { findMapsFile } from './map-view';
 import { useIndexVersion } from './hooks';
 import type LoomLoomPlugin from '../main';
 
@@ -1020,16 +1020,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  location (including sublocations — the whole child hierarchy moves
 	 *  along), minus this location's own descendants so a cycle can't be
 	 *  built. A search, not a plain menu — projects can get huge. */
-	/** The project's map file (multi-map `Maps.json`, or the legacy single-map
-	 *  `Map.json`), or null if none exists. */
-	const mapFileFor = (): TFile | null => {
-		if (!project) return null;
-		const p = (name: string) => normalizePath(project.root === '' ? name : `${project.root}/${name}`);
-		return (
-			plugin.app.vault.getFileByPath(p(`${MAPS_FOLDER}/${project.name} Maps.json`)) ??
-			plugin.app.vault.getFileByPath(p(`${MAPS_FOLDER}/${project.name} Map.json`))
-		);
-	};
+	/** The project's Maps store (`Entities/Maps/<Project> Maps.json`), or null. */
+	const mapFileFor = (): TFile | null => (project ? findMapsFile(plugin.app, project) : null);
 	const zoneIsThisLocation = (z: unknown): boolean => {
 		const loc = (z as { location?: unknown })?.location;
 		if (typeof loc !== 'string' || loc === '') return false;
