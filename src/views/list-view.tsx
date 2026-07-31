@@ -157,8 +157,25 @@ function EntityList({
 	const role = roleOf(type);
 	// Scenes share the 'beat' role with Events, but a Chapter (role 'anchor')
 	// still wants the same Involved/Location filters aggregated across its own
-	// scenes — so filterability is keyed off `type`, not just `role`.
-	const filterable = role === 'beat' || type === 'chapter';
+	// scenes — so filterability is keyed off `type`, not just `role`. Kept
+	// separate from `hasScriptFilter` below (a materially different set of
+	// types) so switching to, say, the Characters list can't leave a stale
+	// Involved/Location pick from the Scenes list silently filtering it.
+	const hasInvolvedLocationFilter = role === 'beat' || type === 'chapter';
+	/** Every type whose "connection to the actual story" is meaningfully
+	 *  script-derived gets the "Not in the script" filter/highlight — Scenes
+	 *  and Chapters check their OWN script presence (`notInScript`); the rest
+	 *  check the project-wide `connectivity` graph below. Quests and Maps are
+	 *  deliberately excluded — quests track their own resolution lifecycle,
+	 *  and maps are a separate workflow entirely. */
+	const hasScriptFilter =
+		type === 'scene' ||
+		type === 'chapter' ||
+		type === 'character' ||
+		type === 'location' ||
+		type === 'faction' ||
+		type === 'item';
+	const filterable = hasInvolvedLocationFilter || hasScriptFilter;
 	// Chapters and scenes carry a script order rather than a date, and a story
 	// reads front to back — where a campaign log wants the latest session on
 	// top, a script wants chapter one. So they default to script order, oldest
@@ -243,6 +260,116 @@ function EntityList({
 		if (!liveScriptIds) return false;
 		const id = r.type === 'scene' ? r.sceneId : r.type === 'chapter' ? r.chapterId : '';
 		return id === '' || !liveScriptIds.has(id);
+	};
+	/** Project-wide "is this entity actually connected to the story" graph
+	 *  for Characters/Locations/Factions/Items — built from what every Scene
+	 *  already carries (`sceneCast`/`sceneFactions`/`sceneItems`/
+	 *  `sceneLocation`/`sceneMentionedLocations`, all `syncScenes`-derived),
+	 *  so no separate script parse is needed here.
+	 *
+	 *  - Character: has a cue or is `@[mentioned]` anywhere — that's exactly
+	 *    what `sceneCast` already merges into one field (see `syncScenes`).
+	 *  - Location: itself is a scene's heading location or `@[mentioned]`,
+	 *    OR any descendant sublocation is — a City that's never itself a
+	 *    scene heading but whose Tavern constantly is shouldn't be flagged.
+	 *  - Faction: connected if ANY resolved member is a connected character —
+	 *    factions are a narrative layer over characters, not something the
+	 *    script names directly.
+	 *  - Item: `@[mentioned]` directly, OR held (`loomItems`) by a connected
+	 *    character OR a connected location.
+	 *  Only computed when actually viewing one of these lists. */
+	const connectivity = useMemo(() => {
+		if (!project || !hasScriptFilter || type === 'scene' || type === 'chapter') return null;
+		const resolve = (lp: string, from: string) => plugin.indexer.resolve(lp, from);
+
+		const connectedCharacters = new Set<string>();
+		const mentionedFactionsDirect = new Set<string>();
+		const mentionedItemsDirect = new Set<string>();
+		const mentionedLocationsDirect = new Set<string>();
+		for (const sc of plugin.indexer.getAll('scene', project.root)) {
+			for (const lp of sc.sceneCast) {
+				const r = resolve(lp, sc.path);
+				if (r) connectedCharacters.add(r.path);
+			}
+			for (const lp of sc.sceneFactions) {
+				const r = resolve(lp, sc.path);
+				if (r) mentionedFactionsDirect.add(r.path);
+			}
+			for (const lp of sc.sceneItems) {
+				const r = resolve(lp, sc.path);
+				if (r) mentionedItemsDirect.add(r.path);
+			}
+			for (const lp of sc.sceneMentionedLocations) {
+				const r = resolve(lp, sc.path);
+				if (r) mentionedLocationsDirect.add(r.path);
+			}
+			if (sc.sceneLocation !== '') {
+				const r = resolve(sc.sceneLocation, sc.path);
+				if (r) mentionedLocationsDirect.add(r.path);
+			}
+		}
+
+		const allLocations = plugin.indexer.getAll('location', project.root);
+		const childrenOf = new Map<string, EntityRecord[]>();
+		for (const loc of allLocations) {
+			if (loc.parentLocation === null) continue;
+			const parent = resolve(loc.parentLocation, loc.path);
+			if (!parent) continue;
+			const list = childrenOf.get(parent.path);
+			if (list) list.push(loc);
+			else childrenOf.set(parent.path, [loc]);
+		}
+		const hasConnectedDescendant = (loc: EntityRecord, seen: Set<string>): boolean => {
+			if (seen.has(loc.path)) return false;
+			seen.add(loc.path);
+			if (mentionedLocationsDirect.has(loc.path)) return true;
+			return (childrenOf.get(loc.path) ?? []).some((child) => hasConnectedDescendant(child, seen));
+		};
+		const connectedLocations = new Set(
+			allLocations.filter((loc) => hasConnectedDescendant(loc, new Set())).map((loc) => loc.path)
+		);
+
+		const connectedFactions = new Set(
+			plugin.indexer
+				.getAll('faction', project.root)
+				.filter((fac) =>
+					fac.members.some((m) => {
+						const r = resolve(m.linkpath, fac.path);
+						return r !== null && connectedCharacters.has(r.path);
+					})
+				)
+				.map((fac) => fac.path)
+		);
+
+		const connectedItems = new Set(mentionedItemsDirect);
+		for (const ch of plugin.indexer.getAll('character', project.root)) {
+			if (!connectedCharacters.has(ch.path)) continue;
+			for (const lp of ch.items) {
+				const r = resolve(lp, ch.path);
+				if (r) connectedItems.add(r.path);
+			}
+		}
+		for (const loc of allLocations) {
+			if (!connectedLocations.has(loc.path)) continue;
+			for (const lp of loc.items) {
+				const r = resolve(lp, loc.path);
+				if (r) connectedItems.add(r.path);
+			}
+		}
+
+		return { connectedCharacters, connectedLocations, connectedFactions, connectedItems };
+	}, [plugin.indexer, version, project, type, hasScriptFilter]);
+	/** Unified "should this row be flagged as disconnected from the story"
+	 *  check — Scenes/Chapters via their own script presence, everything
+	 *  else via the `connectivity` graph above. */
+	const isOrphan = (r: EntityRecord): boolean => {
+		if (r.type === 'scene' || r.type === 'chapter') return notInScript(r);
+		if (!connectivity) return false;
+		if (r.type === 'character') return !connectivity.connectedCharacters.has(r.path);
+		if (r.type === 'location') return !connectivity.connectedLocations.has(r.path);
+		if (r.type === 'faction') return !connectivity.connectedFactions.has(r.path);
+		if (r.type === 'item') return !connectivity.connectedItems.has(r.path);
+		return false;
 	};
 	const vocab = ENTITY_TAGS[type];
 	// The project's own chronology: Sessions/Events in a player or GM project,
@@ -338,9 +465,11 @@ function EntityList({
 					questStatus === '' ||
 					(questStatus === 'active' ? r.questOutcome === '' : r.questOutcome === questStatus)
 			)
-			.filter((r) => !filterable || eventInvolvedFilter.length === 0 || matchesAllInvolved(r, eventInvolvedFilter))
-			.filter((r) => !filterable || eventLocation === null || eventAtLocation(r, eventLocation))
-			.filter((r) => !scriptFilter || notInScript(r))
+			.filter(
+				(r) => !hasInvolvedLocationFilter || eventInvolvedFilter.length === 0 || matchesAllInvolved(r, eventInvolvedFilter)
+			)
+			.filter((r) => !hasInvolvedLocationFilter || eventLocation === null || eventAtLocation(r, eventLocation))
+			.filter((r) => !hasScriptFilter || !scriptFilter || isOrphan(r))
 			.sort((a, b) => dir * compare(a, b, sort, characterAppearance));
 	}, [
 		plugin.indexer,
@@ -354,9 +483,11 @@ function EntityList({
 		questStatus,
 		eventInvolvedFilter,
 		eventLocation,
-		filterable,
+		hasInvolvedLocationFilter,
+		hasScriptFilter,
 		scriptFilter,
 		liveScriptIds,
+		connectivity,
 		characterAppearance,
 	]);
 
@@ -1043,78 +1174,82 @@ function EntityList({
 				<div className="loom-list-filter-anchor" ref={filterPanelRef}>
 					<button
 						className={
-							filterPanelOpen || eventInvolvedFilter.length > 0 || eventLocation !== null
+							filterPanelOpen || eventInvolvedFilter.length > 0 || eventLocation !== null || scriptFilter
 								? 'loom-rel-filter loom-list-filter-btn loom-list-filter-btn-on'
 								: 'loom-rel-filter loom-list-filter-btn'
 						}
-						aria-label={filterPanelOpen ? 'Hide filters' : 'Filter by involved entity or location'}
+						aria-label={filterPanelOpen ? 'Hide filters' : 'Filter'}
 						onClick={() => setFilterPanelOpen(!filterPanelOpen)}
 					>
 						<Icon name="filter" />
 					</button>
 					{filterPanelOpen ? (
 						<div className="loom-filter-pop loom-list-filter-pop">
-							<div className="loom-list-filter-section">
-								<span className="loom-field-label loom-group-sublabel">Involved</span>
-								<SearchableSelect
-									placeholder="Add an involved entity…"
-									options={plugin.indexer
-										.getAll(undefined, project.root)
-										.filter(
-											(c) =>
-												roleOf(c.type) === null &&
-												c.type !== 'location' &&
-												!eventInvolvedFilter.includes(c.path)
-										)
-										.sort((a, b) => a.name.localeCompare(b.name))
-										.map((c) => ({ value: c.path, label: c.name }))}
-									onPick={(path) => setEventInvolvedFilter([...eventInvolvedFilter, path])}
-								/>
-								{involvedFilterRecords.length > 0 ? (
-									<div className="loom-tag-row loom-list-filter-chips">
-										{involvedFilterRecords.map((r) => (
-											<EntityChip
-												key={r.path}
-												plugin={plugin}
-												record={r}
-												onOpen={() => view.openEntity(r.path)}
-												onRemove={() =>
-													setEventInvolvedFilter(eventInvolvedFilter.filter((p) => p !== r.path))
-												}
-												removeLabel="Clear involved filter"
-											/>
-										))}
-									</div>
-								) : null}
-							</div>
-							<div className="loom-list-filter-sep" />
-							<div className="loom-list-filter-section">
-								<span className="loom-field-label loom-group-sublabel">Location</span>
-								{locationFilterRecord ? (
-									<div className="loom-tag-row loom-list-filter-chips">
-										<EntityChip
-											plugin={plugin}
-											record={locationFilterRecord}
-											label={locationLabel(locationFilterRecord, plugin)}
-											onOpen={() => view.openEntity(locationFilterRecord.path)}
-											onRemove={() => setEventLocation(null)}
-											removeLabel="Clear location filter"
-										/>
-									</div>
-								) : (
-									<SearchableSelect
-										placeholder="Filter by location…"
-										options={plugin.indexer
-											.getAll('location', project.root)
-											.sort((a, b) => a.name.localeCompare(b.name))
-											.map((c) => ({ value: c.path, label: locationLabel(c, plugin) }))}
-										onPick={(path) => setEventLocation(path)}
-									/>
-								)}
-							</div>
-							{type === 'scene' || type === 'chapter' ? (
+							{hasInvolvedLocationFilter ? (
 								<>
+									<div className="loom-list-filter-section">
+										<span className="loom-field-label loom-group-sublabel">Involved</span>
+										<SearchableSelect
+											placeholder="Add an involved entity…"
+											options={plugin.indexer
+												.getAll(undefined, project.root)
+												.filter(
+													(c) =>
+														roleOf(c.type) === null &&
+														c.type !== 'location' &&
+														!eventInvolvedFilter.includes(c.path)
+												)
+												.sort((a, b) => a.name.localeCompare(b.name))
+												.map((c) => ({ value: c.path, label: c.name }))}
+											onPick={(path) => setEventInvolvedFilter([...eventInvolvedFilter, path])}
+										/>
+										{involvedFilterRecords.length > 0 ? (
+											<div className="loom-tag-row loom-list-filter-chips">
+												{involvedFilterRecords.map((r) => (
+													<EntityChip
+														key={r.path}
+														plugin={plugin}
+														record={r}
+														onOpen={() => view.openEntity(r.path)}
+														onRemove={() =>
+															setEventInvolvedFilter(eventInvolvedFilter.filter((p) => p !== r.path))
+														}
+														removeLabel="Clear involved filter"
+													/>
+												))}
+											</div>
+										) : null}
+									</div>
 									<div className="loom-list-filter-sep" />
+									<div className="loom-list-filter-section">
+										<span className="loom-field-label loom-group-sublabel">Location</span>
+										{locationFilterRecord ? (
+											<div className="loom-tag-row loom-list-filter-chips">
+												<EntityChip
+													plugin={plugin}
+													record={locationFilterRecord}
+													label={locationLabel(locationFilterRecord, plugin)}
+													onOpen={() => view.openEntity(locationFilterRecord.path)}
+													onRemove={() => setEventLocation(null)}
+													removeLabel="Clear location filter"
+												/>
+											</div>
+										) : (
+											<SearchableSelect
+												placeholder="Filter by location…"
+												options={plugin.indexer
+													.getAll('location', project.root)
+													.sort((a, b) => a.name.localeCompare(b.name))
+													.map((c) => ({ value: c.path, label: locationLabel(c, plugin) }))}
+												onPick={(path) => setEventLocation(path)}
+											/>
+										)}
+									</div>
+								</>
+							) : null}
+							{hasScriptFilter ? (
+								<>
+									{hasInvolvedLocationFilter ? <div className="loom-list-filter-sep" /> : null}
 									<label className="loom-check">
 										<input
 											type="checkbox"
@@ -1194,7 +1329,7 @@ function EntityList({
 				className={
 					(depth > 0 ? 'loom-row loom-row-sub' : 'loom-row') +
 					(r.type === 'region' ? ' loom-row-region' : '') +
-					((r.type === 'scene' || r.type === 'chapter') && notInScript(r) ? ' loom-row-orphan' : '')
+					(hasScriptFilter && isOrphan(r) ? ' loom-row-orphan' : '')
 				}
 				onClick={() => {
 					if (isUnspecRegion) toggleCollapsed(r.path);
@@ -1256,6 +1391,7 @@ function EntityList({
 					<span className="loom-row-date">{recordDate(r, project)}</span>
 				) : null}
 				<span className="loom-row-desc">{r.description}</span>
+				{hasScriptFilter && isOrphan(r) ? <span className="loom-chip loom-chip-orphan">Orphan</span> : null}
 				{isUnspecRegion ? null : (
 				<button
 					className="loom-row-delete"

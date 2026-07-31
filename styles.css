@@ -371,18 +371,29 @@ span.loom-row-caret {
 	background: var(--background-modifier-hover);
 }
 
-/* A Scene/Chapter note no longer backed by a heading/section in the script
-   (its heading was rewritten or deleted directly in the script text, not
-   through the Scene/Chapter page's own fields) — `syncScenes` never
-   auto-deletes, so this is the only passive signal that it's become debris.
-   `color-mix` against the row's own background rather than a flat red, so
-   it reads correctly in both themes and still shows through hover. */
+/* An entity no longer connected to the actual story: a Scene/Chapter whose
+   heading/section was rewritten or deleted directly in the script text
+   (rather than through the Scene/Chapter page's own fields), or a Character/
+   Location/Faction/Item the `connectivity` graph can't reach from anything
+   the script actually uses — `syncScenes` never auto-deletes, so this is the
+   only passive signal that it's become debris. `color-mix` against the row's
+   own background rather than a flat red, so it reads correctly in both
+   themes and still shows through hover. */
 .loom-row.loom-row-orphan {
 	background: color-mix(in srgb, #e0433d 18%, var(--background-primary));
 }
 
 .loom-row.loom-row-orphan:hover {
 	background: color-mix(in srgb, #e0433d 28%, var(--background-primary));
+}
+
+/* The row's own "Orphan" chip — same `.loom-chip` pill shape as tags, tinted
+   to match the row highlight above so the two read as one signal. */
+.loom-chip.loom-chip-orphan {
+	background: color-mix(in srgb, #e0433d 55%, var(--background-primary));
+	color: var(--text-on-accent, #fff);
+	font-weight: var(--font-medium);
+	flex: 0 0 auto;
 }
 
 .loom-row-name {
