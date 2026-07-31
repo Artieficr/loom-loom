@@ -20,6 +20,7 @@ import {
 	ensureSceneIds,
 	findEntityLinks,
 	hasTitlePage,
+	liveSceneIds,
 	nextTopSectionLine,
 	parseFountain,
 	preventOrphans,
@@ -638,7 +639,7 @@ function Script({ view }: { view: ScriptView }) {
 	// Scene notes whose heading is gone from the script. Never auto-deleted —
 	// they may carry notes and relationships that only a human should discard.
 	const orphans = (() => {
-		const live = new Set(parsed.scenes.map((s) => s.loomId).filter((id): id is string => id !== null));
+		const live = liveSceneIds(parsed);
 		return plugin.indexer
 			.getAll('scene', project.root)
 			.filter((r) => r.sceneId !== '' && !live.has(r.sceneId));

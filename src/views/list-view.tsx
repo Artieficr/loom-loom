@@ -55,7 +55,7 @@ import {
 } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
 import { useScriptText } from './script-view';
-import { parseFountain } from '../fountain';
+import { liveChapterIds, liveSceneIds, parseFountain } from '../fountain';
 
 type SortMode = 'name' | 'created' | 'modified' | 'date' | 'order' | 'appearance';
 
@@ -179,6 +179,9 @@ function EntityList({
 	 *  across every picked entity) and the single location filter. */
 	const [eventInvolvedFilter, setEventInvolvedFilter] = useState<readonly string[]>([]);
 	const [eventLocation, setEventLocation] = useState<string | null>(null);
+	/** Scenes/Chapters only: isolate notes no longer backed by a heading/
+	 *  section in the script (see `notInScript` below). */
+	const [scriptFilter, setScriptFilter] = useState(false);
 	/** Folded behind a filter icon in the toolbar, opening on top (like the
 	 *  graph view's own filter popover, `.loom-filter-pop`) rather than a
 	 *  panel that pushes the list down. */
@@ -215,6 +218,32 @@ function EntityList({
 		}
 		return map;
 	}, [type, scriptTextForSort]);
+	// Same gating as the character-appearance read above, for the Scenes/
+	// Chapters lists' own "Not in the script" filter and row highlighting —
+	// a note whose heading was rewritten or deleted directly in the script
+	// text (rather than through the Scene/Chapter page's own fields, which
+	// keep the same `[[loom:id]]` across a rename) loses its script backing
+	// and never gets cleaned up automatically (`syncScenes` is additive-only).
+	const scriptTextForOrphans = useScriptText(
+		plugin,
+		type === 'scene' || type === 'chapter' ? project : null
+	);
+	const liveScriptIds = useMemo(() => {
+		if ((type !== 'scene' && type !== 'chapter') || scriptTextForOrphans === null) return null;
+		const parsed = parseFountain(scriptTextForOrphans);
+		return type === 'scene' ? liveSceneIds(parsed) : liveChapterIds(parsed);
+	}, [type, scriptTextForOrphans]);
+	/** A Scene/Chapter note no longer backed by a heading/section in the
+	 *  script — either never synced one (`sceneId`/`chapterId` empty) or its
+	 *  id fell out of the current parse. `null` (script not loaded yet, or
+	 *  wrong entity type) never counts as an orphan — only a definite miss
+	 *  does, so this can't flash every row red before the script finishes
+	 *  loading. */
+	const notInScript = (r: EntityRecord): boolean => {
+		if (!liveScriptIds) return false;
+		const id = r.type === 'scene' ? r.sceneId : r.type === 'chapter' ? r.chapterId : '';
+		return id === '' || !liveScriptIds.has(id);
+	};
 	const vocab = ENTITY_TAGS[type];
 	// The project's own chronology: Sessions/Events in a player or GM project,
 	// Chapters/Scenes in a writer one. The menus and pickers below address
@@ -311,6 +340,7 @@ function EntityList({
 			)
 			.filter((r) => !filterable || eventInvolvedFilter.length === 0 || matchesAllInvolved(r, eventInvolvedFilter))
 			.filter((r) => !filterable || eventLocation === null || eventAtLocation(r, eventLocation))
+			.filter((r) => !scriptFilter || notInScript(r))
 			.sort((a, b) => dir * compare(a, b, sort, characterAppearance));
 	}, [
 		plugin.indexer,
@@ -325,6 +355,8 @@ function EntityList({
 		eventInvolvedFilter,
 		eventLocation,
 		filterable,
+		scriptFilter,
+		liveScriptIds,
 		characterAppearance,
 	]);
 
@@ -1080,6 +1112,19 @@ function EntityList({
 									/>
 								)}
 							</div>
+							{type === 'scene' || type === 'chapter' ? (
+								<>
+									<div className="loom-list-filter-sep" />
+									<label className="loom-check">
+										<input
+											type="checkbox"
+											checked={scriptFilter}
+											onChange={() => setScriptFilter(!scriptFilter)}
+										/>
+										Not in the script
+									</label>
+								</>
+							) : null}
 						</div>
 					) : null}
 				</div>
@@ -1148,7 +1193,8 @@ function EntityList({
 				key={r.path}
 				className={
 					(depth > 0 ? 'loom-row loom-row-sub' : 'loom-row') +
-					(r.type === 'region' ? ' loom-row-region' : '')
+					(r.type === 'region' ? ' loom-row-region' : '') +
+					((r.type === 'scene' || r.type === 'chapter') && notInScript(r) ? ' loom-row-orphan' : '')
 				}
 				onClick={() => {
 					if (isUnspecRegion) toggleCollapsed(r.path);

@@ -884,6 +884,26 @@ export function sceneAtLine(parsed: ParsedScript, line: number): ParsedScene | n
 	return parsed.scenes.find((s) => line >= s.line && line < s.endLine) ?? null;
 }
 
+/**
+ * Scene loom ids currently backed by a heading in the script — what tells a
+ * Scene note apart from an "orphan" (its heading was rewritten or deleted
+ * directly in the script text, rather than through the Scene page's own
+ * fields, which keep the same id across a rename). Shared by the Script
+ * view's own orphan panel and the Scenes list's "Not in the script" filter,
+ * so the two never drift.
+ */
+export function liveSceneIds(parsed: ParsedScript): Set<string> {
+	return new Set(parsed.scenes.map((s) => s.loomId).filter((id): id is string => id !== null));
+}
+
+/** Chapter (top-level section) loom ids currently backed by a `#` line —
+ *  the Chapter equivalent of `liveSceneIds`. */
+export function liveChapterIds(parsed: ParsedScript): Set<string> {
+	return new Set(
+		parsed.sections.filter((s) => s.level === 1 && s.loomId !== null).map((s) => s.loomId as string)
+	);
+}
+
 /** `"10–23"`, or `"10"` when a scene fits on one page. */
 export function pageRangeLabel(scene: ParsedScene): string {
 	return scene.firstPage === scene.lastPage
