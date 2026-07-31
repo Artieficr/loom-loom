@@ -207,6 +207,56 @@ away, all of them in `src/indexer.ts`:
    `BULK_RENAME_LIMIT` renames stops and points at the "Apply managed file names"
    command instead.
 
+## Licensing (src/license/, prep phase)
+
+Freemium rule: one project of each kind (player/gm/writer, and any future kind) is free
+with **every** feature available; a license key unlocks unlimited projects, activatable
+on up to 3 devices. Must not break offline. The design leans on the same sync-awareness
+as the section above, plus one new distinction of its own:
+
+1. **Device state must never live where the vault syncs.** `Plugin.saveData()` writes
+   `<vault>/.obsidian/plugins/loom-loom/data.json` — a file *inside* the vault folder,
+   which the section above already treats as shared across the user's own machines
+   (Dropbox, Obsidian Sync). A device id or activation record written there would sync
+   between two machines opening the same vault and make them silently share or clobber
+   *one* "device" record — exactly backwards for a feature whose whole job is telling
+   devices apart. `src/license/cache-store.ts` uses `App.loadLocalStorage`/
+   `saveLocalStorage` instead: real `localStorage`, living in the Electron
+   installation's own local profile, never inside the vault. The license *key* itself
+   is the opposite case and deliberately stays in vault-synced settings — the user
+   types it once and it shows up pre-filled on every machine sharing the vault — but
+   *activating* a device is always an explicit button click, never automatic on sync,
+   so opening the vault on a new machine can't silently burn one of the 3 slots.
+2. **A definite "no" and "couldn't ask" must be told apart.** `src/license/provider.ts`
+   has every `LicenseProvider` method return `{ok:false, reason}` for a rejection the
+   server actually sent (revoked key, activation limit hit) but *throw* when the server
+   was never reached at all. `LicenseManager` revokes immediately on the former —
+   waiting out the grace period on a refunded license would be wrong — and leaves the
+   cached verdict completely untouched on the latter, which is what lets the 30-day
+   grace period (`src/license/grace.ts`) run its full course while offline.
+3. **No custom backend.** The plan calls the provider's activate/validate/deactivate
+   endpoints directly from the plugin via `requestUrl` — those specific endpoints are
+   designed to be called with just the public license key, so there's no secret to
+   protect and nothing to host. Everything else talks to a `LicenseProvider` interface,
+   never to a concrete backend's shape directly, so the provider is swappable —
+   `StubLicenseProvider` (in-memory, no account needed) is what's wired up today;
+   `PolarLicenseProvider` is written but not yet the active provider, since its exact
+   wire format is unverified without a live Polar.sh account.
+4. **Gate creation, never possession.** The free-tier check
+   (`canCreateProjectOfKind`) only runs in `SetupProjectModal.submit()` — never when
+   opening or using an existing project. A vault that already had five player projects
+   before this shipped keeps all five; it just can't create a sixth without a key. That
+   makes grandfathering free: there is no migration to write, because nothing about an
+   existing project ever changes.
+
+**Open and unresolved, tracked in ROADMAP.md, not settled decisions:** whether
+Obsidian's community plugin directory permits paywalling in-app functionality itself
+(as opposed to paywalling a backend service the plugin calls, which is clearly fine) —
+needs resolving with Obsidian before any public pricing copy ships; and whether to bump
+`minAppVersion` past `1.7.2` to `1.8.7` for `loadLocalStorage`/`saveLocalStorage`; the
+plugin currently feature-detects and falls back to a session-only cache rather than
+requiring the bump.
+
 ## Calendar & date formats (src/calendar.ts)
 
 `LoomDate` = `{ raw, sortKey, year, month, day, calendar }`. The sort key packs

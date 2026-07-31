@@ -137,6 +137,12 @@ export interface LoomLoomSettings {
 	timelineManualOrder: Record<string, Record<string, number>>;
 	/** Last timeline-drawer height (px) — remembered across sessions/restarts. */
 	timelineDrawerHeight: number;
+	/** The user's license key, if any. Deliberately vault-synced (unlike the
+	 *  per-device activation state in `license/cache-store.ts`) so it shows up
+	 *  pre-filled on every machine sharing the vault — but activating a device
+	 *  is always an explicit button click, never automatic on sync, so opening
+	 *  the vault on a new machine doesn't silently burn an activation slot. */
+	licenseKey: string;
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
@@ -198,6 +204,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphViews: {},
 	timelineManualOrder: {},
 	timelineDrawerHeight: 240,
+	licenseKey: '',
 };
 
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
@@ -247,6 +254,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.notesNewestFirst === 'boolean') {
 		base.notesNewestFirst = data.notesNewestFirst;
+	}
+	if (typeof data.licenseKey === 'string') {
+		base.licenseKey = data.licenseKey;
 	}
 	if (typeof data.timelineDrawerHeight === 'number' && data.timelineDrawerHeight > 0) {
 		base.timelineDrawerHeight = data.timelineDrawerHeight;
@@ -444,12 +454,13 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	return base;
 }
 
-type SettingsTabId = 'general' | 'entities' | 'graph';
+type SettingsTabId = 'general' | 'entities' | 'graph' | 'license';
 
 const SETTINGS_TABS: [SettingsTabId, string][] = [
 	['general', 'General'],
 	['entities', 'Entities'],
 	['graph', 'Graph'],
+	['license', 'License'],
 ];
 
 /**
@@ -480,6 +491,11 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 		'graphDropEdits',
 		'globalLayerOrder',
 	],
+	// No "Restore defaults" button on this tab — "Deactivate this device" /
+	// "Forget this device locally" already serve as its reset actions, and
+	// blanking the key from a generic restore-defaults button would be
+	// surprising (it doesn't itself deactivate anything server-side).
+	license: ['licenseKey'],
 };
 
 export class LoomLoomSettingTab extends PluginSettingTab {
@@ -510,7 +526,8 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 
 		if (this.activeTab === 'general') this.renderGeneral(body);
 		else if (this.activeTab === 'entities') this.renderEntities(body);
-		else this.renderGraph(body);
+		else if (this.activeTab === 'graph') this.renderGraph(body);
+		else this.renderLicense(body);
 	}
 
 	private renderGeneral(containerEl: HTMLElement): void {
@@ -983,6 +1000,124 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		}
 		const editorEl = containerEl.createDiv();
 		new TimelineSettingsEditor(this.plugin, project, editorEl).render();
+	}
+
+	/**
+	 * Free: one project of each type per vault, no other limits. A license key
+	 * unlocks unlimited projects, activatable on up to 3 devices. This tab talks
+	 * only to `this.plugin.licenseManager` (see `src/license/manager.ts`) — the
+	 * network call itself, the per-device activation cache, and the 30-day
+	 * offline grace period all live there, not here.
+	 */
+	private renderLicense(containerEl: HTMLElement): void {
+		const manager = this.plugin.licenseManager;
+		const status = manager.getStatus();
+
+		new Setting(containerEl)
+			.setName('License key')
+			.setDesc(
+				'Free: one project of each type per vault, with every feature available. ' +
+					'A license key unlocks unlimited projects and can be activated on up to 3 devices.'
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder('Paste your license key')
+					.setValue(this.plugin.settings.licenseKey)
+					.onChange(async (value) => {
+						this.plugin.settings.licenseKey = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		const actions = new Setting(containerEl).setName('This device');
+		actions.addButton((btn) =>
+			btn
+				.setButtonText(status.activated ? 'Re-activate' : 'Activate this device')
+				.setCta()
+				.onClick(() =>
+					void (async () => {
+						const key = this.plugin.settings.licenseKey.trim();
+						if (key === '') {
+							new Notice('Enter a license key first.');
+							return;
+						}
+						btn.setDisabled(true).setButtonText('Activating…');
+						const result = await manager.activate(key);
+						new Notice(
+							result.ok
+								? 'License activated on this device.'
+								: (result.reason ?? 'Could not activate this license key.')
+						);
+						this.redisplay();
+					})()
+				)
+		);
+		if (status.activated) {
+			actions.addButton((btn) =>
+				btn.setButtonText('Deactivate this device').onClick(() =>
+					void (async () => {
+						const key = this.plugin.settings.licenseKey.trim();
+						btn.setDisabled(true).setButtonText('Deactivating…');
+						const result = await manager.deactivateThisDevice(key);
+						new Notice(
+							result.ok
+								? 'Device deactivated.'
+								: (result.reason ?? 'Could not deactivate — try "Forget this device locally" below.')
+						);
+						this.redisplay();
+					})()
+				)
+			);
+		}
+		actions.addButton((btn) =>
+			btn.setButtonText('Re-check now').onClick(() =>
+				void (async () => {
+					const key = this.plugin.settings.licenseKey.trim();
+					if (key === '') {
+						new Notice('Enter a license key first.');
+						return;
+					}
+					btn.setDisabled(true).setButtonText('Checking…');
+					await manager.revalidateNow(key, true);
+					this.redisplay();
+				})()
+			)
+		);
+
+		const info = containerEl.createDiv({ cls: 'setting-item-description' });
+		info.createEl('p', {
+			text: `Tier: ${status.tier === 'paid' ? 'Paid — unlimited projects.' : 'Free — one project of each type.'}`,
+		});
+		info.createEl('p', { text: `Device id: ${status.deviceId}` });
+		if (status.activated && status.graceExpiresAt !== null) {
+			info.createEl('p', {
+				text:
+					`Verified until ${new Date(status.graceExpiresAt).toLocaleDateString()} without needing to ` +
+					'reconnect (checked periodically in the background, and on demand via "Re-check now").',
+			});
+		}
+		if (status.lastCheckAt !== null) {
+			const outcome =
+				status.lastCheckOk === true ? 'ok' : status.lastCheckOk === false ? 'rejected' : 'could not reach the server';
+			info.createEl('p', { text: `Last check: ${new Date(status.lastCheckAt).toLocaleString()} — ${outcome}.` });
+		}
+		if (status.lastError) info.createEl('p', { text: status.lastError });
+
+		if (status.activated) {
+			new Setting(containerEl)
+				.setName('Forget this device locally')
+				.setDesc(
+					'If "Deactivate this device" can\'t reach the server (offline), this clears the activation on ' +
+						"THIS device only — it does not free the slot on the license server's side."
+				)
+				.addButton((btn) =>
+					btn.setButtonText('Forget locally').onClick(() => {
+						manager.forgetDeviceLocally();
+						new Notice('Forgotten on this device.');
+						this.redisplay();
+					})
+				);
+		}
 	}
 
 	private addRestoreDefaults(
