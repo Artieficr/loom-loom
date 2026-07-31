@@ -174,14 +174,31 @@ export const FM = {
 	 *  the scene connects to its place in the graph. */
 	sceneLocation: 'loomSceneLocation',
 	/** Scenes only: links to the Characters with a cue in this scene. Visible,
-	 *  so the cast connects in the graph. */
+	 *  so the cast connects in the graph. Also carries any Character named via
+	 *  an `@[...]` inline entity link in the scene's text, even one who never
+	 *  gets a cue — merged in by `syncScenes`, same field either way. */
 	sceneCast: 'loomSceneCast',
+	/** Scenes only: links to the Factions named via `@[...]` in this scene's
+	 *  text. Visible, so they connect in the graph. */
+	sceneFactions: 'loomSceneFactions',
+	/** Scenes only: links to the Items named via `@[...]` in this scene's
+	 *  text. Visible, so they connect in the graph. */
+	sceneItems: 'loomSceneItems',
+	/** Scenes only: links to Locations named via `@[...]` in this scene's
+	 *  text that AREN'T the scene's own heading location (`sceneLocation`
+	 *  already covers that one) — a place merely mentioned or referenced,
+	 *  not where the scene is set. Visible, so they connect in the graph. */
+	sceneMentionedLocations: 'loomSceneMentionedLocations',
 	/** Scenes only: link to the Chapter this scene belongs to — derived from the
 	 *  `#` section enclosing it in the script. A scene's writing lives inside its
 	 *  chapter's stretch of the script, so a chapterless scene has nowhere to be
 	 *  stored. Visible, and it is what makes the scene stack under its chapter in
 	 *  the graph and timeline (`buildColumns` takes any connection to an anchor). */
 	sceneChapter: 'loomSceneChapter',
+	/** Scenes only: the RAW loom id (not a link — there's no Branch note to
+	 *  link to) of the branch-tagged section (`= branch: <id>`) this scene
+	 *  sits under, or '' when it isn't in a branch. */
+	sceneBranch: 'loomSceneBranch',
 	/** Chapters only: the `[[loom:<id>]]` marker on the script's `#` section
 	 *  line. Same job as a scene's — it survives a rename or a move, where
 	 *  matching the section text would not. */
@@ -400,8 +417,21 @@ export interface EntityRecord {
 	/** Scenes: linkpaths of the Characters with a cue in this scene, in
 	 *  first-appearance order. Visible links, so the cast connects in the graph. */
 	sceneCast: string[];
+	/** Scenes: linkpaths of the Factions named via `@[...]` in this scene's
+	 *  text. Visible links, so they connect in the graph. */
+	sceneFactions: string[];
+	/** Scenes: linkpaths of the Items named via `@[...]` in this scene's
+	 *  text. Visible links, so they connect in the graph. */
+	sceneItems: string[];
+	/** Scenes: linkpaths of Locations named via `@[...]` in this scene's text
+	 *  that aren't the scene's own heading location (`sceneLocation`). Visible
+	 *  links, so they connect in the graph. */
+	sceneMentionedLocations: string[];
 	/** Scenes: linkpath of the owning Chapter, or ''. */
 	sceneChapter: string;
+	/** Scenes: the raw loom id (not a linkpath) of the branch-tagged section
+	 *  this scene sits under, or '' when it isn't in a branch. */
+	sceneBranch: string;
 	/** Chapters: the `[[loom:<id>]]` marker on their script section line. */
 	chapterId: string;
 	created: number;
@@ -450,7 +480,11 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		sceneTime: '',
 		sceneLocation: '',
 		sceneCast: [],
+		sceneFactions: [],
+		sceneItems: [],
+		sceneMentionedLocations: [],
 		sceneChapter: '',
+		sceneBranch: '',
 		chapterId: '',
 		created: 0,
 		modified: 0,

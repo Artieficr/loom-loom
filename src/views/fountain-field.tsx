@@ -1,4 +1,4 @@
-import { EditorState } from '@codemirror/state';
+import { EditorSelection, EditorState } from '@codemirror/state';
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import {
@@ -9,7 +9,8 @@ import {
 	startCompletion,
 } from '@codemirror/autocomplete';
 import { ForwardedRef, forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
-import { ElementType, findOrphanPairs, parseFountain, readLoomId } from '../fountain';
+import { ElementType, findEntityLinks, findOrphanPairs, parseFountain, readLoomId } from '../fountain';
+import { EntityType } from '../types';
 
 /**
  * Live-preview editor for the Fountain script. Deliberately NOT
@@ -84,6 +85,44 @@ function scanEmphasis(text: string): { from: number; to: number; deco: Decoratio
 	return spans;
 }
 
+/**
+ * Finds `@[Name|Display]` inline entity links and returns their decorations —
+ * deliberately the OPPOSITE of `scanEmphasis` above: raw-at-cursor, like
+ * `markdown-field.tsx`'s wikilinks, not always-visible. When the selection
+ * doesn't touch a link, the `@[`/`|Name`/`]` punctuation is hidden (kept as
+ * `Decoration.replace({})`) and only `@Display` (or `@Name` with no
+ * `|Display`) renders, marked as a click target; when the cursor IS on it,
+ * every hide decoration is skipped and the raw `@[Name|Display]` shows
+ * unstyled, exactly as typed.
+ */
+function scanEntityLinks(
+	text: string,
+	selection: EditorSelection,
+	hasFocus: boolean,
+	entityOptions: { name: string; type: EntityType; path: string }[]
+): { from: number; to: number; deco: Decoration }[] {
+	const revealRaw = hasFocus;
+	const touches = (from: number, to: number) => revealRaw && selection.ranges.some((r) => r.from <= to && r.to >= from);
+	const byName = new Map<string, string>();
+	for (const e of entityOptions) {
+		const key = e.name.trim().toLowerCase();
+		if (!byName.has(key)) byName.set(key, e.path);
+	}
+	const spans: { from: number; to: number; deco: Decoration }[] = [];
+	for (const link of findEntityLinks(text)) {
+		if (touches(link.from, link.to)) continue;
+		const path = byName.get(link.name.toLowerCase());
+		const attributes = path ? { 'data-loom-fountain-entity': path } : undefined;
+		// The visible "@" (kept, not hidden) and the visible display text are
+		// two separate mark ranges around the hidden `[`/`Name|`/`]` pieces.
+		spans.push({ from: link.from, to: link.from + 1, deco: Decoration.mark({ class: 'loom-fountain-entity-link', attributes }) });
+		spans.push({ from: link.from + 1, to: link.displayFrom, deco: Decoration.replace({}) });
+		spans.push({ from: link.displayFrom, to: link.displayTo, deco: Decoration.mark({ class: 'loom-fountain-entity-link', attributes }) });
+		spans.push({ from: link.displayTo, to: link.to, deco: Decoration.replace({}) });
+	}
+	return spans;
+}
+
 export interface FountainFieldHandle {
 	/** Selects `[from, to)` and scrolls it into view — what the Script
 	 *  view's search jumps to a match with, instead of a raw textarea's
@@ -106,9 +145,11 @@ export const FountainField = forwardRef(function FountainField(
 		onBlur,
 		characters,
 		locations,
+		entityOptions,
 		onOpenCharacter,
 		onOpenLocation,
 		onOpenChapter,
+		onOpenEntity,
 	}: {
 		value: string;
 		onChange: (value: string) => void;
@@ -122,6 +163,11 @@ export const FountainField = forwardRef(function FountainField(
 		/** Existing top-level location names, for the scene-heading
 		 *  location autocomplete (offered once an INT./EXT. prefix is typed). */
 		locations: string[];
+		/** Characters/factions/locations/items offered by the `@[` inline
+		 *  entity-link autocomplete and resolved for click-to-navigate — unlike
+		 *  `characters`/`locations` above, an `@[...]` link never auto-creates,
+		 *  so only entities that already exist are ever offered. */
+		entityOptions?: { name: string; type: EntityType; path: string }[];
 		/** A character cue line was clicked. */
 		onOpenCharacter?: (name: string) => void;
 		/** A scene heading was clicked — passed the scene's `[[loom:…]]` id
@@ -131,6 +177,9 @@ export const FountainField = forwardRef(function FountainField(
 		/** A `#` chapter heading was clicked — passed the section's own
 		 *  `[[loom:…]]` id (only ever present on level-1 sections). */
 		onOpenChapter?: (chapterLoomId: string) => void;
+		/** An `@[...]` inline entity link was clicked — passed the resolved
+		 *  entity's file path. */
+		onOpenEntity?: (path: string) => void;
 	},
 	ref: ForwardedRef<FountainFieldHandle>
 ) {
@@ -143,23 +192,31 @@ export const FountainField = forwardRef(function FountainField(
 	const onBlurRef = useRef(onBlur);
 	const charactersRef = useRef(characters);
 	const locationsRef = useRef(locations);
+	const entityOptionsRef = useRef(entityOptions ?? []);
 	const onOpenCharacterRef = useRef(onOpenCharacter);
 	const onOpenLocationRef = useRef(onOpenLocation);
 	const onOpenChapterRef = useRef(onOpenChapter);
+	const onOpenEntityRef = useRef(onOpenEntity);
 	onChangeRef.current = onChange;
 	onBlurRef.current = onBlur;
 	charactersRef.current = characters;
 	locationsRef.current = locations;
+	entityOptionsRef.current = entityOptions ?? [];
 	onOpenCharacterRef.current = onOpenCharacter;
 	onOpenLocationRef.current = onOpenLocation;
 	onOpenChapterRef.current = onOpenChapter;
+	onOpenEntityRef.current = onOpenEntity;
 
 	useImperativeHandle(ref, () => ({
 		selectRange: (from, to) => {
 			const view = viewRef.current;
 			if (!view) return;
 			view.focus();
-			view.dispatch({ selection: { anchor: from, head: to }, scrollIntoView: true });
+			// `scrollIntoView: true` uses CM6's "nearest" strategy, which lands a
+			// target below the viewport at the BOTTOM edge — every caller here
+			// (nav-panel jump, search jump) wants the target visible near the
+			// TOP instead, same as `scrollToLine` below.
+			view.dispatch({ selection: { anchor: from, head: to }, effects: EditorView.scrollIntoView(from, { y: 'start' }) });
 		},
 		focus: () => viewRef.current?.focus(),
 		getTopLine: () => {
@@ -262,6 +319,9 @@ export const FountainField = forwardRef(function FountainField(
 			}
 
 			for (const span of scanEmphasis(text)) entries.push(span);
+			for (const span of scanEntityLinks(text, view.state.selection, view.hasFocus, entityOptionsRef.current)) {
+				entries.push(span);
+			}
 
 			// Orphan prevention (fountain.ts `ORPHAN_WORDS`/`findOrphanPairs`,
 			// shared with the Pages-preview renderer): glues a short word to
@@ -286,10 +346,14 @@ export const FountainField = forwardRef(function FountainField(
 					this.decorations = buildDecorations(view);
 				}
 				update(update: ViewUpdate) {
-					// Unlike markdown-field's raw-at-cursor markup, nothing here
-					// reacts to selection — the loom id stays hidden regardless
-					// of where the cursor is, so only doc edits need a rebuild.
-					if (update.docChanged) this.decorations = buildDecorations(update.view);
+					// The loom id and the bold/italic/element-class passes stay
+					// selection-independent (they never read `view.state.selection`),
+					// but `scanEntityLinks` is deliberately raw-at-cursor, so a
+					// selection/focus change can change what it hides — same
+					// rebuild triggers as markdown-field.tsx.
+					if (update.docChanged || update.selectionSet || update.focusChanged) {
+						this.decorations = buildDecorations(update.view);
+					}
 				}
 			},
 			{ decorations: (v) => v.decorations }
@@ -400,6 +464,36 @@ export const FountainField = forwardRef(function FountainField(
 			return { from, options, filter: false };
 		};
 
+		/** An existing character/faction/location/item, offered while typing
+		 *  inside an `@[` just opened by `entityBracketPairing` below. Never
+		 *  offers to create — an unresolved name is just left as inert text,
+		 *  same as an unrecognized wikilink target elsewhere in the app. */
+		const entityLinkCompletion = (ctx: CompletionContext): CompletionResult | null => {
+			const m = ctx.matchBefore(/@\[[^\]|]*/);
+			if (!m) return null;
+			const from = m.from + 2;
+			const query = ctx.state.sliceDoc(from, ctx.pos).toLowerCase();
+			const options = entityOptionsRef.current
+				.filter((e) => e.name.toLowerCase().includes(query))
+				.slice(0, 8)
+				.map((e) => ({
+					label: e.name,
+					detail: e.type,
+					apply: (v: EditorView, _c: unknown, _from: number, applyTo: number) => {
+						v.dispatch({
+							changes: { from, to: applyTo, insert: e.name },
+							// Past the closing `]` (already auto-inserted by
+							// `entityBracketPairing`), not just past the name — Enter
+							// (or Tab) accepting a suggestion means "done with this
+							// link", ready to keep typing ordinary prose right after it.
+							selection: { anchor: from + e.name.length + 1 },
+						});
+					},
+				}));
+			if (options.length === 0) return null;
+			return { from, options, filter: false };
+		};
+
 		/** A landing spot for `intExtCompletion`/`characterCompletion` to
 		 *  offer their FULL list on, before anything's typed: an empty line
 		 *  right after a blank one (or the document's first line). Doc
@@ -435,8 +529,37 @@ export const FountainField = forwardRef(function FountainField(
 				onOpenChapterRef.current(chapter.dataset.loomFountainChapter);
 				return true;
 			}
+			const entity = target?.closest('[data-loom-fountain-entity]');
+			if (entity instanceof HTMLElement && entity.dataset.loomFountainEntity && onOpenEntityRef.current) {
+				event.preventDefault();
+				onOpenEntityRef.current(entity.dataset.loomFountainEntity);
+				return true;
+			}
 			return false;
 		};
+
+		// Typing `@` opens the pair immediately (like `[[` does for wikilinks
+		// in markdown-field.tsx), inserting `@[]` with the cursor between the
+		// brackets — EXCEPT at a forced-character-cue-eligible position
+		// (start of a blank-gated line, e.g. `@JOHN`), where a bare `@` must
+		// stay exactly what's typed so Fountain's own convention still works.
+		const entityBracketPairing = EditorView.inputHandler.of((v, from, to, text) => {
+			if (text === '@' && from === to) {
+				const line = v.state.doc.lineAt(from);
+				const before = v.state.sliceDoc(line.from, from).trim();
+				const prevBlank = line.number <= 1 || v.state.doc.line(line.number - 1).text.trim() === '';
+				const isForcedCuePosition = before === '' && prevBlank;
+				if (!isForcedCuePosition && v.state.sliceDoc(from, from + 1) !== '[') {
+					v.dispatch({ changes: { from, to, insert: '@[]' }, selection: { anchor: from + 2 } });
+					return true;
+				}
+			}
+			if (text === ']' && from === to && v.state.sliceDoc(from, from + 1) === ']') {
+				v.dispatch({ selection: { anchor: from + 1 } });
+				return true;
+			}
+			return false;
+		});
 
 		const view = new EditorView({
 			parent: hostRef.current,
@@ -446,8 +569,9 @@ export const FountainField = forwardRef(function FountainField(
 					history(),
 					EditorView.lineWrapping,
 					fountainDecorations,
+					entityBracketPairing,
 					autocompletion({
-						override: [intExtCompletion, characterCompletion, locationCompletion],
+						override: [intExtCompletion, characterCompletion, locationCompletion, entityLinkCompletion],
 						icons: false,
 					}),
 					keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),

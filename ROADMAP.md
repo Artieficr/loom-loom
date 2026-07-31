@@ -687,19 +687,50 @@ Still to build:
     document's last line), since a cue is immediately followed by its dialogue.
 - [ ] Plain-writing mode: keep Fountain syntax and it formats; write plain prose and it stays
   prose (valid Fountain — it's all Action), just without the automatic scene counter.
-- [ ] **Narrative branching**, design resolved (no code yet — see
-  `~/.claude/plans/so-now-let-s-talk-greedy-sunset.md`, or ask to re-derive from this note):
-  classic linear Fountain has no branch syntax, and the `.BRANCH …` forced-heading convention
-  tried first gets misread by other Fountain tools as a new top-level scene rather than nesting
-  under the real one. Landed on a **plugin-specific, structural-only convention**: sibling
-  sections tagged `= branch: <group-id>` (Fountain's own non-exporting synopsis line) under a
-  shared parent, no new entity type — just a Scene-page field (`loomSceneBranch`, hidden link)
-  recording which branch a scene sits in, plus `ensureSceneIds` extended to id branch-tagged
-  sections at any depth (today only level-1). Reads as a plain nested outline with an ordinary
-  note in any compliant Fountain tool. Still needed before this can be built: Script view
-  outline nesting, Chapter page's scene-list grouping by branch, and generalizing
-  `applyDisplayTitles`' visible-marker trick so each branch gets a printed label in the export
-  (sections never export on their own).
+- [x] **Narrative branching** — classic linear Fountain has no branch syntax, and the
+  `.BRANCH …` forced-heading convention tried first gets misread by other Fountain tools as a
+  new top-level scene rather than nesting under the real one. Landed on a **plugin-specific,
+  structural-only convention**: sibling sections tagged `= branch: <group-id>` (Fountain's own
+  non-exporting synopsis line) directly beneath a `##`/`###` heading, no new entity type —
+  `ensureSceneIds` extended to id branch-tagged sections at any depth (not just level-1), and a
+  Scene's own `loomSceneBranch` (a raw id, not a link — no Branch note to point at). Reads as a
+  plain nested outline with an ordinary note in any compliant Fountain tool. The Script view's
+  nav tree (`buildNavTree`) attaches a branch section under the nearest scene seen so far rather
+  than the enclosing chapter, and a scene heading always closes any open branch frame (a branch
+  holds prose, never a scene of its own) — the fix for branch sections rendering as flush
+  top-level entries instead of nesting under their scene. `applyBranchLabels` prints each
+  branch's own title as a centered-bold marker on export, mirroring `applyDisplayTitles` for
+  chapters. **Not done**: Chapter page's scene-list grouping by branch (deliberately skipped —
+  scenes structurally can't nest inside a branch under this convention, so it would rarely
+  trigger, and the drag-reorder code it'd touch is deliberately fragile-adjacent/well-tested);
+  a full choice-point UI (e.g. visually distinct branch node styling beyond the nav panel's tint)
+  is still just the nav-panel treatment, nothing dedicated in the graph/timeline.
+- [x] **Inline entity links** (`@[Name|Display]`) — a Character/Faction/Location/Item can be
+  referenced from anywhere in the script text (not just a scene's heading or CHARACTER cues),
+  bracket-delimited since a name can contain spaces/punctuation. Live editor shows raw-at-cursor
+  (like a wikilink), `@Display` elsewhere; strips to plain text on every export/render path.
+  Feeds `sceneFactions`/`sceneItems`/`sceneMentionedLocations` derivation and merges a mentioned
+  character into `sceneCast`. Resolution is autocomplete-pick only, never auto-create.
+- [x] **Writer-project Scene/Chapter page parity** — "Entities in the scene" (grouped
+  Characters/Factions/Locations/Items, collapsing to one column when empty) replaces the old
+  characters-only column; a Quest section (Active/Resolved-this-Scene-or-Chapter/Resolved
+  previously) now also renders on Scene pages, with quests resolving against Scenes (script
+  order) rather than Sessions/Chapters in a Writer project; the Chapter page gained its own
+  Script/Pages-preview section; a Scene page's own mini nav panel shows its internal branching.
+- [x] **List view Involved/Location filters fixed for Scenes, added for Chapters** — the filters
+  silently no-op'd for Scenes (same role as Events, but no `sessionNotes` field to read) and
+  never appeared for Chapters at all; now branch on `type`, read the script-derived scene
+  fields, and aggregate across a Chapter's own scenes. Involved is now multi-select.
+- [x] **Scene numbering (`#N#`) now cascades** — inserting a scene before an already-numbered
+  one used to leave it unnumbered and everything after untouched (by design, matching real
+  screenwriting's "production numbers are locked" convention) — now, once any scene in the
+  script carries a number, every scene from the start of the document through the last
+  currently-numbered one joins the sequence automatically, renumbered on every commit
+  (including plain typing in the main Script view, not just structural drag/move actions).
+- [x] **Home wheel hover / nav scroll-to-top** — wheel satellites shrink at rest and scale up
+  (whole button, not just a background tint) on hover; nav-panel and search jumps in the script
+  editor now scroll the target to the TOP of the viewport instead of CM6's default "nearest"
+  strategy landing it at the bottom.
 - [ ] **Pre-scene descriptions (e.g. "TEXT OVER BLACK")** — action text written before the
   first scene heading currently has nowhere to show outside the Script view itself. Parked
   deliberately for a dedicated design conversation — nothing implemented.

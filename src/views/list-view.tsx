@@ -1,5 +1,13 @@
 import { Menu, ViewStateResult, normalizePath } from 'obsidian';
-import { Fragment, MouseEvent as ReactMouseEvent, ReactElement, useMemo, useState } from 'react';
+import {
+	Fragment,
+	MouseEvent as ReactMouseEvent,
+	ReactElement,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from 'react';
 import {
 	ENTITY_META,
 	ENTITY_TAGS,
@@ -147,6 +155,10 @@ function EntityList({
 	const version = useIndexVersion(plugin.indexer);
 	const dated = type === 'event' || type === 'session';
 	const role = roleOf(type);
+	// Scenes share the 'beat' role with Events, but a Chapter (role 'anchor')
+	// still wants the same Involved/Location filters aggregated across its own
+	// scenes — so filterability is keyed off `type`, not just `role`.
+	const filterable = role === 'beat' || type === 'chapter';
 	// Chapters and scenes carry a script order rather than a date, and a story
 	// reads front to back — where a campaign log wants the latest session on
 	// top, a script wants chapter one. So they default to script order, oldest
@@ -163,9 +175,23 @@ function EntityList({
 	const [questStatus, setQuestStatus] = useState('');
 	/** Quests only: rows or the session-page-style card grid. */
 	const [questView, setQuestView] = useState<'list' | 'cards'>('list');
-	/** Events only: paths of the involved-entity / location filters. */
-	const [eventInvolved, setEventInvolved] = useState<string | null>(null);
+	/** Events/Scenes/Chapters only: the involved-entity filter (AND semantics
+	 *  across every picked entity) and the single location filter. */
+	const [eventInvolvedFilter, setEventInvolvedFilter] = useState<readonly string[]>([]);
 	const [eventLocation, setEventLocation] = useState<string | null>(null);
+	/** Folded behind a filter icon in the toolbar, opening on top (like the
+	 *  graph view's own filter popover, `.loom-filter-pop`) rather than a
+	 *  panel that pushes the list down. */
+	const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+	const filterPanelRef = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		if (!filterPanelOpen) return;
+		const onDown = (e: PointerEvent) => {
+			if (!filterPanelRef.current?.contains(e.target as Node)) setFilterPanelOpen(false);
+		};
+		document.addEventListener('pointerdown', onDown, true);
+		return () => document.removeEventListener('pointerdown', onDown, true);
+	}, [filterPanelOpen]);
 	/** Locations only: explicit per-parent collapse choices; parents absent
 	 *  here auto-collapse once they hold more than 5 sublocations. */
 	const [collapseOverride, setCollapseOverride] = useState<ReadonlyMap<string, boolean>>(new Map());
@@ -211,17 +237,58 @@ function EntityList({
 		}
 		return false;
 	};
-	const eventHasInvolved = (r: EntityRecord, path: string) =>
-		r.sessionNotes.some((n) =>
+	// Events read their manual `sessionNotes.involved`/`.places`; Scenes have
+	// no such field — "who/where is in it" is entirely script-derived
+	// (`sceneCast`/`sceneFactions`/`sceneItems`/`sceneMentionedLocations`,
+	// `sceneLocation`), so this branches on `r.type` rather than sharing one
+	// shape. A Chapter has neither field of its own — it aggregates across
+	// every scene that points at it via `sceneChapter`.
+	const eventHasInvolved = (r: EntityRecord, path: string): boolean => {
+		if (r.type === 'scene') {
+			return [...r.sceneCast, ...r.sceneFactions, ...r.sceneItems, ...r.sceneMentionedLocations].some(
+				(lp) => plugin.indexer.resolve(lp, r.path)?.path === path
+			);
+		}
+		if (r.type === 'chapter') {
+			return plugin.indexer
+				.getAll('scene', r.project)
+				.some(
+					(sc) =>
+						sc.sceneChapter !== '' &&
+						plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === r.path &&
+						eventHasInvolved(sc, path)
+				);
+		}
+		return r.sessionNotes.some((n) =>
 			[...n.involved, ...n.group].some((lp) => plugin.indexer.resolve(lp, r.path)?.path === path)
 		);
-	const eventAtLocation = (r: EntityRecord, path: string) =>
-		r.sessionNotes.some((n) =>
+	};
+	const eventAtLocation = (r: EntityRecord, path: string): boolean => {
+		if (r.type === 'scene') {
+			if (r.sceneLocation === '') return false;
+			const loc = plugin.indexer.resolve(r.sceneLocation, r.path);
+			return loc?.type === 'location' && locDescendsFrom(loc, path);
+		}
+		if (r.type === 'chapter') {
+			return plugin.indexer
+				.getAll('scene', r.project)
+				.some(
+					(sc) =>
+						sc.sceneChapter !== '' &&
+						plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === r.path &&
+						eventAtLocation(sc, path)
+				);
+		}
+		return r.sessionNotes.some((n) =>
 			n.places.some((lp) => {
 				const place = plugin.indexer.resolve(lp, r.path);
 				return place?.type === 'location' && locDescendsFrom(place, path);
 			})
 		);
+	};
+	/** Multi-select Involved filter: every picked entity must be present. */
+	const matchesAllInvolved = (r: EntityRecord, paths: readonly string[]) =>
+		paths.every((p) => eventHasInvolved(r, p));
 
 	const records = useMemo(() => {
 		if (!project) return [];
@@ -242,8 +309,8 @@ function EntityList({
 					questStatus === '' ||
 					(questStatus === 'active' ? r.questOutcome === '' : r.questOutcome === questStatus)
 			)
-			.filter((r) => role !== 'beat' || eventInvolved === null || eventHasInvolved(r, eventInvolved))
-			.filter((r) => role !== 'beat' || eventLocation === null || eventAtLocation(r, eventLocation))
+			.filter((r) => !filterable || eventInvolvedFilter.length === 0 || matchesAllInvolved(r, eventInvolvedFilter))
+			.filter((r) => !filterable || eventLocation === null || eventAtLocation(r, eventLocation))
 			.sort((a, b) => dir * compare(a, b, sort, characterAppearance));
 	}, [
 		plugin.indexer,
@@ -255,9 +322,9 @@ function EntityList({
 		sortAsc,
 		tagFilter,
 		questStatus,
-		eventInvolved,
+		eventInvolvedFilter,
 		eventLocation,
-		role,
+		filterable,
 		characterAppearance,
 	]);
 
@@ -875,7 +942,9 @@ function EntityList({
 	};
 
 	const allCollapsed = [...childrenOf.keys()].every((p) => isCollapsed(p));
-	const involvedFilterRecord = eventInvolved !== null ? plugin.indexer.get(eventInvolved) : undefined;
+	const involvedFilterRecords = eventInvolvedFilter
+		.map((p) => plugin.indexer.get(p))
+		.filter((r): r is EntityRecord => r != null);
 	const locationFilterRecord = eventLocation !== null ? plugin.indexer.get(eventLocation) : undefined;
 
 	const toolbar = (
@@ -938,49 +1007,82 @@ function EntityList({
 					</button>
 				</>
 			) : null}
-			{role === 'beat' ? (
-				<>
-					{involvedFilterRecord ? (
-						<EntityChip
-							plugin={plugin}
-							record={involvedFilterRecord}
-							onRemove={() => setEventInvolved(null)}
-							removeLabel="Clear involved filter"
-						/>
-					) : (
-						<div className="loom-list-filter">
-							<SearchableSelect
-								placeholder="Involved…"
-								options={plugin.indexer
-									.getAll(undefined, project.root)
-									.filter((c) => roleOf(c.type) === null && c.type !== 'location')
-									.sort((a, b) => a.name.localeCompare(b.name))
-									.map((c) => ({ value: c.path, label: c.name }))}
-								onPick={(path) => setEventInvolved(path)}
-							/>
+			{filterable ? (
+				<div className="loom-list-filter-anchor" ref={filterPanelRef}>
+					<button
+						className={
+							filterPanelOpen || eventInvolvedFilter.length > 0 || eventLocation !== null
+								? 'loom-rel-filter loom-list-filter-btn loom-list-filter-btn-on'
+								: 'loom-rel-filter loom-list-filter-btn'
+						}
+						aria-label={filterPanelOpen ? 'Hide filters' : 'Filter by involved entity or location'}
+						onClick={() => setFilterPanelOpen(!filterPanelOpen)}
+					>
+						<Icon name="filter" />
+					</button>
+					{filterPanelOpen ? (
+						<div className="loom-filter-pop loom-list-filter-pop">
+							<div className="loom-list-filter-section">
+								<span className="loom-field-label loom-group-sublabel">Involved</span>
+								<SearchableSelect
+									placeholder="Add an involved entity…"
+									options={plugin.indexer
+										.getAll(undefined, project.root)
+										.filter(
+											(c) =>
+												roleOf(c.type) === null &&
+												c.type !== 'location' &&
+												!eventInvolvedFilter.includes(c.path)
+										)
+										.sort((a, b) => a.name.localeCompare(b.name))
+										.map((c) => ({ value: c.path, label: c.name }))}
+									onPick={(path) => setEventInvolvedFilter([...eventInvolvedFilter, path])}
+								/>
+								{involvedFilterRecords.length > 0 ? (
+									<div className="loom-tag-row loom-list-filter-chips">
+										{involvedFilterRecords.map((r) => (
+											<EntityChip
+												key={r.path}
+												plugin={plugin}
+												record={r}
+												onOpen={() => view.openEntity(r.path)}
+												onRemove={() =>
+													setEventInvolvedFilter(eventInvolvedFilter.filter((p) => p !== r.path))
+												}
+												removeLabel="Clear involved filter"
+											/>
+										))}
+									</div>
+								) : null}
+							</div>
+							<div className="loom-list-filter-sep" />
+							<div className="loom-list-filter-section">
+								<span className="loom-field-label loom-group-sublabel">Location</span>
+								{locationFilterRecord ? (
+									<div className="loom-tag-row loom-list-filter-chips">
+										<EntityChip
+											plugin={plugin}
+											record={locationFilterRecord}
+											label={locationLabel(locationFilterRecord, plugin)}
+											onOpen={() => view.openEntity(locationFilterRecord.path)}
+											onRemove={() => setEventLocation(null)}
+											removeLabel="Clear location filter"
+										/>
+									</div>
+								) : (
+									<SearchableSelect
+										placeholder="Filter by location…"
+										options={plugin.indexer
+											.getAll('location', project.root)
+											.sort((a, b) => a.name.localeCompare(b.name))
+											.map((c) => ({ value: c.path, label: locationLabel(c, plugin) }))}
+										onPick={(path) => setEventLocation(path)}
+									/>
+								)}
+							</div>
 						</div>
-					)}
-					{locationFilterRecord ? (
-						<EntityChip
-							plugin={plugin}
-							record={locationFilterRecord}
-							label={locationLabel(locationFilterRecord, plugin)}
-							onRemove={() => setEventLocation(null)}
-							removeLabel="Clear location filter"
-						/>
-					) : (
-						<div className="loom-list-filter">
-							<SearchableSelect
-								placeholder="Location…"
-								options={plugin.indexer
-									.getAll('location', project.root)
-									.sort((a, b) => a.name.localeCompare(b.name))
-									.map((c) => ({ value: c.path, label: locationLabel(c, plugin) }))}
-								onPick={(path) => setEventLocation(path)}
-							/>
-						</div>
-					)}
-				</>
+					) : null}
+				</div>
 			) : null}
 			{nested && childrenOf.size > 0 ? (
 				<button

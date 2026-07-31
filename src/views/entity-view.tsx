@@ -65,10 +65,13 @@ import { MiniGraph } from './mini-graph';
 import { findMapsFile } from './map-view';
 import { useIndexVersion } from './hooks';
 import {
+	buildNavTree,
+	chapterScriptText,
 	editScript,
 	editScriptAndSync,
 	highlight,
 	pushChapterTitles,
+	renderNavTreeItem,
 	sceneScriptText,
 	useScriptText,
 } from './script-view';
@@ -77,14 +80,18 @@ import {
 	moveSceneBefore,
 	reorderScenesInSection,
 	renameSectionTitle,
+	replaceChapterBody,
 	replaceSceneBody,
 	removeScene,
 	joinLocationSub,
 	setSceneHeadingParts,
 	elementText,
+	nextTopSectionLine,
 	parseFountain,
+	parseSceneHeading,
 	preventOrphans,
 	renderInline,
+	stripEntityLinksForDisplay,
 	type ParsedScript,
 } from '../fountain';
 import { pdfPages } from '../pdf';
@@ -268,6 +275,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  just this scene's own slice, so it offers every character/location
 	 *  in the project, not only ones already mentioned in this scene. */
 	const scriptParsed = useMemo(() => (scriptText === null ? null : parseFountain(scriptText)), [scriptText]);
+	/** What the `@[` inline entity-link autocomplete offers in the Scene page's
+	 *  Script section — never auto-created, so only what already exists. */
+	const entityOptions = project
+		? (['character', 'faction', 'location', 'item'] as const).flatMap((t) =>
+				plugin.indexer.getAll(t, project.root).map((r) => ({ name: r.name, type: r.type, path: r.path }))
+			)
+		: [];
 	/** Draft of the scene's script body (everything under its heading). */
 	const [sceneBody, setSceneBody] = useState<string | null>(null);
 	/** Scene page's Script section: same Script/Pages preview + search pattern
@@ -281,7 +295,46 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  "stash it, apply once FountainField remounts" pattern as the main
 	 *  Script view's `pendingScrollLineRef`. */
 	const pendingSceneScrollLineRef = useRef<number | null>(null);
+	/** Draft of the chapter's script body (its `#` line through every scene
+	 *  under it) — same shape as `sceneBody`, for the Chapter page's own
+	 *  Script section. */
+	const [chapterBody, setChapterBody] = useState<string | null>(null);
+	const [chapterScriptMode, setChapterScriptMode] = useState<'script' | 'pages'>('script');
+	const [chapterScriptQuery, setChapterScriptQuery] = useState('');
+	const [chapterScriptMatchIndex, setChapterScriptMatchIndex] = useState(0);
+	const chapterScriptEditorRef = useRef<FountainFieldHandle | null>(null);
+	const chapterScriptPagesRef = useRef<HTMLDivElement | null>(null);
+	const pendingChapterScrollLineRef = useRef<number | null>(null);
+	/** Same collapsible nav panel as the main Script view, scoped to just this
+	 *  scene's/chapter's own bounded tree — rendered INSIDE the editor box
+	 *  (`.loom-script-nav-sticky-inset` in styles.css), not stacked above it,
+	 *  so it lives in the box's own spare left margin instead of colliding
+	 *  with the scene-heading caption. */
+	const [sceneNavOpen, setSceneNavOpen] = useState(false);
+	const [chapterNavOpen, setChapterNavOpen] = useState(false);
 	const writeFm = useFrontmatterWriter(plugin, file);
+
+	useEffect(() => {
+		if (!sceneNavOpen) return;
+		const onDown = (e: MouseEvent) => {
+			const el = e.target as HTMLElement | null;
+			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle')) return;
+			setSceneNavOpen(false);
+		};
+		document.addEventListener('mousedown', onDown);
+		return () => document.removeEventListener('mousedown', onDown);
+	}, [sceneNavOpen]);
+
+	useEffect(() => {
+		if (!chapterNavOpen) return;
+		const onDown = (e: MouseEvent) => {
+			const el = e.target as HTMLElement | null;
+			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle')) return;
+			setChapterNavOpen(false);
+		};
+		document.addEventListener('mousedown', onDown);
+		return () => document.removeEventListener('mousedown', onDown);
+	}, [chapterNavOpen]);
 
 	useEffect(() => {
 		if (sceneScriptMode !== 'script') return;
@@ -290,6 +343,14 @@ function EntityPage({ view }: { view: EntityView }) {
 		pendingSceneScrollLineRef.current = null;
 		sceneScriptEditorRef.current?.scrollToLine(line);
 	}, [sceneScriptMode]);
+
+	useEffect(() => {
+		if (chapterScriptMode !== 'script') return;
+		const line = pendingChapterScrollLineRef.current;
+		if (line === null) return;
+		pendingChapterScrollLineRef.current = null;
+		chapterScriptEditorRef.current?.scrollToLine(line);
+	}, [chapterScriptMode]);
 
 	/** Label a record is searched/shown by in free-text draft inputs: the
 	 *  display name — for sessions, their formatted date (their file name is
@@ -585,7 +646,30 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sceneCastRecords = record.sceneCast
 		.map((lp) => plugin.indexer.resolve(lp, record.path))
 		.filter((r): r is EntityRecord => r != null);
+	/** Factions/Items/other-Locations named via `@[...]` in this scene's
+	 *  text — same read-only, script-derived shape as `sceneCastRecords`. */
+	const sceneFactionRecords = record.sceneFactions
+		.map((lp) => plugin.indexer.resolve(lp, record.path))
+		.filter((r): r is EntityRecord => r != null);
+	const sceneItemRecords = record.sceneItems
+		.map((lp) => plugin.indexer.resolve(lp, record.path))
+		.filter((r): r is EntityRecord => r != null);
+	const sceneMentionedLocationRecords = record.sceneMentionedLocations
+		.map((lp) => plugin.indexer.resolve(lp, record.path))
+		.filter((r): r is EntityRecord => r != null);
 	const sceneExcerpt = sceneScriptText(scriptText, record.sceneId);
+	/** This scene's own mini nav panel: whatever `##`+ (branch or ordinary)
+	 *  sections exist inside its own line span, using the exact same
+	 *  algorithm as the main Script view's nav tree (`buildNavTree`), just
+	 *  bounded to this one scene instead of the whole document. */
+	const sceneNavScene = scriptParsed?.scenes.find((s) => s.loomId === record.sceneId) ?? null;
+	// `+ 1` excludes the scene's own heading line — only its own content
+	// (branch sections, ordinary sub-headings) should show up here, not the
+	// scene repeating itself as a top-level entry.
+	const sceneNavTree =
+		scriptParsed && sceneNavScene
+			? buildNavTree(scriptParsed, sceneNavScene.line + 1, sceneNavScene.endLine)
+			: null;
 	// The heading line is the script's, not the note's — only what follows it is
 	// editable here, so the title and its hidden id can't be typed over.
 	const sceneBodyOf = (excerpt: string) => excerpt.split('\n').slice(1).join('\n').trim();
@@ -629,6 +713,54 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (idx < 0 || idx >= sceneBodyPages.length) return 0;
 		const first = sceneBodyPages[idx][0];
 		return first ? first.line - sceneBodyLineOffset : 0;
+	};
+	/** Chapter page's own Script section — same shape as the Scene page's
+	 *  `sceneExcerpt`/`sceneDraft`/`sceneBodyPages`, but spanning every scene
+	 *  under this chapter rather than one heading's worth. The `#` section
+	 *  line is stripped from the editable body the same way a scene's heading
+	 *  is — the Chapter page's own Title field is where that line's text is
+	 *  actually edited, so the Script section doesn't show a rival copy. */
+	const chapterExcerpt = record.type === 'chapter' ? chapterScriptText(scriptText, record.chapterId) : null;
+	/** This chapter's own nav panel — every scene/branch/sub-section between
+	 *  its `#` line and the next top-level one, same `buildNavTree` bounded
+	 *  call the Scene page's mini nav uses. */
+	const chapterNavSection =
+		record.type === 'chapter' && scriptParsed
+			? (scriptParsed.sections.find((s) => s.level === 1 && s.loomId === record.chapterId) ?? null)
+			: null;
+	const chapterNavTree =
+		scriptParsed && chapterNavSection
+			? buildNavTree(
+					scriptParsed,
+					chapterNavSection.line + 1,
+					nextTopSectionLine(scriptParsed, chapterNavSection.line) ?? Infinity
+				)
+			: null;
+	const chapterBodyOf = (excerpt: string) => excerpt.split('\n').slice(1).join('\n').trim();
+	const chapterDraft = chapterBody ?? (chapterExcerpt === null ? '' : chapterBodyOf(chapterExcerpt));
+	const chapterBodyPages = chapterExcerpt !== null ? pdfPages(parseFountain(chapterExcerpt)) : [];
+	const chapterBodyLineOffset = (() => {
+		if (chapterExcerpt === null) return 0;
+		const afterHeading = chapterExcerpt.split('\n').slice(1);
+		let blanks = 0;
+		while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
+		return 1 + blanks;
+	})();
+	const chapterPageOfLine = (bodyLine: number) => {
+		const line = bodyLine + chapterBodyLineOffset;
+		for (let i = 0; i < chapterBodyPages.length; i++) {
+			if (chapterBodyPages[i].some((el) => line >= el.line && line < el.line + sceneElementSpan(el))) return i + 1;
+		}
+		for (let i = 0; i < chapterBodyPages.length; i++) {
+			if (chapterBodyPages[i].some((el) => el.line > line)) return i + 1;
+		}
+		return Math.max(1, chapterBodyPages.length);
+	};
+	const chapterLineOfPage = (page: number) => {
+		const idx = page - 1;
+		if (idx < 0 || idx >= chapterBodyPages.length) return 0;
+		const first = chapterBodyPages[idx][0];
+		return first ? first.line - chapterBodyLineOffset : 0;
 	};
 	/** Chapter pages: the scenes pointing at this chapter, in script order. */
 	const chapterScenes = plugin.indexer
@@ -1232,6 +1364,18 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sessionsByDate = sessions
 		.slice()
 		.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
+	// A quest resolves against whatever unit play/writing actually happens in:
+	// Sessions in a Player/GM project, Scenes in a Writer one (chapters have no
+	// date or single sitting of their own — the scene is where a quest is
+	// actually received or completed). `questAnchorRole` is what a resolved
+	// link must be to count as valid.
+	const questAnchorType = scriptMode ? beatType : anchorType;
+	const questAnchorRole = scriptMode ? 'beat' : 'anchor';
+	const questAnchorsSorted = (project ? plugin.indexer.getAll(questAnchorType, project.root) : [])
+		.slice()
+		.sort((a, b) =>
+			scriptMode ? (a.seq ?? a.created) - (b.seq ?? b.created) : (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)
+		);
 	const sessionChip = (s: EntityRecord, clear: () => void) => (
 		<div className="loom-tag-row">
 			<EntityChip
@@ -2315,23 +2459,41 @@ function EntityPage({ view }: { view: EntityView }) {
 				new Notice('Could not rename the entity.');
 			});
 	};
-	const asOf = record.date?.sortKey ?? Number.MAX_SAFE_INTEGER;
-	const sessionQuests = (isSession && project ? plugin.indexer.getAll('quest', project.root) : [])
+	// Writer projects: quests resolve against Scenes (script order, `seq`),
+	// same as Sessions resolve against dates elsewhere. A quest's own
+	// `questReceived`/`questOutcomeSession` is always a leaf (Scene or
+	// Session, never a Chapter), so `anchorPositionKey` only needs the two
+	// leaf cases; a Chapter page's OWN position is the special case, since
+	// "as of this chapter" means "as of its last scene" (`chapterScenes` is
+	// already sorted ascending by `seq`).
+	const anchorPositionKey = (r: EntityRecord): number | null =>
+		scriptMode ? r.seq ?? r.created : (r.date?.sortKey ?? null);
+	const showsQuestSection = (isSession || record.type === 'scene') && project;
+	const lastChapterScene = chapterScenes.length > 0 ? chapterScenes[chapterScenes.length - 1] : null;
+	const asOf = scriptMode
+		? record.type === 'chapter'
+			? (lastChapterScene?.seq ?? lastChapterScene?.created ?? record.seq ?? record.created)
+			: (record.seq ?? record.created)
+		: (record.date?.sortKey ?? Number.MAX_SAFE_INTEGER);
+	const sessionQuests = (showsQuestSection ? plugin.indexer.getAll('quest', project.root) : [])
 		.map((q) => {
 			const rec = q.questReceived !== null ? plugin.indexer.resolve(q.questReceived, q.path) : null;
-			if (rec?.date && rec.date.sortKey > asOf) return null; // not yet received then
+			const recKey = rec ? anchorPositionKey(rec) : null;
+			if (recKey !== null && recKey > asOf) return null; // not yet received then
 			const out =
 				q.questOutcomeSession !== null
 					? plugin.indexer.resolve(q.questOutcomeSession, q.path)
 					: null;
-			const finished = q.questOutcome !== '' && out?.date !== undefined && out.date !== null && out.date.sortKey <= asOf;
-			// Three buckets: still active as of this session, resolved in this very
-			// session, or resolved in an earlier one ("Resolved previously").
-			const state = !finished
-				? 'active'
-				: out?.path === record.path
-					? 'resolvedThis'
-					: 'resolvedPrev';
+			const outKey = out ? anchorPositionKey(out) : null;
+			const finished = q.questOutcome !== '' && outKey !== null && outKey <= asOf;
+			// Three buckets: still active as of this session/scene, resolved on
+			// THIS page (a Chapter counts any of its own scenes too), or resolved
+			// on an earlier one ("Resolved previously").
+			const resolvedHere =
+				record.type === 'chapter'
+					? out !== null && chapterScenes.some((sc) => sc.path === out.path)
+					: out?.path === record.path;
+			const state = !finished ? 'active' : resolvedHere ? 'resolvedThis' : 'resolvedPrev';
 			return { quest: q, state };
 		})
 		.filter((e): e is { quest: EntityRecord; state: string } => e !== null)
@@ -3828,16 +3990,16 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : null}
 
 
-			{isSession && project ? (
+			{showsQuestSection ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Quests</span>
 					{(['active', 'resolvedThis', 'resolvedPrev'] as const).map((state) => {
-						const outcomeKey = (q: EntityRecord) =>
-							q.questOutcomeSession
-								? plugin.indexer.resolve(q.questOutcomeSession, q.path)?.date?.sortKey ?? 0
-								: 0;
+						const outcomeKey = (q: EntityRecord) => {
+							const out = q.questOutcomeSession ? plugin.indexer.resolve(q.questOutcomeSession, q.path) : null;
+							return (out ? anchorPositionKey(out) : null) ?? 0;
+						};
 						// Active: manual loomSeq order (from sessionQuests). Resolved
-						// groups: most recently finished on top (by outcome session date),
+						// groups: most recently finished on top (by outcome position),
 						// no reorder — and "Resolved previously" is capped by the setting.
 						const limit = plugin.settings.sessionResolvedQuests;
 						const list =
@@ -3855,11 +4017,12 @@ function EntityPage({ view }: { view: EntityView }) {
 						const gkey = 'quest-' + state;
 						const reorderable = state === 'active';
 						const questRecords = list.map((x) => x.quest);
+						const pageLabel = record.type === 'scene' ? beatLabel : anchorLabel;
 						const heading =
 							state === 'active'
 								? 'Active'
 								: state === 'resolvedThis'
-									? 'Resolved this session'
+									? `Resolved this ${pageLabel}`
 									: 'Resolved previously';
 						return (
 							<div key={state} className="loom-section">
@@ -3932,9 +4095,9 @@ function EntityPage({ view }: { view: EntityView }) {
 													</div>
 													<div className="loom-quest-card-row">
 													<span className="loom-quest-card-label">Received on:</span>
-<span className="loom-quest-card-value">														{received && roleOf(received.type) === 'anchor' ? (
+<span className="loom-quest-card-value">														{received && roleOf(received.type) === questAnchorRole ? (
 															received.path === record.path ? (
-																<span>This session</span>
+																<span>This {pageLabel}</span>
 															) : (
 																<button
 																	className="loom-subloc-link"
@@ -3964,9 +4127,9 @@ function EntityPage({ view }: { view: EntityView }) {
 														<>
 															<div className="loom-quest-card-row">
 															<span className="loom-quest-card-label">Completed on:</span>
-<span className="loom-quest-card-value">																{outcomeSes && roleOf(outcomeSes.type) === 'anchor' ? (
+<span className="loom-quest-card-value">																{outcomeSes && roleOf(outcomeSes.type) === questAnchorRole ? (
 																	outcomeSes.path === record.path ? (
-																		<span>This session</span>
+																		<span>This {pageLabel}</span>
 																	) : (
 																		<button
 																			className="loom-subloc-link"
@@ -4068,13 +4231,13 @@ function EntityPage({ view }: { view: EntityView }) {
 					<div className="loom-quest-right">
 						<div className="loom-quest-sessions">
 							<div className="loom-field">
-								<span className="loom-field-label">Received in session</span>
-								{questReceived && roleOf(questReceived.type) === 'anchor' ? (
+								<span className="loom-field-label">Received in {questAnchorRole === 'beat' ? beatLabel : anchorLabel}</span>
+								{questReceived && roleOf(questReceived.type) === questAnchorRole ? (
 									sessionChip(questReceived, () => setQuestSession('questReceived', null))
 								) : (
 									<SearchableSelect
-										placeholder="Pick the session…"
-										options={sessionsByDate.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
+										placeholder={`Pick the ${questAnchorRole === 'beat' ? beatLabel : anchorLabel}…`}
+										options={questAnchorsSorted.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 										onPick={(name) => setQuestSession('questReceived', name)}
 									/>
 								)}
@@ -4082,14 +4245,15 @@ function EntityPage({ view }: { view: EntityView }) {
 							{record.questOutcome !== '' ? (
 								<div className="loom-field">
 									<span className="loom-field-label">
-										{record.questOutcome[0].toUpperCase() + record.questOutcome.slice(1)} in session
+										{record.questOutcome[0].toUpperCase() + record.questOutcome.slice(1)} in{' '}
+										{questAnchorRole === 'beat' ? beatLabel : anchorLabel}
 									</span>
-									{questOutcomeSession && roleOf(questOutcomeSession.type) === 'anchor' ? (
+									{questOutcomeSession && roleOf(questOutcomeSession.type) === questAnchorRole ? (
 										sessionChip(questOutcomeSession, () => setQuestSession('questOutcomeSession', null))
 									) : (
 										<SearchableSelect
-											placeholder="Pick the session…"
-											options={sessionsByDate.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
+											placeholder={`Pick the ${questAnchorRole === 'beat' ? beatLabel : anchorLabel}…`}
+											options={questAnchorsSorted.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 											onPick={(name) => setQuestSession('questOutcomeSession', name)}
 										/>
 									)}
@@ -4311,6 +4475,309 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+			{record.type === 'chapter' && scriptMode && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">Script</span>
+					{chapterExcerpt !== null
+						? (() => {
+								// Same box-local placement as the Scene page's own panel —
+								// lives inside the editor box's left margin via a sticky
+								// wrapper scoped to the box's own scroll, not the page's.
+								const chapterNavPanel =
+									chapterNavTree && chapterNavTree.items.length > 0 ? (
+										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+											<button
+												className="loom-script-nav-toggle"
+												aria-label={chapterNavOpen ? 'Hide navigation' : 'Show navigation'}
+												onClick={() => setChapterNavOpen(!chapterNavOpen)}
+											>
+												<Icon name={chapterNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
+											</button>
+											{chapterNavOpen ? (
+												<aside className="loom-script-nav">
+													<div className="loom-script-nav-head">
+														Navigate
+														<button
+															className="loom-rel-filter"
+															aria-label="Hide navigation"
+															onClick={() => setChapterNavOpen(false)}
+														>
+															<Icon name="chevron-left" />
+														</button>
+													</div>
+													{chapterNavTree.items.map((item) =>
+														renderNavTreeItem(item, 1, (line) => {
+															// `line` is an ABSOLUTE line in the whole script (from
+															// `buildNavTree`) — first back out to a line relative to
+															// this chapter's own excerpt (which starts at the
+															// chapter's own `#` line), then to one relative to
+															// `chapterDraft` (the heading-stripped body). Missing the
+															// first subtraction was why every click landed at the
+															// very end of the chapter (`bodyLine` came out far past
+															// the excerpt's real length, and both branches below just
+															// clamp to their last position when that happens).
+															const bodyLine =
+																line - (chapterNavSection?.line ?? 0) - chapterBodyLineOffset;
+															if (chapterScriptMode === 'pages') {
+																// Jumping to the PAGE's own top isn't precise enough —
+																// a page can run much taller than the visible box, so
+																// the target line could still sit far below the fold
+																// after landing on the right page. Every rendered `<p>`
+																// carries its own `data-line`, so find the specific
+																// element at (or just after — sections/branches don't
+																// render their own paragraph, only the printed marker
+																// that follows them) this line and scroll straight to
+																// IT. Not `scrollIntoView` — see the search-match jump
+																// above for why (cascades through every scrollable
+																// ancestor, including the whole entity page).
+																const excerptLine = bodyLine + chapterBodyLineOffset;
+																const flatEls = chapterBodyPages.flat();
+																const target = flatEls.find((e) => e.line >= excerptLine) ?? flatEls[flatEls.length - 1];
+																const container = chapterScriptPagesRef.current;
+																const targetEl = target
+																	? container?.querySelector(`[data-line="${target.line}"]`)
+																	: null;
+																if (container && targetEl) {
+																	const containerRect = container.getBoundingClientRect();
+																	const targetRect = targetEl.getBoundingClientRect();
+																	const top = container.scrollTop + (targetRect.top - containerRect.top);
+																	container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+																}
+																return;
+															}
+															const offset =
+																chapterDraft.split('\n').slice(0, bodyLine).join('\n').length +
+																(bodyLine > 0 ? 1 : 0);
+															chapterScriptEditorRef.current?.selectRange(offset, offset);
+														})
+													)}
+												</aside>
+											) : null}
+										</div>
+									) : null;
+								const chapterMatches: number[] = [];
+								if (chapterScriptQuery.trim() !== '') {
+									const needle = chapterScriptQuery.toLowerCase();
+									const hay = chapterDraft.toLowerCase();
+									for (
+										let at = hay.indexOf(needle);
+										at !== -1;
+										at = hay.indexOf(needle, at + needle.length)
+									) {
+										chapterMatches.push(at);
+									}
+								}
+								const gotoChapterMatch = (index: number) => {
+									if (chapterMatches.length === 0) return;
+									const next =
+										((index % chapterMatches.length) + chapterMatches.length) % chapterMatches.length;
+									setChapterScriptMatchIndex(next);
+									if (chapterScriptMode === 'script') {
+										const offset = chapterMatches[next];
+										chapterScriptEditorRef.current?.selectRange(offset, offset + chapterScriptQuery.length);
+									} else {
+										window.requestAnimationFrame(() => {
+											const container = chapterScriptPagesRef.current;
+											const mark = container?.querySelectorAll('mark')[next];
+											if (!container || !mark) return;
+											const containerRect = container.getBoundingClientRect();
+											const markRect = mark.getBoundingClientRect();
+											const target =
+												container.scrollTop +
+												(markRect.top - containerRect.top) -
+												container.clientHeight / 2 +
+												markRect.height / 2;
+											container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+										});
+									}
+								};
+								const currentChapterPage = (): number => {
+									const container = chapterScriptPagesRef.current;
+									if (!container) return 1;
+									const top = container.getBoundingClientRect().top;
+									const threshold = top + container.clientHeight / 3;
+									let current = 1;
+									for (const node of container.querySelectorAll<HTMLElement>('[data-page]')) {
+										if (node.getBoundingClientRect().top <= threshold) current = Number(node.dataset.page);
+									}
+									return current;
+								};
+								const switchChapterMode = (next: 'script' | 'pages') => {
+									if (next === chapterScriptMode) return;
+									if (next === 'pages') {
+										const topLine = chapterScriptEditorRef.current?.getTopLine();
+										setChapterScriptMode('pages');
+										if (topLine !== undefined) {
+											const target = chapterPageOfLine(topLine);
+											window.requestAnimationFrame(() => {
+												chapterScriptPagesRef.current
+													?.querySelector(`[data-page="${target}"]`)
+													?.scrollIntoView({ block: 'start', behavior: 'instant' });
+											});
+										}
+									} else {
+										pendingChapterScrollLineRef.current = chapterLineOfPage(currentChapterPage());
+										setChapterScriptMode('script');
+									}
+								};
+								return (
+									<>
+										<div className="loom-script-tabs loom-seg">
+											<button
+												className={
+													chapterScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+												}
+												onClick={() => switchChapterMode('script')}
+											>
+												Script
+											</button>
+											<button
+												className={
+													chapterScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+												}
+												onClick={() => switchChapterMode('pages')}
+											>
+												Pages preview
+											</button>
+										</div>
+										<div className="loom-script-toolbar">
+											<div className="loom-search-wrap">
+												<input
+													className="loom-script-search"
+													type="search"
+													placeholder="Search this chapter…"
+													value={chapterScriptQuery}
+													onChange={(e) => {
+														setChapterScriptQuery(e.target.value);
+														setChapterScriptMatchIndex(0);
+													}}
+													onKeyDown={(e) => {
+														if (e.key !== 'Enter') return;
+														e.preventDefault();
+														gotoChapterMatch(
+															e.shiftKey ? chapterScriptMatchIndex - 1 : chapterScriptMatchIndex + 1
+														);
+													}}
+												/>
+												{chapterScriptQuery !== '' ? (
+													<button
+														className="loom-chip-remove loom-search-clear"
+														aria-label="Clear search"
+														onClick={() => {
+															setChapterScriptQuery('');
+															setChapterScriptMatchIndex(0);
+														}}
+													>
+														✕
+													</button>
+												) : null}
+											</div>
+											<button
+												className="loom-rel-filter"
+												aria-label="Previous match"
+												disabled={chapterMatches.length === 0}
+												onClick={() => gotoChapterMatch(chapterScriptMatchIndex - 1)}
+											>
+												<Icon name="chevron-up" />
+											</button>
+											<button
+												className="loom-rel-filter"
+												aria-label="Next match"
+												disabled={chapterMatches.length === 0}
+												onClick={() => gotoChapterMatch(chapterScriptMatchIndex + 1)}
+											>
+												<Icon name="chevron-down" />
+											</button>
+											<span className="loom-script-stat">
+												{chapterScriptQuery.trim() === ''
+													? ''
+													: chapterMatches.length === 0
+														? 'No matches'
+														: `${(chapterScriptMatchIndex % chapterMatches.length) + 1} of ${chapterMatches.length}`}
+											</span>
+										</div>
+										{chapterScriptMode === 'script' ? (
+											<div className="loom-scene-script">
+												{chapterNavPanel}
+												<FountainField
+													ref={chapterScriptEditorRef}
+													value={chapterDraft}
+													onChange={setChapterBody}
+													onBlur={() => {
+														if (!project || chapterDraft === chapterBodyOf(chapterExcerpt)) return;
+														void editScriptAndSync(plugin, project, (raw) =>
+															replaceChapterBody(raw, record.chapterId, chapterDraft)
+														).then(() => setChapterBody(null));
+													}}
+													characters={scriptParsed?.characters ?? []}
+													locations={scriptParsed?.locations ?? []}
+													entityOptions={entityOptions}
+													onOpenCharacter={(name) => {
+														if (!project) return;
+														const match = plugin.indexer
+															.getAll('character', project.root)
+															.find((c) => c.name.trim().toLowerCase() === name.trim().toLowerCase());
+														if (match) view.openEntity(match.path);
+													}}
+													onOpenLocation={(sceneLoomId) => {
+														const sc = plugin.indexer
+															.getAll('scene', record.project)
+															.find((s) => s.sceneId === sceneLoomId);
+														if (!sc || sc.sceneLocation === '') return;
+														const loc = plugin.indexer.resolve(sc.sceneLocation, sc.path);
+														if (loc) view.openEntity(loc.path);
+													}}
+													onOpenChapter={() => view.openEntity(record.path)}
+													onOpenEntity={(path) => view.openEntity(path)}
+												/>
+											</div>
+										) : (
+											<div className="loom-screenplay loom-scene-pages" ref={chapterScriptPagesRef}>
+												{chapterNavPanel}
+												{chapterBodyPages.map((elements, i) => (
+													<div key={i} className="loom-screenplay-page" data-page={i + 1}>
+														{elements.map((el, j) =>
+															el.type === 'scene-heading' ? (
+																<p key={j} className="loom-sp-scene-heading" data-line={el.line}>
+																	<span
+																		dangerouslySetInnerHTML={{
+																			__html: highlight(
+																				renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))),
+																				chapterScriptQuery
+																			),
+																		}}
+																	/>
+																	{el.sceneNumber ? (
+																		<span className="loom-sp-scene-num">{el.sceneNumber}</span>
+																	) : null}
+																</p>
+															) : (
+																<p
+																	key={j}
+																	className={`loom-sp-${el.type}`}
+																	data-line={el.line}
+																	dangerouslySetInnerHTML={{
+																		__html: highlight(
+																			renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))),
+																			chapterScriptQuery
+																		),
+																	}}
+																/>
+															)
+														)}
+													</div>
+												))}
+											</div>
+										)}
+									</>
+								);
+							})()
+						: (
+							<div className="loom-attendance-empty">This chapter isn't in the script yet.</div>
+						)}
+				</div>
+			) : null}
+
 			{isSession && !scriptMode && project ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">{ENTITY_META[beatType].plural}</span>
@@ -4425,12 +4892,12 @@ function EntityPage({ view }: { view: EntityView }) {
 									/>
 								</div>
 								<div className="loom-obj-finished">
-									{finished && roleOf(finished.type) === 'anchor' ? (
+									{finished && roleOf(finished.type) === questAnchorRole ? (
 										sessionChip(finished, () => commitSet(idx, { finishedOn: '' }))
 									) : (
 										<SearchableSelect
 											placeholder="Finished on…"
-											options={sessionsByDate.map((s) => ({
+											options={questAnchorsSorted.map((s) => ({
 												value: linkTargetOf(s),
 												label: recordLabel(s, project),
 											}))}
@@ -4667,7 +5134,17 @@ function EntityPage({ view }: { view: EntityView }) {
 					    read-only side column — it's `loomSceneCast`, derived from
 					    the script's own character cues, never edited here. */}
 					<div className="loom-field loom-field-sep">
-					<div className="loom-scene-chapter-grid">
+					<div
+						className={
+							sceneCastRecords.length +
+								sceneFactionRecords.length +
+								sceneMentionedLocationRecords.length +
+								sceneItemRecords.length ===
+							0
+								? 'loom-scene-chapter-grid loom-scene-chapter-grid-solo'
+								: 'loom-scene-chapter-grid'
+						}
+					>
 					<div className="loom-scene-chapter-left">
 						<span className="loom-field-label">{ENTITY_META[anchorType].label}</span>
 						<div className="loom-tag-row">
@@ -4800,23 +5277,39 @@ function EntityPage({ view }: { view: EntityView }) {
 								})()
 							: null}
 					</div>
-					<div className="loom-scene-chapter-right">
-						<span className="loom-field-label">Characters in the scene</span>
-						{sceneCastRecords.length > 0 ? (
-							<div className="loom-tag-row">
-								{sceneCastRecords.map((c) => (
-									<EntityChip
-										key={c.path}
-										plugin={plugin}
-										record={c}
-										onOpen={() => view.openEntity(c.path)}
-									/>
-								))}
-							</div>
-						) : (
-							<div className="loom-attendance-empty">No characters recognized in this scene yet.</div>
-						)}
-					</div>
+					{sceneCastRecords.length +
+						sceneFactionRecords.length +
+						sceneMentionedLocationRecords.length +
+						sceneItemRecords.length ===
+					0 ? null : (
+						<div className="loom-scene-chapter-right">
+							<span className="loom-field-label">Entities in the scene</span>
+							{(
+								[
+									['Characters', sceneCastRecords],
+									['Factions', sceneFactionRecords],
+									['Locations', sceneMentionedLocationRecords],
+									['Items', sceneItemRecords],
+								] as const
+							).map(([label, records]) =>
+								records.length === 0 ? null : (
+									<div key={label} className="loom-scene-entity-group">
+										<span className="loom-field-sublabel">{label}</span>
+										<div className="loom-tag-row">
+											{records.map((r) => (
+												<EntityChip
+													key={r.path}
+													plugin={plugin}
+													record={r}
+													onOpen={() => view.openEntity(r.path)}
+												/>
+											))}
+										</div>
+									</div>
+								)
+							)}
+						</div>
+					)}
 					</div>
 					</div>
 					{/* A focused window onto this scene's stretch of the script. The
@@ -4915,9 +5408,95 @@ function EntityPage({ view }: { view: EntityView }) {
 											setSceneScriptMode('script');
 										}
 									};
+									// The raw first line still carries the hidden `[[loom:<id>]]`
+									// marker — `parseSceneHeading` strips it and splits out the
+									// location so it can be a real link instead of leaking the
+									// marker as visible text.
+									const headingParts = parseSceneHeading(sceneExcerpt.split('\n')[0]);
+									// Lives INSIDE the editor box (its own left margin), not above
+									// it — the box is where the spare horizontal space actually is;
+									// stacked in the Script/Pages tabs above it, the toggle collided
+									// with the scene-heading caption right below. `position: sticky`
+									// keeps it pinned to the box's own top-left through the box's
+									// OWN internal scroll (`.loom-scene-script`'s `overflow-y: auto`),
+									// independent of the page's scroll — same zero-height-wrapper
+									// trick as the main Script view's panel, just scoped smaller.
+									const sceneNavPanel =
+										sceneNavTree && sceneNavTree.items.length > 0 ? (
+											<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+												<button
+													className="loom-script-nav-toggle"
+													aria-label={sceneNavOpen ? 'Hide navigation' : 'Show navigation'}
+													onClick={() => setSceneNavOpen(!sceneNavOpen)}
+												>
+													<Icon name={sceneNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
+												</button>
+												{sceneNavOpen ? (
+													<aside className="loom-script-nav">
+														<div className="loom-script-nav-head">
+															Navigate
+															<button
+																className="loom-rel-filter"
+																aria-label="Hide navigation"
+																onClick={() => setSceneNavOpen(false)}
+															>
+																<Icon name="chevron-left" />
+															</button>
+														</div>
+														{sceneNavTree.items.map((item) =>
+															renderNavTreeItem(item, 1, (line) => {
+																// Same fix as the Chapter panel's callback: back out the
+																// scene's own start line before the body offset, or
+																// every click lands at the end of the scene.
+																const bodyLine =
+																	line - (sceneNavScene?.line ?? 0) - sceneBodyLineOffset;
+																if (sceneScriptMode === 'pages') {
+																	// Scroll straight to the target's own rendered element
+																	// (`data-line`), not just the page it's on — see the
+																	// Chapter panel's identical callback for why (a page can
+																	// run much taller than the box, and `scrollIntoView`
+																	// cascades through every scrollable ancestor).
+																	const excerptLine = bodyLine + sceneBodyLineOffset;
+																	const flatEls = sceneBodyPages.flat();
+																	const target = flatEls.find((e) => e.line >= excerptLine) ?? flatEls[flatEls.length - 1];
+																	const container = sceneScriptPagesRef.current;
+																	const targetEl = target
+																		? container?.querySelector(`[data-line="${target.line}"]`)
+																		: null;
+																	if (container && targetEl) {
+																		const containerRect = container.getBoundingClientRect();
+																		const targetRect = targetEl.getBoundingClientRect();
+																		const top = container.scrollTop + (targetRect.top - containerRect.top);
+																		container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+																	}
+																	return;
+																}
+																const offset =
+																	sceneDraft.split('\n').slice(0, bodyLine).join('\n').length +
+																	(bodyLine > 0 ? 1 : 0);
+																sceneScriptEditorRef.current?.selectRange(offset, offset);
+															})
+														)}
+													</aside>
+												) : null}
+											</div>
+										) : null;
 									return (
 										<>
-											<div className="loom-scene-heading">{sceneExcerpt.split('\n')[0]}</div>
+											<div className="loom-scene-heading">
+												{headingParts.intExt ? `${headingParts.intExt} ` : ''}
+												{initialSceneLocation ? (
+													<button
+														className="loom-subloc-link"
+														onClick={() => view.openEntity(initialSceneLocation.path)}
+													>
+														{headingParts.location}
+													</button>
+												) : (
+													<span>{headingParts.location}</span>
+												)}
+												{headingParts.timeOfDay ? ` - ${headingParts.timeOfDay}` : ''}
+											</div>
 											<div className="loom-script-tabs loom-seg">
 												<button
 													className={
@@ -4992,6 +5571,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											</div>
 											{sceneScriptMode === 'script' ? (
 												<div className="loom-scene-script">
+													{sceneNavPanel}
 													<FountainField
 														ref={sceneScriptEditorRef}
 														value={sceneDraft}
@@ -5004,6 +5584,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														}}
 														characters={scriptParsed?.characters ?? []}
 														locations={scriptParsed?.locations ?? []}
+														entityOptions={entityOptions}
 														onOpenCharacter={(name) => {
 															if (!project) return;
 															const match = plugin.indexer
@@ -5011,19 +5592,27 @@ function EntityPage({ view }: { view: EntityView }) {
 																.find((c) => c.name.trim().toLowerCase() === name.trim().toLowerCase());
 															if (match) view.openEntity(match.path);
 														}}
+														onOpenLocation={() => {
+															if (initialSceneLocation) view.openEntity(initialSceneLocation.path);
+														}}
+														onOpenChapter={() => {
+															if (sceneChapterRecord) view.openEntity(sceneChapterRecord.path);
+														}}
+														onOpenEntity={(path) => view.openEntity(path)}
 													/>
 												</div>
 											) : (
 												<div className="loom-screenplay loom-scene-pages" ref={sceneScriptPagesRef}>
+													{sceneNavPanel}
 													{sceneBodyPages.map((elements, i) => (
 														<div key={i} className="loom-screenplay-page" data-page={i + 1}>
 															{elements.map((el, j) =>
 																el.type === 'scene-heading' ? (
-																	<p key={j} className="loom-sp-scene-heading">
+																	<p key={j} className="loom-sp-scene-heading" data-line={el.line}>
 																		<span
 																			dangerouslySetInnerHTML={{
 																				__html: highlight(
-																					renderInline(preventOrphans(elementText(el))),
+																					renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))),
 																					sceneScriptQuery
 																				),
 																			}}
@@ -5036,8 +5625,9 @@ function EntityPage({ view }: { view: EntityView }) {
 																	<p
 																		key={j}
 																		className={`loom-sp-${el.type}`}
+																		data-line={el.line}
 																		dangerouslySetInnerHTML={{
-																			__html: highlight(renderInline(preventOrphans(elementText(el))), sceneScriptQuery),
+																			__html: highlight(renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))), sceneScriptQuery),
 																		}}
 																	/>
 																)
