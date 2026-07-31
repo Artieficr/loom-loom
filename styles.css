@@ -4826,8 +4826,19 @@ span.loom-row-caret {
 	right: 1in;
 }
 
+/* NOT the `margin` shorthand: that sets all four sides at once, so it was
+   silently forcing margin-left/-right back to 0 (and margin-bottom back to
+   1em) on EVERY element below with its own competing declaration — the
+   selector here has an extra `p` type selector on top of the two classes
+   every `.loom-sp-*` rule has, which won the specificity fight regardless of
+   which value actually looked "more specific" to a human reading the file.
+   That's what made every character cue and dialogue block render flush left
+   with no indentation at all, no matter what `.loom-sp-character`/
+   `.loom-sp-dialogue` said. Left/right are left alone here (action/synopsis
+   text wants the page's own 0 margin, which is just never overridden). */
 .loom-view .loom-screenplay p {
-	margin: 0 0 1em;
+	margin-top: 0;
+	margin-bottom: 1em;
 	white-space: pre-wrap;
 }
 
@@ -4860,7 +4871,13 @@ span.loom-row-caret {
 	white-space: pre-line;
 }
 
-.loom-view .loom-sp-scene-heading {
+/* Every element rule below is written as `p.loom-sp-*` (not just
+   `.loom-sp-*`) specifically so it ties `.loom-screenplay p` above on
+   specificity (2 classes + 1 type each) — a tie resolves by source order, and
+   these come later in the file, so they correctly win on the properties both
+   rules set (margin-bottom, for the tight character/parenthetical spacing).
+   `.loom-sp-*` alone (2 classes, no type) would lose that fight outright. */
+.loom-view p.loom-sp-scene-heading {
 	display: flex;
 	justify-content: space-between;
 	align-items: baseline;
@@ -4875,32 +4892,32 @@ span.loom-row-caret {
 	font-weight: bold;
 }
 
-.loom-view .loom-sp-character {
+.loom-view p.loom-sp-character {
 	margin-left: 2.2in;
 	margin-bottom: 0;
 	text-transform: uppercase;
 }
 
-.loom-view .loom-sp-parenthetical {
+.loom-view p.loom-sp-parenthetical {
 	margin-left: 1.6in;
 	margin-bottom: 0;
 }
 
-.loom-view .loom-sp-dialogue {
+.loom-view p.loom-sp-dialogue {
 	margin-left: 1in;
 	margin-right: 1.5in;
 }
 
-.loom-view .loom-sp-transition {
+.loom-view p.loom-sp-transition {
 	text-align: right;
 	text-transform: uppercase;
 }
 
-.loom-view .loom-sp-centered {
+.loom-view p.loom-sp-centered {
 	text-align: center;
 }
 
-.loom-view .loom-sp-lyrics {
+.loom-view p.loom-sp-lyrics {
 	margin-left: 1in;
 	font-style: italic;
 }

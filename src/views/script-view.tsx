@@ -506,9 +506,24 @@ function Script({ view }: { view: ScriptView }) {
 		if (!file || !project || text === null || loadedFor.current !== file.path) return;
 		if (committedFor.current === file.path) return;
 		committedFor.current = file.path;
-		// Runs once per file; `commit` deliberately closes over live state
-		// rather than joining the dependency list, which would re-fire it.
-		void commit(text);
+		const path = file.path;
+		// `syncScenes` decides "does a note for this id already exist?" from
+		// `plugin.indexer`'s CURRENT contents — if this view is restored as part
+		// of Obsidian's own workspace-layout restore, that can run before the
+		// plugin's startup rebuild has populated anything, so every scene looks
+		// new and gets a full set of duplicate Scene/Character/Location notes
+		// created for it (their managed file names dodge the collision with a
+		// " 2" suffix, but the loom ids are true duplicates). Waiting for a
+		// settled index first is the same guard the startup migration already
+		// uses for the same reason. `rebuildNow()` coalesces with an in-flight
+		// pass, so this is free once the index is already built.
+		void plugin.indexer.rebuildNow().then(() => {
+			// The view may have moved on to a different file while this awaited.
+			if (committedFor.current !== path) return;
+			// Runs once per file; `commit` deliberately closes over live state
+			// rather than joining the dependency list, which would re-fire it.
+			void commit(text);
+		});
 	}, [file?.path, project?.root, text !== null]);
 
 	if (!file) return <div className="loom-empty">Loading script…</div>;

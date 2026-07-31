@@ -785,13 +785,27 @@ function escapeHtml(text: string): string {
 /**
  * Fountain's inline emphasis: `**bold**`, `*italic*`, `_underline_`. Applied
  * after escaping, so script text can contain `<` and `&` safely.
+ *
+ * A backslash-escaped `\*`, `\_` or `\\` (the standard Markdown convention for
+ * "this literal character, not a delimiter" — e.g. `Colour\_DP-01` so the
+ * underscore doesn't start an underline) is swapped for a placeholder BEFORE
+ * the emphasis regexes run, so it can never be mistaken for a real delimiter,
+ * then restored as the literal (HTML-escaped) character afterward. Without
+ * this the backslash itself leaked into the rendered output instead of being
+ * consumed by the escape.
  */
 export function renderInline(text: string): string {
-	return escapeHtml(text)
+	const escapedChars: string[] = [];
+	const withPlaceholders = text.replace(/\\([*_\\])/g, (_, ch: string) => {
+		escapedChars.push(ch);
+		return `\uE000${escapedChars.length - 1}\uE000`;
+	});
+	const html = escapeHtml(withPlaceholders)
 		.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
 		.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 		.replace(/\*(.+?)\*/g, '<em>$1</em>')
 		.replace(/_(.+?)_/g, '<u>$1</u>');
+	return html.replace(/\uE000(\d+)\uE000/g, (_, i: string) => escapeHtml(escapedChars[Number(i)]));
 }
 
 /** Screenplay CSS: US Letter margins, 12pt Courier, standard element indents. */
