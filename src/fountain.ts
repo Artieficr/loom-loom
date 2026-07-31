@@ -808,6 +808,73 @@ export function renderInline(text: string): string {
 	return html.replace(/\uE000(\d+)\uE000/g, (_, i: string) => escapeHtml(escapedChars[Number(i)]));
 }
 
+// --- Orphan prevention -------------------------------------------------
+
+/**
+ * English articles, one-letter words, and short prepositions/conjunctions \u2014
+ * the class of "glue" word a compositor never wants left alone at the end of
+ * a wrapped line (`...what does a` / `swear mean...` instead of `...what
+ * does` / `a swear mean...`). Shared by every rendering surface that wraps
+ * prose: the Pages-preview renderer (`preventOrphans`, below \u2014 glues with a
+ * non-breaking space, safe since it's throwaway generated HTML/PDF text) and
+ * the live-preview editor (`findOrphanPairs` \u2014 glues visually via a
+ * `nowrap` decoration in `fountain-field.tsx` instead, since it must never
+ * alter the actual document text).
+ */
+export const ORPHAN_WORDS = new Set([
+	'a',
+	'an',
+	'the',
+	'i',
+	'of',
+	'in',
+	'on',
+	'at',
+	'by',
+	'to',
+	'up',
+	'as',
+	'is',
+	'it',
+	'or',
+	'if',
+	'so',
+	'no',
+	'and',
+	'but',
+	'nor',
+	'yet',
+	'for',
+]);
+
+const ORPHAN_PAIR_RE = /\b([A-Za-z]+)( )([A-Za-z]+)/g;
+
+/**
+ * Finds every `<glue word> <next word>` run and returns the whole pair's
+ * span (word, the space, and the following word) \u2014 for a caller that wants
+ * to mark it non-breaking without touching the underlying text.
+ */
+export function findOrphanPairs(text: string): { from: number; to: number }[] {
+	const spans: { from: number; to: number }[] = [];
+	for (const m of text.matchAll(ORPHAN_PAIR_RE)) {
+		if (!ORPHAN_WORDS.has(m[1].toLowerCase())) continue;
+		spans.push({ from: m.index, to: m.index + m[0].length });
+	}
+	return spans;
+}
+
+/**
+ * Replaces the space after a short "glue" word with a non-breaking space, so
+ * wrapping can never strand it alone at the end of a line. For generated
+ * preview text ONLY (call before `renderInline`/`plainText`) \u2014 never written
+ * back into the script itself.
+ */
+export function preventOrphans(text: string): string {
+	return text.replace(ORPHAN_PAIR_RE, (match, word: string) =>
+		ORPHAN_WORDS.has(word.toLowerCase()) ? match.replace(' ', '\u00A0') : match
+	);
+}
+
 /** Screenplay CSS: US Letter margins, 12pt Courier, standard element indents. */
 const SCREENPLAY_CSS = `
 @page { size: Letter; margin: 1in 1in 1in 1.5in; }

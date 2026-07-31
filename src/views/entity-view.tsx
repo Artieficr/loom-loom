@@ -58,6 +58,7 @@ import {
 import { ConnectedEntities } from './connected-entities';
 import { LinkOption } from './link-textarea';
 import { MarkdownField } from './markdown-field';
+import { FountainField, FountainFieldHandle } from './fountain-field';
 import { extractLinkpath, linkTargetOf, memberEntryLinkpath } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
 import { MiniGraph } from './mini-graph';
@@ -82,7 +83,9 @@ import {
 	setSceneHeadingParts,
 	elementText,
 	parseFountain,
+	preventOrphans,
 	renderInline,
+	type ParsedScript,
 } from '../fountain';
 import { pdfPages } from '../pdf';
 import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
@@ -260,6 +263,11 @@ function EntityPage({ view }: { view: EntityView }) {
 	// hook, so it can't sit behind the early returns below) and unused by every
 	// other entity type.
 	const scriptText = useScriptText(plugin, project);
+	/** Feeds the scene excerpt's live-preview autocomplete the same known
+	 *  names as the main Script view — parsed from the WHOLE script, not
+	 *  just this scene's own slice, so it offers every character/location
+	 *  in the project, not only ones already mentioned in this scene. */
+	const scriptParsed = useMemo(() => (scriptText === null ? null : parseFountain(scriptText)), [scriptText]);
 	/** Draft of the scene's script body (everything under its heading). */
 	const [sceneBody, setSceneBody] = useState<string | null>(null);
 	/** Scene page's Script section: same Script/Pages preview + search pattern
@@ -267,9 +275,21 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [sceneScriptMode, setSceneScriptMode] = useState<'script' | 'pages'>('script');
 	const [sceneScriptQuery, setSceneScriptQuery] = useState('');
 	const [sceneScriptMatchIndex, setSceneScriptMatchIndex] = useState(0);
-	const sceneScriptEditorRef = useRef<HTMLTextAreaElement | null>(null);
+	const sceneScriptEditorRef = useRef<FountainFieldHandle | null>(null);
 	const sceneScriptPagesRef = useRef<HTMLDivElement | null>(null);
+	/** A body line to land on once the scene's Script pane is back — same
+	 *  "stash it, apply once FountainField remounts" pattern as the main
+	 *  Script view's `pendingScrollLineRef`. */
+	const pendingSceneScrollLineRef = useRef<number | null>(null);
 	const writeFm = useFrontmatterWriter(plugin, file);
+
+	useEffect(() => {
+		if (sceneScriptMode !== 'script') return;
+		const line = pendingSceneScrollLineRef.current;
+		if (line === null) return;
+		pendingSceneScrollLineRef.current = null;
+		sceneScriptEditorRef.current?.scrollToLine(line);
+	}, [sceneScriptMode]);
 
 	/** Label a record is searched/shown by in free-text draft inputs: the
 	 *  display name — for sessions, their formatted date (their file name is
@@ -570,6 +590,46 @@ function EntityPage({ view }: { view: EntityView }) {
 	// editable here, so the title and its hidden id can't be typed over.
 	const sceneBodyOf = (excerpt: string) => excerpt.split('\n').slice(1).join('\n').trim();
 	const sceneDraft = sceneBody ?? (sceneExcerpt === null ? '' : sceneBodyOf(sceneExcerpt));
+	/** Same Script/Pages scroll sync as the main Script view, scoped to this
+	 *  scene's own pagination (`pdfPages` run on just the excerpt, not the
+	 *  whole document — a scene's own "page 1" isn't its real position in the
+	 *  script). The editor edits `sceneDraft` (body only, heading stripped),
+	 *  but `sceneBodyPages` is paginated against the full `sceneExcerpt`
+	 *  (heading included, since that's what's actually rendered) — the two
+	 *  don't share a line-numbering origin, so `sceneBodyLineOffset` is
+	 *  computed once to translate between them. `sceneBodyOf`'s `.trim()`
+	 *  means that offset isn't a fixed constant (it eats however many blank
+	 *  lines separate the heading from the body), hence computing it instead
+	 *  of assuming "heading line + 1". */
+	const sceneBodyPages = sceneExcerpt !== null ? pdfPages(parseFountain(sceneExcerpt)) : [];
+	const sceneBodyLineOffset = (() => {
+		if (sceneExcerpt === null) return 0;
+		const afterHeading = sceneExcerpt.split('\n').slice(1);
+		let blanks = 0;
+		while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
+		return 1 + blanks;
+	})();
+	const sceneElementSpan = (el: ParsedScript['elements'][number]) =>
+		el.type === 'dialogue' ? el.text.split('\n').length : 1;
+	/** `bodyLine` is 0-based against `sceneDraft` (what `FountainField.getTopLine`
+	 *  returns); translated to the excerpt's own line numbering before matching
+	 *  against `sceneBodyPages`. */
+	const scenePageOfLine = (bodyLine: number) => {
+		const line = bodyLine + sceneBodyLineOffset;
+		for (let i = 0; i < sceneBodyPages.length; i++) {
+			if (sceneBodyPages[i].some((el) => line >= el.line && line < el.line + sceneElementSpan(el))) return i + 1;
+		}
+		for (let i = 0; i < sceneBodyPages.length; i++) {
+			if (sceneBodyPages[i].some((el) => el.line > line)) return i + 1;
+		}
+		return Math.max(1, sceneBodyPages.length);
+	};
+	const sceneLineOfPage = (page: number) => {
+		const idx = page - 1;
+		if (idx < 0 || idx >= sceneBodyPages.length) return 0;
+		const first = sceneBodyPages[idx][0];
+		return first ? first.line - sceneBodyLineOffset : 0;
+	};
 	/** Chapter pages: the scenes pointing at this chapter, in script order. */
 	const chapterScenes = plugin.indexer
 		.getAll('scene', record.project)
@@ -732,6 +792,30 @@ function EntityPage({ view }: { view: EntityView }) {
 		void editScriptAndSync(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { timeOfDay: value }));
 	};
 
+	/** A confirm dialog that resolves to whether the user actually confirmed —
+	 *  `ConfirmModal` only takes an onConfirm callback, so this wraps its
+	 *  close in a Promise for call sites that need to branch on the answer
+	 *  (aborting an in-flight commit on Cancel) rather than fire-and-forget. */
+	const confirmDialog = (heading: string, detail: string, confirmText: string): Promise<boolean> =>
+		new Promise((resolve) => {
+			let confirmed = false;
+			const modal = new ConfirmModal(
+				plugin.app,
+				heading,
+				detail,
+				() => {
+					confirmed = true;
+				},
+				confirmText
+			);
+			const close = modal.onClose.bind(modal);
+			modal.onClose = () => {
+				close();
+				resolve(confirmed);
+			};
+			modal.open();
+		});
+
 	/**
 	 * Scene page: commits the Location + Sublocation fields together (they're
 	 * interdependent — changing one can mean reparenting the other).
@@ -742,6 +826,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	 * creating a differently-named duplicate and silently detaching the old
 	 * one. Only when nothing is linked yet does it fall back to matching an
 	 * existing location by name, or creating a new one.
+	 *
+	 * A rename that would land on an ALREADY-linked entity's own name asks
+	 * first (`resolveOrRename`'s confirm step, below) — that entity may be
+	 * referenced by other scenes too, so silently renaming it everywhere off
+	 * one scene's heading edit was a trap. Cancelling reverts the field(s)
+	 * that would have been renamed and aborts the whole commit rather than
+	 * leaving Location and Sublocation half-applied against each other.
 	 */
 	const commitSceneLocation = async () => {
 		if (!project || record.type !== 'scene') return;
@@ -751,17 +842,26 @@ function EntityPage({ view }: { view: EntityView }) {
 		const mainKey = mainName.toLowerCase();
 		const topLevel = plugin.indexer.getAll('location', record.project).filter((r) => r.parentLocation === null);
 
+		/** Null return means the user cancelled a rename confirmation — the
+		 *  caller aborts rather than proceeding with a half-decided commit. */
 		const resolveOrRename = async (
 			name: string,
 			key: string,
 			current: EntityRecord | null,
 			candidates: EntityRecord[],
-			onCreate: () => Promise<EntityRecord>
-		): Promise<EntityRecord> => {
+			onCreate: () => Promise<EntityRecord>,
+			kind: string
+		): Promise<EntityRecord | null> => {
 			if (current) {
 				if (current.name.trim().toLowerCase() === key) return current;
 				const other = candidates.find((r) => r.name.trim().toLowerCase() === key && r.path !== current.path);
 				if (other) return other;
+				const ok = await confirmDialog(
+					`Rename "${current.name}" to "${name}"?`,
+					`This ${kind} is renamed everywhere it's referenced, not just on this scene's heading.`,
+					'Rename'
+				);
+				if (!ok) return null;
 				await renameEntityRecord(plugin, project, current, name);
 				return { ...current, name };
 			}
@@ -771,15 +871,26 @@ function EntityPage({ view }: { view: EntityView }) {
 
 		const currentSub = initialSceneLocationParent ? initialSceneLocation : null;
 		const currentMain = initialSceneLocationParent ?? initialSceneLocation;
-		const mainRecord = await resolveOrRename(mainName, mainKey, currentMain, topLevel, async () => {
-			const created = await createEntity(plugin, project, 'location', {
-				name: mainName,
-				tag: '',
-				date: '',
-				description: '',
-			});
-			return { ...pcGroupStub(record.project), path: created.path, name: mainName, type: 'location' };
-		});
+		const mainRecord = await resolveOrRename(
+			mainName,
+			mainKey,
+			currentMain,
+			topLevel,
+			async () => {
+				const created = await createEntity(plugin, project, 'location', {
+					name: mainName,
+					tag: '',
+					date: '',
+					description: '',
+				});
+				return { ...pcGroupStub(record.project), path: created.path, name: mainName, type: 'location' };
+			},
+			'location'
+		);
+		if (!mainRecord) {
+			setSceneMain(currentMain?.name ?? '');
+			return;
+		}
 
 		let target = mainRecord;
 		if (subName !== '') {
@@ -796,22 +907,34 @@ function EntityPage({ view }: { view: EntityView }) {
 				currentSub.parentLocation != null &&
 				plugin.indexer.resolve(currentSub.parentLocation, currentSub.path)?.path === mainRecord.path;
 			if (subUnderSameParent) {
-				target = await resolveOrRename(subName, subKey, currentSub, siblings, async () => {
-					const created = await createEntity(plugin, project, 'location', {
-						name: subName,
-						tag: '',
-						date: '',
-						description: '',
-						parentLocation: linkTargetOf(mainRecord),
-					});
-					return {
-						...pcGroupStub(record.project),
-						path: created.path,
-						name: subName,
-						type: 'location',
-						parentLocation: linkTargetOf(mainRecord),
-					};
-				});
+				const resolved = await resolveOrRename(
+					subName,
+					subKey,
+					currentSub,
+					siblings,
+					async () => {
+						const created = await createEntity(plugin, project, 'location', {
+							name: subName,
+							tag: '',
+							date: '',
+							description: '',
+							parentLocation: linkTargetOf(mainRecord),
+						});
+						return {
+							...pcGroupStub(record.project),
+							path: created.path,
+							name: subName,
+							type: 'location',
+							parentLocation: linkTargetOf(mainRecord),
+						};
+					},
+					'sublocation'
+				);
+				if (!resolved) {
+					setSceneSub(currentSub?.name ?? '');
+					return;
+				}
+				target = resolved;
 			} else if (currentSub) {
 				// The main location changed while a sublocation was already
 				// linked — follow it onto the new parent instead of spawning a
@@ -819,6 +942,17 @@ function EntityPage({ view }: { view: EntityView }) {
 				const other = siblings.find((r) => r.name.trim().toLowerCase() === subKey);
 				if (other) target = other;
 				else {
+					if (currentSub.name.trim().toLowerCase() !== subKey) {
+						const ok = await confirmDialog(
+							`Rename "${currentSub.name}" to "${subName}"?`,
+							"This sublocation is renamed everywhere it's referenced, not just on this scene's heading.",
+							'Rename'
+						);
+						if (!ok) {
+							setSceneSub(currentSub.name);
+							return;
+						}
+					}
 					await reparentLocation(currentSub, mainRecord);
 					target = { ...currentSub, name: subName, parentLocation: linkTargetOf(mainRecord) };
 					if (currentSub.name.trim().toLowerCase() !== subKey) {
@@ -852,6 +986,41 @@ function EntityPage({ view }: { view: EntityView }) {
 		void editScriptAndSync(plugin, project, (raw) =>
 			setSceneHeadingParts(raw, record.sceneId, { location: joinLocationSub(mainRecord.name, subName) })
 		);
+	};
+
+	/**
+	 * The Sublocation field's own blur handler — clearing it (while one was
+	 * actually linked) used to just detach it from this scene's heading and
+	 * leave the sublocation's own note behind, orphaned but still sitting in
+	 * the vault. Now it asks first, since "clear the field" reads as "I don't
+	 * want this sublocation" rather than "keep the note around unreferenced".
+	 * Reverts the field immediately (so it doesn't sit visually empty while
+	 * the vault still points at the old sublocation) and only actually clears
+	 * it — deleting the note — if the user confirms.
+	 */
+	const commitSceneSubBlur = () => {
+		const currentSub = initialSceneLocationParent ? initialSceneLocation : null;
+		if (sceneSub.trim() === '' && currentSub) {
+			const subName = currentSub.name;
+			setSceneSub(subName);
+			void confirmDialog(
+				`Delete "${subName}" sublocation?`,
+				"Clearing this field removes the sublocation's own note, not just this scene's heading. The note is moved to the trash.",
+				'Delete'
+			).then((ok) => {
+				if (!ok) return;
+				setSceneSub('');
+				void commitSceneLocation().then(() => {
+					const f = plugin.app.vault.getFileByPath(currentSub.path);
+					if (!f) return;
+					void purgeEntityReferences(plugin, currentSub.path, currentSub.project).finally(() =>
+						plugin.app.fileManager.trashFile(f)
+					);
+				});
+			});
+			return;
+		}
+		void commitSceneLocation();
 	};
 
 	/** Resolves a draft value — display name or link target — to its record. */
@@ -3438,7 +3607,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								setSceneSub(v);
 								void commitSceneLocation();
 							}}
-							onBlur={() => void commitSceneLocation()}
+							onBlur={commitSceneSubBlur}
 						/>
 						<input
 							type="text"
@@ -3453,7 +3622,9 @@ function EntityPage({ view }: { view: EntityView }) {
 						/>
 					</div>
 					<span className="loom-field-hint">
-						{joinLocationSub(sceneMain || '…', sceneSub) + (sceneTime.trim() !== '' ? ` - ${sceneTime.trim()}` : '')}
+						{(sceneIntExt.trim() !== '' ? `${sceneIntExt.trim()} ` : '') +
+							joinLocationSub(sceneMain || '…', sceneSub) +
+							(sceneTime.trim() !== '' ? ` - ${sceneTime.trim()}` : '')}
 					</span>
 				</div>
 			) : null}
@@ -4674,13 +4845,8 @@ function EntityPage({ view }: { view: EntityView }) {
 										const next = ((index % sceneMatches.length) + sceneMatches.length) % sceneMatches.length;
 										setSceneScriptMatchIndex(next);
 										if (sceneScriptMode === 'script') {
-											const editor = sceneScriptEditorRef.current;
-											if (!editor) return;
 											const offset = sceneMatches[next];
-											editor.focus();
-											editor.setSelectionRange(offset, offset + sceneScriptQuery.length);
-											const ratio = offset / Math.max(1, sceneDraft.length);
-											editor.scrollTop = Math.max(0, ratio * editor.scrollHeight - editor.clientHeight / 2);
+											sceneScriptEditorRef.current?.selectRange(offset, offset + sceneScriptQuery.length);
 										} else {
 											// Pages mode has no offset-to-page mapping to scroll by (this
 											// excerpt isn't laid out against the whole document) — the
@@ -4706,6 +4872,49 @@ function EntityPage({ view }: { view: EntityView }) {
 											});
 										}
 									};
+									/** The page currently at the top of the Pages preview's
+									 *  viewport — read on demand from the DOM rather than kept
+									 *  as tracked state, since this scene preview (unlike the
+									 *  main Script view) has no page-number readout that would
+									 *  otherwise need that state anyway. Mirrors the main view's
+									 *  scroll-tracking logic exactly (top third of the container
+									 *  counts as "current"). */
+									const currentScenePage = (): number => {
+										const container = sceneScriptPagesRef.current;
+										if (!container) return 1;
+										const top = container.getBoundingClientRect().top;
+										const threshold = top + container.clientHeight / 3;
+										let current = 1;
+										for (const node of container.querySelectorAll<HTMLElement>('[data-page]')) {
+											if (node.getBoundingClientRect().top <= threshold) current = Number(node.dataset.page);
+										}
+										return current;
+									};
+									/** Same restore-your-place logic as the main Script view's
+									 *  `switchMode`, against this scene's own `sceneBodyPages`
+									 *  instead of the whole document's. Leaving Pages scrolls
+									 *  immediately ('instant' — no animated jump across the whole
+									 *  preview on every toggle, matching the main view's fix for
+									 *  the same issue); leaving Script stashes a line for the
+									 *  effect above to apply once `FountainField` remounts. */
+									const switchSceneMode = (next: 'script' | 'pages') => {
+										if (next === sceneScriptMode) return;
+										if (next === 'pages') {
+											const topLine = sceneScriptEditorRef.current?.getTopLine();
+											setSceneScriptMode('pages');
+											if (topLine !== undefined) {
+												const target = scenePageOfLine(topLine);
+												window.requestAnimationFrame(() => {
+													sceneScriptPagesRef.current
+														?.querySelector(`[data-page="${target}"]`)
+														?.scrollIntoView({ block: 'start', behavior: 'instant' });
+												});
+											}
+										} else {
+											pendingSceneScrollLineRef.current = sceneLineOfPage(currentScenePage());
+											setSceneScriptMode('script');
+										}
+									};
 									return (
 										<>
 											<div className="loom-scene-heading">{sceneExcerpt.split('\n')[0]}</div>
@@ -4714,7 +4923,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													className={
 														sceneScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
 													}
-													onClick={() => setSceneScriptMode('script')}
+													onClick={() => switchSceneMode('script')}
 												>
 													Script
 												</button>
@@ -4722,7 +4931,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													className={
 														sceneScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
 													}
-													onClick={() => setSceneScriptMode('pages')}
+													onClick={() => switchSceneMode('pages')}
 												>
 													Pages preview
 												</button>
@@ -4782,30 +4991,39 @@ function EntityPage({ view }: { view: EntityView }) {
 												</span>
 											</div>
 											{sceneScriptMode === 'script' ? (
-												<textarea
-													ref={sceneScriptEditorRef}
-													className="loom-scene-script"
-													spellCheck={false}
-													value={sceneDraft}
-													onChange={(e) => setSceneBody(e.target.value)}
-													onBlur={() => {
-														if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
-														void editScriptAndSync(plugin, project, (raw) =>
-															replaceSceneBody(raw, record.sceneId, sceneDraft)
-														).then(() => setSceneBody(null));
-													}}
-												/>
+												<div className="loom-scene-script">
+													<FountainField
+														ref={sceneScriptEditorRef}
+														value={sceneDraft}
+														onChange={setSceneBody}
+														onBlur={() => {
+															if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
+															void editScriptAndSync(plugin, project, (raw) =>
+																replaceSceneBody(raw, record.sceneId, sceneDraft)
+															).then(() => setSceneBody(null));
+														}}
+														characters={scriptParsed?.characters ?? []}
+														locations={scriptParsed?.locations ?? []}
+														onOpenCharacter={(name) => {
+															if (!project) return;
+															const match = plugin.indexer
+																.getAll('character', project.root)
+																.find((c) => c.name.trim().toLowerCase() === name.trim().toLowerCase());
+															if (match) view.openEntity(match.path);
+														}}
+													/>
+												</div>
 											) : (
 												<div className="loom-screenplay loom-scene-pages" ref={sceneScriptPagesRef}>
-													{pdfPages(parseFountain(sceneExcerpt)).map((elements, i) => (
-														<div key={i} className="loom-screenplay-page">
+													{sceneBodyPages.map((elements, i) => (
+														<div key={i} className="loom-screenplay-page" data-page={i + 1}>
 															{elements.map((el, j) =>
 																el.type === 'scene-heading' ? (
 																	<p key={j} className="loom-sp-scene-heading">
 																		<span
 																			dangerouslySetInnerHTML={{
 																				__html: highlight(
-																					renderInline(elementText(el)),
+																					renderInline(preventOrphans(elementText(el))),
 																					sceneScriptQuery
 																				),
 																			}}
@@ -4819,7 +5037,7 @@ function EntityPage({ view }: { view: EntityView }) {
 																		key={j}
 																		className={`loom-sp-${el.type}`}
 																		dangerouslySetInnerHTML={{
-																			__html: highlight(renderInline(elementText(el)), sceneScriptQuery),
+																			__html: highlight(renderInline(preventOrphans(elementText(el))), sceneScriptQuery),
 																		}}
 																	/>
 																)

@@ -4642,7 +4642,7 @@ span.loom-row-caret {
 	top: 0;
 	left: 0;
 	z-index: 4;
-	width: 17em;
+	width: 29em;
 	max-height: 80vh;
 	overflow-y: auto;
 	background: var(--background-primary);
@@ -4692,14 +4692,34 @@ span.loom-row-caret {
 	background: none;
 }
 
+/* A nested `##`/`###` section under a chapter — same jump-target button,
+   lighter weight so it reads as a sub-level rather than another chapter. */
+.loom-view button.loom-script-nav-chapter.loom-script-nav-sub {
+	font-weight: 500;
+	font-size: 0.92em;
+	color: var(--text-muted);
+	margin-top: 0.2em;
+}
+
+/* Indents everything under a chapter/section one step — scenes, and any
+   further-nested sections recurse into their own `.loom-script-nav-children`
+   for additional indent. */
+.loom-view .loom-script-nav-children {
+	padding-left: 0.9em;
+}
+
 .loom-view .loom-script-nav-empty {
 	color: var(--text-faint);
 	font-size: 0.85em;
 }
 
-/* Scene entries: number in a fixed gutter so titles line up. */
-.loom-view .loom-script-nav-scene {
+/* Scene entries: number in a fixed gutter so titles line up. `button` type
+   selector (like `.loom-script-nav-chapter` above) so this beats Obsidian's
+   own default button styling on specificity — a bare class-only rule lost
+   that fight and appeared centered instead of left-aligned. */
+.loom-view button.loom-script-nav-scene {
 	display: flex;
+	justify-content: flex-start;
 	gap: 0.5em;
 	width: 100%;
 	background: none;
@@ -4846,6 +4866,138 @@ span.loom-row-caret {
 	font-size: 0.9em;
 	line-height: 1.45;
 	tab-size: 4;
+}
+
+/* Live-preview Fountain editor (fountain-field.tsx). The wrapper
+   (.loom-script-editor above) owns the resize handle and outer scrollbar;
+   the CM6 editor just fills it — no second scrollbar. Background is a fixed
+   white/black pair, not theme tokens — same reasoning as the Pages preview's
+   `.loom-screenplay-page`: this is meant to read as a sheet of paper, not as
+   an ordinary editor pane, regardless of the vault's color scheme. */
+.loom-fountain-field,
+.loom-fountain-field .cm-editor {
+	height: 100%;
+}
+
+.loom-fountain-field .cm-editor {
+	background: #fff;
+	color: #000;
+}
+
+/* Column width matches the PDF's own text width exactly (`TEXT_W` in
+   pdf.ts: 8.5in page − 1.5in left margin − 1in right margin = 6in), and
+   every element's left/right padding below is that same LAYOUT table's
+   indent/width pair, so the live editor's proportions are the printed
+   page's proportions, not an arbitrary editor-sized guess. */
+.loom-fountain-field .cm-content {
+	max-width: 6in;
+	margin: 0 auto;
+	padding: 1em 0;
+	font-family: inherit;
+	caret-color: var(--caret-color);
+}
+
+.loom-fountain-field .cm-line {
+	padding: 0;
+}
+
+.loom-fountain-field .cm-line.loom-fountain-scene-heading {
+	font-weight: 700;
+	text-transform: uppercase;
+	color: var(--text-accent);
+	margin-top: 1em;
+}
+
+.loom-fountain-field .cm-line.loom-fountain-character {
+	font-weight: 700;
+	text-transform: uppercase;
+	padding-left: 2.2in;
+}
+
+.loom-fountain-field .cm-line.loom-fountain-dialogue {
+	padding-left: 1in;
+	padding-right: 1.5in;
+}
+
+.loom-fountain-field .cm-line.loom-fountain-parenthetical {
+	font-style: italic;
+	color: var(--text-muted);
+	padding-left: 1.6in;
+	padding-right: 2.4in;
+}
+
+.loom-fountain-field .cm-line.loom-fountain-transition {
+	font-weight: 700;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	text-align: right;
+}
+
+.loom-fountain-field .cm-line.loom-fountain-section {
+	font-weight: 700;
+	color: var(--text-accent);
+}
+
+.loom-fountain-field .cm-line.loom-fountain-synopsis {
+	font-style: italic;
+	color: var(--text-faint);
+}
+
+.loom-fountain-field .cm-line.loom-fountain-centered {
+	text-align: center;
+}
+
+.loom-fountain-field .cm-line.loom-fountain-lyrics {
+	font-style: italic;
+	padding-left: 1in;
+	padding-right: 1.5in;
+}
+
+.loom-fountain-field .cm-line.loom-fountain-page-break {
+	color: var(--text-faint);
+	letter-spacing: 0.1em;
+}
+
+.loom-fountain-field .loom-fountain-char-link,
+.loom-fountain-field .loom-fountain-scene-link,
+.loom-fountain-field .loom-fountain-chapter-link {
+	cursor: var(--cursor-link);
+}
+
+.loom-fountain-field .loom-fountain-char-link:hover,
+.loom-fountain-field .loom-fountain-scene-link:hover,
+.loom-fountain-field .loom-fountain-chapter-link:hover {
+	text-decoration: underline;
+}
+
+/* Inline emphasis (scanEmphasis in fountain-field.tsx) — styled WITH the
+   raw `**`/`*`/`_` delimiters still showing, deliberately unlike
+   markdown-field.tsx's raw-only-at-cursor model: seeing which literal
+   characters are producing the formatting is the point here. */
+.loom-fountain-field .loom-fountain-bold {
+	font-weight: 700;
+}
+
+.loom-fountain-field .loom-fountain-italic {
+	font-style: italic;
+}
+
+.loom-fountain-field .loom-fountain-bold-italic {
+	font-weight: 700;
+	font-style: italic;
+}
+
+.loom-fountain-field .loom-fountain-underline {
+	text-decoration: underline;
+}
+
+/* Orphan prevention (fountain.ts `findOrphanPairs`) — a short glue word
+   (article, one-letter word, short preposition/conjunction) is never left
+   alone at the end of a wrapped line; glued to the word after it visually
+   instead of via a real non-breaking space, since this editor must never
+   alter the document text. */
+.loom-fountain-field .loom-fountain-nowrap {
+	white-space: nowrap;
 }
 
 /* --- Screenplay preview --------------------------------------------------
@@ -5089,11 +5241,14 @@ span.loom-row-caret {
    the box instead of growing the page around them. 210mm: A4's own WIDTH,
    not an arbitrary "297mm * 0.7" — ISO 216's ratio is 1:√2, so A4's width is
    already ~70.7% of its height, landing at "around 70% shorter" from a real
-   physical measurement of the same sheet rather than a made-up fraction. */
-textarea.loom-scene-script {
+   physical measurement of the same sheet rather than a made-up fraction. Was
+   a `<textarea>`, now the wrapper div around `FountainField` (same CM6
+   live-preview editor the main Script view uses — see fountain-field.tsx);
+   the `div` type selector keeps this rule as specific as the old
+   `textarea.loom-scene-script` one was, for the same reason noted above. */
+div.loom-scene-script {
 	width: 100%;
 	height: 210mm;
-	resize: none;
 	overflow-y: auto;
 }
 
