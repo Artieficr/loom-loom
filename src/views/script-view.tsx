@@ -1030,21 +1030,35 @@ function Script({ view }: { view: ScriptView }) {
 					</div>
 
 					<div className="loom-script-toolbar">
-						<input
-							className="loom-script-search"
-							type="search"
-							placeholder="Search the script…"
-							value={query}
-							onChange={(e) => {
-								setQuery(e.target.value);
-								setMatchIndex(0);
-							}}
-							onKeyDown={(e) => {
-								if (e.key !== 'Enter') return;
-								e.preventDefault();
-								gotoMatch(e.shiftKey ? matchIndex - 1 : matchIndex + 1);
-							}}
-						/>
+						<div className="loom-search-wrap">
+							<input
+								className="loom-script-search"
+								type="search"
+								placeholder="Search the script…"
+								value={query}
+								onChange={(e) => {
+									setQuery(e.target.value);
+									setMatchIndex(0);
+								}}
+								onKeyDown={(e) => {
+									if (e.key !== 'Enter') return;
+									e.preventDefault();
+									gotoMatch(e.shiftKey ? matchIndex - 1 : matchIndex + 1);
+								}}
+							/>
+							{query !== '' ? (
+								<button
+									className="loom-chip-remove loom-search-clear"
+									aria-label="Clear search"
+									onClick={() => {
+										setQuery('');
+										setMatchIndex(0);
+									}}
+								>
+									✕
+								</button>
+							) : null}
+						</div>
 						<button
 							className="loom-rel-filter"
 							aria-label="Previous match"
@@ -1270,7 +1284,7 @@ function Script({ view }: { view: ScriptView }) {
  * Splits on tags first so a query like "strong" can't match inside `<strong>`
  * and corrupt the markup.
  */
-function highlight(html: string, query: string): string {
+export function highlight(html: string, query: string): string {
 	const needle = query.trim();
 	if (needle === '') return html;
 	const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

@@ -213,6 +213,20 @@ function EntityList({
 			.sort((a, b) => dir * compare(a, b, sort));
 	}, [plugin.indexer, version, project, type, query, sort, sortAsc, tagFilter, questStatus, eventInvolved, eventLocation, role]);
 
+	/** Scene/Chapter counter: each one's position in canonical SCRIPT order
+	 *  (ascending, ignoring whatever sort/direction is currently on screen) —
+	 *  a fixed property of the entity, not "which row happens to be drawn
+	 *  first". Without this, reversing the sort direction just recounted
+	 *  1..N from the new top instead of flipping which number lands on which
+	 *  row, so the last scene read "1" while ascending. Built from `records`
+	 *  (the current search/filter set), so numbering stays dense under a
+	 *  filter rather than showing gappy global positions. */
+	const scriptOrder = useMemo(() => {
+		if (type !== 'scene' && type !== 'chapter') return new Map<string, number>();
+		const canonical = [...records].sort((a, b) => compare(a, b, 'order'));
+		return new Map(canonical.map((r, i) => [r.path, i + 1]));
+	}, [records, type]);
+
 	// Locations nest under their parentLocation, items under their original (a
 	// character-specific copy under the item it derives from). Searching flattens
 	// the list — a match shouldn't hide inside a collapsed parent. Cycles fall
@@ -955,9 +969,27 @@ function EntityList({
 		</>
 	);
 
+	/** A scene's own recognized cast, resolved from `sceneCast`. */
+	const sceneCastOf = (r: EntityRecord): EntityRecord[] =>
+		r.sceneCast
+			.map((lp) => plugin.indexer.resolve(lp, r.path))
+			.filter((c): c is EntityRecord => c != null);
+	/** A chapter's cast: the union of every scene's cast under it, in
+	 *  first-seen order — chapters don't carry their own cast field, this
+	 *  reads it straight off the scenes that point at them via `sceneChapter`. */
+	const chapterCastOf = (r: EntityRecord): EntityRecord[] => {
+		const seen = new Map<string, EntityRecord>();
+		for (const sc of plugin.indexer.getAll('scene', r.project)) {
+			if (sc.sceneChapter === '' || plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path !== r.path) continue;
+			for (const c of sceneCastOf(sc)) seen.set(c.path, c);
+		}
+		return [...seen.values()];
+	};
+
 	const row = (r: EntityRecord, depth: number) => {
 		const hasChildren = nested && (childrenOf.get(r.path)?.length ?? 0) > 0;
 		const isUnspecRegion = r.path === UNSPEC_REGION;
+		const cast = r.type === 'scene' ? sceneCastOf(r) : r.type === 'chapter' ? chapterCastOf(r) : [];
 		return (
 			<div
 				key={r.path}
@@ -989,9 +1021,24 @@ function EntityList({
 						<span className="loom-row-caret" aria-hidden="true" />
 					)
 				) : null}
+				{r.type === 'scene' || r.type === 'chapter' ? (
+					<span className="loom-scene-row-num">{scriptOrder.get(r.path)}</span>
+				) : null}
+				{/* Always reserved (even blank) so the title's start position
+				    doesn't shift for a forced heading with no INT./EXT. */}
+				{r.type === 'scene' ? <span className="loom-scene-row-intext">{r.sceneIntExt}</span> : null}
 				<span className="loom-row-name">{recordLabel(r, project)}</span>
 				{hasChildren ? (
 					<span className="loom-row-count">{childrenOf.get(r.path)?.length}</span>
+				) : null}
+				{cast.length > 0 ? (
+					// Stops a chip click from bubbling into the row's own onClick,
+					// which would open THIS scene/chapter instead of the character.
+					<div className="loom-row-cast" onClick={(e) => e.stopPropagation()}>
+						{cast.map((c) => (
+							<EntityChip key={c.path} plugin={plugin} record={c} onOpen={() => view.openEntity(c.path)} />
+						))}
+					</div>
 				) : null}
 				{(() => {
 					// A character-specific item copy carries its owner as a chip.

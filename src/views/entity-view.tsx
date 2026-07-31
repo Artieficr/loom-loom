@@ -63,7 +63,14 @@ import { fmLoomValue, setLoomKey } from '../fm';
 import { MiniGraph } from './mini-graph';
 import { findMapsFile } from './map-view';
 import { useIndexVersion } from './hooks';
-import { editScript, editScriptAndSync, pushChapterTitles, sceneScriptText, useScriptText } from './script-view';
+import {
+	editScript,
+	editScriptAndSync,
+	highlight,
+	pushChapterTitles,
+	sceneScriptText,
+	useScriptText,
+} from './script-view';
 import {
 	moveSceneToSection,
 	moveSceneBefore,
@@ -73,7 +80,11 @@ import {
 	removeScene,
 	joinLocationSub,
 	setSceneHeadingParts,
+	elementText,
+	parseFountain,
+	renderInline,
 } from '../fountain';
+import { pdfPages } from '../pdf';
 import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
 import type LoomLoomPlugin from '../main';
 
@@ -251,6 +262,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	const scriptText = useScriptText(plugin, project);
 	/** Draft of the scene's script body (everything under its heading). */
 	const [sceneBody, setSceneBody] = useState<string | null>(null);
+	/** Scene page's Script section: same Script/Pages preview + search pattern
+	 *  as the main Script view, scoped to just this scene's own excerpt. */
+	const [sceneScriptMode, setSceneScriptMode] = useState<'script' | 'pages'>('script');
+	const [sceneScriptQuery, setSceneScriptQuery] = useState('');
+	const [sceneScriptMatchIndex, setSceneScriptMatchIndex] = useState(0);
+	const sceneScriptEditorRef = useRef<HTMLTextAreaElement | null>(null);
+	const sceneScriptPagesRef = useRef<HTMLDivElement | null>(null);
 	const writeFm = useFrontmatterWriter(plugin, file);
 
 	/** Label a record is searched/shown by in free-text draft inputs: the
@@ -541,6 +559,12 @@ function EntityPage({ view }: { view: EntityView }) {
 		scriptMode && (record.type === 'chapter' ? record.chapterId !== '' : record.sceneId !== '');
 	const sceneChapterRecord =
 		record.sceneChapter !== '' ? plugin.indexer.resolve(record.sceneChapter, record.path) : null;
+	/** Script-recognized cast — `loomSceneCast`, derived from the script's own
+	 *  character cues by `syncScenes`, shown read-only (editing a scene's cast
+	 *  means writing the dialogue that names them, not this list). */
+	const sceneCastRecords = record.sceneCast
+		.map((lp) => plugin.indexer.resolve(lp, record.path))
+		.filter((r): r is EntityRecord => r != null);
 	const sceneExcerpt = sceneScriptText(scriptText, record.sceneId);
 	// The heading line is the script's, not the note's — only what follows it is
 	// editable here, so the title and its hidden id can't be typed over.
@@ -4468,8 +4492,12 @@ function EntityPage({ view }: { view: EntityView }) {
 					    Either step physically moves the writing in the script, so
 					    the note's chapter link and the script can never drift
 					    apart — a chapter link edited any other way would just be
-					    undone by the next sync. */}
+					    undone by the next sync. Cast sits alongside it as a
+					    read-only side column — it's `loomSceneCast`, derived from
+					    the script's own character cues, never edited here. */}
 					<div className="loom-field loom-field-sep">
+					<div className="loom-scene-chapter-grid">
+					<div className="loom-scene-chapter-left">
 						<span className="loom-field-label">{ENTITY_META[anchorType].label}</span>
 						<div className="loom-tag-row">
 							{sceneChapterRecord ? (
@@ -4601,30 +4629,211 @@ function EntityPage({ view }: { view: EntityView }) {
 								})()
 							: null}
 					</div>
+					<div className="loom-scene-chapter-right">
+						<span className="loom-field-label">Characters in the scene</span>
+						{sceneCastRecords.length > 0 ? (
+							<div className="loom-tag-row">
+								{sceneCastRecords.map((c) => (
+									<EntityChip
+										key={c.path}
+										plugin={plugin}
+										record={c}
+										onOpen={() => view.openEntity(c.path)}
+									/>
+								))}
+							</div>
+						) : (
+							<div className="loom-attendance-empty">No characters recognized in this scene yet.</div>
+						)}
+					</div>
+					</div>
+					</div>
 					{/* A focused window onto this scene's stretch of the script. The
 					    heading (and the hidden id on it) stays owned by the script,
-					    so only the writing beneath it is editable here. */}
+					    so only the writing beneath it is editable here. Script/Pages
+					    preview + search mirror the main Script view exactly, scoped
+					    to just this scene's own excerpt. */}
 					<div className="loom-field loom-field-sep">
 						<span className="loom-field-label">Script</span>
-						{sceneExcerpt !== null ? (
-							<>
-								<div className="loom-scene-heading">{sceneExcerpt.split('\n')[0]}</div>
-								<textarea
-									className="loom-scene-script"
-									spellCheck={false}
-									value={sceneDraft}
-									onChange={(e) => setSceneBody(e.target.value)}
-									onBlur={() => {
-										if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
-										void editScriptAndSync(plugin, project, (raw) =>
-											replaceSceneBody(raw, record.sceneId, sceneDraft)
-										).then(() => setSceneBody(null));
-									}}
-								/>
-							</>
-						) : (
-							<div className="loom-attendance-empty">This scene isn't in the script yet.</div>
-						)}
+						{sceneExcerpt !== null
+							? (() => {
+									const sceneMatches: number[] = [];
+									if (sceneScriptQuery.trim() !== '') {
+										const needle = sceneScriptQuery.toLowerCase();
+										const hay = sceneDraft.toLowerCase();
+										for (
+											let at = hay.indexOf(needle);
+											at !== -1;
+											at = hay.indexOf(needle, at + needle.length)
+										) {
+											sceneMatches.push(at);
+										}
+									}
+									const gotoSceneMatch = (index: number) => {
+										if (sceneMatches.length === 0) return;
+										const next = ((index % sceneMatches.length) + sceneMatches.length) % sceneMatches.length;
+										setSceneScriptMatchIndex(next);
+										if (sceneScriptMode === 'script') {
+											const editor = sceneScriptEditorRef.current;
+											if (!editor) return;
+											const offset = sceneMatches[next];
+											editor.focus();
+											editor.setSelectionRange(offset, offset + sceneScriptQuery.length);
+											const ratio = offset / Math.max(1, sceneDraft.length);
+											editor.scrollTop = Math.max(0, ratio * editor.scrollHeight - editor.clientHeight / 2);
+										} else {
+											// Pages mode has no offset-to-page mapping to scroll by (this
+											// excerpt isn't laid out against the whole document) — the
+											// `<mark>`s render in the same reading order as `sceneMatches`,
+											// so the Nth one in the DOM is the Nth match; wait a frame for
+											// the highlight to actually be in the DOM before finding it.
+											// Scrolled manually via scrollTop rather than the mark's own
+											// `scrollIntoView`, which scrolls EVERY scrollable ancestor
+											// needed to bring it into view — including the whole entity
+											// page behind this one small preview box, not just the box.
+											window.requestAnimationFrame(() => {
+												const container = sceneScriptPagesRef.current;
+												const mark = container?.querySelectorAll('mark')[next];
+												if (!container || !mark) return;
+												const containerRect = container.getBoundingClientRect();
+												const markRect = mark.getBoundingClientRect();
+												const target =
+													container.scrollTop +
+													(markRect.top - containerRect.top) -
+													container.clientHeight / 2 +
+													markRect.height / 2;
+												container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+											});
+										}
+									};
+									return (
+										<>
+											<div className="loom-scene-heading">{sceneExcerpt.split('\n')[0]}</div>
+											<div className="loom-script-tabs loom-seg">
+												<button
+													className={
+														sceneScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+													}
+													onClick={() => setSceneScriptMode('script')}
+												>
+													Script
+												</button>
+												<button
+													className={
+														sceneScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+													}
+													onClick={() => setSceneScriptMode('pages')}
+												>
+													Pages preview
+												</button>
+											</div>
+											<div className="loom-script-toolbar">
+												<div className="loom-search-wrap">
+													<input
+														className="loom-script-search"
+														type="search"
+														placeholder="Search this scene…"
+														value={sceneScriptQuery}
+														onChange={(e) => {
+															setSceneScriptQuery(e.target.value);
+															setSceneScriptMatchIndex(0);
+														}}
+														onKeyDown={(e) => {
+															if (e.key !== 'Enter') return;
+															e.preventDefault();
+															gotoSceneMatch(e.shiftKey ? sceneScriptMatchIndex - 1 : sceneScriptMatchIndex + 1);
+														}}
+													/>
+													{sceneScriptQuery !== '' ? (
+														<button
+															className="loom-chip-remove loom-search-clear"
+															aria-label="Clear search"
+															onClick={() => {
+																setSceneScriptQuery('');
+																setSceneScriptMatchIndex(0);
+															}}
+														>
+															✕
+														</button>
+													) : null}
+												</div>
+												<button
+													className="loom-rel-filter"
+													aria-label="Previous match"
+													disabled={sceneMatches.length === 0}
+													onClick={() => gotoSceneMatch(sceneScriptMatchIndex - 1)}
+												>
+													<Icon name="chevron-up" />
+												</button>
+												<button
+													className="loom-rel-filter"
+													aria-label="Next match"
+													disabled={sceneMatches.length === 0}
+													onClick={() => gotoSceneMatch(sceneScriptMatchIndex + 1)}
+												>
+													<Icon name="chevron-down" />
+												</button>
+												<span className="loom-script-stat">
+													{sceneScriptQuery.trim() === ''
+														? ''
+														: sceneMatches.length === 0
+															? 'No matches'
+															: `${(sceneScriptMatchIndex % sceneMatches.length) + 1} of ${sceneMatches.length}`}
+												</span>
+											</div>
+											{sceneScriptMode === 'script' ? (
+												<textarea
+													ref={sceneScriptEditorRef}
+													className="loom-scene-script"
+													spellCheck={false}
+													value={sceneDraft}
+													onChange={(e) => setSceneBody(e.target.value)}
+													onBlur={() => {
+														if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
+														void editScriptAndSync(plugin, project, (raw) =>
+															replaceSceneBody(raw, record.sceneId, sceneDraft)
+														).then(() => setSceneBody(null));
+													}}
+												/>
+											) : (
+												<div className="loom-screenplay loom-scene-pages" ref={sceneScriptPagesRef}>
+													{pdfPages(parseFountain(sceneExcerpt)).map((elements, i) => (
+														<div key={i} className="loom-screenplay-page">
+															{elements.map((el, j) =>
+																el.type === 'scene-heading' ? (
+																	<p key={j} className="loom-sp-scene-heading">
+																		<span
+																			dangerouslySetInnerHTML={{
+																				__html: highlight(
+																					renderInline(elementText(el)),
+																					sceneScriptQuery
+																				),
+																			}}
+																		/>
+																		{el.sceneNumber ? (
+																			<span className="loom-sp-scene-num">{el.sceneNumber}</span>
+																		) : null}
+																	</p>
+																) : (
+																	<p
+																		key={j}
+																		className={`loom-sp-${el.type}`}
+																		dangerouslySetInnerHTML={{
+																			__html: highlight(renderInline(elementText(el)), sceneScriptQuery),
+																		}}
+																	/>
+																)
+															)}
+														</div>
+													))}
+												</div>
+											)}
+										</>
+									);
+								})()
+							: (
+								<div className="loom-attendance-empty">This scene isn't in the script yet.</div>
+							)}
 					</div>
 				</>
 			) : isBeat ? (

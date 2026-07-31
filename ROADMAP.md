@@ -479,6 +479,65 @@ Still to build:
   (which relies on an external grid-template it doesn't have in a plain flex row), so a
   double-digit scene number no longer shifts every title's start position — `styles.css`,
   `src/views/entity-view.tsx`
+- [x] **Real character/dialogue/parenthetical indentation, finally.** The Pages preview was
+  rendering everything flush left despite `.loom-sp-character`/`.loom-sp-dialogue`/
+  `.loom-sp-parenthetical` all declaring their own `margin-left` — `.loom-screenplay p` used the
+  `margin` SHORTHAND (`margin: 0 0 1em`), which sets all four sides at once, and its extra `p`
+  type selector gave it higher specificity than the `.loom-sp-*` rules (2 classes each, no
+  type) — so it silently won and reset every character/dialogue indent back to 0 regardless of
+  what the more-specific-looking rule said. Fixed two ways: the general rule now only touches
+  `margin-top`/`margin-bottom` (never left/right, so there's nothing left to fight over), and
+  every `.loom-sp-*` selector gained a `p.` prefix so it ties the general rule on specificity —
+  a tie resolves by source order, and these come later in the file, so they correctly win on
+  `margin-bottom` too (the tight character→dialogue spacing) — `styles.css`.
+- [x] **Backslash-escaped `\*`/`\_`/`\\` render as the literal character**, not with the
+  backslash leaking into the output (`Colour\_DP-01` — a real screenwriter convention for "this
+  underscore isn't an underline delimiter" — used to print verbatim, backslash included).
+  `renderInline` (fountain.ts) and `plainText` (pdf.ts) both swap escaped sequences for a
+  Private Use Area placeholder before the emphasis-stripping regexes run, then restore the
+  literal character afterward — not plain digits (could collide with real numbers already in
+  the text) or a literal control character (trips ESLint's `no-control-regex`).
+- [x] **Fixed a real duplicate-entity bug found via a live script**: the Script view's one-time
+  "assign ids + sync scenes" pass on load reads `plugin.indexer`'s CURRENT contents to decide
+  "does a note for this id already exist?" — but if this view is restored as part of Obsidian's
+  own workspace-layout restore, that can happen before the plugin's own startup index rebuild
+  has populated anything, so every scene looks new and gets a full duplicate set of Scene/
+  Character/Location notes (the managed file names dodge the collision with a " 2" suffix, but
+  the loom ids are true duplicates). Now awaits `plugin.indexer.rebuildNow()` first — the same
+  guard the startup migration already uses for the identical reason — `src/views/script-view.tsx`.
+- [x] **Scene page: chapter section is two columns.** Chapter management (pick/move) stays on
+  the left; a right column lists **Characters in the scene** (`loomSceneCast`, read-only —
+  editing means writing the dialogue that names them, not this list) as chips. Same flex +
+  vertical-separator shape as the quest page's grid (`loom-quest-grid`) — `styles.css`,
+  `src/views/entity-view.tsx`.
+- [x] **Scene page's own Script section gained the Script/Pages preview + search mechanism**
+  from the main Script view, scoped to just that scene's excerpt — the same segmented pill,
+  the same search-with-prev/next-and-count toolbar (selecting/scrolling the match in Script
+  mode, highlighting via the shared `highlight()` — now exported from script-view.tsx — in
+  Pages mode), and the same `.loom-sp-*`/`pdfPages` rendering, parsed from just the scene's own
+  text rather than the whole document (so "page 1" here means the start of the excerpt, not
+  the scene's real position in the full script) — `src/views/entity-view.tsx`.
+- [x] **Scene/Chapter entity lists gained dedicated columns**: a counter as the first column for
+  both, INT./EXT. right after it for scenes (always rendered, even blank, so a forced heading
+  with no INT./EXT. doesn't shift every title's start position), and a **Characters** column
+  (chips, click to open) after the title — a chapter's cast is the union of every scene under it
+  (chapters carry no cast field of their own). Reuses `loom-scene-row-num`/`loom-scene-row-intext`
+  from the Chapter/Location page's scene rows rather than inventing new column classes. The
+  counter is each entity's position in canonical SCRIPT order (ascending, ignoring whatever
+  sort/direction is currently on screen) — a fixed property of the entity, not "which row
+  happens to be drawn first": the first cut recomputed 1..N from the top on every reorder, so
+  reversing the sort direction relabeled every row instead of flipping which number landed on
+  which row (the last scene read "1" while ascending) — `src/views/list-view.tsx`, `styles.css`.
+- [x] **Scene page polish**: the chapter/characters two-column grid gained its own
+  flex-column gap (they're plain divs, not `.loom-field`, so they weren't getting the
+  breathing room every other field block gets for free) — `styles.css`. The Pages preview
+  (both the main Script view and the scene's own) now explicitly sets `user-select: text` on
+  the page — some ancestor Obsidian gives its own custom `ItemView` content a default of
+  `user-select: none`, which the preview had been silently inheriting, blocking text
+  selection. The scene's own Pages-preview search now actually scrolls to the match on
+  Prev/Next (there's no offset-to-page mapping to compute here, since the excerpt isn't laid
+  out against the whole document — instead it scrolls the Nth `<mark>` in the DOM into view,
+  since marks render in the same reading order as the match list) — `src/views/entity-view.tsx`.
 - [ ] **Chapters can't be created or reordered from the app** — only by writing a `#` section
   in the script. "Add a chapter" should insert a section (with a fresh `[[loom:…]]`), and
   reordering chapters should move their whole section blocks.
