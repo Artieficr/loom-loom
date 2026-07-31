@@ -11,6 +11,27 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 - [x] Legacy single-root settings migration (auto-creates the .loom file) — `src/main.ts`
 - [ ] Export/import loom projects: package a project (its .loom config + all entity/timeline notes) into a portable archive and import one into another vault — handle name collisions with existing notes and re-anchor the project root path on import. **Deferred (late-game):** it serializes the whole data model, so every new frontmatter key / config field would have to be maintained here — build once the core data model stabilizes.
 
+## Licensing
+
+Freemium: one project of each kind is free with every feature available; a license key
+unlocks unlimited projects, activatable on up to 3 devices; must not break offline (30-day
+cached grace period). See CLAUDE.md's "Key architectural decisions" for the full reasoning.
+
+- [x] Provider-agnostic `LicenseProvider` seam + types (`CachedLicenseState`, `LicenseStatus`) — `src/license/provider.ts`, `src/license/types.ts`
+- [x] 30-day offline grace period, pure + boundary-verified — `src/license/grace.ts`
+- [x] Per-device cache (device id + activation), `App.loadLocalStorage`/`saveLocalStorage` so it never syncs with the vault, feature-detected fallback for pre-1.8.7 Obsidian — `src/license/cache-store.ts`
+- [x] Free-tier gate (`canCreateProjectOfKind`) — `src/license/gating.ts`
+- [x] `LicenseManager` (activate/deactivate/revalidate, recheck throttle, offline "forget locally" fallback) — `src/license/manager.ts`
+- [x] `StubLicenseProvider` (in-memory, 3-device cap simulation, network-down toggle) — the active provider for now — `src/license/stub-provider.ts`
+- [x] Settings → License tab (key field, activate/deactivate/re-check, status) — `src/settings.ts`
+- [x] `main.ts` wiring: manager construction, startup re-check, recurring background re-check interval — `src/main.ts`
+- [x] Gate `SetupProjectModal` (disabled Create button + inline upsell, authoritative re-check in `submit()`) — `src/project.ts`
+- [ ] **Blocked on a Polar.sh account existing:** verify `PolarLicenseProvider`'s wire format against the live API (field-name casing is currently a documented guess), then flip `main.ts` from `StubLicenseProvider` to it — `src/license/polar-provider.ts`
+- [ ] Purchase/checkout link UI (not designed yet — out of scope until the provider is live)
+- [ ] **Unresolved, blocking any public pricing:** confirm with Obsidian whether the community plugin directory allows paywalling in-app functionality itself (vs. paywalling a backend service called from the plugin) — research during planning could not confirm either way
+- [ ] Decide whether to bump `minAppVersion` past `1.7.2` (to `1.8.7`, for `loadLocalStorage`/`saveLocalStorage`) or keep the current session-only fallback for older Obsidian indefinitely
+- [ ] README network-use disclosure once the real provider is live (the stub makes no real network calls, so the current disclosure already covers it, but it needs a fresh pass once `PolarLicenseProvider` is wired up)
+
 ## Entities
 
 - [x] Seven entity types with basic frontmatter templates (type, loomTags, description, relationships; role for characters; date for events/sessions; quests currently share the basic template, unique fields planned) — `src/types.ts`, `src/project.ts`

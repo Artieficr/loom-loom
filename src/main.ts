@@ -28,14 +28,29 @@ import { EntityView } from './views/entity-view';
 import { GroupView } from './views/group-view';
 import { MapView } from './views/map-view';
 import { ScriptView } from './views/script-view';
+import { LicenseManager } from './license/manager';
+import { StubLicenseProvider } from './license/stub-provider';
+
+/** How often the plugin re-checks an activated license in the background,
+ *  independent of the manual "Re-check now" button. Well inside the 30-day
+ *  offline grace period (see `license/grace.ts`), so a machine that's online
+ *  most days re-verifies quietly long before the grace window could matter. */
+const LICENSE_RECHECK_TICK_MS = 6 * 60 * 60 * 1000;
 
 export default class LoomLoomPlugin extends Plugin {
 	settings: LoomLoomSettings = DEFAULT_SETTINGS;
 	indexer!: LoomIndexer;
+	/** Freemium gate: one project of each kind is free, a license key unlocks
+	 *  unlimited projects — see `src/license/`. `StubLicenseProvider` is the
+	 *  active provider until a real Polar.sh account exists to swap in
+	 *  (`PolarLicenseProvider`, written but intentionally not wired up yet). */
+	licenseManager!: LicenseManager;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.applyTextSize();
+
+		this.licenseManager = new LicenseManager(this.app, new StubLicenseProvider());
 
 		this.indexer = this.addChild(new LoomIndexer(this.app, this));
 
@@ -158,7 +173,20 @@ export default class LoomLoomPlugin extends Plugin {
 				await this.indexer.rebuildNow();
 				await this.indexer.migrateFiles();
 			});
+			// Internally throttled and a no-op with no local activation, so this
+			// costs nothing for a free-tier user and doesn't fight the migration
+			// work above for startup time.
+			void this.licenseManager.revalidateNow(this.settings.licenseKey);
 		});
+
+		// The plugin's first genuinely *recurring* background task (every other
+		// registerInterval use is a one-shot startup poll) — see
+		// `license/manager.ts`'s own throttle for why overlapping ticks are safe.
+		this.registerInterval(
+			window.setInterval(() => {
+				void this.licenseManager.revalidateNow(this.settings.licenseKey);
+			}, LICENSE_RECHECK_TICK_MS)
+		);
 	}
 
 	/**

@@ -46,6 +46,7 @@ import {
 import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
 import { ProjectDef, extractLinkpath, linkTargetOf } from './indexer';
 import { fmLoomValue, setLoomKey } from './fm';
+import { canCreateProjectOfKind } from './license/gating';
 import type LoomLoomPlugin from './main';
 
 /** Folders scaffolded for a new project: only the entity types its kind
@@ -1873,10 +1874,28 @@ export class SetupProjectModal extends Modal {
 				.join(', ')}.`,
 		});
 
+		// Freemium gate: one project of each kind is free with every feature
+		// available; a license key unlocks unlimited projects. Only gates NEW
+		// creation here — existing projects (however many) are never touched, so
+		// a vault that already has several from before this shipped is never
+		// blocked from opening or using them. See src/license/gating.ts.
+		const blocked = !canCreateProjectOfKind(
+			this.plugin.licenseManager.getTier(),
+			this.plugin.indexer.getProjects(),
+			this.kind
+		);
+		if (blocked) {
+			this.contentEl.createEl('p', {
+				cls: 'setting-item-description',
+				text: `This vault already has a free-tier ${PROJECT_KIND_META[this.kind].label.toLowerCase()} project. A license key unlocks unlimited projects of every type — see settings → license.`,
+			});
+		}
+
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
 				.setButtonText('Create project')
 				.setCta()
+				.setDisabled(blocked)
 				.onClick(() => void this.submit())
 		);
 	}
@@ -1896,6 +1915,19 @@ export class SetupProjectModal extends Modal {
 				return;
 			}
 			root = this.dir;
+		}
+		// Authoritative re-check, not just the render()-time disabled state: the
+		// index or license tier could have changed between opening this modal and
+		// clicking Create.
+		if (
+			!canCreateProjectOfKind(
+				this.plugin.licenseManager.getTier(),
+				this.plugin.indexer.getProjects(),
+				this.kind
+			)
+		) {
+			new Notice('This vault already has a free-tier project of that type. See settings → license.');
+			return;
 		}
 		try {
 			const loomFile = await scaffoldProject(this.app, root, this.kind);
