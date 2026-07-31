@@ -50,6 +50,77 @@ export function stripLoomIds(text: string): string {
 	return text.replace(LOOM_ID_RE_G, '');
 }
 
+// --- Entity links ------------------------------------------------------------
+
+/**
+ * An inline entity link: `@[Grandma's necklace|necklace]` (display text after
+ * `|` is optional — bare `@[Name]` displays as the full name). Bracket-
+ * delimited rather than a bare `@Name` because an entity's name can contain
+ * spaces and punctuation with no other safe terminator.
+ */
+const ENTITY_LINK_RE = /@\[([^\]|]+)(?:\|([^\]]+))?\]/g;
+
+/**
+ * `= branch: <group-id>` — a plugin-specific convention marking a section as
+ * one branch in a narrative choice point, using Fountain's own non-exporting
+ * synopsis line so it reads as a plain nested outline in any compliant tool
+ * (unlike the leading-`.`-forced-heading approach tried first, which other
+ * Fountain tools misread as a new top-level scene). Sits directly beneath
+ * its section's heading line, no blank line between.
+ */
+const BRANCH_TAG_RE = /^=\s*branch:\s*(.+)$/i;
+
+/**
+ * Every `@[...]` span in `text`, with string offsets for decoration.
+ *
+ * `nameFrom`/`nameTo` and `displayFrom`/`displayTo` are the RAW (untrimmed)
+ * offsets of the name and display segments within the source text — what a
+ * live editor needs to hide the `@[`/`|`/`]` punctuation while leaving just
+ * the display segment visible (`displayFrom`/`displayTo` equal the name span
+ * when there's no `|Display`, since the name IS the display then).
+ */
+export function findEntityLinks(text: string): {
+	from: number;
+	to: number;
+	name: string;
+	display: string;
+	nameFrom: number;
+	nameTo: number;
+	displayFrom: number;
+	displayTo: number;
+}[] {
+	const out: ReturnType<typeof findEntityLinks> = [];
+	for (const m of text.matchAll(ENTITY_LINK_RE)) {
+		const from = m.index;
+		const to = from + m[0].length;
+		const nameFrom = from + 2;
+		const nameTo = nameFrom + m[1].length;
+		const hasDisplay = m[2] !== undefined;
+		const displayFrom = hasDisplay ? nameTo + 1 : nameFrom;
+		const displayTo = hasDisplay ? displayFrom + m[2].length : nameTo;
+		out.push({
+			from,
+			to,
+			name: m[1].trim(),
+			display: (m[2] ?? m[1]).trim(),
+			nameFrom,
+			nameTo,
+			displayFrom,
+			displayTo,
+		});
+	}
+	return out;
+}
+
+/**
+ * Collapses every `@[Name|Display]` to just its display text (or `Name` with
+ * no `|Display`) — for EXPORT/render only, never the live document, same
+ * contract as `stripLoomIds`.
+ */
+export function stripEntityLinksForDisplay(text: string): string {
+	return text.replace(ENTITY_LINK_RE, (_full, name: string, display?: string) => (display ?? name).trim());
+}
+
 // --- Title page ------------------------------------------------------------
 
 /**
@@ -386,6 +457,11 @@ export interface ParsedScene extends SceneHeadingParts {
 	characters: string[];
 	/** 1-based position in the script, ignoring sections. */
 	index: number;
+	/** The nearest enclosing branch-tagged section's own loom id, or `null`
+	 *  when this scene isn't inside a branch — the deepest ancestor with a
+	 *  `branchGroup`, not just its immediate parent (a branch can nest inside
+	 *  ordinary untagged sub-sections). */
+	branchLoomId: string | null;
 }
 
 export interface ParsedSection {
@@ -395,6 +471,12 @@ export interface ParsedSection {
 	/** Hidden `[[loom:…]]` marker, like a scene heading's — what ties a top-level
 	 *  section to its Chapter note across a rename or a move. */
 	loomId: string | null;
+	/** The branch group this section belongs to, from a `= branch: <id>`
+	 *  synopsis line directly beneath its heading (no blank line) — an
+	 *  ordinary nested `##`/`###` that ISN'T tagged has `branchGroup: null`
+	 *  and is just structure, never a branch. Any number of sibling sections
+	 *  sharing the same group id form one narrative choice point. */
+	branchGroup: string | null;
 }
 
 export interface ParsedScript {
@@ -462,15 +544,28 @@ export function parseFountain(text: string): ParsedScript {
 		if (line.startsWith('#')) {
 			const level = /^#+/.exec(line)?.[0].length ?? 1;
 			const loomId = readLoomId(line);
-			const heading = {
+			// A `= branch: <id>` tag directly beneath (no blank line) — consumed
+			// here rather than left to fall through to the generic synopsis
+			// handling below, so it doesn't also surface as a floating note.
+			let branchGroup: string | null = null;
+			let consumed = 1;
+			if (i + 1 < lines.length) {
+				const branchMatch = BRANCH_TAG_RE.exec(lines[i + 1].trim());
+				if (branchMatch) {
+					branchGroup = branchMatch[1].trim();
+					consumed = 2;
+				}
+			}
+			const heading: ParsedSection = {
 				level,
 				text: line.slice(level).replace(LOOM_ID_RE_G, '').trim(),
 				line: i,
 				loomId,
+				branchGroup,
 			};
 			sections.push(heading);
 			elements.push({ type: 'section', text: heading.text, line: i, level });
-			i++;
+			i += consumed;
 			continue;
 		}
 		if (line.startsWith('=')) {
@@ -519,7 +614,8 @@ export function parseFountain(text: string): ParsedScript {
 		}
 
 		// Character cue: uppercase, blank line before, non-blank line after.
-		const forcedCharacter = line.startsWith('@');
+		// `@[` is an entity link (see ENTITY_LINK_RE above), not a forced cue.
+		const forcedCharacter = line.startsWith('@') && line.charAt(1) !== '[';
 		const cueLine = forcedCharacter ? line.slice(1).trim() : line;
 		if (
 			(forcedCharacter || (looksLikeCharacter(cueLine) && !looksLikeTransition(cueLine))) &&
@@ -578,7 +674,7 @@ export function parseFountain(text: string): ParsedScript {
 	// stored, so adding five pages to an earlier scene shifts every later scene
 	// automatically, which is the whole point.
 	const scenes: ParsedScene[] = [];
-	const sectionStack: { level: number; text: string }[] = [];
+	const sectionStack: { level: number; text: string; loomId: string | null; branchGroup: string | null }[] = [];
 	let usedLines = 0;
 	let current: ParsedScene | null = null;
 
@@ -595,7 +691,13 @@ export function parseFountain(text: string): ParsedScript {
 			while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].level >= (element.level ?? 1)) {
 				sectionStack.pop();
 			}
-			sectionStack.push({ level: element.level ?? 1, text: element.text });
+			const sec = sections.find((s) => s.line === element.line);
+			sectionStack.push({
+				level: element.level ?? 1,
+				text: element.text,
+				loomId: sec?.loomId ?? null,
+				branchGroup: sec?.branchGroup ?? null,
+			});
 			continue;
 		}
 		if (element.type === 'page-break') {
@@ -606,6 +708,14 @@ export function parseFountain(text: string): ParsedScript {
 		element.page = Math.floor(usedLines / LINES_PER_PAGE) + 1;
 		if (element.type === 'scene-heading') {
 			closeScene(element.line);
+			// A scene heading always belongs to the nearest REAL (non-branch)
+			// section — a branch holds prose, never a further scene heading of
+			// its own — so hitting one closes any currently open branch frame
+			// first. Without this, a scene written right after a branch (once
+			// its choice point has resolved) stayed nested inside that branch.
+			while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].branchGroup !== null) {
+				sectionStack.pop();
+			}
 			// From the raw line, so the loom id is seen — the element's own text
 			// has already had it stripped for display.
 			const parts = parseSceneHeading(lines[element.line]);
@@ -619,6 +729,7 @@ export function parseFountain(text: string): ParsedScript {
 				lastPage: Math.floor(usedLines / LINES_PER_PAGE) + 1,
 				characters: [],
 				index: scenes.length + 1,
+				branchLoomId: [...sectionStack].reverse().find((s) => s.branchGroup !== null)?.loomId ?? null,
 			};
 		}
 		if (current && element.type === 'character' && !current.characters.includes(element.text)) {
@@ -660,10 +771,15 @@ export function ensureSceneIds(text: string): { text: string; changed: boolean }
 	const parsed = parseFountain(text);
 	// Top-level sections are chapters, and they need a stable identity for the
 	// same reason scenes do: a renamed-and-moved heading must not detach its
-	// note. Nested sections are structure inside a chapter, not chapters.
+	// note. Nested sections are ordinary structure inside a chapter EXCEPT a
+	// branch-tagged one (`= branch: <id>` right beneath it) — that's a Scene's
+	// own `loomSceneBranch` target, so it needs the same stable identity at
+	// whatever depth it sits.
 	const missing: number[] = [
 		...parsed.scenes.filter((s) => s.loomId === null).map((s) => s.line),
-		...parsed.sections.filter((s) => s.level === 1 && s.loomId === null).map((s) => s.line),
+		...parsed.sections
+			.filter((s) => (s.level === 1 || s.branchGroup !== null) && s.loomId === null)
+			.map((s) => s.line),
 	];
 	if (missing.length === 0) return { text, changed: false };
 
@@ -725,6 +841,39 @@ export function applyDisplayTitles(
 			if (lines[existing].trim() !== rendered) lines[existing] = rendered;
 		} else {
 			lines.splice(section.line + 1, 0, '', rendered);
+		}
+	}
+	return lines.join('\n');
+}
+
+/**
+ * Writes a printed marker under every branch-tagged section (`= branch:
+ * <id>`) so an exported screenplay shows a visual separator between branches
+ * instead of every branch's content running together with no indication a
+ * choice point even exists — Fountain sections never export, same reasoning
+ * as `applyDisplayTitles` for chapters, but auto-derived from the section's
+ * own title text rather than a note field (a branch has no backing note).
+ * Kept in sync on every call, so renaming `## Branch A` to `## Branch A:
+ * Fight` updates the printed line too.
+ */
+export function applyBranchLabels(text: string): string {
+	const parsed = parseFountain(text);
+	const lines = text.split(/\r?\n/);
+	// Back to front, so earlier line numbers stay valid as lines are spliced.
+	const sections = parsed.sections.filter((sec) => sec.branchGroup !== null).sort((a, b) => b.line - a.line);
+
+	for (const section of sections) {
+		let at = section.line + 1;
+		// Skip the `= branch: <id>` tag itself — it's real text in the file;
+		// the parser only leaves it out of the rendered element stream.
+		if (at < lines.length && BRANCH_TAG_RE.test(lines[at].trim())) at++;
+		while (at < lines.length && lines[at].trim() === '') at++;
+		const existing = at < lines.length && /^>.*<$/.test(lines[at].trim()) ? at : -1;
+		const wanted = `>**${section.text}**<`;
+		if (existing !== -1) {
+			if (lines[existing].trim() !== wanted) lines[existing] = wanted;
+		} else {
+			lines.splice(at, 0, '', wanted);
 		}
 	}
 	return lines.join('\n');
@@ -932,7 +1081,7 @@ export function renderScreenplayHtml(parsed: ParsedScript): string {
 		.map(
 			(elements, i) => `<div class="page">
 	${i > 0 ? `<div class="page-number">${i + 1}.</div>` : ''}
-	${elements.map((e) => `<p class="${e.type}">${renderInline(elementText(e))}</p>`).join('\n\t')}
+	${elements.map((e) => `<p class="${e.type}">${renderInline(stripEntityLinksForDisplay(elementText(e)))}</p>`).join('\n\t')}
 </div>`
 		)
 		.join('\n');
@@ -1054,6 +1203,26 @@ export function replaceSceneBody(text: string, sceneId: string, body: string): s
 	return lines.join('\n');
 }
 
+/**
+ * Replaces a chapter's body — everything after its `#` section line, scene
+ * headings included — leaving the section line (and its hidden id) untouched.
+ *
+ * Mirrors `replaceSceneBody`, but for the Chapter page's own Script section:
+ * a chapter's excerpt spans every scene under it, not one heading's worth, so
+ * the whole span between this section and the next top-level one is the
+ * editable body.
+ */
+export function replaceChapterBody(text: string, chapterId: string, body: string): string | null {
+	const parsed = parseFountain(text);
+	const section = parsed.sections.find((sec) => sec.level === 1 && sec.loomId === chapterId);
+	if (!section) return null;
+	const lines = text.split(/\r?\n/);
+	const endLine = nextTopSectionLine(parsed, section.line) ?? lines.length;
+	const next = body.replace(/\s+$/, '').split('\n');
+	lines.splice(section.line + 1, endLine - section.line - 1, '', ...next, '');
+	return lines.join('\n');
+}
+
 /** Removes a scene — heading and body — from the script entirely. */
 export function removeScene(text: string, sceneId: string): string | null {
 	const parsed = parseFountain(text);
@@ -1062,6 +1231,22 @@ export function removeScene(text: string, sceneId: string): string | null {
 	const lines = text.split(/\r?\n/);
 	lines.splice(scene.line, scene.endLine - scene.line);
 	return lines.join('\n');
+}
+
+/**
+ * The line where a top-level section's content ends: the next top-level
+ * section's own line, or `null` when it's the last one in the script (the
+ * caller substitutes the file's line count). A structural edit bounded to
+ * ONE chapter must cap here rather than trusting a scene's `endLine` (the
+ * parser extends the LAST scene's `endLine` to whatever scene heading comes
+ * next in the WHOLE file, chapter boundary or not) — shared by every op that
+ * needs "don't reach into the next chapter".
+ */
+export function nextTopSectionLine(parsed: ParsedScript, afterLine: number): number | null {
+	const next = parsed.sections
+		.filter((sec) => sec.level === 1 && sec.line > afterLine)
+		.sort((a, b) => a.line - b.line)[0];
+	return next ? next.line : null;
 }
 
 /**
@@ -1077,11 +1262,7 @@ export function moveSceneToSection(text: string, sceneId: string, sectionId: str
 
 	const lines = text.split(/\r?\n/);
 	const block = lines.slice(scene.line, scene.endLine);
-	// Where the target section ends: the next top-level section, or the file end.
-	const nextSection = parsed.sections
-		.filter((sec) => sec.level === 1 && sec.line > target.line)
-		.sort((a, b) => a.line - b.line)[0];
-	let insertAt = nextSection ? nextSection.line : lines.length;
+	let insertAt = nextTopSectionLine(parsed, target.line) ?? lines.length;
 
 	lines.splice(scene.line, scene.endLine - scene.line);
 	// Removing the block shifts everything after it up.
@@ -1188,10 +1369,7 @@ export function reorderScenesInSection(
 	const section = parsed.sections.find((sec) => sec.loomId === sectionId);
 	if (!section) return null;
 	const lines = text.split(/\r?\n/);
-	const nextSection = parsed.sections
-		.filter((sec) => sec.level === 1 && sec.line > section.line)
-		.sort((a, b) => a.line - b.line)[0];
-	const sectionEnd = nextSection ? nextSection.line : lines.length;
+	const sectionEnd = nextTopSectionLine(parsed, section.line) ?? lines.length;
 
 	const inSection = parsed.scenes
 		.filter((sc) => sc.line > section.line && sc.line < sectionEnd)
@@ -1223,23 +1401,30 @@ export function reorderScenesInSection(
 }
 
 /**
- * Renumbers every scene that already carries a production number (`#N#`) to
- * match its current script order.
+ * Renumbers scenes to keep an existing production-numbering scheme (`#N#`)
+ * sequential and gapless.
  *
  * Production numbers are traditionally LOCKED in screenwriting (hence 12A,
  * 12B on a real set) precisely so they don't move — but this app's reorder
- * actions (chapter drag reorder, move to another chapter) physically relocate
- * a scene's whole block, number included, which would otherwise leave a
- * stale number sitting on the wrong scene. Called after every such move.
- * Scenes with no number are left untouched and never given one — this only
- * keeps an EXISTING numbering scheme in sync, it never starts one.
+ * actions (chapter drag reorder, move to another chapter, or simply typing a
+ * new scene above an already-numbered one) physically relocate a scene's
+ * whole block, number included, which would otherwise leave a stale number
+ * sitting on the wrong scene. If NO scene is numbered at all, this is a
+ * no-op — it never starts a numbering scheme from nothing. But once at least
+ * one scene carries a number, every scene from the very start of the script
+ * through the last currently-numbered scene is treated as part of that
+ * scheme (including scenes that had no number yet, e.g. one just inserted
+ * before today's `#1#`) and renumbered 1..N in document order. A scene AFTER
+ * the last numbered one is left alone — the numbered zone never grows past
+ * where the writer has actually placed a number.
  */
 export function renumberScenes(text: string): string {
 	const parsed = parseFountain(text);
-	const numbered = parsed.scenes.filter((sc) => sc.sceneNumber !== '');
-	if (numbered.length === 0) return text;
+	const lastNumberedIdx = parsed.scenes.reduce((last, sc, i) => (sc.sceneNumber !== '' ? i : last), -1);
+	if (lastNumberedIdx === -1) return text;
+	const inScheme = parsed.scenes.slice(0, lastNumberedIdx + 1);
 	const lines = text.split(/\r?\n/);
-	numbered.forEach((sc, i) => {
+	inScheme.forEach((sc, i) => {
 		const parts = parseSceneHeading(lines[sc.line]);
 		const wanted = String(i + 1);
 		if (parts.sceneNumber === wanted) return;

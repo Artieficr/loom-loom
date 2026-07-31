@@ -231,7 +231,7 @@ body.loom-text-large {
 	left: calc(50% + var(--wheel-x) * var(--wheel-radius));
 	top: calc(50% + var(--wheel-y) * var(--wheel-radius));
 	transform: translate(-50%, -50%);
-	width: 26%;
+	width: 22%;
 	aspect-ratio: 1;
 	border-radius: 50%;
 	justify-content: center;
@@ -239,10 +239,20 @@ body.loom-text-large {
 	gap: var(--size-2-1);
 	background: color-mix(in srgb, var(--wheel-color) 16%, var(--background-secondary));
 	border-color: color-mix(in srgb, var(--wheel-color) 55%, var(--background-modifier-border));
+	transition: transform 150ms ease, background 150ms ease;
 }
 
+/* Smaller at rest, growing back to (roughly) today's size on hover — scaling
+   the whole button (not just tinting it) so the icon and label grow with it,
+   since `transform` scales everything nested inside for free. Re-centers via
+   the same translate every rule that sets `transform` needs to repeat it, or
+   the hover transform would replace the centering instead of composing with
+   it. `z-index` keeps the growing card drawn over its neighbors instead of
+   looking clipped against them at the tightest wheel spacings. */
 .loom-home-wheel .loom-wheel-card:hover {
 	background: color-mix(in srgb, var(--wheel-color) 28%, var(--background-secondary));
+	transform: translate(-50%, -50%) scale(1.18);
+	z-index: 2;
 }
 
 .loom-home-wheel .loom-wheel-card .loom-icon svg {
@@ -264,6 +274,7 @@ body.loom-text-large {
 	border-radius: 50%;
 	background: var(--wheel-center-bg);
 	border-color: color-mix(in srgb, var(--wheel-center-icon) 30%, var(--wheel-center-bg));
+	transition: transform 150ms ease, background 150ms ease;
 }
 
 /* "Loom, original": plum on cream in light theme, reversed in dark — driven by
@@ -280,6 +291,7 @@ body.loom-text-large {
 
 .loom-home-wheel .loom-wheel-center:hover {
 	background: color-mix(in srgb, var(--wheel-center-icon) 14%, var(--wheel-center-bg));
+	transform: translate(-50%, -50%) scale(1.12);
 }
 
 .loom-home-wheel .loom-wheel-center .loom-icon svg {
@@ -2515,6 +2527,23 @@ span.loom-row-caret {
 	padding-left: var(--size-4-4);
 }
 
+/* No entities recognized in the scene at all: the right column isn't
+   rendered, and the left one takes the full width instead of leaving 40%
+   reserved for nothing. */
+.loom-scene-chapter-grid-solo .loom-scene-chapter-left {
+	flex: 1 1 100%;
+}
+
+.loom-scene-entity-group {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-1);
+}
+
+.loom-scene-entity-group + .loom-scene-entity-group {
+	margin-top: var(--size-2-2);
+}
+
 .loom-quest-sessions {
 	display: flex;
 	flex-wrap: wrap;
@@ -3574,6 +3603,63 @@ span.loom-row-caret {
 	color: var(--text-accent);
 }
 
+/* Entity list's own Involved/Location filter toggle — same lit-while-active
+   convention as the Group page's filter icon above. */
+.loom-view button.loom-list-filter-btn-on {
+	color: var(--text-accent);
+}
+
+/* The Involved/Location filter panel: opens ON TOP of the list (like the
+   graph view's own `.loom-filter-pop`), not a row that pushes it down. The
+   anchor is the toggle button's own positioning context. */
+.loom-view .loom-list-filter-anchor {
+	position: relative;
+}
+
+.loom-view .loom-list-filter-pop {
+	left: 0;
+	right: auto;
+	width: 300px;
+	max-width: 90vw;
+}
+
+/* Vertical stack: label, search, then wrapping chips below it — Involved
+   above a divider, Location below. */
+.loom-view .loom-list-filter-section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	align-self: stretch;
+}
+
+.loom-view .loom-list-filter-section .loom-combo {
+	max-width: none;
+}
+
+.loom-view .loom-list-filter-sep {
+	align-self: stretch;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Chips wrap onto their own lines within the popover's fixed width, and a
+   long entity name truncates with an ellipsis rather than forcing the
+   popover wider. */
+.loom-view .loom-list-filter-chips {
+	max-width: 100%;
+}
+
+.loom-view .loom-list-filter-chips .loom-chip {
+	max-width: 100%;
+	min-width: 0;
+}
+
+.loom-view .loom-list-filter-chips .loom-chip .loom-subloc-link {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
+
 .loom-group-filter {
 	display: flex;
 	flex-direction: column;
@@ -3661,15 +3747,6 @@ span.loom-row-caret {
 .loom-toolbar .loom-list-iconbtn .loom-icon svg {
 	width: var(--icon-s);
 	height: var(--icon-s);
-}
-
-/* Event-list entity filters: a compact searchable select in the toolbar. */
-.loom-list-filter {
-	width: 180px;
-}
-
-.loom-list-filter input {
-	width: 100%;
 }
 
 /* Quest cards reuse the session page's 3-up grid look. */
@@ -4614,7 +4691,25 @@ span.loom-row-caret {
 	position: sticky;
 	top: 0;
 	height: 0;
+	width: 100%;
 	z-index: 5;
+}
+
+/* The Scene/Chapter page's own copy of this panel lives INSIDE the editor
+   box (its left margin has the spare room) rather than stacked above the
+   Script/Pages tabs, where it collided with the scene-heading caption right
+   below it. Nesting inside `.loom-scene-script`/`.loom-scene-pages` (both
+   already `overflow-y/overflow: auto`) means `position: sticky` tracks THAT
+   box's own scroll, not the page's — a small inset keeps it off the box's
+   own edge. */
+.loom-view .loom-script-nav-sticky-inset .loom-script-nav-toggle {
+	top: 0.3em;
+	left: 0.3em;
+}
+
+.loom-view .loom-script-nav-sticky-inset .loom-script-nav {
+	top: 0.3em;
+	left: 0.3em;
 }
 
 /* The panel floats over the page instead of sitting in the flow: as a flex
@@ -4642,8 +4737,18 @@ span.loom-row-caret {
 	top: 0;
 	left: 0;
 	z-index: 4;
-	width: 29em;
-	max-height: 80vh;
+	width: 36.25em;
+	/* Was 80vh, fine while this panel floated over the whole page. Now it
+	   lives INSIDE the editor/pages box (`.loom-script-nav-sticky-inset`),
+	   which clips anything taller than its own rendered height REGARDLESS of
+	   this panel's own `overflow-y: auto` — an `overflow: auto` ancestor
+	   clips any descendant that visually extends past its bounds, sticky or
+	   not, so a panel taller than the box just got cut off with no way to
+	   scroll the rest into view. 60vh sits safely under the main Script
+	   view's editor box (capped at 70vh) and the Scene/Chapter boxes (a
+	   fixed 210mm, taller than 60vh on any real screen), so this panel's OWN
+	   scrollbar below always has room to engage before the box's does. */
+	max-height: 60vh;
 	overflow-y: auto;
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
@@ -4701,11 +4806,30 @@ span.loom-row-caret {
 	margin-top: 0.2em;
 }
 
-/* Indents everything under a chapter/section one step — scenes, and any
-   further-nested sections recurse into their own `.loom-script-nav-children`
-   for additional indent. */
+/* A branch-tagged section (`= branch: <id>`) nested under its scene — same
+   sub-level button and the same even step-in as every other nesting level,
+   tinted and un-bolded so a narrative choice point still reads differently
+   from a plain organizational sub-heading without needing extra distance. */
+.loom-view button.loom-script-nav-chapter.loom-script-nav-branch {
+	color: var(--text-accent);
+	font-weight: 400;
+}
+
+/* Indents everything under a chapter/section one step — scenes, branches,
+   and any further-nested sections all recurse into their own
+   `.loom-script-nav-children` for the SAME additional indent, so every
+   level of the hierarchy — chapter → scene → branch → sub-branch — steps in
+   by an even amount and the rails read as evenly spaced. `margin-left` is
+   the branch level's own original step (previously a `.loom-script-nav-
+   children-branch`-only override) — raised here for every level rather
+   than reverted, so ordinary sections/scenes match the wider branch step
+   instead of branches matching their narrower one. A real vertical rail
+   (not just padding), same `.loom-subtree` convention used elsewhere for
+   nested rows. */
 .loom-view .loom-script-nav-children {
-	padding-left: 0.9em;
+	margin-left: 1.4em;
+	padding-left: var(--size-2-3);
+	border-left: 2px solid var(--background-modifier-border);
 }
 
 .loom-view .loom-script-nav-empty {
@@ -4753,8 +4877,6 @@ span.loom-row-caret {
 
 .loom-view .loom-script-main {
 	min-width: 0;
-	/* Room for the floating navigation toggle in the top-left corner. */
-	padding-left: 2em;
 }
 
 .loom-view .loom-script-section > summary {
@@ -4960,13 +5082,15 @@ span.loom-row-caret {
 
 .loom-fountain-field .loom-fountain-char-link,
 .loom-fountain-field .loom-fountain-scene-link,
-.loom-fountain-field .loom-fountain-chapter-link {
+.loom-fountain-field .loom-fountain-chapter-link,
+.loom-fountain-field .loom-fountain-entity-link {
 	cursor: var(--cursor-link);
 }
 
 .loom-fountain-field .loom-fountain-char-link:hover,
 .loom-fountain-field .loom-fountain-scene-link:hover,
-.loom-fountain-field .loom-fountain-chapter-link:hover {
+.loom-fountain-field .loom-fountain-chapter-link:hover,
+.loom-fountain-field .loom-fountain-entity-link:hover {
 	text-decoration: underline;
 }
 

@@ -14,16 +14,20 @@ import {
 	ParsedScene,
 	ParsedScript,
 	TitlePage,
+	applyBranchLabels,
 	applyDisplayTitles,
 	elementText,
 	ensureSceneIds,
+	findEntityLinks,
 	hasTitlePage,
+	nextTopSectionLine,
 	parseFountain,
 	preventOrphans,
 	reattachSceneIds,
 	reattachSectionIds,
 	renderInline,
 	renumberScenes,
+	stripEntityLinksForDisplay,
 	stripLoomIds,
 	renderTitlePage,
 	splitLocationSub,
@@ -107,8 +111,10 @@ export class ScriptView extends LoomFileReactView {
 export async function syncScenes(
 	plugin: LoomLoomPlugin,
 	project: ProjectDef,
-	parsed: ParsedScript
+	parsed: ParsedScript,
+	text: string
 ): Promise<void> {
+	const lines = text.split(/\r?\n/);
 	const existing = new Map<string, EntityRecord>();
 	for (const record of plugin.indexer.getAll('scene', project.root)) {
 		const id = record.sceneId;
@@ -123,6 +129,12 @@ export async function syncScenes(
 		return map;
 	};
 	const characters = byName('character');
+	const factions = byName('faction');
+	const items = byName('item');
+	// EVERY location, sublocations included — unlike `mainLocations` below, an
+	// `@[...]` mention names a specific place directly rather than a heading's
+	// "main location" part, so it can legitimately name a sublocation.
+	const allLocations = byName('location');
 	// Only TOP-LEVEL locations, keyed by name — a heading's "main" location part
 	// (see `splitLocationSub`) names a place the same way the modular Scene-page
 	// editor does, and matching against every location including sublocations
@@ -292,9 +304,31 @@ export async function syncScenes(
 		const name = sceneName(scene);
 		const chapter = chapterById.get(sectionIdOf(scene));
 		const location = await resolveSceneLocation(scene);
-		const cast = scene.characters
-			.map((c) => characters.get(c.trim().toLowerCase()))
-			.filter((c): c is EntityRecord => c !== undefined);
+
+		// Entities named via `@[...]` anywhere in the scene's own text — the
+		// scene's raw line span, same slicing `sceneScriptText` uses.
+		const mentions = findEntityLinks(lines.slice(scene.line, scene.endLine).join('\n'));
+		const dedupe = (records: EntityRecord[]) => [...new Map(records.map((r) => [r.path, r])).values()];
+		const cast = dedupe([
+			...scene.characters.map((c) => characters.get(c.trim().toLowerCase())).filter((c): c is EntityRecord => c !== undefined),
+			// A character merely mentioned in action text (never cued to speak)
+			// still belongs in the cast — the field means "who's in this scene",
+			// not "who has a line".
+			...mentions.map((m) => characters.get(m.name.toLowerCase())).filter((c): c is EntityRecord => c !== undefined),
+		]);
+		const factionsHere = dedupe(
+			mentions.map((m) => factions.get(m.name.toLowerCase())).filter((f): f is EntityRecord => f !== undefined)
+		);
+		const itemsHere = dedupe(
+			mentions.map((m) => items.get(m.name.toLowerCase())).filter((i): i is EntityRecord => i !== undefined)
+		);
+		// Excludes the scene's own heading location — that one is already
+		// `sceneLocation`, not a "mention".
+		const mentionedLocations = dedupe(
+			mentions
+				.map((m) => allLocations.get(m.name.toLowerCase()))
+				.filter((l): l is EntityRecord => l !== undefined && l.path !== location?.path)
+		);
 
 		const apply = (fm: Record<string, unknown>) => {
 			setLoomKey(fm, FM.sceneId, scene.loomId);
@@ -306,10 +340,27 @@ export async function syncScenes(
 			// The chapter link is what stacks the scene under it in the graph and
 			// timeline — `buildColumns` takes any connection to an anchor.
 			setLoomKey(fm, FM.sceneChapter, chapter ? `[[${linkTargetOf(chapter)}]]` : '');
+			// A raw id, not a link — there's no Branch note to point at.
+			setLoomKey(fm, FM.sceneBranch, scene.branchLoomId ?? '');
 			setLoomKey(
 				fm,
 				FM.sceneCast,
 				cast.map((c) => `[[${linkTargetOf(c)}]]`)
+			);
+			setLoomKey(
+				fm,
+				FM.sceneFactions,
+				factionsHere.map((f) => `[[${linkTargetOf(f)}]]`)
+			);
+			setLoomKey(
+				fm,
+				FM.sceneItems,
+				itemsHere.map((i) => `[[${linkTargetOf(i)}]]`)
+			);
+			setLoomKey(
+				fm,
+				FM.sceneMentionedLocations,
+				mentionedLocations.map((l) => `[[${linkTargetOf(l)}]]`)
 			);
 			// Scene order follows the script, so the graph and lists read in
 			// script order without anyone dragging anything.
@@ -323,17 +374,20 @@ export async function syncScenes(
 			// through the user's sync client and invite conflict copies (see
 			// ARCHITECTURE, "Playing nicely with file sync"). Only write when
 			// something actually differs.
-			const sameCast =
-				record.sceneCast.length === cast.length &&
-				cast.every((c, i) => record.sceneCast[i] === linkTargetOf(c));
+			const sameLinks = (existingLinks: string[], records: EntityRecord[]) =>
+				existingLinks.length === records.length && records.every((r, i) => existingLinks[i] === linkTargetOf(r));
 			const clean =
 				record.name === name &&
 				record.sceneChapter === (chapter ? linkTargetOf(chapter) : '') &&
+				record.sceneBranch === (scene.branchLoomId ?? '') &&
 				record.sceneIntExt === scene.intExt &&
 				record.sceneTime === scene.timeOfDay &&
 				record.sceneLocation === (location ? linkTargetOf(location) : '') &&
 				record.seq === scene.index &&
-				sameCast;
+				sameLinks(record.sceneCast, cast) &&
+				sameLinks(record.sceneFactions, factionsHere) &&
+				sameLinks(record.sceneItems, itemsHere) &&
+				sameLinks(record.sceneMentionedLocations, mentionedLocations);
 			if (clean) continue;
 			const file = plugin.app.vault.getFileByPath(record.path);
 			if (!file) continue;
@@ -496,12 +550,17 @@ function Script({ view }: { view: ScriptView }) {
 	const commit = async (raw: string) => {
 		if (!file || !project) return;
 		const withIds = ensureSceneIds(raw);
-		if (withIds.text !== onDisk.current) {
-			await plugin.app.vault.modify(file, withIds.text);
-			onDisk.current = withIds.text;
+		// Keeps an existing #N# production-numbering scheme sequential even when
+		// the scene was added by plain typing here, not through a structural
+		// drag/move action — a no-op when nothing in the script is numbered.
+		const renumbered = renumberScenes(withIds.text);
+		const changed = withIds.changed || renumbered !== withIds.text;
+		if (renumbered !== onDisk.current) {
+			await plugin.app.vault.modify(file, renumbered);
+			onDisk.current = renumbered;
 		}
-		if (withIds.changed) setText(withIds.text);
-		await syncScenes(plugin, project, parseFountain(withIds.text));
+		if (changed) setText(renumbered);
+		await syncScenes(plugin, project, parseFountain(renumbered), renumbered);
 
 		// The one thing that flows the other way: a chapter's display title.
 		// Fountain sections never export, so a title that must appear in the PDF
@@ -517,7 +576,11 @@ function Script({ view }: { view: ScriptView }) {
 				titles.set(chapter.chapterId, chapter.displayTitle.trim() !== '' ? chapter.displayTitle : chapter.name);
 			}
 		}
-		const titled = applyDisplayTitles(withIds.text, titles);
+		// Branch sections get the same treatment, auto-derived from their own
+		// title text rather than a note field — there's no Branch note to own
+		// one — so a branch's printed marker stays in sync purely from its
+		// heading, kept separate from the chapter-title pass above.
+		const titled = applyBranchLabels(applyDisplayTitles(renumbered, titles));
 		if (titled !== onDisk.current) {
 			await plugin.app.vault.modify(file, titled);
 			onDisk.current = titled;
@@ -588,6 +651,13 @@ function Script({ view }: { view: ScriptView }) {
 	const sceneNotes = plugin.indexer.getAll('scene', project.root);
 	const sceneNote = (scene: ParsedScene): EntityRecord | undefined =>
 		sceneNotes.find((r) => r.sceneId === scene.loomId);
+
+	// What the `@[` inline entity-link autocomplete offers, and what its
+	// clicks resolve against — never auto-created, so only what already
+	// exists shows up here.
+	const entityOptions = (['character', 'faction', 'location', 'item'] as const).flatMap((t) =>
+		plugin.indexer.getAll(t, project.root).map((r) => ({ name: r.name, type: r.type, path: r.path }))
+	);
 
 	// --- Pagination ---------------------------------------------------------
 	// From the PDF's real typeset geometry, not the parser's line-budget
@@ -934,7 +1004,7 @@ function Script({ view }: { view: ScriptView }) {
 			i
 				.setTitle('Export as .fountain (no Loom ids)…')
 				.setIcon('file-down')
-				.onClick(() => void saveExport(`${stem}.fountain`, stripLoomIds(text), 'text/plain'))
+				.onClick(() => void saveExport(`${stem}.fountain`, stripEntityLinksForDisplay(stripLoomIds(text)), 'text/plain'))
 		);
 		menu.addSeparator();
 		menu.addItem((i) => i.setTitle('Import a script…').setIcon('file-up').onClick(pickImport));
@@ -974,74 +1044,44 @@ function Script({ view }: { view: ScriptView }) {
 		else groups.push({ section, line: sectionLineOf(section, scene.line), scenes: [scene] });
 	}
 
-	// The navigation panel's own tree — every section LEVEL, not just the
-	// top-level chapter `groups` above collapses everything to. Built by
-	// walking sections and scenes together in document order (merged and
-	// line-sorted) with a stack of currently-open sections, so a scene that
-	// falls between two sibling `##` subsections stays attached to whichever
-	// one actually precedes it, and content keeps its real reading order
-	// instead of "every scene, then every child section" (which separate
-	// scenes/children arrays would have produced).
-	type NavItem = { kind: 'scene'; scene: ParsedScene } | { kind: 'section'; node: NavNode };
-	interface NavNode {
-		title: string;
-		line: number;
-		items: NavItem[];
-	}
-	const navTree: NavNode = (() => {
-		const root: NavNode = { title: '', line: -1, items: [] };
-		const stack: { node: NavNode; level: number }[] = [{ node: root, level: 0 }];
-		const merged = [
-			...parsed.sections.map((s) => ({ line: s.line, kind: 'section' as const, level: s.level, title: s.text })),
-			...parsed.scenes.map((s) => ({ line: s.line, kind: 'scene' as const, scene: s })),
-		].sort((a, b) => a.line - b.line);
-		for (const m of merged) {
-			if (m.kind === 'section') {
-				while (stack.length > 1 && stack[stack.length - 1].level >= m.level) stack.pop();
-				const node: NavNode = { title: m.title, line: m.line, items: [] };
-				stack[stack.length - 1].node.items.push({ kind: 'section', node });
-				stack.push({ node, level: m.level });
-			} else {
-				stack[stack.length - 1].node.items.push({ kind: 'scene', scene: m.scene });
-			}
-		}
-		return root;
-	})();
+	// The navigation panel's own tree, built by `buildNavTree` (below) from
+	// the whole script; the Scene page's own mini nav panel calls the same
+	// function bounded to just one scene's line range.
+	const navTree: NavNode = buildNavTree(parsed);
 
-	/** Renders one nav tree level, recursing into nested sections. `depth`
-	 *  1 is a top-level chapter (styled like today); 2+ is a nested `##`/`###`
-	 *  section, indented and lighter-weight so it reads as a sub-level. */
-	const renderNavNode = (node: NavNode, depth: number): ReactElement => (
-		<div key={`${node.line}-${node.title}`}>
-			{node.title !== '' ? (
+	// Lives INSIDE the editor/pages box (its own left margin), the same
+	// `loom-script-nav-sticky-inset` placement the Scene/Chapter pages use —
+	// more natural than floating above the Script/Pages tabs, and it means
+	// one consistent spot for this toggle everywhere in the app rather than
+	// a page-level position unique to this one view.
+	const navPanel =
+		navTree.items.length > 0 ? (
+			<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 				<button
-					className={depth > 1 ? 'loom-script-nav-chapter loom-script-nav-sub' : 'loom-script-nav-chapter'}
-					disabled={node.line < 0}
-					onClick={() => jumpToLine(node.line)}
-					title={node.title}
+					className="loom-script-nav-toggle"
+					aria-label={navOpen ? 'Hide navigation' : 'Show navigation'}
+					onClick={() => setNavOpen(!navOpen)}
 				>
-					{node.title}
+					<Icon name={navOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
 				</button>
-			) : null}
-			<div className={depth > 0 ? 'loom-script-nav-children' : undefined}>
-				{node.items.map((item) =>
-					item.kind === 'scene' ? (
-						<button
-							key={item.scene.loomId ?? item.scene.line}
-							className="loom-script-nav-scene"
-							onClick={() => jumpToLine(item.scene.line)}
-							title={item.scene.heading}
-						>
-							<span className="loom-script-nav-num">{item.scene.index}</span>
-							<span className="loom-script-nav-text">{item.scene.heading}</span>
-						</button>
-					) : (
-						renderNavNode(item.node, depth + 1)
-					)
-				)}
+				{navOpen ? (
+					<aside className="loom-script-nav">
+						<div className="loom-script-nav-head">
+							Navigate
+							<button
+								className="loom-rel-filter"
+								aria-label="Hide navigation"
+								onClick={() => setNavOpen(false)}
+							>
+								<Icon name="chevron-left" />
+							</button>
+						</div>
+						{parsed.scenes.length === 0 ? <div className="loom-script-nav-empty">No scenes yet.</div> : null}
+						{renderNavTreeNode(navTree, 0, jumpToLine)}
+					</aside>
+				) : null}
 			</div>
-		</div>
-	);
+		) : null;
 
 	return (
 		<ViewShell
@@ -1061,42 +1101,6 @@ function Script({ view }: { view: ScriptView }) {
 			}
 		>
 			<div className="loom-script-layout">
-				{/* Script navigation. It OVERLAYS the working area rather than
-				    sitting beside it — a permanent column stole width from the
-				    page the whole time it was open. Chapters are jump targets
-				    too: the script has a `# Chapter` line, so it's a place to go,
-				    not a label. Unlike "Outline links" below, everything here
-				    navigates within the SCRIPT rather than opening a page.
-				    The zero-height sticky wrapper keeps the toggle (and the
-				    panel, when open) pinned to the top of the scrolling view
-				    instead of scrolling away with the title-page/toolbar above
-				    the editor. */}
-				<div className="loom-script-nav-sticky">
-					<button
-						className="loom-script-nav-toggle"
-						aria-label={navOpen ? 'Hide navigation' : 'Show navigation'}
-						onClick={() => setNavOpen(!navOpen)}
-					>
-						<Icon name={navOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
-					</button>
-					{navOpen ? (
-						<aside className="loom-script-nav">
-						<div className="loom-script-nav-head">
-							Navigate
-							<button
-								className="loom-rel-filter"
-								aria-label="Hide navigation"
-								onClick={() => setNavOpen(false)}
-							>
-								<Icon name="chevron-left" />
-							</button>
-						</div>
-						{parsed.scenes.length === 0 ? <div className="loom-script-nav-empty">No scenes yet.</div> : null}
-						{renderNavNode(navTree, 0)}
-					</aside>
-				) : null}
-				</div>
-
 				<div className="loom-script-main">
 					<details className="loom-script-section">
 						<summary>Title page</summary>
@@ -1231,6 +1235,7 @@ function Script({ view }: { view: ScriptView }) {
 						// navigates by scrolling to a page rather than swapping which
 						// one exists, so reading straight through still works.
 						<div className="loom-screenplay" ref={pagesRef}>
+							{navPanel}
 							{titleFirst ? (
 								// Mirrors the PDF's title page: title a third down,
 								// credits under it, contact and draft date lower-left.
@@ -1262,7 +1267,7 @@ function Script({ view }: { view: ScriptView }) {
 												<p key={j} className="loom-sp-scene-heading">
 													<span
 														dangerouslySetInnerHTML={{
-															__html: highlight(renderInline(preventOrphans(elementText(el))), query),
+															__html: highlight(renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))), query),
 														}}
 													/>
 													{el.sceneNumber ? (
@@ -1274,7 +1279,7 @@ function Script({ view }: { view: ScriptView }) {
 													key={j}
 													className={`loom-sp-${el.type}`}
 													dangerouslySetInnerHTML={{
-														__html: highlight(renderInline(preventOrphans(elementText(el))), query),
+														__html: highlight(renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))), query),
 													}}
 												/>
 											)
@@ -1285,6 +1290,7 @@ function Script({ view }: { view: ScriptView }) {
 						</div>
 					) : (
 						<div className="loom-script-editor" ref={editorWrapperRef}>
+							{navPanel}
 							<FountainField
 								ref={fountainFieldRef}
 								value={text}
@@ -1292,6 +1298,7 @@ function Script({ view }: { view: ScriptView }) {
 								onBlur={() => void commit(text)}
 								characters={parsed.characters}
 								locations={parsed.locations}
+								entityOptions={entityOptions}
 								onOpenCharacter={(name) => {
 									if (!project) return;
 									const match = plugin.indexer
@@ -1312,6 +1319,7 @@ function Script({ view }: { view: ScriptView }) {
 										.find((c) => c.chapterId === chapterLoomId);
 									if (chapter) view.openEntity(chapter.path);
 								}}
+								onOpenEntity={(path) => view.openEntity(path)}
 							/>
 						</div>
 					)}
@@ -1454,6 +1462,158 @@ export function useScriptText(plugin: LoomLoomPlugin, project: ProjectDef | null
 }
 
 /** The lines of the script belonging to one scene, by its loom id. */
+/** One node in the script navigation tree — a chapter or a nested `##`/`###`
+ *  section (a branch-tagged one carries its own `branchGroup`). */
+export interface NavNode {
+	title: string;
+	line: number;
+	branchGroup: string | null;
+	items: NavItem[];
+}
+export type NavItem =
+	| { kind: 'scene'; scene: ParsedScene; items: NavItem[] }
+	| { kind: 'section'; node: NavNode };
+
+/**
+ * Builds the script navigation tree — every section LEVEL, not just the
+ * top-level chapters, and (optionally) bounded to `[startLine, endLine)` so
+ * the Scene page's own mini nav panel can ask for just one scene's own
+ * branching, reusing the exact same algorithm as the main Script view's full
+ * tree.
+ *
+ * Walks sections and scenes together in document order (merged and
+ * line-sorted) with a stack of currently-open sections, so a scene that
+ * falls between two sibling `##` subsections stays attached to whichever one
+ * actually precedes it, and content keeps its real reading order instead of
+ * "every scene, then every child section" (which separate scenes/children
+ * arrays would have produced).
+ *
+ * A branch-tagged section (`= branch: <id>`, see fountain.ts) is the one
+ * exception to plain level-based nesting: it attaches under the nearest
+ * SCENE seen so far (in document order, not just the current stack frame —
+ * a run of several branch groups in a row, e.g. a reaction choice then an
+ * item choice, all belong to the SAME preceding scene even though each
+ * branch section's own frame gets pushed and popped in between), not the
+ * enclosing chapter/section. Without this a `## Branch A` after a scene
+ * heading rendered as a flush sibling of the chapter instead of nested under
+ * that scene. An ordinary (untagged) nested section is unaffected — it still
+ * nests by level exactly as before. A scene heading always belongs to the
+ * nearest REAL (non-branch) section in turn — a branch holds prose, never a
+ * further scene heading of its own — so hitting one closes any currently
+ * open branch frame first (same reasoning as `parseFountain`'s own
+ * `sectionStack` in fountain.ts), which is what keeps a scene written AFTER
+ * a resolved choice point from staying nested inside the last branch.
+ */
+export function buildNavTree(parsed: ParsedScript, startLine = 0, endLine = Infinity): NavNode {
+	const root: NavNode = { title: '', line: -1, branchGroup: null, items: [] };
+	type SceneItem = Extract<NavItem, { kind: 'scene' }>;
+	const stack: { node: NavNode; level: number }[] = [{ node: root, level: 0 }];
+	let lastScene: SceneItem | null = null;
+	const merged = [
+		...parsed.sections
+			.filter((s) => s.line >= startLine && s.line < endLine)
+			.map((s) => ({
+				line: s.line,
+				kind: 'section' as const,
+				level: s.level,
+				title: s.text,
+				branchGroup: s.branchGroup,
+			})),
+		...parsed.scenes
+			.filter((s) => s.line >= startLine && s.line < endLine)
+			.map((s) => ({ line: s.line, kind: 'scene' as const, scene: s })),
+	].sort((a, b) => a.line - b.line);
+	for (const m of merged) {
+		if (m.kind === 'section') {
+			while (stack.length > 1 && stack[stack.length - 1].level >= m.level) stack.pop();
+			const top = stack[stack.length - 1];
+			const node: NavNode = { title: m.title, line: m.line, branchGroup: m.branchGroup, items: [] };
+			if (m.branchGroup !== null && lastScene) {
+				lastScene.items.push({ kind: 'section', node });
+			} else {
+				top.node.items.push({ kind: 'section', node });
+			}
+			if (m.branchGroup === null) lastScene = null;
+			stack.push({ node, level: m.level });
+		} else {
+			while (stack.length > 1 && stack[stack.length - 1].node.branchGroup !== null) stack.pop();
+			const item: SceneItem = { kind: 'scene', scene: m.scene, items: [] };
+			stack[stack.length - 1].node.items.push(item);
+			lastScene = item;
+		}
+	}
+	return root;
+}
+
+/**
+ * Renders one nav item — a scene (its own button, plus any branch children
+ * nested beneath it) or a section (recurses via `renderNavTreeNode`).
+ *
+ * Shared across all three nav panels — the main Script view's full tree, the
+ * Chapter page's (bounded to that chapter), and the Scene page's (bounded to
+ * that scene) — so they're genuinely the SAME navigation at different
+ * scopes, not three separate implementations that could drift. `jump` is the
+ * caller's own line-to-position logic (different for Script vs Pages mode,
+ * and for how a bounded panel's absolute script line maps back to its own
+ * excerpt's line numbering).
+ */
+export function renderNavTreeItem(
+	item: NavItem,
+	depth: number,
+	jump: (line: number) => void
+): ReactElement {
+	if (item.kind === 'section') return renderNavTreeNode(item.node, depth, jump);
+	return (
+		<div key={item.scene.loomId ?? item.scene.line}>
+			<button
+				className="loom-script-nav-scene"
+				onClick={() => jump(item.scene.line)}
+				title={item.scene.heading}
+			>
+				<span className="loom-script-nav-num">{item.scene.index}</span>
+				<span className="loom-script-nav-text">{item.scene.heading}</span>
+			</button>
+			{item.items.length > 0 ? (
+				<div className="loom-script-nav-children">
+					{item.items.map((child) => renderNavTreeItem(child, depth + 1, jump))}
+				</div>
+			) : null}
+		</div>
+	);
+}
+
+/** Renders one nav tree level, recursing into nested sections. `depth` 1 is
+ *  a top-level chapter (styled like today); 2+ is a nested `##`/`###`
+ *  section, indented and lighter-weight so it reads as a sub-level. A
+ *  branch-tagged section gets its own modifier class too. */
+export function renderNavTreeNode(
+	node: NavNode,
+	depth: number,
+	jump: (line: number) => void
+): ReactElement {
+	return (
+		<div key={`${node.line}-${node.title}`}>
+			{node.title !== '' ? (
+				<button
+					className={
+						(depth > 1 ? 'loom-script-nav-chapter loom-script-nav-sub' : 'loom-script-nav-chapter') +
+						(node.branchGroup !== null ? ' loom-script-nav-branch' : '')
+					}
+					disabled={node.line < 0}
+					onClick={() => jump(node.line)}
+					title={node.title}
+				>
+					{node.title}
+				</button>
+			) : null}
+			<div className={depth > 0 ? 'loom-script-nav-children' : undefined}>
+				{node.items.map((item) => renderNavTreeItem(item, depth + 1, jump))}
+			</div>
+		</div>
+	);
+}
+
+/** The lines of the script belonging to one scene, by its loom id. */
 export function sceneScriptText(script: string | null, sceneId: string): string | null {
 	if (script === null || sceneId === '') return null;
 	const parsed = parseFountain(script);
@@ -1462,6 +1622,22 @@ export function sceneScriptText(script: string | null, sceneId: string): string 
 	return script
 		.split(/\r?\n/)
 		.slice(scene.line, scene.endLine)
+		.join('\n')
+		.replace(/\s+$/, '');
+}
+
+/** The lines of the script belonging to one chapter (its `#` section line
+ *  through every scene under it), by the section's loom id — the Chapter
+ *  page's own Script section excerpt, mirroring `sceneScriptText`. */
+export function chapterScriptText(script: string | null, chapterId: string): string | null {
+	if (script === null || chapterId === '') return null;
+	const parsed = parseFountain(script);
+	const section = parsed.sections.find((sec) => sec.level === 1 && sec.loomId === chapterId);
+	if (!section) return null;
+	const lines = script.split(/\r?\n/);
+	const endLine = nextTopSectionLine(parsed, section.line) ?? lines.length;
+	return lines
+		.slice(section.line, endLine)
 		.join('\n')
 		.replace(/\s+$/, '');
 }
@@ -1549,7 +1725,7 @@ export async function editScriptAndSync(
 		const scriptFile = findScriptFile(plugin, project);
 		if (scriptFile) {
 			const raw = await plugin.app.vault.read(scriptFile);
-			await syncScenes(plugin, project, parseFountain(raw));
+			await syncScenes(plugin, project, parseFountain(raw), raw);
 		}
 	}
 	return changed;

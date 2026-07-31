@@ -1,4 +1,4 @@
-import { FountainElement, ParsedScript, TitlePage, elementText, hasTitlePage } from './fountain';
+import { FountainElement, ParsedScript, TitlePage, elementText, hasTitlePage, stripEntityLinksForDisplay } from './fountain';
 
 /**
  * A minimal PDF writer, just wide enough for a screenplay.
@@ -57,7 +57,8 @@ const LAYOUT: Record<string, { indent: number; width: number; align?: 'right' | 
  * the strip regexes run — same reasoning as `renderInline` in fountain.ts —
  * so the backslash itself doesn't leak into the printed page.
  */
-function plainText(text: string): string {
+function plainText(rawText: string): string {
+	const text = stripEntityLinksForDisplay(rawText);
 	const escapedChars: string[] = [];
 	const withPlaceholders = text.replace(/\\([*_\\])/g, (_, ch: string) => {
 		escapedChars.push(ch);

@@ -122,6 +122,7 @@ const HIDDEN_LINK_KEYS = [
 	'loomregionorder',
 	'loomitemowner',
 	'loomobjectives',
+	'loomscenebranch',
 	'attendance',
 	'deathsession',
 	'sublocationorder',
@@ -896,10 +897,17 @@ export class LoomIndexer extends Component {
 				return lp ?? '';
 			})(),
 			sceneCast: parseLinkList(fmLoom(fm, FM.sceneCast)),
+			sceneFactions: parseLinkList(fmLoom(fm, FM.sceneFactions)),
+			sceneItems: parseLinkList(fmLoom(fm, FM.sceneItems)),
+			sceneMentionedLocations: parseLinkList(fmLoom(fm, FM.sceneMentionedLocations)),
 			sceneChapter: (() => {
 				const v = fmLoom(fm, FM.sceneChapter);
 				const lp = typeof v === 'string' ? extractLinkpath(v) : null;
 				return lp ?? '';
+			})(),
+			sceneBranch: (() => {
+				const v = fmLoom(fm, FM.sceneBranch);
+				return typeof v === 'string' ? v.trim() : '';
 			})(),
 			chapterId: (() => {
 				const v = fmLoom(fm, FM.chapterId);
