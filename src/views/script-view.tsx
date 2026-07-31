@@ -19,6 +19,7 @@ import {
 	ensureSceneIds,
 	hasTitlePage,
 	parseFountain,
+	preventOrphans,
 	reattachSceneIds,
 	reattachSectionIds,
 	renderInline,
@@ -35,6 +36,7 @@ import { ConfirmModal, createEntity, entityFileName } from '../project';
 import { LoomFileReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage } from './common';
 import { useIndexVersion } from './hooks';
+import { FountainField, FountainFieldHandle } from './fountain-field';
 import type LoomLoomPlugin from '../main';
 
 /**
@@ -390,8 +392,17 @@ function Script({ view }: { view: ScriptView }) {
 	const onDisk = useRef<string | null>(null);
 	/** Paths already given their one post-load commit pass. */
 	const committedFor = useRef<string | null>(null);
-	const editorRef = useRef<HTMLTextAreaElement | null>(null);
+	/** The resizable wrapper around the live-preview editor (for the
+	 *  height-memory effect below) — not the editor itself, which is a CM6
+	 *  view mounted by `FountainField`, not a native resizable textarea. */
+	const editorWrapperRef = useRef<HTMLDivElement | null>(null);
+	const fountainFieldRef = useRef<FountainFieldHandle | null>(null);
 	const pagesRef = useRef<HTMLDivElement | null>(null);
+	/** A script line to land on once the Script pane is back — set when
+	 *  leaving Pages mode, consumed by the effect below once `FountainField`
+	 *  has remounted (it's torn down and rebuilt on every mode switch, so
+	 *  the scroll has to be applied after the fact, not inline). */
+	const pendingScrollLineRef = useRef<number | null>(null);
 
 	// Read the file once per path; afterwards the textarea is the source of
 	// truth until it's written back.
@@ -417,13 +428,16 @@ function Script({ view }: { view: ScriptView }) {
 		return () => document.removeEventListener('mousedown', onDown);
 	}, [navOpen]);
 
-	// Remembers the script textarea's manually-resized height across reloads —
-	// a UI preference, not vault data, so it's kept in localStorage rather than
+	// Remembers the editor's manually-resized height across reloads — a UI
+	// preference, not vault data, so it's kept in localStorage rather than
 	// project settings. Restored before the ResizeObserver starts watching so
 	// its own initial callback doesn't immediately overwrite what we just set.
+	// This resizes the WRAPPER (plain CSS `resize: vertical`), not the CM6
+	// view mounted inside it — a live-preview editor has no native resize
+	// handle the way a `<textarea>` does.
 	useEffect(() => {
 		if (mode !== 'script' || !file) return;
-		const editor = editorRef.current;
+		const editor = editorWrapperRef.current;
 		if (!editor) return;
 		const key = `loom-script-editor-height:${file.path}`;
 		const saved = window.localStorage.getItem(key);
@@ -434,6 +448,17 @@ function Script({ view }: { view: ScriptView }) {
 		observer.observe(editor);
 		return () => observer.disconnect();
 	}, [file?.path, mode]);
+
+	// Script/Pages scroll sync (the other direction, script view -> pages,
+	// happens inline in `switchMode` below since the pages DOM only needs a
+	// scrollIntoView, not a freshly-mounted CM6 view to hand a ref to).
+	useEffect(() => {
+		if (mode !== 'script') return;
+		const line = pendingScrollLineRef.current;
+		if (line === null) return;
+		pendingScrollLineRef.current = null;
+		fountainFieldRef.current?.scrollToLine(line);
+	}, [mode]);
 
 	// Pages preview: the page-number readout should track manual scrolling, not
 	// just the explicit jump buttons — otherwise it silently goes stale the
@@ -600,11 +625,23 @@ function Script({ view }: { view: ScriptView }) {
 	/** Line index a character offset falls on. */
 	const lineAt = (offset: number) => text.slice(0, offset).split('\n').length - 1;
 
-	/** The 1-based typeset page a line renders on. */
+	/** How many physical lines an element's OWN `.line` covers — only
+	 *  `dialogue` ever merges consecutive source lines into one element
+	 *  (`\n`-joined), so it's the one type whose span can be more than 1;
+	 *  matches the identical check in `fountain-field.tsx`'s decorations. */
+	const elementSpan = (el: ParsedScript['elements'][number]) =>
+		el.type === 'dialogue' ? el.text.split('\n').length : 1;
+
+	/** The 1-based typeset page a line renders on. Checks the element's WHOLE
+	 *  span, not just its start line — a line landing mid-dialogue (a
+	 *  multi-line merged element) has no element starting exactly there, so
+	 *  an exact-match-only check fell through to the "after this line"
+	 *  fallback below and could land a page later than the one actually
+	 *  showing that line. */
 	const pageOfLine = (line: number) => {
 		const offset = titleFirst ? 2 : 1;
 		for (let i = 0; i < bodyPages.length; i++) {
-			if (bodyPages[i].some((el) => el.line === line)) return i + offset;
+			if (bodyPages[i].some((el) => line >= el.line && line < el.line + elementSpan(el))) return i + offset;
 		}
 		// Nothing rendered sits exactly on this line — a section (`#` chapter)
 		// heading never reaches the page itself. Land on whichever page holds
@@ -618,32 +655,36 @@ function Script({ view }: { view: ScriptView }) {
 		return Math.max(offset, bodyPages.length - 1 + offset);
 	};
 
+	/** First rendered line on a typeset page — the inverse of `pageOfLine`,
+	 *  used to land the Script pane near where Pages was scrolled to. */
+	const lineOfPage = (target: number) => {
+		const idx = target - (titleFirst ? 2 : 1);
+		if (idx < 0 || idx >= bodyPages.length) return 0;
+		return bodyPages[idx][0]?.line ?? 0;
+	};
+
 	const gotoMatch = (index: number) => {
 		if (matches.length === 0) return;
 		const next = ((index % matches.length) + matches.length) % matches.length;
 		setMatchIndex(next);
 		const offset = matches[next];
 		if (mode === 'script') {
-			const editor = editorRef.current;
-			if (!editor) return;
-			editor.focus();
-			editor.setSelectionRange(offset, offset + query.length);
-			// setSelectionRange doesn't scroll on its own in every engine.
-			const ratio = offset / Math.max(1, text.length);
-			editor.scrollTop = Math.max(0, ratio * editor.scrollHeight - editor.clientHeight / 2);
+			fountainFieldRef.current?.selectRange(offset, offset + query.length);
 		} else {
 			scrollToPage(pageOfLine(lineAt(offset)));
 		}
 	};
 
 	/** Scrolls the active pane to a script line (outline navigation). */
-	/** Scrolls the preview to a page (the pages all exist; navigation moves). */
-	const scrollToPage = (target: number) => {
+	/** Scrolls the preview to a page (the pages all exist; navigation moves).
+	 *  `behavior` defaults to smooth for an explicit jump (Prev/Next, the page
+	 *  number field, search) — landing back where you were on a mode switch
+	 *  is a restore, not a jump, so `switchMode` passes 'auto' there instead
+	 *  of animating a scroll across the whole document on every toggle. */
+	const scrollToPage = (target: number, behavior: ScrollBehavior = 'smooth') => {
 		setPage(target);
 		window.requestAnimationFrame(() => {
-			pagesRef.current
-				?.querySelector(`[data-page="${target}"]`)
-				?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+			pagesRef.current?.querySelector(`[data-page="${target}"]`)?.scrollIntoView({ block: 'start', behavior });
 		});
 	};
 
@@ -652,13 +693,29 @@ function Script({ view }: { view: ScriptView }) {
 			scrollToPage(pageOfLine(line));
 			return;
 		}
-		const editor = editorRef.current;
-		if (!editor) return;
 		const offset = text.split('\n').slice(0, line).join('\n').length + (line > 0 ? 1 : 0);
-		editor.focus();
-		editor.setSelectionRange(offset, offset);
-		const ratio = offset / Math.max(1, text.length);
-		editor.scrollTop = Math.max(0, ratio * editor.scrollHeight - editor.clientHeight / 3);
+		fountainFieldRef.current?.selectRange(offset, offset);
+	};
+
+	/** The Script/Pages toggle keeps roughly the same spot in the document
+	 *  across a switch, rather than always landing back at the top. Leaving
+	 *  Pages stashes a target line for the effect above to apply once
+	 *  `FountainField` remounts; leaving Script can scroll immediately since
+	 *  the pages markup, once mounted, needs nothing handed to it but a
+	 *  `scrollIntoView`. */
+	const switchMode = (next: 'script' | 'pages') => {
+		if (next === mode) return;
+		if (next === 'pages') {
+			const topLine = fountainFieldRef.current?.getTopLine();
+			setMode('pages');
+			// 'instant', not 'auto' — the container has `scroll-behavior: smooth`
+			// for the ordinary jump navigation below, and 'auto' explicitly
+			// means "defer to that CSS property", so it would animate anyway.
+			if (topLine !== undefined) scrollToPage(pageOfLine(topLine), 'instant');
+		} else {
+			pendingScrollLineRef.current = lineOfPage(currentPage);
+			setMode('script');
+		}
 	};
 
 	// --- Menus --------------------------------------------------------------
@@ -917,6 +974,75 @@ function Script({ view }: { view: ScriptView }) {
 		else groups.push({ section, line: sectionLineOf(section, scene.line), scenes: [scene] });
 	}
 
+	// The navigation panel's own tree — every section LEVEL, not just the
+	// top-level chapter `groups` above collapses everything to. Built by
+	// walking sections and scenes together in document order (merged and
+	// line-sorted) with a stack of currently-open sections, so a scene that
+	// falls between two sibling `##` subsections stays attached to whichever
+	// one actually precedes it, and content keeps its real reading order
+	// instead of "every scene, then every child section" (which separate
+	// scenes/children arrays would have produced).
+	type NavItem = { kind: 'scene'; scene: ParsedScene } | { kind: 'section'; node: NavNode };
+	interface NavNode {
+		title: string;
+		line: number;
+		items: NavItem[];
+	}
+	const navTree: NavNode = (() => {
+		const root: NavNode = { title: '', line: -1, items: [] };
+		const stack: { node: NavNode; level: number }[] = [{ node: root, level: 0 }];
+		const merged = [
+			...parsed.sections.map((s) => ({ line: s.line, kind: 'section' as const, level: s.level, title: s.text })),
+			...parsed.scenes.map((s) => ({ line: s.line, kind: 'scene' as const, scene: s })),
+		].sort((a, b) => a.line - b.line);
+		for (const m of merged) {
+			if (m.kind === 'section') {
+				while (stack.length > 1 && stack[stack.length - 1].level >= m.level) stack.pop();
+				const node: NavNode = { title: m.title, line: m.line, items: [] };
+				stack[stack.length - 1].node.items.push({ kind: 'section', node });
+				stack.push({ node, level: m.level });
+			} else {
+				stack[stack.length - 1].node.items.push({ kind: 'scene', scene: m.scene });
+			}
+		}
+		return root;
+	})();
+
+	/** Renders one nav tree level, recursing into nested sections. `depth`
+	 *  1 is a top-level chapter (styled like today); 2+ is a nested `##`/`###`
+	 *  section, indented and lighter-weight so it reads as a sub-level. */
+	const renderNavNode = (node: NavNode, depth: number): ReactElement => (
+		<div key={`${node.line}-${node.title}`}>
+			{node.title !== '' ? (
+				<button
+					className={depth > 1 ? 'loom-script-nav-chapter loom-script-nav-sub' : 'loom-script-nav-chapter'}
+					disabled={node.line < 0}
+					onClick={() => jumpToLine(node.line)}
+					title={node.title}
+				>
+					{node.title}
+				</button>
+			) : null}
+			<div className={depth > 0 ? 'loom-script-nav-children' : undefined}>
+				{node.items.map((item) =>
+					item.kind === 'scene' ? (
+						<button
+							key={item.scene.loomId ?? item.scene.line}
+							className="loom-script-nav-scene"
+							onClick={() => jumpToLine(item.scene.line)}
+							title={item.scene.heading}
+						>
+							<span className="loom-script-nav-num">{item.scene.index}</span>
+							<span className="loom-script-nav-text">{item.scene.heading}</span>
+						</button>
+					) : (
+						renderNavNode(item.node, depth + 1)
+					)
+				)}
+			</div>
+		</div>
+	);
+
 	return (
 		<ViewShell
 			view={view}
@@ -965,32 +1091,8 @@ function Script({ view }: { view: ScriptView }) {
 								<Icon name="chevron-left" />
 							</button>
 						</div>
-						{groups.length === 0 ? <div className="loom-script-nav-empty">No scenes yet.</div> : null}
-						{groups.map((group, gi) => (
-							<div key={`${group.section}-${gi}`}>
-								{group.section !== '' ? (
-									<button
-										className="loom-script-nav-chapter"
-										disabled={group.line < 0}
-										onClick={() => jumpToLine(group.line)}
-										title={group.section}
-									>
-										{group.section}
-									</button>
-								) : null}
-								{group.scenes.map((scene) => (
-									<button
-										key={scene.loomId ?? scene.line}
-										className="loom-script-nav-scene"
-										onClick={() => jumpToLine(scene.line)}
-										title={scene.heading}
-									>
-										<span className="loom-script-nav-num">{scene.index}</span>
-										<span className="loom-script-nav-text">{scene.heading}</span>
-									</button>
-								))}
-							</div>
-						))}
+						{parsed.scenes.length === 0 ? <div className="loom-script-nav-empty">No scenes yet.</div> : null}
+						{renderNavNode(navTree, 0)}
 					</aside>
 				) : null}
 				</div>
@@ -1017,13 +1119,13 @@ function Script({ view }: { view: ScriptView }) {
 					<div className="loom-script-tabs loom-seg">
 						<button
 							className={mode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-							onClick={() => setMode('script')}
+							onClick={() => switchMode('script')}
 						>
 							Script
 						</button>
 						<button
 							className={mode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-							onClick={() => setMode('pages')}
+							onClick={() => switchMode('pages')}
 						>
 							Pages preview
 						</button>
@@ -1160,7 +1262,7 @@ function Script({ view }: { view: ScriptView }) {
 												<p key={j} className="loom-sp-scene-heading">
 													<span
 														dangerouslySetInnerHTML={{
-															__html: highlight(renderInline(elementText(el)), query),
+															__html: highlight(renderInline(preventOrphans(elementText(el))), query),
 														}}
 													/>
 													{el.sceneNumber ? (
@@ -1172,7 +1274,7 @@ function Script({ view }: { view: ScriptView }) {
 													key={j}
 													className={`loom-sp-${el.type}`}
 													dangerouslySetInnerHTML={{
-														__html: highlight(renderInline(elementText(el)), query),
+														__html: highlight(renderInline(preventOrphans(elementText(el))), query),
 													}}
 												/>
 											)
@@ -1182,20 +1284,36 @@ function Script({ view }: { view: ScriptView }) {
 							})}
 						</div>
 					) : (
-						<>
-							<textarea
-								ref={editorRef}
-								className="loom-script-editor"
-								spellCheck={false}
+						<div className="loom-script-editor" ref={editorWrapperRef}>
+							<FountainField
+								ref={fountainFieldRef}
 								value={text}
-								onChange={(e) => setText(e.target.value)}
+								onChange={setText}
 								onBlur={() => void commit(text)}
+								characters={parsed.characters}
+								locations={parsed.locations}
+								onOpenCharacter={(name) => {
+									if (!project) return;
+									const match = plugin.indexer
+										.getAll('character', project.root)
+										.find((c) => c.name.trim().toLowerCase() === name.trim().toLowerCase());
+									if (match) view.openEntity(match.path);
+								}}
+								onOpenLocation={(sceneLoomId) => {
+									const note = sceneNotes.find((r) => r.sceneId === sceneLoomId);
+									if (!note || note.sceneLocation === '') return;
+									const loc = plugin.indexer.resolve(note.sceneLocation, note.path);
+									if (loc) view.openEntity(loc.path);
+								}}
+								onOpenChapter={(chapterLoomId) => {
+									if (!project) return;
+									const chapter = plugin.indexer
+										.getAll('chapter', project.root)
+										.find((c) => c.chapterId === chapterLoomId);
+									if (chapter) view.openEntity(chapter.path);
+								}}
 							/>
-							<span className="loom-field-hint">
-								Plain Fountain for now — live preview with clickable character and location links is
-								the next step. Scene ids are written into the headings and never reach an export.
-							</span>
-						</>
+						</div>
 					)}
 
 					<details className="loom-script-section">

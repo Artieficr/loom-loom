@@ -46,8 +46,10 @@ import {
 	recordLabel,
 } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
+import { useScriptText } from './script-view';
+import { parseFountain } from '../fountain';
 
-type SortMode = 'name' | 'created' | 'modified' | 'date' | 'order';
+type SortMode = 'name' | 'created' | 'modified' | 'date' | 'order' | 'appearance';
 
 export class EntityListView extends LoomReactView {
 	entityType: EntityType = 'character';
@@ -91,7 +93,12 @@ export class EntityListView extends LoomReactView {
 	}
 }
 
-function compare(a: EntityRecord, b: EntityRecord, mode: SortMode): number {
+function compare(
+	a: EntityRecord,
+	b: EntityRecord,
+	mode: SortMode,
+	appearance?: Map<string, number> | null
+): number {
 	switch (mode) {
 		case 'created':
 			return b.created - a.created;
@@ -107,6 +114,15 @@ function compare(a: EntityRecord, b: EntityRecord, mode: SortMode): number {
 			// script itself, so this reads the story front to back.
 			const ka = a.seq ?? a.created;
 			const kb = b.seq ?? b.created;
+			return ka === kb ? a.name.localeCompare(b.name) : ka - kb;
+		}
+		case 'appearance': {
+			// A character's first CUE line in the script — characters never
+			// named on a cue (mentioned only in action text, or not in the
+			// script at all) sort after every one that appears, then fall back
+			// to name so the ordering is still stable.
+			const ka = appearance?.get(a.name.trim().toLowerCase()) ?? Number.POSITIVE_INFINITY;
+			const kb = appearance?.get(b.name.trim().toLowerCase()) ?? Number.POSITIVE_INFINITY;
 			return ka === kb ? a.name.localeCompare(b.name) : ka - kb;
 		}
 		default:
@@ -155,6 +171,24 @@ function EntityList({
 	const [collapseOverride, setCollapseOverride] = useState<ReadonlyMap<string, boolean>>(new Map());
 
 	const project = resolveProject(plugin.indexer, projectRoot);
+	// Only characters offer "Sort: appearance", but the hook has to run
+	// unconditionally (React's rules of hooks) — reading the script for every
+	// OTHER entity type is wasted work, so it's gated to just that case.
+	const scriptTextForSort = useScriptText(plugin, type === 'character' ? project : null);
+	/** A character's first CUE line in the script, keyed by lowercased name —
+	 *  built once per script change rather than re-parsing on every sort
+	 *  comparison. */
+	const characterAppearance = useMemo(() => {
+		if (type !== 'character' || scriptTextForSort === null) return null;
+		const parsed = parseFountain(scriptTextForSort);
+		const map = new Map<string, number>();
+		for (const el of parsed.elements) {
+			if (el.type !== 'character') continue;
+			const key = el.text.trim().toLowerCase();
+			if (!map.has(key)) map.set(key, el.line);
+		}
+		return map;
+	}, [type, scriptTextForSort]);
 	const vocab = ENTITY_TAGS[type];
 	// The project's own chronology: Sessions/Events in a player or GM project,
 	// Chapters/Scenes in a writer one. The menus and pickers below address
@@ -210,8 +244,22 @@ function EntityList({
 			)
 			.filter((r) => role !== 'beat' || eventInvolved === null || eventHasInvolved(r, eventInvolved))
 			.filter((r) => role !== 'beat' || eventLocation === null || eventAtLocation(r, eventLocation))
-			.sort((a, b) => dir * compare(a, b, sort));
-	}, [plugin.indexer, version, project, type, query, sort, sortAsc, tagFilter, questStatus, eventInvolved, eventLocation, role]);
+			.sort((a, b) => dir * compare(a, b, sort, characterAppearance));
+	}, [
+		plugin.indexer,
+		version,
+		project,
+		type,
+		query,
+		sort,
+		sortAsc,
+		tagFilter,
+		questStatus,
+		eventInvolved,
+		eventLocation,
+		role,
+		characterAppearance,
+	]);
 
 	/** Scene/Chapter counter: each one's position in canonical SCRIPT order
 	 *  (ascending, ignoring whatever sort/direction is currently on screen) —
@@ -841,6 +889,9 @@ function EntityList({
 			/>
 			<select className="dropdown" value={sort} onChange={(e) => setSort(e.target.value as SortMode)}>
 				{scripted ? <option value="order">Sort: script order</option> : null}
+				{type === 'character' && characterAppearance ? (
+					<option value="appearance">Sort: appearance</option>
+				) : null}
 				{type !== 'session' ? <option value="name">Sort: name</option> : null}
 				<option value="created">Sort: created</option>
 				<option value="modified">Sort: modified</option>

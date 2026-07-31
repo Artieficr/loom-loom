@@ -327,7 +327,7 @@ Built so far:
   idempotent — an existing id is never changed or removed.
 - [x] **Script view** (`src/views/script-view.tsx`, `.fountain` registered like `.loom`):
   title-page editor (body stays byte-identical across rewrites), scene outline grouped by
-  section with page ranges and cast, "Open in external app", interim plain-Fountain textarea.
+  section with page ranges and cast, "Open in external app", live-preview Fountain editor.
 - [x] **Scene → note mirroring** (`syncScenes`): matched by loom id, additive only (a removed
   heading leaves an orphan, surfaced in the view, never deleted), and skipped entirely when a
   note's data already matches, so it doesn't re-upload notes through the user's sync. Ids are
@@ -546,16 +546,160 @@ Still to build:
   the record's `sceneId` cached before the record is dropped from the index.
 - [ ] **A chapter deleted from its page doesn't remove its `#` section** (and would strand its
   scenes). Needs a decision first: delete the scenes with it, or move them out?
-- [ ] Live-preview editor: raw at the cursor, formatted once it leaves — same model as
-  `markdown-field.tsx`, which is the head start here (CodeMirror, rendered-vs-raw
-  decorations, `[[` completion). Character/location names stay **plain text in the file** but
-  render as clickable entity chips inside the plugin.
+- [x] **Live-preview Fountain editor** (`src/views/fountain-field.tsx`, a new CM6 field replacing
+  the plain textarea in Script mode): per-element-type line decorations computed by re-parsing
+  the doc on every change (`parseFountain` — dependency-free, cheap enough to run per keystroke)
+  and mapping each `FountainElement`'s line range to a `Decoration.line` class
+  (`loom-fountain-scene-heading`/`-character`/`-dialogue`/`-parenthetical`/`-transition`/
+  `-section`/`-synopsis`/`-centered`/`-lyrics`/`-page-break`). The hidden `[[loom:…]]` marker on
+  scene headings and sections is hidden the same way `markdown-field.tsx` hides its own syntax
+  (`Decoration.replace({})`), never touching the underlying text. Three `autocompletion`
+  sources (`@codemirror/autocomplete`, `override` so nothing else competes): INT./EXT./EST.
+  prefixes at the start of a blank line, character names (from `parsed.characters`) on a line
+  preceded by a blank line, and location names (from `parsed.locations`) right after a typed
+  scene-heading prefix. Imperative `selectRange`/`focus` (via `useImperativeHandle`) replace the
+  old manual `textarea.setSelectionRange`/`scrollTop` math the search-jump and line-jump callers
+  used. Character/location names stay **plain text in the file** — the plugin renders them
+  specially, it never rewrites the script to add markup.
+- [x] **Live-preview editor polish, from first-use feedback**: styling is `#fff`/`#000` fixed
+  (not theme tokens) — same reasoning as the Pages preview's `.loom-screenplay-page`, this reads
+  as a sheet of paper, not an ordinary editor pane. `.cm-content` is capped to `max-width: 6in`
+  and centered — the PDF's own `TEXT_W` (`pdf.ts`), so character/dialogue/parenthetical indents
+  are the real `LAYOUT` table's inch values applied directly (2.2in/1in/1.6in, with matching
+  right padding so dialogue and parenthetical wrap at the real printed width), not an arbitrary
+  em guess. Transitions gained `text-align: right` (a bare `>` forces one and had no visible
+  effect before — it just looked bold). **Inline emphasis is now painted, deliberately WITHOUT
+  hiding the delimiters** — `scanEmphasis` finds `**bold**`/`*italic*`/`***both***`/`_underline_`
+  spans (escaped `\*`/`\_`/`\\` masked to same-length placeholders first, so a real backslash
+  escape can't be mistaken for a delimiter, mirroring `renderInline`'s technique) and marks the
+  WHOLE span — delimiters included — with the matching style class; this is the opposite choice
+  from `markdown-field.tsx`'s "raw only at the cursor" model, made on purpose because seeing
+  which literal characters are producing the formatting is the actual point of a screenwriting
+  editor. **Chapters and scene locations are now clickable too**, alongside character cues:
+  a scene heading resolves through the SCENE note's own `sceneLocation` field (sublocation-aware,
+  matched by the heading's hidden `[[loom:…]]` id, never by heading text) rather than trying to
+  parse the raw location text into an entity; a `#` chapter heading resolves by the section's own
+  loom id against `EntityRecord.chapterId`. Both are new optional `onOpenLocation`/`onOpenChapter`
+  props resolved in `script-view.tsx`, mirroring `onOpenCharacter`. **Script/Pages mode now keeps
+  your place across the toggle** (`switchMode` in `script-view.tsx`): leaving Script reads
+  `FountainField.getTopLine()` (via `EditorView.lineBlockAtHeight`) and maps it to a page through
+  the existing `pageOfLine`; leaving Pages reads the scroll-tracked `currentPage` and maps it back
+  to a line through the new inverse `lineOfPage`, stashed in a ref and applied by
+  `FountainField.scrollToLine()` once the CM6 view remounts (it's torn down and rebuilt on every
+  mode switch, so the scroll can't be applied inline the way the pages-preview scroll can be).
+- [x] **Second round of live-preview feedback**: the mode-switch scroll above animated across the
+  whole document every time — `.loom-screenplay`'s own `scroll-behavior: smooth` means
+  `scrollIntoView({behavior: 'auto'})` still defers to that CSS and animates anyway, so the
+  restore now passes `'instant'` specifically, leaving ordinary jump navigation (Prev/Next, the
+  page field, search) smooth as before. **The Scene page's own Script section now uses
+  `FountainField` too** (`src/views/entity-view.tsx`), replacing its separate plain textarea —
+  the exact ask behind this was "can main script and scene script listen to the same formatting
+  code," and the answer is the same component, fed the SAME project-wide
+  `parsed.characters`/`parsed.locations` (parsed from the whole script, not just the scene's own
+  slice, so the autocomplete offers every name in the project) and the same `onOpenCharacter`.
+  Its Pages preview already shared `pdfPages`/`renderInline`/`highlight` with the main Script
+  view; only the Script-mode editor itself hadn't been switched over yet. **Autocomplete now
+  offers its full list the moment the cursor LANDS on a valid empty line** (an empty INT./EXT.
+  or character-cue position, preceded by a blank line or the document's first line) rather than
+  waiting for a first keystroke, matching Better Fountain — CM6 only auto-activates completion on
+  typing, so an explicit `startCompletion` call was added to the update listener, gated on a new
+  `emptyCueLine` check so it never fires while the user is mid-typing elsewhere. **Orphan/widow
+  prevention** (`ORPHAN_WORDS`/`findOrphanPairs`/`preventOrphans`, fountain.ts): a short "glue"
+  word (article, one-letter word, short preposition/conjunction) left alone at the end of a
+  wrapped line — "...what does a" / "swear mean..." — is glued to the word after it instead.
+  Pages preview (both the main Script view and the Scene page's) glues with a real non-breaking
+  space via `preventOrphans` before `renderInline`, since it's throwaway generated HTML; the live
+  editor can't safely alter the document text, so `findOrphanPairs` instead returns the pair's
+  span for a `white-space: nowrap` mark decoration (`loom-fountain-nowrap`) — same word list,
+  same matching, two different glue mechanisms for two different surfaces. **Not yet covering the
+  actual exported PDF** — `pdf.ts` computes its own line wrapping from character-width math
+  rather than letting a browser wrap HTML, so fixing orphans there means teaching that wrap loop
+  the same rule directly, not reusing either glue mechanism; parked. Nav panel widened 17em →
+  29em (~1.7×) and its scene rows gained a `button` type selector plus explicit
+  `justify-content: flex-start`/`text-align: left` — the class-only selector was losing a
+  specificity fight against Obsidian's own default button styling, the exact bug category this
+  codebase already hit once with `.loom-sp-*` (see the CSS-specificity note in the file map).
+- [x] **Third round of live-preview feedback**:
+  - **Nav panel shows the FULL section tree**, not just chapter → flat scene list: a new
+    `navTree` (script-view.tsx) walks `parsed.sections` + `parsed.scenes` merged and
+    line-sorted with a stack of currently-open sections (mirroring the parser's own
+    `sectionStack`), so a scene between two sibling `##` subsections stays under whichever
+    actually precedes it and content keeps real reading order — a `NavItem` union
+    (`{kind:'scene'}` / `{kind:'section', node}`) per node rather than separate
+    scenes/children arrays, which would have rendered "every scene, then every child
+    section" instead. Recursive `renderNavNode`; depth 2+ sections get a `.loom-script-nav-sub`
+    modifier (lighter weight) and indent one step via `.loom-script-nav-children`.
+  - **Scene page's Script/Pages toggle now scroll-syncs**, same as the main Script view:
+    `scenePageOfLine`/`sceneLineOfPage` (entity-view.tsx) mirror `pageOfLine`/`lineOfPage` but
+    against `sceneBodyPages` (`pdfPages` on just this scene's excerpt). The tricky part: the
+    editor edits `sceneDraft` (body only, heading stripped by `sceneBodyOf`'s `.trim()`), while
+    `sceneBodyPages` is paginated against the full `sceneExcerpt` (heading included, since
+    that's what's actually rendered) — two different line-numbering origins. `sceneBodyLineOffset`
+    is computed once (1 + however many leading blank lines `.trim()` ate) to translate between
+    them, since that offset isn't a fixed constant. The scene preview has no page-number
+    readout/state the way the main view does, so `currentScenePage()` reads the visible page
+    straight from the DOM on demand (same top-third-of-viewport logic as the main view's scroll
+    listener, just not kept as continuous state) rather than adding a whole tracking effect
+    for a value only needed at the moment of switching.
+  - **Fixed a real off-by-one**: `pageOfLine`'s exact-match loop checked `el.line === line`,
+    which never matches a line landing mid-way through a merged multi-line `dialogue` element
+    (the one element type that joins several source lines into one, `\n`-joined) — the cursor
+    would fall through to the "first element after this line" fallback and could land a page
+    later (or, combined with the scroll-sync work above, effectively a page off) than the one
+    actually showing that line. Fixed by checking the element's whole span
+    (`line >= el.line && line < el.line + elementSpan(el)`, matching the identical span check
+    already in `fountain-field.tsx`'s decorations) instead of just its start line. Applied to
+    both the main Script view and the new scene-page equivalent.
+  - **Scene heading preview showed only Location - Sublocation - Time**, dropping the
+    INT./EXT. prefix entirely — the `loom-field-hint` string just never included `sceneIntExt`.
+  - **Clearing the Sublocation field now asks before deleting** ("Delete "\<name\>"
+    sublocation?") instead of silently detaching it from the heading and leaving the note
+    itself orphaned in the vault forever. Cancelling reverts the field immediately (set back to
+    the old name before the modal even opens, so it never sits visually empty while the vault
+    still points at the old note); confirming deletes the note via `purgeEntityReferences` +
+    `trashFile`, the same pair every other delete-with-confirm flow in this codebase uses.
+  - **Renaming an already-linked Location/Sublocation now confirms first too** — `resolveOrRename`
+    (entity-view.tsx) gained a `confirmDialog` step ("Rename "X" to "Y"?") before calling
+    `renameEntityRecord`, since that entity may be referenced by OTHER scenes and a heading edit
+    silently renaming it everywhere was a trap. Returns `null` on cancel, which the caller
+    (`commitSceneLocation`) treats as "abort the whole commit and revert whichever field(s) were
+    mid-rename" rather than proceeding half-decided. `confirmDialog` itself is a small
+    Promise-wrapping shim around `ConfirmModal` (which only takes a fire-and-forget onConfirm)
+    for the handful of call sites that need to branch on the answer instead of just reacting to
+    confirmation.
+  - **Character list gained "Sort: appearance"** (list-view.tsx): a character's first CUE line
+    in the project's script (`parseFountain(scriptText).elements`, first `character`-type
+    element per name — already extension-stripped by the parser, so it matches `EntityRecord.name`
+    directly). Only offered once a script actually exists (`useScriptText`, called
+    unconditionally per the rules of hooks but only fed a real project when `type === 'character'`,
+    so every other entity type does zero script-reading work). `compare()` took an optional
+    `appearance` map parameter for this one mode; characters absent from the script (mentioned
+    only in action text, or not written yet) sort after every one that appears, then fall back
+    to name.
+  - **Autocomplete's inserted text landed the cursor at the START of the insertion, not the
+    end** — CM6's default behavior when a completion's `apply` doesn't specify an explicit
+    `selection` is to map the OLD cursor (sitting exactly at the insertion point) through the
+    change using its default assoc, which sticks it BEFORE new text rather than after; the
+    INT./EXT. completion already set an explicit `selection` and worked correctly, but
+    character and location completions didn't. Fixed by adding explicit `selection` to both:
+    location lands right after the inserted name (ready to keep typing the rest of the heading);
+    character lands at the **start of the next line** (inserting one if the cue was the
+    document's last line), since a cue is immediately followed by its dialogue.
 - [ ] Plain-writing mode: keep Fountain syntax and it formats; write plain prose and it stays
   prose (valid Fountain — it's all Action), just without the automatic scene counter.
-- [ ] **Narrative branching.** A player-facing game plot needs branches, which classic linear
-  Fountain has no native syntax for; a `.BRANCH …` forced-heading convention the user tried gets
-  misread by other Fountain tools as a new top-level scene rather than nesting under the real
-  one. Parked deliberately for a dedicated design conversation — nothing implemented.
+- [ ] **Narrative branching**, design resolved (no code yet — see
+  `~/.claude/plans/so-now-let-s-talk-greedy-sunset.md`, or ask to re-derive from this note):
+  classic linear Fountain has no branch syntax, and the `.BRANCH …` forced-heading convention
+  tried first gets misread by other Fountain tools as a new top-level scene rather than nesting
+  under the real one. Landed on a **plugin-specific, structural-only convention**: sibling
+  sections tagged `= branch: <group-id>` (Fountain's own non-exporting synopsis line) under a
+  shared parent, no new entity type — just a Scene-page field (`loomSceneBranch`, hidden link)
+  recording which branch a scene sits in, plus `ensureSceneIds` extended to id branch-tagged
+  sections at any depth (today only level-1). Reads as a plain nested outline with an ordinary
+  note in any compliant Fountain tool. Still needed before this can be built: Script view
+  outline nesting, Chapter page's scene-list grouping by branch, and generalizing
+  `applyDisplayTitles`' visible-marker trick so each branch gets a printed label in the export
+  (sections never export on their own).
 - [ ] **Pre-scene descriptions (e.g. "TEXT OVER BLACK")** — action text written before the
   first scene heading currently has nowhere to show outside the Script view itself. Parked
   deliberately for a dedicated design conversation — nothing implemented.
