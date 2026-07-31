@@ -51,13 +51,24 @@ const LAYOUT: Record<string, { indent: number; width: number; align?: 'right' | 
  * to Courier-Bold/Oblique, but screenplay convention barely uses them and
  * carrying styled runs through the wrapper would double this file's size — so
  * the marks are simply removed rather than rendered as literal asterisks.
+ *
+ * A backslash-escaped `\*`, `\_` or `\\` (e.g. `Colour\_DP-01`, escaped so the
+ * underscore doesn't start an underline) is swapped for a placeholder before
+ * the strip regexes run — same reasoning as `renderInline` in fountain.ts —
+ * so the backslash itself doesn't leak into the printed page.
  */
 function plainText(text: string): string {
-	return text
+	const escapedChars: string[] = [];
+	const withPlaceholders = text.replace(/\\([*_\\])/g, (_, ch: string) => {
+		escapedChars.push(ch);
+		return `\uE000${escapedChars.length - 1}\uE000`;
+	});
+	const stripped = withPlaceholders
 		.replace(/\*\*\*(.+?)\*\*\*/g, '$1')
 		.replace(/\*\*(.+?)\*\*/g, '$1')
 		.replace(/\*(.+?)\*/g, '$1')
 		.replace(/_(.+?)_/g, '$1');
+	return stripped.replace(/\uE000(\d+)\uE000/g, (_, i: string) => escapedChars[Number(i)]);
 }
 
 /** Escapes a string for a PDF literal and drops anything outside Latin-1. */

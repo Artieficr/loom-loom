@@ -548,6 +548,15 @@ Still to build:
   emptied-then-abandoned field (blur, or Enter with nothing typed) just reverts to showing the
   current page, no jump. The `⋯` script-actions button is a burger (`menu`) icon, not
   horizontal dots.
+- [x] **Backslash-escaped `\*`/`\_`/`\\` render as the literal character**, not with the
+  backslash leaking into the output (`Colour\_DP-01` — a real screenwriter convention for
+  "this underscore isn't an underline delimiter" — used to print as `Colour\_DP-01` verbatim,
+  backslash included). `renderInline` (fountain.ts, used by the Pages preview) and `plainText`
+  (pdf.ts, the PDF/print path) both swap escaped sequences for a placeholder BEFORE the
+  emphasis-stripping regexes run, then restore the literal character afterward — the
+  placeholder is a Private Use Area code point (`\uE000`), not plain digits or a NUL byte:
+  digits could collide with real numbers in the text, and a literal control character in a
+  regex trips ESLint's `no-control-regex`.
 
 ## Next session (committed)
 
