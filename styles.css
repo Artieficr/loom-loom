@@ -382,6 +382,16 @@ span.loom-row-caret {
 	white-space: nowrap;
 }
 
+/* Scene/Chapter list rows: the script-recognized cast, right after the name.
+   Wraps rather than forcing the row wider — a scene with a large cast grows
+   the row's height instead of pushing the delete button off-screen. */
+.loom-row-cast {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
 .loom-chip {
 	background: var(--background-modifier-border);
 	border-radius: var(--radius-s);
@@ -2475,6 +2485,36 @@ span.loom-row-caret {
 	gap: var(--size-4-3);
 }
 
+/* Scene page's chapter section: chapter management on the left (as it always
+   was), the script-derived cast as a lighter side column on the right —
+   same flex + vertical-separator shape as the quest page's grid. */
+.loom-scene-chapter-grid {
+	display: flex;
+	align-items: stretch;
+	gap: var(--size-4-4);
+}
+
+.loom-scene-chapter-left {
+	flex: 1 1 60%;
+	min-width: 0;
+	/* Plain divs, not `.loom-field` — without their own gap, the label/chip
+	   row/hint sat crammed together instead of getting the usual breathing
+	   room every other field block gets for free. */
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+.loom-scene-chapter-right {
+	flex: 1 1 40%;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	border-left: 1px solid var(--background-modifier-border);
+	padding-left: var(--size-4-4);
+}
+
 .loom-quest-sessions {
 	display: flex;
 	flex-wrap: wrap;
@@ -3115,7 +3155,6 @@ span.loom-row-caret {
 }
 
 .loom-view button.loom-search-clear {
-	margin-left: -24px;
 	z-index: 1;
 	font-size: 0.9em;
 	color: var(--text-muted);
@@ -3131,12 +3170,33 @@ span.loom-row-caret {
 	position: relative;
 }
 
+/* Same shape as `.loom-graph-search`, generically named for reuse anywhere
+   else a search input wants an inline clear ✕ (the Script view's own search,
+   and the Scene page's scoped-to-this-scene search). */
+.loom-search-wrap {
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+
+.loom-search-wrap input[type='search'] {
+	padding-right: 28px;
+}
+
 .loom-view button.loom-search-clear {
 	position: absolute;
 	right: var(--size-2-3);
 	top: 50%;
 	transform: translateY(-50%);
 	margin-left: 0;
+	/* An explicit square box, flex-centering the glyph inside it, rather than
+	   trusting the "✕" character's own line-height/baseline to land it dead
+	   center — that's what left it visibly off by a hair. */
+	width: 16px;
+	height: 16px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 }
 
 /* Search Prev / All / Next cluster, shown while a query has matches. */
@@ -4818,6 +4878,11 @@ span.loom-row-caret {
 	line-height: 1;
 	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
 	flex: none;
+	/* Explicit, not assumed: some ancestor Obsidian gives its own custom
+	   ItemView content a default of `user-select: none`, which this preview
+	   otherwise silently inherited. */
+	user-select: text;
+	-webkit-user-select: text;
 }
 
 .loom-view .loom-screenplay-pagenum {
@@ -5030,4 +5095,12 @@ textarea.loom-scene-script {
 	height: 210mm;
 	resize: none;
 	overflow-y: auto;
+}
+
+/* Scene page's own Pages preview: same `.loom-screenplay`/`.loom-sp-*` look
+   as the main Script view, just capped to match the editor's own height
+   instead of the main view's 70vh (this is one nested section on a page with
+   plenty else on it, not the whole view). */
+.loom-view .loom-scene-pages {
+	max-height: 210mm;
 }
