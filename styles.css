@@ -371,6 +371,20 @@ span.loom-row-caret {
 	background: var(--background-modifier-hover);
 }
 
+/* A Scene/Chapter note no longer backed by a heading/section in the script
+   (its heading was rewritten or deleted directly in the script text, not
+   through the Scene/Chapter page's own fields) — `syncScenes` never
+   auto-deletes, so this is the only passive signal that it's become debris.
+   `color-mix` against the row's own background rather than a flat red, so
+   it reads correctly in both themes and still shows through hover. */
+.loom-row.loom-row-orphan {
+	background: color-mix(in srgb, #e0433d 18%, var(--background-primary));
+}
+
+.loom-row.loom-row-orphan:hover {
+	background: color-mix(in srgb, #e0433d 28%, var(--background-primary));
+}
+
 .loom-row-name {
 	font-weight: var(--font-medium);
 	white-space: nowrap;
