@@ -1,5 +1,5 @@
 import { Menu, Notice, TFile, normalizePath } from 'obsidian';
-import { MouseEvent as ReactMouseEvent, ReactElement, useEffect, useMemo, useRef, useState } from 'react';
+import { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement, useEffect, useMemo, useRef, useState } from 'react';
 import {
 	EntityRecord,
 	EntityType,
@@ -21,13 +21,18 @@ import {
 	findEntityLinks,
 	hasTitlePage,
 	liveSceneIds,
+	moveSceneToSection,
 	nextTopSectionLine,
 	parseFountain,
 	preventOrphans,
 	reattachSceneIds,
 	reattachSectionIds,
+	removeChapter,
+	removeScene,
 	renderInline,
 	renumberScenes,
+	reorderScenesInSection,
+	reorderTopSections,
 	stripEntityLinksForDisplay,
 	stripLoomIds,
 	renderTitlePage,
@@ -37,7 +42,7 @@ import {
 import { pdfPages, renderScreenplayPdf } from '../pdf';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { setLoomKey } from '../fm';
-import { ConfirmModal, createEntity, entityFileName } from '../project';
+import { ConfirmModal, CreateEntityModal, createEntity, entityFileName, purgeEntityReferences } from '../project';
 import { LoomFileReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage } from './common';
 import { useIndexVersion } from './hooks';
@@ -424,8 +429,49 @@ function Script({ view }: { view: ScriptView }) {
 	const project = file ? plugin.indexer.projectForPath(file.path) : undefined;
 
 	const [text, setText] = useState<string | null>(null);
-	/** Which pane the main area shows. */
-	const [mode, setMode] = useState<'script' | 'pages'>('script');
+	/** Which pane the main area shows. Script/Pages are the paired toggle;
+	 *  Outline is a separate button on the far right of the same row (not
+	 *  part of that pill) that swaps in a chapter/scene drag-reorder tree
+	 *  instead. Remembered per file in `localStorage` — a UI preference, not
+	 *  vault data, same reasoning as the editor's own resized-height memory
+	 *  below — so reopening a script comes back to whichever pane was last
+	 *  open rather than always resetting to Script. */
+	const [mode, setMode] = useState<'script' | 'pages' | 'outline'>(() => {
+		const saved = file ? window.localStorage.getItem(`loom-script-mode:${file.path}`) : null;
+		return saved === 'pages' || saved === 'outline' ? saved : 'script';
+	});
+	/** Outline drag-reorder — same pointer-drag shape as the Chapter page's
+	 *  own scene reorder, generalized with a `group` key so it serves BOTH
+	 *  the top-level chapter list ('chapters') and each chapter's own nested
+	 *  scene list ('scenes:<chapterId>'), the same trick `seqGrip` in
+	 *  entity-view.tsx uses for its several independent drag lists — scoped
+	 *  locally here since this view has more than one now. `hoverChapterId`
+	 *  is only meaningful mid-drag on a SCENE group: which chapter the
+	 *  pointer is currently over, tracked separately from `over` (the
+	 *  within-source-list insert index) so a scene can be dropped into a
+	 *  DIFFERENT chapter — appended there — instead of only ever reordering
+	 *  inside the one it started in. */
+	const [outlineDrag, setOutlineDrag] = useState<{
+		group: string;
+		from: number;
+		over: number;
+		dy: number;
+		hoverChapterId?: string;
+	} | null>(null);
+	const outlineDragRef = useRef<{
+		startY: number;
+		slot: number;
+		mids: number[];
+		/** Every chapter's own on-screen block, captured once at drag start
+		 *  (siblings only shift via CSS transform during a drag, never
+		 *  reflow, so this stays accurate for the drag's whole duration) —
+		 *  only populated when dragging a SCENE, used to tell which chapter
+		 *  the pointer is currently over. */
+		chapterRects?: { id: string; top: number; bottom: number }[];
+	} | null>(null);
+	/** Chapters currently collapsed in the Outline panel (hiding their nested
+	 *  scenes) — a Chapter/loom-id set, default empty (everything expanded). */
+	const [collapsedChapters, setCollapsedChapters] = useState<Set<string>>(new Set());
 	/** Page shown in the pages preview (1-based). */
 	const [page, setPage] = useState(1);
 	/** The page-number input's own typed text while being edited — separate
@@ -447,12 +493,40 @@ function Script({ view }: { view: ScriptView }) {
 	const onDisk = useRef<string | null>(null);
 	/** Paths already given their one post-load commit pass. */
 	const committedFor = useRef<string | null>(null);
+	/** Serializes every `commit` call — each one does real async work
+	 *  (`vault.modify`, `syncScenes`), and without a queue two overlapping
+	 *  calls could interleave their disk writes out of order. Concretely: the
+	 *  live editor unmounts on every Script → Pages/Outline switch, and CM6
+	 *  losing focus as part of that teardown fires `onBlur` (its own
+	 *  `commit(text)`, using whatever text was current at that moment); an
+	 *  action taken right after switching — e.g. the toolbar's own
+	 *  "+ New chapter" — starts a SECOND commit with the new content. Without
+	 *  ordering, if the first (older, unmount-triggered) commit's
+	 *  `vault.modify` happened to land after the second's, it silently wrote
+	 *  the OLDER content back over the just-added chapter — even though
+	 *  `syncScenes` inside the second commit had already created its note,
+	 *  leaving a chapter note with nothing backing it in the script. Queuing
+	 *  guarantees commits land on disk in the order they were REQUESTED. */
+	const commitQueue = useRef<Promise<void>>(Promise.resolve());
 	/** The resizable wrapper around the live-preview editor (for the
 	 *  height-memory effect below) — not the editor itself, which is a CM6
 	 *  view mounted by `FountainField`, not a native resizable textarea. */
 	const editorWrapperRef = useRef<HTMLDivElement | null>(null);
 	const fountainFieldRef = useRef<FountainFieldHandle | null>(null);
 	const pagesRef = useRef<HTMLDivElement | null>(null);
+	/** The Outline panel's own root — scoped lookups for every chapter's
+	 *  on-screen block (`[data-chapter-id]`) during a scene drag read from
+	 *  here rather than the whole document. */
+	const outlineRef = useRef<HTMLDivElement | null>(null);
+	/** The Script/Pages/Outline tabs row — clicking any of the three scrolls
+	 *  the outer view so this row lands at the top, same as Pages preview
+	 *  already did as a side effect of its own internal `scrollIntoView`
+	 *  (bringing a page element into view drags every scrollable ancestor,
+	 *  the outer shell body included). Script and Outline had no such effect
+	 *  of their own, so this makes it deliberate and uniform across all
+	 *  three — including a re-click on the pane that's already active, which
+	 *  `switchMode`'s own same-mode early return would otherwise skip. */
+	const tabsRef = useRef<HTMLDivElement | null>(null);
 	/** A script line to land on once the Script pane is back — set when
 	 *  leaving Pages mode, consumed by the effect below once `FountainField`
 	 *  has remounted (it's torn down and rebuilt on every mode switch, so
@@ -504,6 +578,14 @@ function Script({ view }: { view: ScriptView }) {
 		return () => observer.disconnect();
 	}, [file?.path, mode]);
 
+	// Persists the mode-per-file memory above — separate from the read, which
+	// only needs to happen once (the lazy `useState` initializer), while this
+	// needs to re-fire on every later switch.
+	useEffect(() => {
+		if (!file) return;
+		window.localStorage.setItem(`loom-script-mode:${file.path}`, mode);
+	}, [file?.path, mode]);
+
 	// Script/Pages scroll sync (the other direction, script view -> pages,
 	// happens inline in `switchMode` below since the pages DOM only needs a
 	// scrollIntoView, not a freshly-mounted CM6 view to hand a ref to).
@@ -548,7 +630,7 @@ function Script({ view }: { view: ScriptView }) {
 	 * would yank the caret to the end. It runs on load and on blur instead, so
 	 * the text only changes underneath the user when they've stopped typing.
 	 */
-	const commit = async (raw: string) => {
+	const runCommit = async (raw: string) => {
 		if (!file || !project) return;
 		const withIds = ensureSceneIds(raw);
 		// Keeps an existing #N# production-numbering scheme sequential even when
@@ -587,6 +669,18 @@ function Script({ view }: { view: ScriptView }) {
 			onDisk.current = titled;
 			setText(titled);
 		}
+	};
+
+	/** Enqueues a commit behind whatever's already running, so overlapping
+	 *  calls land on disk in request order instead of racing (see
+	 *  `commitQueue`'s own comment). Errors are swallowed on the QUEUE only
+	 *  — not from this call's own returned promise, so an awaited caller
+	 *  (`importScript`) still sees a real rejection — otherwise one failed
+	 *  commit would wedge every commit after it. */
+	const commit = (raw: string): Promise<void> => {
+		const run = commitQueue.current.then(() => runCommit(raw));
+		commitQueue.current = run.catch(() => {});
+		return run;
 	};
 
 	// Load, then one commit pass so a script dropped in from elsewhere gets its
@@ -659,6 +753,172 @@ function Script({ view }: { view: ScriptView }) {
 	const entityOptions = (['character', 'faction', 'location', 'item'] as const).flatMap((t) =>
 		plugin.indexer.getAll(t, project.root).map((r) => ({ name: r.name, type: r.type, path: r.path }))
 	);
+
+	// --- Outline panel ----------------------------------------------------
+	// Every top-level section already carrying its stable id — `ensureSceneIds`
+	// gives one to every level-1 section, so the only way one's missing here is
+	// the brief window before the load-time commit pass finishes.
+	const chapterSections = parsed.sections.filter(
+		(sec): sec is typeof sec & { loomId: string } => sec.level === 1 && sec.loomId !== null
+	);
+	const chapterNoteByLoomId = new Map(
+		plugin.indexer.getAll('chapter', project.root).map((r) => [r.chapterId, r])
+	);
+	/** Every scene inside one chapter's own stretch of the script — the same
+	 *  `[chapter line, next top-level section)` boundary `reorderScenesInSection`
+	 *  and `chapterScriptText` use. */
+	const chapterScenes = (sec: (typeof chapterSections)[number]): ParsedScene[] => {
+		const end = nextTopSectionLine(parsed, sec.line) ?? Infinity;
+		return parsed.scenes.filter((s) => s.line > sec.line && s.line < end);
+	};
+	const isChapterCollapsed = (id: string) => collapsedChapters.has(id);
+	const toggleChapterCollapsed = (id: string) => {
+		const next = new Set(collapsedChapters);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		setCollapsedChapters(next);
+	};
+	const allChaptersCollapsed =
+		chapterSections.length > 0 && chapterSections.every((sec) => isChapterCollapsed(sec.loomId));
+	const setAllChaptersCollapsed = (value: boolean) =>
+		setCollapsedChapters(value ? new Set(chapterSections.map((sec) => sec.loomId)) : new Set());
+
+	/** Row transform while an outline row is being dragged — same shape as
+	 *  the Chapter page's own scene-reorder grip, generalized with a `group`
+	 *  key so the top-level chapter list and each chapter's own nested scene
+	 *  list can each drag independently without fighting over one piece of
+	 *  state (mirrors `seqGrip`'s `group` parameter in entity-view.tsx). */
+	const outlineRowStyle = (group: string, i: number): CSSProperties | undefined => {
+		if (!outlineDrag || outlineDrag.group !== group) return undefined;
+		const slot = outlineDragRef.current?.slot ?? 40;
+		if (outlineDrag.from === i)
+			return { transform: `translateY(${outlineDrag.dy}px)`, position: 'relative', zIndex: 2 };
+		const sourceChapterId = group.startsWith('scenes:') ? group.slice('scenes:'.length) : null;
+		// Once the pointer has moved into a DIFFERENT chapter, the drop no
+		// longer lands among these siblings at all — stop previewing a
+		// within-list shift for them.
+		if (sourceChapterId && outlineDrag.hoverChapterId && outlineDrag.hoverChapterId !== sourceChapterId) {
+			return undefined;
+		}
+		const { from, over } = outlineDrag;
+		const shift = from < i && i <= over ? -1 : over <= i && i < from ? 1 : 0;
+		return shift !== 0 ? { transform: `translateY(${shift * slot}px)` } : undefined;
+	};
+	const endOutlineDrag = (
+		group: string,
+		commit: boolean,
+		onCommit: (from: number, over: number, hoverChapterId?: string) => void
+	) => {
+		outlineDragRef.current = null;
+		const drag = outlineDrag;
+		setOutlineDrag(null);
+		if (!commit || !drag || drag.group !== group) return;
+		// Nothing to do only when NEITHER changed — a scene can numerically
+		// land back at its own starting index while still having crossed
+		// into a different chapter along the way.
+		if (drag.from === drag.over && !drag.hoverChapterId) return;
+		onCommit(drag.from, drag.over, drag.hoverChapterId);
+	};
+	/** The 6-dot grab handle placed before an outline row (chapter or scene).
+	 *  `sceneChapterId` — the scene's OWN chapter id — is passed only for
+	 *  scene rows; its presence is what turns on cross-chapter drop
+	 *  detection (chapters themselves never move between chapters). */
+	const outlineGrip = (
+		group: string,
+		i: number,
+		length: number,
+		onCommit: (from: number, over: number, hoverChapterId?: string) => void,
+		sceneChapterId?: string
+	) => (
+		<span
+			className="loom-subloc-grip"
+			onPointerDown={(e) => {
+				e.preventDefault();
+				e.currentTarget.setPointerCapture(e.pointerId);
+				const rowEl = e.currentTarget.closest('[data-seq-row]');
+				const row = rowEl instanceof HTMLElement ? rowEl : null;
+				const rows = row?.parentElement
+					? [...row.parentElement.querySelectorAll(':scope > [data-seq-row]')]
+					: [];
+				const mids = rows.map((r) => {
+					const b = r.getBoundingClientRect();
+					return b.top + b.height / 2;
+				});
+				// Every chapter's own on-screen block, captured once up front
+				// (siblings only shift via CSS transform during a drag, never
+				// reflow, so this stays accurate for the whole gesture) — only
+				// scenes need this, chapters can't move between chapters.
+				const chapterRects = sceneChapterId
+					? [...(outlineRef.current?.querySelectorAll<HTMLElement>('[data-chapter-id]') ?? [])].map((el) => {
+							const b = el.getBoundingClientRect();
+							return { id: el.dataset.chapterId as string, top: b.top, bottom: b.bottom };
+						})
+					: undefined;
+				outlineDragRef.current = { startY: e.clientY, slot: (row?.offsetHeight ?? 40) + 8, mids, chapterRects };
+				setOutlineDrag({ group, from: i, over: i, dy: 0 });
+			}}
+			onPointerMove={(e) => {
+				const start = outlineDragRef.current;
+				if (!start) return;
+				const dy = e.clientY - start.startY;
+				const over = Math.max(0, Math.min(length - 1, start.mids.filter((m) => m < e.clientY).length));
+				// The chapter block whose top the pointer has most recently
+				// passed — blocks are captured top-to-bottom, so the LAST one
+				// still satisfying this is the one currently under the pointer.
+				let hoverChapterId: string | undefined;
+				if (start.chapterRects && start.chapterRects.length > 0) {
+					hoverChapterId = start.chapterRects[0].id;
+					for (const r of start.chapterRects) {
+						if (r.top <= e.clientY) hoverChapterId = r.id;
+					}
+				}
+				setOutlineDrag((cur) =>
+					cur &&
+					cur.group === group &&
+					(cur.over !== over || cur.dy !== dy || cur.hoverChapterId !== hoverChapterId)
+						? { ...cur, over, dy, hoverChapterId }
+						: cur
+				);
+			}}
+			onPointerUp={() => endOutlineDrag(group, true, onCommit)}
+			onPointerCancel={() => endOutlineDrag(group, false, onCommit)}
+		>
+			<Icon name="grip-vertical" />
+		</span>
+	);
+	/** One atomic rewrite of the whole document's chapter order — robust to
+	 *  any drag distance, mirroring `reorderScenesInSection` one level up. */
+	const commitChapterOrder = (from: number, over: number) => {
+		const next = [...chapterSections];
+		const [moved] = next.splice(from, 1);
+		next.splice(over, 0, moved);
+		const reordered = reorderTopSections(
+			text,
+			next.map((sec) => sec.loomId)
+		);
+		if (reordered !== null) write(reordered);
+	};
+	/** Same, scoped to one chapter's own scene list — unless the drop lands
+	 *  in a DIFFERENT chapter (`hoverChapterId`), in which case the scene
+	 *  moves there instead of being reordered in place, via the same
+	 *  `moveSceneToSection` the Scene page's own chapter picker uses. */
+	const commitSceneOrder =
+		(sec: (typeof chapterSections)[number], scenes: ParsedScene[]) =>
+		(from: number, over: number, hoverChapterId?: string) => {
+			if (hoverChapterId && hoverChapterId !== sec.loomId) {
+				const moved = scenes[from];
+				if (!moved || moved.loomId === null) return;
+				const reordered = moveSceneToSection(text, moved.loomId, hoverChapterId);
+				if (reordered !== null) write(reordered);
+				return;
+			}
+			const next = [...scenes];
+			const [moved] = next.splice(from, 1);
+			next.splice(over, 0, moved);
+			const ids = next.map((s) => s.loomId).filter((id): id is string => id !== null);
+			const reordered = reorderScenesInSection(text, sec.loomId, ids);
+			if (reordered !== null) write(reordered);
+		};
 
 	// --- Pagination ---------------------------------------------------------
 	// From the PDF's real typeset geometry, not the parser's line-budget
@@ -773,20 +1033,33 @@ function Script({ view }: { view: ScriptView }) {
 	 *  Pages stashes a target line for the effect above to apply once
 	 *  `FountainField` remounts; leaving Script can scroll immediately since
 	 *  the pages markup, once mounted, needs nothing handed to it but a
-	 *  `scrollIntoView`. */
-	const switchMode = (next: 'script' | 'pages') => {
+	 *  `scrollIntoView`. Outline (the standalone button, not part of that
+	 *  pill) is a plain swap either direction — it's a management list, not a
+	 *  reading position to preserve. */
+	const switchMode = (next: 'script' | 'pages' | 'outline') => {
 		if (next === mode) return;
 		if (next === 'pages') {
-			const topLine = fountainFieldRef.current?.getTopLine();
+			const topLine = mode === 'script' ? fountainFieldRef.current?.getTopLine() : undefined;
 			setMode('pages');
 			// 'instant', not 'auto' — the container has `scroll-behavior: smooth`
 			// for the ordinary jump navigation below, and 'auto' explicitly
 			// means "defer to that CSS property", so it would animate anyway.
 			if (topLine !== undefined) scrollToPage(pageOfLine(topLine), 'instant');
-		} else {
+		} else if (next === 'script' && mode === 'pages') {
 			pendingScrollLineRef.current = lineOfPage(currentPage);
 			setMode('script');
+		} else {
+			setMode(next);
 		}
+	};
+
+	/** Scrolls the outer view so the tabs row lands at the top — called on
+	 *  every tab click, independent of whether the mode actually changes
+	 *  (a re-click on the already-active tab still scrolls). */
+	const scrollTabsIntoView = () => tabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	const clickTab = (next: 'script' | 'pages' | 'outline') => {
+		scrollTabsIntoView();
+		switchMode(next);
 	};
 
 	// --- Menus --------------------------------------------------------------
@@ -1121,79 +1394,96 @@ function Script({ view }: { view: ScriptView }) {
 						</div>
 					</details>
 
-					<div className="loom-script-tabs loom-seg">
+					<div className="loom-script-tabs" ref={tabsRef}>
+						<div className="loom-seg">
+							<button
+								className={mode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
+								onClick={() => clickTab('script')}
+							>
+								Script
+							</button>
+							<button
+								className={mode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
+								onClick={() => clickTab('pages')}
+							>
+								Pages preview
+							</button>
+						</div>
+						<div className="loom-shell-spacer" />
+						{/* Deliberately NOT part of the Script/Pages pill above — that pair
+						    is one logical toggle over the same document, while this swaps
+						    in a management list (chapter/scene order), so it gets its own
+						    standalone button on the far side of the row. */}
 						<button
-							className={mode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-							onClick={() => switchMode('script')}
+							className={mode === 'outline' ? 'loom-script-chapters-btn loom-seg-on' : 'loom-script-chapters-btn'}
+							onClick={() => clickTab('outline')}
 						>
-							Script
-						</button>
-						<button
-							className={mode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-							onClick={() => switchMode('pages')}
-						>
-							Pages preview
+							Outline
 						</button>
 					</div>
 
 					<div className="loom-script-toolbar">
-						<div className="loom-search-wrap">
-							<input
-								className="loom-script-search"
-								type="search"
-								placeholder="Search the script…"
-								value={query}
-								onChange={(e) => {
-									setQuery(e.target.value);
-									setMatchIndex(0);
-								}}
-								onKeyDown={(e) => {
-									if (e.key !== 'Enter') return;
-									e.preventDefault();
-									gotoMatch(e.shiftKey ? matchIndex - 1 : matchIndex + 1);
-								}}
-							/>
-							{query !== '' ? (
+						{mode !== 'outline' ? (
+							<>
+								<div className="loom-search-wrap">
+									<input
+										className="loom-script-search"
+										type="search"
+										placeholder="Search the script…"
+										value={query}
+										onChange={(e) => {
+											setQuery(e.target.value);
+											setMatchIndex(0);
+										}}
+										onKeyDown={(e) => {
+											if (e.key !== 'Enter') return;
+											e.preventDefault();
+											gotoMatch(e.shiftKey ? matchIndex - 1 : matchIndex + 1);
+										}}
+									/>
+									{query !== '' ? (
+										<button
+											className="loom-chip-remove loom-search-clear"
+											aria-label="Clear search"
+											onClick={() => {
+												setQuery('');
+												setMatchIndex(0);
+											}}
+										>
+											✕
+										</button>
+									) : null}
+								</div>
 								<button
-									className="loom-chip-remove loom-search-clear"
-									aria-label="Clear search"
-									onClick={() => {
-										setQuery('');
-										setMatchIndex(0);
-									}}
+									className="loom-rel-filter"
+									aria-label="Previous match"
+									disabled={matches.length === 0}
+									onClick={() => gotoMatch(matchIndex - 1)}
 								>
-									✕
+									<Icon name="chevron-up" />
 								</button>
-							) : null}
-						</div>
-						<button
-							className="loom-rel-filter"
-							aria-label="Previous match"
-							disabled={matches.length === 0}
-							onClick={() => gotoMatch(matchIndex - 1)}
-						>
-							<Icon name="chevron-up" />
-						</button>
-						<button
-							className="loom-rel-filter"
-							aria-label="Next match"
-							disabled={matches.length === 0}
-							onClick={() => gotoMatch(matchIndex + 1)}
-						>
-							<Icon name="chevron-down" />
-						</button>
-						{/* After the buttons, not before — so their position doesn't
-						    shift when this text appears/disappears/changes length. */}
-						<span className="loom-script-stat">
-							{query.trim() === ''
-								? ''
-								: matches.length === 0
-									? 'No matches'
-									: `${(matchIndex % matches.length) + 1} of ${matches.length}`}
-						</span>
+								<button
+									className="loom-rel-filter"
+									aria-label="Next match"
+									disabled={matches.length === 0}
+									onClick={() => gotoMatch(matchIndex + 1)}
+								>
+									<Icon name="chevron-down" />
+								</button>
+								{/* After the buttons, not before — so their position doesn't
+								    shift when this text appears/disappears/changes length. */}
+								<span className="loom-script-stat">
+									{query.trim() === ''
+										? ''
+										: matches.length === 0
+											? 'No matches'
+											: `${(matchIndex % matches.length) + 1} of ${matches.length}`}
+								</span>
+							</>
+						) : null}
+						<div className="loom-shell-spacer" />
 						{mode === 'pages' ? (
 							<>
-								<div className="loom-shell-spacer" />
 								<button
 									className="loom-rel-filter"
 									aria-label="Previous page"
@@ -1228,10 +1518,176 @@ function Script({ view }: { view: ScriptView }) {
 									<Icon name="chevron-right" />
 								</button>
 							</>
-						) : null}
+						) : (
+							// Script and Outline share this spot — Pages uses it for page
+							// navigation instead, so these never coexist with that. Both
+							// buttons share the same creation modal the entity list's own
+							// "New scene"/"New chapter" use, rather than each view growing
+							// its own bare-name prompt.
+							<>
+								<button
+									className="loom-rel-add"
+									onClick={() => new CreateEntityModal(plugin, 'scene', project, {}).open()}
+								>
+									+ New scene
+								</button>
+								<button
+									className="loom-rel-add"
+									onClick={() => new CreateEntityModal(plugin, 'chapter', project, {}).open()}
+								>
+									+ New chapter
+								</button>
+							</>
+						)}
 					</div>
 
-					{mode === 'pages' ? (
+					{mode === 'outline' ? (
+						<div className="loom-script-outline" ref={outlineRef}>
+							{chapterSections.length === 0 ? (
+								<div className="loom-attendance-empty">
+									No chapters yet — a <code># Chapter name</code> line starts one.
+								</div>
+							) : (
+								<>
+									{/* Column headings — same row shape as the chapter rows below
+									    (grip/caret placeholders reserve their gutters) so "Title"
+									    and "Scenes" land exactly over their real columns; the
+									    expand/collapse-all toggle takes the caret's own slot,
+									    extending that same "caret acts on this row" language to
+									    "this one acts on every row". */}
+									<div className="loom-script-scene-row loom-script-outline-headrow">
+										<span className="loom-subloc-grip-static" aria-hidden="true" />
+										<button
+											className="loom-row-caret"
+											aria-label={allChaptersCollapsed ? 'Expand all' : 'Collapse all'}
+											onClick={() => setAllChaptersCollapsed(!allChaptersCollapsed)}
+										>
+											<Icon
+												name={allChaptersCollapsed ? 'list-chevrons-up-down' : 'list-chevrons-down-up'}
+												fallback={allChaptersCollapsed ? 'chevrons-up-down' : 'chevrons-down-up'}
+											/>
+										</button>
+										<span className="loom-scene-row-num">#</span>
+										<span className="loom-script-scene-head">Title</span>
+										<span className="loom-script-outline-leader" aria-hidden="true" />
+										<span className="loom-script-chapter-count">Scenes</span>
+									</div>
+									<div
+										className={
+											outlineDrag?.group === 'chapters' ? 'loom-subloc-list loom-subloc-dragging' : 'loom-subloc-list'
+										}
+									>
+									{chapterSections.map((sec, i) => {
+										const grabbed = outlineDrag?.group === 'chapters' && outlineDrag.from === i;
+										const note = chapterNoteByLoomId.get(sec.loomId);
+										const scenes = chapterScenes(sec);
+										const collapsed = isChapterCollapsed(sec.loomId);
+										const sceneGroup = `scenes:${sec.loomId}`;
+										const dropTarget =
+											outlineDrag?.group.startsWith('scenes:') &&
+											outlineDrag.group !== sceneGroup &&
+											outlineDrag.hoverChapterId === sec.loomId;
+										return (
+											<div
+												key={sec.loomId}
+												className={
+													dropTarget ? 'loom-script-outline-chapter loom-script-outline-drop-target' : 'loom-script-outline-chapter'
+												}
+												data-chapter-id={sec.loomId}
+											>
+												<div
+													className={
+														grabbed
+															? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
+															: 'loom-script-scene-row loom-subloc-row-slide'
+													}
+													style={outlineRowStyle('chapters', i)}
+													data-seq-row=""
+												>
+													{outlineGrip('chapters', i, chapterSections.length, commitChapterOrder)}
+													{scenes.length > 0 ? (
+														<button
+															className="loom-row-caret"
+															aria-label={collapsed ? 'Expand scenes' : 'Collapse scenes'}
+															onClick={() => toggleChapterCollapsed(sec.loomId)}
+														>
+															<span className={collapsed ? 'loom-caret' : 'loom-caret loom-caret-open'}>▸</span>
+														</button>
+													) : (
+														<span className="loom-row-caret" aria-hidden="true" />
+													)}
+													<span className="loom-scene-row-num">{i + 1}</span>
+													{note ? (
+														<button className="loom-subloc-link" onClick={() => view.openEntity(note.path)}>
+															{sec.text.trim()}
+														</button>
+													) : (
+														<span className="loom-script-scene-head">{sec.text.trim()}</span>
+													)}
+													{/* A dashed leader — flex-grow — fills whatever's left
+													    between the title and the count, adapting to title
+													    length automatically instead of leaving a ragged gap. */}
+													<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
+													{/* Its own fixed-width column, not sized to its own text —
+													    a two-digit count previously nudged this whole cell
+													    (and thus its left edge) sideways row to row. */}
+													<span className="loom-script-chapter-count">
+														{scenes.length} scene{scenes.length === 1 ? '' : 's'}
+													</span>
+												</div>
+												{!collapsed && scenes.length > 0 ? (
+													<div
+														className={
+															outlineDrag?.group === sceneGroup
+																? 'loom-subloc-list loom-subloc-dragging loom-script-outline-scenes'
+																: 'loom-subloc-list loom-script-outline-scenes'
+														}
+													>
+														{scenes.map((scene, si) => {
+															const sceneGrabbed = outlineDrag?.group === sceneGroup && outlineDrag.from === si;
+															const note2 = sceneNote(scene);
+															return (
+																<div
+																	key={scene.loomId ?? scene.line}
+																	className={
+																		sceneGrabbed
+																			? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
+																			: 'loom-script-scene-row loom-subloc-row-slide'
+																	}
+																	style={outlineRowStyle(sceneGroup, si)}
+																	data-seq-row=""
+																>
+																	{/* No caret placeholder here (unlike the chapter row) —
+																	    scenes never collapse, and keeping the grip close to
+																	    the title reads better than preserving strict column
+																	    alignment with the chapter row above. */}
+																	{outlineGrip(sceneGroup, si, scenes.length, commitSceneOrder(sec, scenes), sec.loomId)}
+																	<span className="loom-scene-row-num">{si + 1}</span>
+																	{note2 ? (
+																		<button
+																			className="loom-subloc-link"
+																			onClick={() => view.openEntity(note2.path)}
+																		>
+																			{scene.heading}
+																		</button>
+																	) : (
+																		<span className="loom-script-scene-head">{scene.heading}</span>
+																	)}
+																	<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
+																	<span className="loom-script-chapter-count">p. {scenePages(scene)}</span>
+																</div>
+															);
+														})}
+													</div>
+												) : null}
+											</div>
+										);
+									})}
+								</div>
+								</>
+							)}
+						</div>
+					) : mode === 'pages' ? (
 						// Every page in one scroller, like a PDF viewer: the page box
 						// navigates by scrolling to a page rather than swapping which
 						// one exists, so reading straight through still works.
@@ -1730,4 +2186,44 @@ export async function editScriptAndSync(
 		}
 	}
 	return changed;
+}
+
+/**
+ * Trashes a Scene or Chapter note AND removes its backing block from the
+ * script — a scene/chapter note that survives a script removal (or vice
+ * versa) just resurrects itself on the next `syncScenes` pass, so the two
+ * have to go together. Deleting a Chapter cascades onto every Scene note
+ * that pointed at it (`sceneChapter`): the chapter's script block held their
+ * headings too, so once it's gone those notes have nothing left to reflect
+ * and are trashed rather than left as permanent orphans.
+ */
+export async function deleteScriptEntity(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	record: EntityRecord
+): Promise<void> {
+	if (record.type === 'scene' && record.sceneId !== '') {
+		const sceneId = record.sceneId;
+		await editScript(plugin, project, (raw) => removeScene(raw, sceneId));
+	} else if (record.type === 'chapter' && record.chapterId !== '') {
+		const chapterId = record.chapterId;
+		const scenes = plugin.indexer
+			.getAll('scene', record.project)
+			.filter(
+				(sc) =>
+					sc.sceneChapter !== '' &&
+					plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === record.path
+			);
+		await editScript(plugin, project, (raw) => removeChapter(raw, chapterId));
+		for (const sc of scenes) {
+			const f = plugin.app.vault.getFileByPath(sc.path);
+			if (!f) continue;
+			await purgeEntityReferences(plugin, sc.path, sc.project);
+			await plugin.app.fileManager.trashFile(f);
+		}
+	}
+	const file = plugin.app.vault.getFileByPath(record.path);
+	if (!file) return;
+	await purgeEntityReferences(plugin, record.path, record.project);
+	await plugin.app.fileManager.trashFile(file);
 }

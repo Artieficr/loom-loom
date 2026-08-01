@@ -1980,6 +1980,70 @@ span.loom-row-caret {
 	align-items: center;
 }
 
+/* Position picker (Chapter and Scene creation modals): the "where does it
+   land" list — existing items as static rows, the new (unsaved) one as the
+   single draggable row among them. */
+.loom-modal-order-wrap {
+	margin: var(--size-2-2) 0 var(--size-4-2);
+}
+
+.loom-modal-order-wrap-hidden {
+	display: none;
+}
+
+.loom-modal-order-list {
+	position: relative;
+	max-height: 220px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+/* Fixed height (matches the `SLOT` constant in project.ts exactly) so the
+   drag math never has to measure the DOM mid-gesture — a static row slides a
+   whole slot via `transform`, transitioned smoothly; the dragged (new
+   chapter) row rides the raw cursor delta with no transition. */
+.loom-modal-order-row {
+	box-sizing: border-box;
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	height: 34px;
+	padding: 0 var(--size-4-2);
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-small);
+	transition: transform 120ms ease;
+}
+
+.loom-modal-order-row-new {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	z-index: 1;
+	background: var(--background-modifier-hover);
+	font-weight: var(--font-weight-medium);
+}
+
+.loom-modal-order-row-dragging {
+	transition: none;
+}
+
+.loom-modal-order-grip {
+	cursor: grab;
+	color: var(--text-faint);
+	user-select: none;
+	touch-action: none;
+}
+
+.loom-modal-order-row-dragging .loom-modal-order-grip {
+	cursor: grabbing;
+}
+
+.loom-modal-order-grip-spacer {
+	width: 1em;
+}
+
 .loom-entity-chip {
 	display: inline-flex;
 	align-items: center;
@@ -2216,6 +2280,47 @@ span.loom-row-caret {
 .loom-quest-tag .loom-icon svg {
 	width: 13px;
 	height: 13px;
+}
+
+/* Scene creation modal: the heading row (INT./EXT. + Location + Sublocation +
+   Time, all in one Setting row) is wider than Obsidian's default modal. */
+.loom-modal-scene {
+	width: min(720px, 92vw);
+}
+
+/* The heading row's four controls need the FULL row width to fit without
+   clipping — sharing it with the "Scene heading" label (Obsidian's default
+   side-by-side Setting layout) isn't enough room, so this stacks the label
+   above the controls (same idea as `.loom-modal-wide`) and gives the control
+   row itself a hard 100% width booking, `min-width: 0` at every level so flex
+   children are actually allowed to shrink instead of forcing an overflow. */
+.loom-modal-scene-heading.setting-item {
+	flex-direction: column;
+	align-items: stretch;
+}
+
+.loom-modal-scene-heading .setting-item-info {
+	margin-right: 0;
+}
+
+.loom-modal-scene-heading .setting-item-control {
+	display: flex;
+	flex-wrap: nowrap;
+	gap: var(--size-2-2);
+	width: 100%;
+	min-width: 0;
+}
+
+.loom-modal-scene-heading .setting-item-control select {
+	flex: 0 0 auto;
+	width: 5.5em;
+	min-width: 0;
+}
+
+.loom-modal-scene-heading .setting-item-control input[type='text'] {
+	flex: 1 1 0;
+	min-width: 0;
+	width: 0;
 }
 
 /* Full-width modal rows (e.g. the quest Description): label above, control
@@ -4911,7 +5016,171 @@ span.loom-row-caret {
 }
 
 .loom-view .loom-script-tabs {
+	display: flex;
+	align-items: center;
 	margin: 0.5em 0;
+}
+
+/* The Outline button: standalone on the far right of the tabs row, not part
+   of the Script/Pages pill (that pair is one toggle over the same document;
+   this swaps in a management list instead) — same pill look, but with its
+   own full border radius since it isn't connected to a sibling. */
+.loom-view .loom-script-chapters-btn {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-primary);
+	box-shadow: none;
+	cursor: pointer;
+	padding: var(--size-2-2) var(--size-4-3);
+	height: auto;
+}
+
+.loom-view .loom-script-chapters-btn.loom-seg-on {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.loom-view .loom-script-chapters-btn:hover:not(.loom-seg-on) {
+	background: var(--background-modifier-hover);
+	border-color: var(--background-modifier-border-hover);
+}
+
+.loom-view .loom-script-chapters-btn.loom-seg-on:hover {
+	background: var(--interactive-accent-hover);
+}
+
+/* One page tall and scrolling inside itself, same limit as the raw editor
+   (.loom-script-editor) and the Pages preview (.loom-screenplay) — a script
+   with dozens of chapters previously had nothing to stop the outline from
+   just running on past the bottom of the view and overlapping whatever
+   followed it. */
+.loom-view .loom-script-outline {
+	max-height: 70vh;
+	overflow-y: auto;
+	/* A little breathing room on the right, or a scrolled panel's own
+	   scrollbar sits flush against the row content. */
+	padding-right: var(--size-4-3);
+	margin-top: 0.6em;
+	margin-bottom: 0.5em;
+}
+
+.loom-view .loom-script-outline-chapter {
+	width: 100%;
+}
+
+/* Column headings, styled like a table header sitting over the chapter
+   rows below (same row shape, so its cells land on the real columns). The
+   expand/collapse-all toggle lives IN this row (the caret's own slot) —
+   there's no separate row above it any more. */
+.loom-view .loom-script-outline-headrow {
+	color: var(--text-faint);
+	font-size: 0.8em;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	padding-bottom: var(--size-2-2);
+	margin-bottom: var(--size-2-2);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.loom-view .loom-script-outline-headrow .loom-script-scene-head,
+.loom-view .loom-script-outline-headrow .loom-script-chapter-count {
+	color: inherit;
+	font-size: inherit;
+}
+
+.loom-view .loom-script-outline-headrow .loom-row-caret {
+	color: inherit;
+}
+
+/* A chapter's scenes hang off a vertical nesting rail beneath it, the same
+   device the entity-page Events hub uses (`.loom-event-nest`) — the rail
+   starts flush with the chapter row above rather than floating a gap above
+   itself, and its horizontal position is pinned to the chapter row's own
+   caret (grip width + row gap + half the caret's own width), so it visibly
+   continues down from the arrow that opens it rather than landing under an
+   unrelated column. Scene rows themselves indent past that same point (grip
+   + gap + caret + gap) so their own grip lands right after the rail. */
+.loom-view .loom-script-outline-scenes {
+	position: relative;
+	margin-top: var(--size-2-1);
+	margin-left: calc(var(--icon-s) + 0.5em + var(--size-4-4) + 0.5em);
+}
+
+.loom-view .loom-script-outline-scenes::before {
+	content: '';
+	position: absolute;
+	left: calc(-1px - 0.5em - var(--size-4-4) / 2);
+	top: calc(-1 * var(--size-2-1));
+	bottom: 0;
+	width: 2px;
+	border-radius: 1px;
+	background: var(--background-modifier-border);
+}
+
+/* Highlights the chapter a dragged scene is currently hovering over, when
+   that's a DIFFERENT chapter than the one it started in — dropping here
+   moves the scene there instead of just reordering it in place. */
+.loom-view .loom-script-outline-drop-target > .loom-script-scene-row {
+	background: var(--background-modifier-hover);
+	border-radius: var(--radius-s);
+}
+
+/* `.loom-subloc-list` (shared with sublocation/item drag lists) sets
+   `align-items: flex-start`, which shrink-wraps each row to its own content
+   width. That leaves the count's `flex: 0 0 6em` box genuinely 6em wide, but
+   floating right after wherever the (also shrink-wrapped) name text happens
+   to end — so it still moved row to row. Stretching the row to the list's
+   full width restores the usual flex-grow/flex-basis split. */
+.loom-view .loom-script-outline .loom-script-scene-row {
+	width: 100%;
+}
+
+/* Fixed width, not sized to its own text — otherwise a longer "N scenes"
+   count shifts its own left edge (and so its start position) row to row. */
+.loom-view .loom-script-outline .loom-script-chapter-count {
+	flex: 0 0 6em;
+	text-align: right;
+	color: var(--text-muted);
+	font-size: 0.85em;
+}
+
+/* A `<button>`'s user-agent default is CENTER-aligned text — high-specificity
+   author CSS elsewhere (Obsidian's own base button styling) was still
+   winning that fight, so `text-align: left` alone wasn't enough. Making the
+   button itself a flex container and aligning on `justify-content` sidesteps
+   `text-align` entirely — a completely different property nothing else here
+   overrides. Also no longer flex-grow: `.loom-script-scene-row .loom-subloc-link`
+   (below, in the shared scene-row block) sets `flex: 1 1 auto` at the SAME
+   3-class specificity as a plain `.loom-script-outline .loom-subloc-link`
+   selector would carry, so which one won came down to source order rather
+   than intent — the leader was getting no room to grow, landing hard
+   against the count instead of right after the title. Matching
+   `.loom-script-scene-row` explicitly here (4 classes) makes the win
+   unconditional regardless of where either rule sits in the file. */
+.loom-view .loom-script-outline .loom-script-scene-row .loom-subloc-link,
+.loom-view .loom-script-outline .loom-script-scene-row .loom-script-scene-head {
+	display: flex;
+	flex: 0 1 auto;
+	justify-content: flex-start;
+	text-align: left;
+}
+
+/* The table-of-contents-style leader between a title and its trailing count
+   — flex-grow, so it fills exactly whatever's left after the (now
+   non-growing) title, adapting to title length automatically instead of
+   leaving a ragged ever-different gap. The header row reuses the same
+   spacer for column alignment but without the dashed line (nothing to
+   "lead" between two column labels). */
+.loom-view .loom-script-outline-leader {
+	flex: 1 1 0;
+	min-width: 0.75em;
+}
+
+.loom-view .loom-script-outline-leader-dashed {
+	align-self: center;
+	height: 0;
+	margin: 0 0.5em;
+	border-bottom: 1px dashed var(--background-modifier-border);
 }
 
 .loom-view .loom-script-toolbar {

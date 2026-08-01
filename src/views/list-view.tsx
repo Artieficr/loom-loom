@@ -54,7 +54,7 @@ import {
 	recordLabel,
 } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
-import { useScriptText } from './script-view';
+import { deleteScriptEntity, useScriptText } from './script-view';
 import { liveChapterIds, liveSceneIds, parseFountain } from '../fountain';
 
 type SortMode = 'name' | 'created' | 'modified' | 'date' | 'order' | 'appearance';
@@ -498,12 +498,19 @@ function EntityList({
 	 *  1..N from the new top instead of flipping which number lands on which
 	 *  row, so the last scene read "1" while ascending. Built from `records`
 	 *  (the current search/filter set), so numbering stays dense under a
-	 *  filter rather than showing gappy global positions. */
+	 *  filter rather than showing gappy global positions. **Orphans excluded
+	 *  entirely** (not just skipped in the sequence) — this is a SCRIPT
+	 *  position, and a note no longer backed by a heading/section has none;
+	 *  counting it would both hand it a number that means nothing and inflate
+	 *  every number after it past what the script itself actually contains.
+	 *  An orphan's row simply shows no number (`scriptOrder.get` misses). */
 	const scriptOrder = useMemo(() => {
 		if (type !== 'scene' && type !== 'chapter') return new Map<string, number>();
-		const canonical = [...records].sort((a, b) => compare(a, b, 'order'));
+		const canonical = [...records]
+			.filter((r) => !liveScriptIds || liveScriptIds.has(r.type === 'scene' ? r.sceneId : r.chapterId))
+			.sort((a, b) => compare(a, b, 'order'));
 		return new Map(canonical.map((r, i) => [r.path, i + 1]));
-	}, [records, type]);
+	}, [records, type, liveScriptIds]);
 
 	// Locations nest under their parentLocation, items under their original (a
 	// character-specific copy under the item it derives from). Searching flattens
@@ -712,6 +719,30 @@ function EntityList({
 			? ses.attendance.filter((lp) => plugin.indexer.resolve(lp, ses.path)?.path !== pc.path)
 			: [...ses.attendance, linkTargetOf(pc)];
 		writeFmOf(ses, (fm) => setLoomKey(fm, FM.attendance, next.map((n) => `[[${n}]]`)));
+	};
+
+	// A scene/chapter IS its stretch of the script — deleting the note while
+	// leaving the writing behind would just resurrect it on the next parse, so
+	// the two go together; deleting a chapter also takes its scenes' notes
+	// with it (`deleteScriptEntity`, script-view.tsx).
+	const scriptBacked = (r: EntityRecord): boolean =>
+		(r.type === 'chapter' && r.chapterId !== '') || (r.type === 'scene' && r.sceneId !== '');
+	const deleteMessage = (r: EntityRecord): string =>
+		scriptBacked(r)
+			? r.type === 'chapter'
+				? "The note is moved to the trash, this chapter is removed from the script, and its scenes' notes are trashed too."
+				: 'The note is moved to the trash, and this scene is removed from the script.'
+			: 'The note is moved to the trash.';
+	const deleteRow = (r: EntityRecord): void => {
+		if (scriptBacked(r)) {
+			void deleteScriptEntity(plugin, project, r);
+			return;
+		}
+		const file = plugin.app.vault.getFileByPath(r.path);
+		if (!file) return;
+		void purgeEntityReferences(plugin, r.path, r.project).finally(() =>
+			plugin.app.fileManager.trashFile(file)
+		);
 	};
 
 	const onRowMenu = (e: ReactMouseEvent, r: EntityRecord) => {
@@ -1089,14 +1120,8 @@ function EntityList({
 					new ConfirmModal(
 						plugin.app,
 						`Delete "${recordLabel(r, project)}"?`,
-						'The note is moved to the trash.',
-						() => {
-							const file = plugin.app.vault.getFileByPath(r.path);
-							if (!file) return;
-							void purgeEntityReferences(plugin, r.path, r.project).finally(() =>
-								plugin.app.fileManager.trashFile(file)
-							);
-						},
+						deleteMessage(r),
+						() => deleteRow(r),
 						'Delete'
 					).open()
 				)
@@ -1401,14 +1426,8 @@ function EntityList({
 						new ConfirmModal(
 							plugin.app,
 							`Delete "${recordLabel(r, project)}"?`,
-							'The note is moved to the trash.',
-							() => {
-								const file = plugin.app.vault.getFileByPath(r.path);
-								if (!file) return;
-								void purgeEntityReferences(plugin, r.path, r.project).finally(() =>
-									plugin.app.fileManager.trashFile(file)
-								);
-							},
+							deleteMessage(r),
+							() => deleteRow(r),
 							'Delete'
 						).open();
 					}}

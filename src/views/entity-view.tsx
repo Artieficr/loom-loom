@@ -67,7 +67,7 @@ import { useIndexVersion } from './hooks';
 import {
 	buildNavTree,
 	chapterScriptText,
-	editScript,
+	deleteScriptEntity,
 	editScriptAndSync,
 	highlight,
 	pushChapterTitles,
@@ -82,7 +82,6 @@ import {
 	renameSectionTitle,
 	replaceChapterBody,
 	replaceSceneBody,
-	removeScene,
 	joinLocationSub,
 	setSceneHeadingParts,
 	elementText,
@@ -2499,6 +2498,13 @@ function EntityPage({ view }: { view: EntityView }) {
 		.filter((e): e is { quest: EntityRecord; state: string } => e !== null)
 		// Manual order (drag-reorderable), then chronological for the unstamped.
 		.sort((a, b) => (a.quest.seq ?? a.quest.created) - (b.quest.seq ?? b.quest.created));
+	// Scene/Chapter pages hide the whole Quests block when nothing resolves
+	// against them yet — Session pages keep showing it empty (a session's
+	// quest involvement is worth surfacing as an invitation to add one; a
+	// scene/chapter's isn't, since most of them will never touch a quest).
+	const questSectionVisible =
+		showsQuestSection &&
+		((record.type !== 'scene' && record.type !== 'chapter') || sessionQuests.length > 0);
 
 	// PC life state: unticking Alive reveals the death-session picker.
 	// Gated on the kind: a writer project's cast has no party to be away from,
@@ -3589,11 +3595,15 @@ function EntityPage({ view }: { view: EntityView }) {
 						new ConfirmModal(
 							plugin.app,
 							`Delete "${recordLabel(record, project)}"?`,
-							// A scene IS its stretch of the script — deleting the note
-							// while leaving the writing behind would just resurrect the
-							// note on the next parse, so the two go together.
-							record.sceneId !== '' && scriptMode
-								? 'The note is moved to the trash, and this scene is removed from the script.'
+							// A scene/chapter IS its stretch of the script — deleting the
+							// note while leaving the writing behind would just resurrect it
+							// on the next parse, so the two go together. Deleting a chapter
+							// also takes its scenes' notes with it (their headings live in
+							// the chapter's own script block, which is about to go too).
+							scriptNamed
+								? record.type === 'chapter'
+									? "The note is moved to the trash, this chapter is removed from the script, and its scenes' notes are trashed too."
+									: 'The note is moved to the trash, and this scene is removed from the script.'
 								: 'The note is moved to the trash.',
 							() => {
 								// Leave the page first so the view never sits on a
@@ -3603,13 +3613,13 @@ function EntityPage({ view }: { view: EntityView }) {
 								else if (project) {
 									view.navigateTo(VIEW_LIST, { project: project.root, entityType: record.type });
 								}
-								if (record.sceneId !== '' && scriptMode && project) {
-									const sceneId = record.sceneId;
-									void editScript(plugin, project, (raw) => removeScene(raw, sceneId));
+								if (scriptNamed && project) {
+									void deleteScriptEntity(plugin, project, record);
+								} else {
+									void purgeEntityReferences(plugin, record.path, record.project).finally(() =>
+										plugin.app.fileManager.trashFile(file)
+									);
 								}
-								void purgeEntityReferences(plugin, record.path, record.project).finally(() =>
-									plugin.app.fileManager.trashFile(file)
-								);
 							},
 							'Delete'
 						).open()
@@ -3891,7 +3901,9 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{isBeat ? (
+			{/* A writer project's Scene has no date of its own — its position in
+			    the story is the script order (`seq`), same as a Chapter's. */}
+			{isBeat && record.type !== 'scene' ? (
 				<label className="loom-field">
 					<span className="loom-field-label">Date</span>
 					<input
@@ -3968,6 +3980,29 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
+			{/* Chapters are otherwise `isSession`-shaped (the anchor role) and so
+			    skip the generic body section below — but with Description gone
+			    from the Scene/Chapter pages, a Chapter needs this as its one
+			    remaining freeform field, same as every Scene already has it.
+			    Placed right after the title fields rather than down with the
+			    rest of the page. */}
+			{record.type === 'chapter' ? (
+				<div className="loom-field loom-field-body">
+					<span className="loom-field-label">Notes</span>
+					<MarkdownField
+						app={plugin.app}
+						value={body ?? ''}
+						names={linkNames}
+						onOpenLink={openLinkTarget}
+						onCreateEntity={createLinkEntity}
+						onChange={(v) => {
+							setBody(v);
+							saveBody(v);
+						}}
+					/>
+				</div>
+			) : null}
+
 			{isSession && kindFeatures.attendance ? (
 				<div className="loom-field">
 					<span className="loom-field-label">Attendance</span>
@@ -3990,7 +4025,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : null}
 
 
-			{showsQuestSection ? (
+			{questSectionVisible ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Quests</span>
 					{(['active', 'resolvedThis', 'resolvedPrev'] as const).map((state) => {
@@ -4320,6 +4355,11 @@ function EntityPage({ view }: { view: EntityView }) {
 						</details>
 					) : null}
 				</div>
+			) : record.type === 'scene' || record.type === 'chapter' ? (
+				// The script IS the writing — a scene/chapter's own blurb field
+				// is redundant with it, so this page shows only the freeform
+				// Notes section below instead.
+				null
 			) : (
 		<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
 				<span className="loom-field-label">Description</span>
@@ -5103,6 +5143,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			{/* Character: Items sit directly under the Faction(s) section. */}
 			{record.type === 'character' ? itemsSection : null}
 
+			{/* Chapters render this same section right after Display title
+			    instead (up near the Title fields) — see below. */}
 			{!isSession ? (
 <div className="loom-field loom-field-body">
 				<span className="loom-field-label">Notes</span>
