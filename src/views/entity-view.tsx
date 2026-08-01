@@ -90,6 +90,7 @@ import {
 	parseSceneHeading,
 	preventOrphans,
 	renderInline,
+	sceneEndLine,
 	stripEntityLinksForDisplay,
 	type ParsedScript,
 } from '../fountain';
@@ -667,7 +668,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	// scene repeating itself as a top-level entry.
 	const sceneNavTree =
 		scriptParsed && sceneNavScene
-			? buildNavTree(scriptParsed, sceneNavScene.line + 1, sceneNavScene.endLine)
+			? buildNavTree(scriptParsed, sceneNavScene.line + 1, sceneEndLine(scriptParsed, sceneNavScene))
 			: null;
 	// The heading line is the script's, not the note's — only what follows it is
 	// editable here, so the title and its hidden id can't be typed over.
