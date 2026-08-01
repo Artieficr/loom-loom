@@ -840,6 +840,19 @@ Still to build:
   script-order scene has no date of its own. The Quests section only renders when at least one
   quest actually resolves against the page (Session pages keep showing it empty) —
   `src/views/entity-view.tsx`
+- [x] **Page breaks (`===`) between chapters become their own draggable Outline entry**,
+  fixing the bug where one meant to start the NEXT chapter on a fresh page instead got swept
+  into the PRECEDING chapter's last scene — so reordering that scene dragged the break along
+  with it. Classification is purely positional (the next element after it is a chapter heading
+  or EOF) and recomputed on every parse, so a hand-typed `===` at a chapter boundary shows up in
+  the Outline on the next commit with no action needed; one written between two scenes or
+  mid-scene is left alone forever, plain content. Outline gets a "+ New page breaker" button,
+  and page-break rows drag in the SAME top-level list as chapters (right-click → Delete, no
+  confirm needed). The Chapter creation modal's own chapters-only position picker still can't
+  drop or misplace an existing page break when reordering — each one stays attached to whichever
+  chapter follows it — `src/fountain.ts` (`ParsedPageBreak`, `pageBreaks`, `nextTopSectionLine`,
+  `ensureSceneIds`, `topLevelEntries`, `reorderTopLevelEntries`, `reorderTopSections`,
+  `appendPageBreak`, `removePageBreak`), `src/views/script-view.tsx`
 
 ## Next session (committed)
 

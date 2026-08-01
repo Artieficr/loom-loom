@@ -5068,6 +5068,28 @@ span.loom-row-caret {
 	width: 100%;
 }
 
+/* A page break's Outline row — same row shape as a chapter's, but it never
+   has children (no caret, no nested list) so the wrapper is just a plain
+   width-100% box, matching the chapter wrapper's own sizing for consistent
+   drag behavior. */
+.loom-view .loom-script-outline-pagebreak {
+	width: 100%;
+}
+
+.loom-view .loom-script-outline-pagebreak-label {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+/* The Title page's own static row — first inside the list, right under the
+   column headings, same width as every other row. */
+.loom-view .loom-script-outline-titlepage {
+	width: 100%;
+}
+
 /* Column headings, styled like a table header sitting over the chapter
    rows below (same row shape, so its cells land on the real columns). The
    expand/collapse-all toggle lives IN this row (the caret's own slot) —
