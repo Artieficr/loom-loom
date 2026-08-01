@@ -1253,6 +1253,20 @@ export function removeScene(text: string, sceneId: string): string | null {
 	return lines.join('\n');
 }
 
+/** Removes a chapter — its `#` section line and everything beneath it (every
+ *  scene it holds included) — from the script entirely. Mirrors `removeScene`
+ *  one level up, bounded the same way `replaceChapterBody`/`nextTopSectionLine`
+ *  are so it can never reach into the next chapter. */
+export function removeChapter(text: string, chapterId: string): string | null {
+	const parsed = parseFountain(text);
+	const section = parsed.sections.find((sec) => sec.level === 1 && sec.loomId === chapterId);
+	if (!section) return null;
+	const lines = text.split(/\r?\n/);
+	const endLine = nextTopSectionLine(parsed, section.line) ?? lines.length;
+	lines.splice(section.line, endLine - section.line);
+	return lines.join('\n');
+}
+
 /**
  * The line where a top-level section's content ends: the next top-level
  * section's own line, or `null` when it's the last one in the script (the
@@ -1421,6 +1435,50 @@ export function reorderScenesInSection(
 }
 
 /**
+ * Reorders every top-level section (chapter) in the whole script to match
+ * `orderedSectionIds` exactly, in one pass — the Script view's own Chapters
+ * panel drag-reorder uses this, mirroring `reorderScenesInSection` one level
+ * up: a chapter's ENTIRE block (its `#` line through everything up to the
+ * next top-level section, scenes and nested structure included) travels as
+ * one unit rather than being reasoned about scene by scene.
+ *
+ * Only sections already carrying a loom id are touched — `ensureSceneIds`
+ * guarantees every level-1 section has one before this can run. Anything
+ * before the first chapter (a stray scene with no `#` above it) is left
+ * exactly where it is, since `insertAt` starts at the first chapter's own
+ * line.
+ */
+export function reorderTopSections(text: string, orderedSectionIds: string[]): string | null {
+	const parsed = parseFountain(text);
+	const chapters = parsed.sections
+		.filter((sec): sec is ParsedSection & { loomId: string } => sec.level === 1 && sec.loomId !== null)
+		.sort((a, b) => a.line - b.line);
+	if (chapters.length === 0) return null;
+	const lines = text.split(/\r?\n/);
+	const trueEnd = (sec: ParsedSection) => nextTopSectionLine(parsed, sec.line) ?? lines.length;
+
+	const insertAt = chapters[0].line;
+	const removeEnd = trueEnd(chapters[chapters.length - 1]);
+	const blocks = new Map<string, string[]>(chapters.map((sec) => [sec.loomId, lines.slice(sec.line, trueEnd(sec))]));
+
+	const order = [
+		...orderedSectionIds.filter((id) => blocks.has(id)),
+		...chapters.map((sec) => sec.loomId).filter((id) => !orderedSectionIds.includes(id)),
+	];
+	const rebuilt: string[] = [];
+	for (const id of order) {
+		const block = blocks.get(id);
+		if (!block) continue;
+		const clean = [...block];
+		while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+		rebuilt.push(...clean, '');
+	}
+
+	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
+	return lines.join('\n');
+}
+
+/**
  * Renumbers scenes to keep an existing production-numbering scheme (`#N#`)
  * sequential and gapless.
  *
@@ -1471,4 +1529,50 @@ export function renameSectionTitle(text: string, sectionId: string, newTitle: st
 	const level = /^#+/.exec(lines[section.line].trim())?.[0].length ?? section.level;
 	lines[section.line] = `${'#'.repeat(level)} ${newTitle.trim()} [[loom:${sectionId}]]`;
 	return lines.join('\n');
+}
+
+/**
+ * Appends a new, empty top-level chapter to the end of the script, with its
+ * `[[loom:…]]` id already attached.
+ *
+ * The Script view's Chapters panel "+ New chapter" button uses this rather
+ * than creating a bare Chapter note the way the generic entity-creation
+ * modal would — a Chapter note with nothing backing it in the script is an
+ * orphan the moment it's made (see `liveChapterIds`), so this gives the
+ * script itself the new section first; `syncScenes` then creates the note
+ * FROM that section on the next commit, the same path a `# Chapter` line
+ * typed by hand takes.
+ */
+export function appendChapter(text: string, title: string): string {
+	const parsed = parseFountain(text);
+	const seen = new Set(
+		[...parsed.scenes, ...parsed.sections].map((s) => s.loomId).filter((id): id is string => id !== null)
+	);
+	let id = newSceneId();
+	while (seen.has(id)) id = newSceneId();
+	const trimmed = text.replace(/\s+$/, '');
+	return `${trimmed}\n\n# ${title.trim()} [[loom:${id}]]\n`;
+}
+
+/**
+ * Appends a new, empty scene to the very end of the script, with its
+ * `[[loom:…]]` id already attached — the Outline panel's "+ New scene"
+ * button uses this. Appending at the true end (rather than needing a target
+ * chapter) lands it in whichever chapter is LAST, the same way typing a new
+ * heading at the bottom of the file would — a chapter's own content is
+ * simply "everything up to the next `#` line or EOF" (see
+ * `nextTopSectionLine`), so there's nothing extra to wire up. With no
+ * chapter at all yet, it lands as a chapterless scene, same as typing one in
+ * by hand.
+ */
+export function appendScene(text: string, location: string): string {
+	const parsed = parseFountain(text);
+	const seen = new Set(
+		[...parsed.scenes, ...parsed.sections].map((s) => s.loomId).filter((id): id is string => id !== null)
+	);
+	let id = newSceneId();
+	while (seen.has(id)) id = newSceneId();
+	const trimmed = text.replace(/\s+$/, '');
+	const heading = location.trim() === '' ? 'NEW LOCATION' : location.trim().toUpperCase();
+	return `${trimmed}\n\nINT. ${heading} - DAY [[loom:${id}]]\n`;
 }

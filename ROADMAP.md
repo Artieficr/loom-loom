@@ -812,6 +812,34 @@ Still to build:
   placeholder is a Private Use Area code point (`\uE000`), not plain digits or a NUL byte:
   digits could collide with real numbers in the text, and a literal control character in a
   regex trips ESLint's `no-control-regex`.
+- [x] **Deleting a Scene/Chapter note now removes its backing block from the script too** —
+  previously only the Scene page's own delete button did this (and only for scenes); every
+  delete entry point (entity page, both `list-view.tsx` delete paths) now goes through one
+  shared `deleteScriptEntity` (script-view.tsx). Deleting a Chapter cascades: every Scene note
+  that pointed at it (`sceneChapter`) is trashed too, since the chapter's script block held
+  their headings — `src/fountain.ts` (`removeChapter`), `src/views/script-view.tsx`,
+  `src/views/entity-view.tsx`, `src/views/list-view.tsx`
+- [x] **Scene/Chapter creation unified onto one modal**: the entity list's "New scene"/"New
+  chapter", the Script view's own toolbar buttons, and a session row's context-menu add all now
+  open the same `CreateEntityModal` branch instead of the Script view separately prompting for
+  a bare name — `appendScene`/`appendChapter` fire FIRST (so the script anchor exists before the
+  note does) and the note is stamped directly, letting the modal open the real page immediately.
+  Scene modal: a heading row (INT./EXT., Location, optional Sublocation, Time — search-existing-
+  or-create-new for the two location fields) and a mandatory Chapter picker with a pinned
+  "+ New chapter" entry that opens a NESTED chapter-creation modal and returns to the scene
+  modal on completion, rather than navigating away mid-flow. Chapter modal: Title → Display
+  title → position (toggle "Append to the end", off reveals a chapter list with the new one as
+  the single draggable row, positioned via `reorderTopSections`) → Notes. The old
+  Involved/Locations/Date fields (meaningless for a script-derived scene) are gone from the
+  Scene modal — `src/project.ts` (`renderSceneModal`/`renderChapterModal`)
+- [x] **Scene/Chapter pages: Description → Notes, Date dropped from Scene, Quests section
+  hidden when empty**. The generic `loomDescription`-backed "Description" field is gone from
+  both pages (redundant with the script itself) in favor of the freeform body-backed "Notes"
+  section every other entity type already has (Chapter gained that section for the first time).
+  A Scene's Date field (meant for Events, inherited via the shared `beat` role) is hidden — a
+  script-order scene has no date of its own. The Quests section only renders when at least one
+  quest actually resolves against the page (Session pages keep showing it empty) —
+  `src/views/entity-view.tsx`
 
 ## Next session (committed)
 
