@@ -74,6 +74,8 @@ import {
 	renderNavTreeItem,
 	sceneScriptText,
 	useScriptText,
+	type NavItem,
+	type NavNode,
 } from './script-view';
 import {
 	moveSceneToSection,
@@ -85,11 +87,13 @@ import {
 	joinLocationSub,
 	setSceneHeadingParts,
 	elementText,
+	nextSectionAtLevel,
 	nextTopSectionLine,
 	parseFountain,
 	parseSceneHeading,
 	preventOrphans,
 	renderInline,
+	reorderBranchGroup,
 	sceneEndLine,
 	stripEntityLinksForDisplay,
 	type ParsedScript,
@@ -155,6 +159,38 @@ export class EntityView extends LoomFileReactView {
 	protected renderReact(): ReactElement {
 		return <EntityPage key={this.file?.path ?? ''} view={this} />;
 	}
+}
+
+/**
+ * Scrolls `target` into view within `container` ONLY — never `Element.
+ * scrollIntoView`, which cascades through every scrollable ancestor by
+ * default. The Scene/Chapter Script section's own preview box is one small
+ * self-scrolling box nested deep inside the page's own much bigger outer
+ * scroll; `scrollIntoView` on something inside it drags that outer scroll
+ * along too, which could scroll the whole page far enough that the
+ * Script/Pages tabs sitting above the box went off-screen the moment Pages
+ * mode finished restoring its scroll position.
+ */
+function scrollIntoContainer(container: HTMLElement, target: HTMLElement, behavior: ScrollBehavior): void {
+	const containerRect = container.getBoundingClientRect();
+	const targetRect = target.getBoundingClientRect();
+	const top = container.scrollTop + (targetRect.top - containerRect.top);
+	container.scrollTo({ top: Math.max(0, top), behavior });
+}
+
+/** `buildNavTree` only starts grouping branch-tagged sections under a shared
+ *  decision-point parent once it has seen a real 'scene' item (`lastScene` in
+ *  its own merge loop) — so a tree bounded to just ONE scene's own span has
+ *  to include that scene's own heading line in the build, or every branch
+ *  section it contains falls through as a flush top-level sibling instead of
+ *  nesting under its `DP-xx` identifier. But the Scene page's own mini nav
+ *  panel and Outline don't want the scene repeating itself as a row — so
+ *  this builds WITH the heading included, then unwraps the single resulting
+ *  'scene' item back out, keeping whatever grouping happened inside it. */
+function sceneOwnTree(parsed: ParsedScript, headingLine: number, endLine: number): NavNode {
+	const tree = buildNavTree(parsed, headingLine, endLine);
+	const first = tree.items[0];
+	return first && first.kind === 'scene' ? { ...tree, items: first.items } : tree;
 }
 
 function useFrontmatterWriter(plugin: LoomLoomPlugin, file: TFile | null) {
@@ -286,11 +322,16 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [sceneBody, setSceneBody] = useState<string | null>(null);
 	/** Scene page's Script section: same Script/Pages preview + search pattern
 	 *  as the main Script view, scoped to just this scene's own excerpt. */
-	const [sceneScriptMode, setSceneScriptMode] = useState<'script' | 'pages'>('script');
+	const [sceneScriptMode, setSceneScriptMode] = useState<'script' | 'pages' | 'outline'>('script');
 	const [sceneScriptQuery, setSceneScriptQuery] = useState('');
 	const [sceneScriptMatchIndex, setSceneScriptMatchIndex] = useState(0);
 	const sceneScriptEditorRef = useRef<FountainFieldHandle | null>(null);
 	const sceneScriptPagesRef = useRef<HTMLDivElement | null>(null);
+	/** Scrolled into view on every tab click (mirrors the main Script view's
+	 *  `tabsRef`/`scrollTabsIntoView`) so switching Script/Pages always lands
+	 *  the section in a convenient spot to work in, not wherever the page
+	 *  happened to be scrolled. */
+	const sceneScriptTabsRef = useRef<HTMLDivElement | null>(null);
 	/** A body line to land on once the scene's Script pane is back — same
 	 *  "stash it, apply once FountainField remounts" pattern as the main
 	 *  Script view's `pendingScrollLineRef`. */
@@ -299,11 +340,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  under it) — same shape as `sceneBody`, for the Chapter page's own
 	 *  Script section. */
 	const [chapterBody, setChapterBody] = useState<string | null>(null);
-	const [chapterScriptMode, setChapterScriptMode] = useState<'script' | 'pages'>('script');
+	const [chapterScriptMode, setChapterScriptMode] = useState<'script' | 'pages' | 'outline'>('script');
 	const [chapterScriptQuery, setChapterScriptQuery] = useState('');
 	const [chapterScriptMatchIndex, setChapterScriptMatchIndex] = useState(0);
 	const chapterScriptEditorRef = useRef<FountainFieldHandle | null>(null);
 	const chapterScriptPagesRef = useRef<HTMLDivElement | null>(null);
+	/** Same as `sceneScriptTabsRef`, for the Chapter page's own Script section. */
+	const chapterScriptTabsRef = useRef<HTMLDivElement | null>(null);
 	const pendingChapterScrollLineRef = useRef<number | null>(null);
 	/** Same collapsible nav panel as the main Script view, scoped to just this
 	 *  scene's/chapter's own bounded tree — rendered INSIDE the editor box
@@ -663,12 +706,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  algorithm as the main Script view's nav tree (`buildNavTree`), just
 	 *  bounded to this one scene instead of the whole document. */
 	const sceneNavScene = scriptParsed?.scenes.find((s) => s.loomId === record.sceneId) ?? null;
-	// `+ 1` excludes the scene's own heading line — only its own content
-	// (branch sections, ordinary sub-headings) should show up here, not the
-	// scene repeating itself as a top-level entry.
+	// Built FROM the scene's own heading line (`sceneOwnTree` unwraps that
+	// single 'scene' item back out) rather than excluding it — a branch
+	// section right under the heading needs `buildNavTree` to have seen the
+	// scene item first, or it can't group under its `DP-xx` identifier.
 	const sceneNavTree =
 		scriptParsed && sceneNavScene
-			? buildNavTree(scriptParsed, sceneNavScene.line + 1, sceneEndLine(scriptParsed, sceneNavScene))
+			? sceneOwnTree(scriptParsed, sceneNavScene.line, sceneEndLine(scriptParsed, sceneNavScene))
 			: null;
 	// The heading line is the script's, not the note's — only what follows it is
 	// editable here, so the title and its hidden id can't be typed over.
@@ -693,6 +737,35 @@ function EntityPage({ view }: { view: EntityView }) {
 		while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
 		return 1 + blanks;
 	})();
+	/** A fresh, EXCERPT-relative parse — `sceneNavTree` above uses `scriptParsed`
+	 *  (absolute line numbers), which don't line up with `sceneBodyPages`
+	 *  (paginated from `sceneExcerpt` alone, line 0 = the scene's own heading).
+	 *  The Outline tab needs both a nav tree AND page ranges built from the
+	 *  SAME numbering, so it gets its own tree from this parse instead of
+	 *  reusing `sceneNavTree`. */
+	const sceneExcerptParsed = sceneExcerpt !== null ? parseFountain(sceneExcerpt) : null;
+	// Line 0 of the excerpt IS the scene's own heading — built from there
+	// (not line 1) via `sceneOwnTree` for the same reason `sceneNavTree`
+	// above now is: a branch section needs `buildNavTree` to see the scene
+	// item first to group under its decision-point identifier.
+	const sceneOutlineTree = sceneExcerptParsed ? sceneOwnTree(sceneExcerptParsed, 0, Infinity) : null;
+	/** A branch/section's own page range, same idea as `chapterScenePageRange`
+	 *  — its block is `[section.line, nextSectionAtLevel)`, at whatever level
+	 *  it's nested to, since a branch can sit at any depth. */
+	const sceneOutlinePageRange = (node: NavNode): string => {
+		if (!sceneExcerptParsed) return '—';
+		const section = sceneExcerptParsed.sections.find((s) => s.line === node.line);
+		if (!section) return '—';
+		const end = nextSectionAtLevel(sceneExcerptParsed, section.line, section.level) ?? Infinity;
+		const hits: number[] = [];
+		sceneBodyPages.forEach((els, i) => {
+			if (els.some((el) => el.line >= section.line && el.line < end)) hits.push(i + 1);
+		});
+		if (hits.length === 0) return '—';
+		const first = hits[0];
+		const last = hits[hits.length - 1];
+		return first === last ? String(first) : `${first}–${last}`;
+	};
 	const sceneElementSpan = (el: ParsedScript['elements'][number]) =>
 		el.type === 'dialogue' ? el.text.split('\n').length : 1;
 	/** `bodyLine` is 0-based against `sceneDraft` (what `FountainField.getTopLine`
@@ -746,6 +819,26 @@ function EntityPage({ view }: { view: EntityView }) {
 		while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
 		return 1 + blanks;
 	})();
+	/** Re-parsed straight from the excerpt (its own line numbers, not the whole
+	 *  script's), so a scene's page range can be read the same way the main
+	 *  Script view's Outline reads `scenePages` — `chapterScenes[i]` and
+	 *  `chapterExcerptParsed.scenes[i]` line up 1:1 in document order, same
+	 *  `seq`-sorted order `syncScenes` already guarantees between the two. */
+	const chapterExcerptParsed = chapterExcerpt !== null ? parseFountain(chapterExcerpt) : null;
+	const chapterScenePageRange = (index: number): string => {
+		if (!chapterExcerptParsed) return '—';
+		const scene = chapterExcerptParsed.scenes[index];
+		if (!scene) return '—';
+		const end = sceneEndLine(chapterExcerptParsed, scene);
+		const hits: number[] = [];
+		chapterBodyPages.forEach((els, i) => {
+			if (els.some((el) => el.line >= scene.line && el.line < end)) hits.push(i + 1);
+		});
+		if (hits.length === 0) return '—';
+		const first = hits[0];
+		const last = hits[hits.length - 1];
+		return first === last ? String(first) : `${first}–${last}`;
+	};
 	const chapterPageOfLine = (bodyLine: number) => {
 		const line = bodyLine + chapterBodyLineOffset;
 		for (let i = 0; i < chapterBodyPages.length; i++) {
@@ -2264,6 +2357,165 @@ function EntityPage({ view }: { view: EntityView }) {
 			<Icon name="grip-vertical" />
 		</span>
 	);
+	/** Like `seqGrip`, but generic over a plain item count rather than
+	 *  `EntityRecord[]` — the Scene page's Outline drags branch SECTIONS,
+	 *  which have no backing entity to type against. Reuses the SAME
+	 *  `seqDrag`/`seqDragRef` state (and so `seqRowStyle`, unchanged — it
+	 *  never cared what the dragged items ARE, only their index), just
+	 *  calling `onCommit(from, over)` directly instead of `endSeqDrag`'s
+	 *  EntityRecord-shaped splice-and-callback. */
+	const branchGrip = (group: string, i: number, length: number, onCommit: (from: number, over: number) => void) => (
+		<span
+			className="loom-subloc-grip"
+			onPointerDown={(e) => {
+				e.preventDefault();
+				e.currentTarget.setPointerCapture(e.pointerId);
+				const rowEl = e.currentTarget.closest('[data-seq-row]');
+				const row = rowEl instanceof HTMLElement ? rowEl : null;
+				const rows = row?.parentElement
+					? [...row.parentElement.querySelectorAll(':scope > [data-seq-row]')]
+					: [];
+				const mids = rows.map((r) => {
+					const b = r.getBoundingClientRect();
+					return b.top + b.height / 2;
+				});
+				seqDragRef.current = { startY: e.clientY, slot: (row?.offsetHeight ?? 34) + 8, mids };
+				setSeqDrag({ group, from: i, over: i, dy: 0 });
+			}}
+			onPointerMove={(e) => {
+				const start = seqDragRef.current;
+				if (!start) return;
+				const dy = e.clientY - start.startY;
+				const over = Math.max(0, Math.min(length - 1, start.mids.filter((m) => m < e.clientY).length));
+				setSeqDrag((cur) =>
+					cur && cur.group === group && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur
+				);
+			}}
+			onPointerUp={() => {
+				const drag = seqDrag;
+				seqDragRef.current = null;
+				setSeqDrag(null);
+				if (drag && drag.group === group && drag.from !== drag.over) onCommit(drag.from, drag.over);
+			}}
+			onPointerCancel={() => {
+				seqDragRef.current = null;
+				setSeqDrag(null);
+			}}
+		>
+			<Icon name="grip-vertical" />
+		</span>
+	);
+	/**
+	 * The Scene page's own Outline: this scene's branch structure
+	 * (`sceneOutlineTree`, bounded to just this scene's line span and
+	 * numbered against `sceneExcerptParsed` so `sceneOutlinePageRange` lines
+	 * up), rendered with the SAME row shape the Script view's and Chapter
+	 * page's own Outlines use (`.loom-script-scene-row` grip/caret placeholder
+	 * + num placeholder + title + dashed leader + page-range count, each row
+	 * wrapped in a `.loom-script-outline-chapter`-shaped box so children hang
+	 * off the shared `.loom-script-outline-scenes` nesting rail) rather than
+	 * the read-only nav panel's plain `loom-script-nav-branchpoint` labels.
+	 * Only a `branchPoint`'s own children — the branches sharing that ONE
+	 * decision point's identifier — are draggable (`reorderBranchGroup`,
+	 * scoped to that identifier so a branch can never land under a different
+	 * one); the decision point's own header row and a plain untagged nested
+	 * section are both static, same as the Title page / page-break rows in
+	 * the main Script view's Outline.
+	 */
+	const renderSceneOutlineItem = (item: NavItem): ReactElement => {
+		if (item.kind === 'scene') {
+			// Never actually reached — `sceneOutlineTree` is bounded to one
+			// scene's own span, so a nested 'scene' item can't appear here.
+			return <div key={`sc-${item.scene.line}`} />;
+		}
+		if (item.kind === 'section') {
+			const hasChildren = item.node.items.length > 0;
+			return (
+				<div key={`sec-${item.node.line}`} className="loom-script-outline-chapter">
+					<div className="loom-script-scene-row">
+						<span className="loom-subloc-grip-static" aria-hidden="true" />
+						<span className="loom-row-caret" aria-hidden="true" />
+						<span className="loom-scene-row-num" aria-hidden="true" />
+						<span className="loom-script-scene-head">{item.node.title}</span>
+						<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
+						<span className="loom-script-chapter-count">p. {sceneOutlinePageRange(item.node)}</span>
+					</div>
+					{hasChildren ? (
+						<div className="loom-script-outline-scenes">
+							{item.node.items.map((child) => renderSceneOutlineItem(child))}
+						</div>
+					) : null}
+				</div>
+			);
+		}
+		const group = `branch:${item.id}`;
+		const branches = item.items.filter(
+			(x): x is Extract<NavItem, { kind: 'section' }> => x.kind === 'section'
+		);
+		return (
+			<div key={`bp-${item.id}`} className="loom-script-outline-chapter">
+				<div className="loom-script-scene-row">
+					<span className="loom-subloc-grip-static" aria-hidden="true" />
+					<span className="loom-row-caret" aria-hidden="true" />
+					<span className="loom-scene-row-num" aria-hidden="true" />
+					<span className="loom-script-outline-pagebreak-label">
+						<Icon name="git-branch" fallback="split" /> {item.id}
+					</span>
+					<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
+					<span className="loom-script-chapter-count">
+						{branches.length} branch{branches.length === 1 ? '' : 'es'}
+					</span>
+				</div>
+				<div
+					className={
+						seqDrag?.group === group
+							? 'loom-subloc-list loom-subloc-dragging loom-script-outline-scenes'
+							: 'loom-subloc-list loom-script-outline-scenes'
+					}
+				>
+					{branches.map((b, i) => {
+						const grabbed = seqDrag?.group === group && seqDrag.from === i;
+						const hasChildren = b.node.items.length > 0;
+						return (
+							<div
+								key={b.node.loomId ?? b.node.line}
+								className={
+									grabbed
+										? 'loom-script-outline-chapter loom-subloc-row-slide loom-subloc-row-dragging'
+										: 'loom-script-outline-chapter loom-subloc-row-slide'
+								}
+								style={seqRowStyle(group, i)}
+								data-seq-row=""
+							>
+								<div className="loom-script-scene-row">
+									{branchGrip(group, i, branches.length, (from, over) => {
+										if (!project) return;
+										const ids = branches
+											.map((x) => x.node.loomId)
+											.filter((id): id is string => id !== null);
+										const next = [...ids];
+										const [moved] = next.splice(from, 1);
+										next.splice(over, 0, moved);
+										void editScriptAndSync(plugin, project, (raw) => reorderBranchGroup(raw, item.id, next));
+									})}
+									<span className="loom-row-caret" aria-hidden="true" />
+									<span className="loom-scene-row-num">{i + 1}</span>
+									<span className="loom-script-scene-head">{b.node.title}</span>
+									<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
+									<span className="loom-script-chapter-count">p. {sceneOutlinePageRange(b.node)}</span>
+								</div>
+								{hasChildren ? (
+									<div className="loom-script-outline-scenes">
+										{b.node.items.map((grandchild) => renderSceneOutlineItem(grandchild))}
+									</div>
+								) : null}
+							</div>
+						);
+					})}
+				</div>
+			</div>
+		);
+	};
 	/** Grip for the quest-card grid (timeline-style). The grabbed card rides the
 	 *  cursor; the drop slot is the reading-order index (grid read as one
 	 *  continuous row) counted from a static rect snapshot. */
@@ -4442,80 +4694,6 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{/* A writer project's chapter owns its scenes through their own
-			    `loomSceneChapter` link — parsed straight out of the script's `#`
-			    sections — rather than through the note hub the session page uses.
-			    Without this a chapter imported from a script looked empty even
-			    though every scene under it pointed at it. */}
-			{isSession && scriptMode && project ? (
-				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">{ENTITY_META[beatType].plural}</span>
-					<div className="loom-hub-add-row">
-						<button
-							className="loom-rel-add"
-							onClick={() =>
-								new CreateEntityModal(plugin, beatType, project, {
-									noteSession: record,
-									onCreated: () => {},
-								}).open()
-							}
-						>
-							+ Add {/^[aeiou]/.test(beatLabel) ? 'an' : 'a'} {beatLabel}
-						</button>
-					</div>
-					{chapterScenes.length === 0 ? (
-						<div className="loom-attendance-empty">
-							No {ENTITY_META[beatType].plural.toLowerCase()} yet — a heading under this{' '}
-							<code># {record.name}</code> section in the script creates them.
-						</div>
-					) : (
-						<div
-							className={
-								seqDrag?.group === 'chapter-scenes'
-									? 'loom-subloc-list loom-subloc-dragging'
-									: 'loom-subloc-list'
-							}
-						>
-							{chapterScenes.map((sc, i) => {
-								const grabbed = seqDrag?.group === 'chapter-scenes' && seqDrag.from === i;
-								return (
-									<div
-										key={sc.path}
-										className={
-											grabbed
-												? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
-												: 'loom-script-scene-row loom-subloc-row-slide'
-										}
-										style={seqRowStyle('chapter-scenes', i)}
-										data-seq-row=""
-									>
-										{seqGrip('chapter-scenes', i, chapterScenes, (reordered) => {
-											if (!project) return;
-											// One atomic rewrite of the whole section's scene order,
-											// rather than reasoning about a single "insert before its
-											// new neighbor" move — robust to any jump distance.
-											void editScriptAndSync(plugin, project, (raw) =>
-												reorderScenesInSection(
-													raw,
-													record.chapterId,
-													reordered.map((r) => r.sceneId)
-												)
-											);
-										})}
-										<span className="loom-scene-row-num">{i + 1}</span>
-										<span className="loom-scene-row-intext">{sc.sceneIntExt}</span>
-										<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
-											{sc.name}
-										</button>
-										{sc.sceneTime !== '' ? <span className="loom-row-desc">{sc.sceneTime}</span> : null}
-									</div>
-								);
-							})}
-						</div>
-					)}
-				</div>
-			) : null}
-
 			{record.type === 'chapter' && scriptMode && project ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">Script</span>
@@ -4643,45 +4821,89 @@ function EntityPage({ view }: { view: EntityView }) {
 									}
 									return current;
 								};
-								const switchChapterMode = (next: 'script' | 'pages') => {
+								/** Outline is a plain swap either direction — a management
+								 *  list, not a reading position to preserve — mirroring the
+								 *  main Script view's own `switchMode`. Only Script↔Pages
+								 *  stash/restore a scroll line. */
+								const switchChapterMode = (next: 'script' | 'pages' | 'outline') => {
 									if (next === chapterScriptMode) return;
 									if (next === 'pages') {
-										const topLine = chapterScriptEditorRef.current?.getTopLine();
+										const topLine =
+											chapterScriptMode === 'script' ? chapterScriptEditorRef.current?.getTopLine() : undefined;
 										setChapterScriptMode('pages');
 										if (topLine !== undefined) {
 											const target = chapterPageOfLine(topLine);
 											window.requestAnimationFrame(() => {
-												chapterScriptPagesRef.current
-													?.querySelector(`[data-page="${target}"]`)
-													?.scrollIntoView({ block: 'start', behavior: 'instant' });
+												const container = chapterScriptPagesRef.current;
+												const el = container?.querySelector(`[data-page="${target}"]`);
+												if (container && el instanceof HTMLElement) {
+													scrollIntoContainer(container, el, 'instant');
+												}
 											});
 										}
-									} else {
+									} else if (next === 'script' && chapterScriptMode === 'pages') {
 										pendingChapterScrollLineRef.current = chapterLineOfPage(currentChapterPage());
 										setChapterScriptMode('script');
+									} else {
+										setChapterScriptMode(next);
 									}
+								};
+								/** Scrolls the section into view on every tab click, even a
+								 *  re-click of the pane already active — mirrors the main
+								 *  Script view's `clickTab`/`scrollTabsIntoView`, so working
+								 *  in this section from wherever the page happens to be
+								 *  scrolled is one click away. Switches mode FIRST and scrolls
+								 *  on the next frame, after the new pane has actually laid
+								 *  out — scrolling before the switch used the OLD content's
+								 *  height, and Outline is usually much shorter than Script/
+								 *  Pages, so the browser clamped the resulting out-of-range
+								 *  scroll position back up the page once the content shrank,
+								 *  landing well above the tabs instead of on them. */
+								const clickChapterTab = (next: 'script' | 'pages' | 'outline') => {
+									switchChapterMode(next);
+									window.requestAnimationFrame(() => {
+										chapterScriptTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+									});
 								};
 								return (
 									<>
-										<div className="loom-script-tabs loom-seg">
+										<div className="loom-script-tabs" ref={chapterScriptTabsRef}>
+											<div className="loom-seg">
+												<button
+													className={
+														chapterScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+													}
+													onClick={() => clickChapterTab('script')}
+												>
+													Script
+												</button>
+												<button
+													className={
+														chapterScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+													}
+													onClick={() => clickChapterTab('pages')}
+												>
+													Pages preview
+												</button>
+											</div>
+											<div className="loom-shell-spacer" />
+											{/* Deliberately NOT part of the Script/Pages pill — same
+											    reasoning as the main Script view's own standalone
+											    Outline button (`.loom-script-chapters-btn`). */}
 											<button
 												className={
-													chapterScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+													chapterScriptMode === 'outline'
+														? 'loom-script-chapters-btn loom-seg-on'
+														: 'loom-script-chapters-btn'
 												}
-												onClick={() => switchChapterMode('script')}
+												onClick={() => clickChapterTab('outline')}
 											>
-												Script
-											</button>
-											<button
-												className={
-													chapterScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
-												}
-												onClick={() => switchChapterMode('pages')}
-											>
-												Pages preview
+												Outline
 											</button>
 										</div>
 										<div className="loom-script-toolbar">
+											{chapterScriptMode !== 'outline' ? (
+												<>
 											<div className="loom-search-wrap">
 												<input
 													className="loom-script-search"
@@ -4736,6 +4958,20 @@ function EntityPage({ view }: { view: EntityView }) {
 														? 'No matches'
 														: `${(chapterScriptMatchIndex % chapterMatches.length) + 1} of ${chapterMatches.length}`}
 											</span>
+											</>
+											) : null}
+											<div className="loom-shell-spacer" />
+											{chapterScriptMode !== 'pages' ? (
+												<button
+													className="loom-rel-add"
+													onClick={() => {
+														if (!project) return;
+														new CreateEntityModal(plugin, 'scene', project, { defaultChapter: record }).open();
+													}}
+												>
+													+ New scene
+												</button>
+											) : null}
 										</div>
 										{chapterScriptMode === 'script' ? (
 											<div className="loom-scene-script">
@@ -4772,7 +5008,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													onOpenEntity={(path) => view.openEntity(path)}
 												/>
 											</div>
-										) : (
+										) : chapterScriptMode === 'pages' ? (
 											<div className="loom-screenplay loom-scene-pages" ref={chapterScriptPagesRef}>
 												{chapterNavPanel}
 												{chapterBodyPages.map((elements, i) => (
@@ -4808,6 +5044,54 @@ function EntityPage({ view }: { view: EntityView }) {
 														)}
 													</div>
 												))}
+											</div>
+										) : (
+											<div
+												className={
+													seqDrag?.group === 'chapter-scenes'
+														? 'loom-subloc-list loom-subloc-dragging loom-script-outline'
+														: 'loom-subloc-list loom-script-outline'
+												}
+											>
+												{chapterScenes.length === 0 ? (
+													<div className="loom-attendance-empty">
+														No scenes yet — a heading under this <code># {record.name}</code>{' '}
+														section in the script creates them.
+													</div>
+												) : (
+													chapterScenes.map((sc, i) => {
+														const grabbed = seqDrag?.group === 'chapter-scenes' && seqDrag.from === i;
+														return (
+															<div
+																key={sc.path}
+																className={
+																	grabbed
+																		? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
+																		: 'loom-script-scene-row loom-subloc-row-slide'
+																}
+																style={seqRowStyle('chapter-scenes', i)}
+																data-seq-row=""
+															>
+																{seqGrip('chapter-scenes', i, chapterScenes, (reordered) => {
+																	if (!project) return;
+																	void editScriptAndSync(plugin, project, (raw) =>
+																		reorderScenesInSection(
+																			raw,
+																			record.chapterId,
+																			reordered.map((r) => r.sceneId)
+																		)
+																	);
+																})}
+																<span className="loom-scene-row-num">{i + 1}</span>
+																<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
+																	{chapterExcerptParsed?.scenes[i]?.heading ?? sc.name}
+																</button>
+																<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
+																<span className="loom-script-chapter-count">p. {chapterScenePageRange(i)}</span>
+															</div>
+														);
+													})
+												)}
 											</div>
 										)}
 									</>
@@ -5433,23 +5717,38 @@ function EntityPage({ view }: { view: EntityView }) {
 									 *  preview on every toggle, matching the main view's fix for
 									 *  the same issue); leaving Script stashes a line for the
 									 *  effect above to apply once `FountainField` remounts. */
-									const switchSceneMode = (next: 'script' | 'pages') => {
+									/** Outline is a plain swap either direction, same reasoning
+									 *  as the Chapter panel's own `switchChapterMode`. */
+									const switchSceneMode = (next: 'script' | 'pages' | 'outline') => {
 										if (next === sceneScriptMode) return;
 										if (next === 'pages') {
-											const topLine = sceneScriptEditorRef.current?.getTopLine();
+											const topLine =
+												sceneScriptMode === 'script' ? sceneScriptEditorRef.current?.getTopLine() : undefined;
 											setSceneScriptMode('pages');
 											if (topLine !== undefined) {
 												const target = scenePageOfLine(topLine);
 												window.requestAnimationFrame(() => {
-													sceneScriptPagesRef.current
-														?.querySelector(`[data-page="${target}"]`)
-														?.scrollIntoView({ block: 'start', behavior: 'instant' });
+													const container = sceneScriptPagesRef.current;
+													const el = container?.querySelector(`[data-page="${target}"]`);
+													if (container && el instanceof HTMLElement) {
+														scrollIntoContainer(container, el, 'instant');
+													}
 												});
 											}
-										} else {
+										} else if (next === 'script' && sceneScriptMode === 'pages') {
 											pendingSceneScrollLineRef.current = sceneLineOfPage(currentScenePage());
 											setSceneScriptMode('script');
+										} else {
+											setSceneScriptMode(next);
 										}
+									};
+									/** Same as the Chapter panel's `clickChapterTab` (switch first,
+									 *  scroll on the next frame — see its comment for why). */
+									const clickSceneTab = (next: 'script' | 'pages' | 'outline') => {
+										switchSceneMode(next);
+										window.requestAnimationFrame(() => {
+											sceneScriptTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+										});
 									};
 									// The raw first line still carries the hidden `[[loom:<id>]]`
 									// marker — `parseSceneHeading` strips it and splits out the
@@ -5540,25 +5839,43 @@ function EntityPage({ view }: { view: EntityView }) {
 												)}
 												{headingParts.timeOfDay ? ` - ${headingParts.timeOfDay}` : ''}
 											</div>
-											<div className="loom-script-tabs loom-seg">
+											<div className="loom-script-tabs" ref={sceneScriptTabsRef}>
+												<div className="loom-seg">
+													<button
+														className={
+															sceneScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+														}
+														onClick={() => clickSceneTab('script')}
+													>
+														Script
+													</button>
+													<button
+														className={
+															sceneScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+														}
+														onClick={() => clickSceneTab('pages')}
+													>
+														Pages preview
+													</button>
+												</div>
+												<div className="loom-shell-spacer" />
+												{/* Deliberately NOT part of the Script/Pages pill —
+												    same reasoning as the main Script view's own
+												    standalone Outline button. */}
 												<button
 													className={
-														sceneScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+														sceneScriptMode === 'outline'
+															? 'loom-script-chapters-btn loom-seg-on'
+															: 'loom-script-chapters-btn'
 													}
-													onClick={() => switchSceneMode('script')}
+													onClick={() => clickSceneTab('outline')}
 												>
-													Script
-												</button>
-												<button
-													className={
-														sceneScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
-													}
-													onClick={() => switchSceneMode('pages')}
-												>
-													Pages preview
+													Outline
 												</button>
 											</div>
 											<div className="loom-script-toolbar">
+												{sceneScriptMode === 'outline' ? null : (
+												<>
 												<div className="loom-search-wrap">
 													<input
 														className="loom-script-search"
@@ -5611,6 +5928,8 @@ function EntityPage({ view }: { view: EntityView }) {
 															? 'No matches'
 															: `${(sceneScriptMatchIndex % sceneMatches.length) + 1} of ${sceneMatches.length}`}
 												</span>
+												</>
+												)}
 											</div>
 											{sceneScriptMode === 'script' ? (
 												<div className="loom-scene-script">
@@ -5644,7 +5963,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														onOpenEntity={(path) => view.openEntity(path)}
 													/>
 												</div>
-											) : (
+											) : sceneScriptMode === 'pages' ? (
 												<div className="loom-screenplay loom-scene-pages" ref={sceneScriptPagesRef}>
 													{sceneNavPanel}
 													{sceneBodyPages.map((elements, i) => (
@@ -5677,6 +5996,17 @@ function EntityPage({ view }: { view: EntityView }) {
 															)}
 														</div>
 													))}
+												</div>
+											) : (
+												<div className="loom-subloc-list loom-script-outline">
+													{sceneOutlineTree && sceneOutlineTree.items.length > 0 ? (
+														sceneOutlineTree.items.map((item) => renderSceneOutlineItem(item))
+													) : (
+														<div className="loom-attendance-empty">
+															No branch structure in this scene yet — a nested heading tagged with{' '}
+															<code>= branch: &lt;id&gt;</code> right beneath it creates one.
+														</div>
+													)}
 												</div>
 											)}
 										</>

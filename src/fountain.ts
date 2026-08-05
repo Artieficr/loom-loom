@@ -1347,6 +1347,22 @@ export function nextTopSectionLine(parsed: ParsedScript, afterLine: number): num
 }
 
 /**
+ * Where a section's own content ends, at ANY level: the next section whose
+ * level is <= this one's (a sibling, or a shallower ancestor-level section),
+ * or `null` when nothing like that follows (the caller substitutes EOF).
+ * `nextTopSectionLine` is this same question hardcoded to level 1 (plus a
+ * chapter-boundary page break, which only ever applies there); this is the
+ * general form, for bounding a branch section's own block regardless of how
+ * deep it's nested.
+ */
+export function nextSectionAtLevel(parsed: ParsedScript, afterLine: number, level: number): number | null {
+	const next = parsed.sections
+		.filter((sec) => sec.level <= level && sec.line > afterLine)
+		.sort((a, b) => a.line - b.line)[0];
+	return next ? next.line : null;
+}
+
+/**
  * Where a scene's own content actually ends — its raw `endLine`, capped at
  * the next top-level boundary (`nextTopSectionLine`). `ParsedScene.endLine`
  * extends to whatever scene heading comes next in the WHOLE file, chapter
@@ -1508,6 +1524,51 @@ export function reorderScenesInSection(
 		const clean = [...block];
 		while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
 		rebuilt.push('', ...clean, '');
+	}
+
+	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
+	return lines.join('\n');
+}
+
+/**
+ * Reorders every sibling section sharing ONE branch-point identifier
+ * (`= branch: <id>`) to match `orderedSectionIds` exactly — the Scene page's
+ * own Outline uses this, scoped to a single decision point: a branch from a
+ * DIFFERENT identifier is never touched, mirroring the nav panel's own
+ * `branchPoint` grouping (script-view.tsx's `buildNavTree`) — dragging a
+ * branch into a different choice point wouldn't have a coherent meaning, so
+ * it's simply not offered.
+ *
+ * Mirrors `reorderScenesInSection` one level further in: each branch's
+ * ENTIRE block (its heading through everything nested beneath it, bounded by
+ * `nextSectionAtLevel` rather than a fixed level so it works regardless of
+ * how deep the branch sits) travels as one unit, captured up front and
+ * spliced back in the requested order.
+ */
+export function reorderBranchGroup(text: string, groupId: string, orderedSectionIds: string[]): string | null {
+	const parsed = parseFountain(text);
+	const branches = parsed.sections
+		.filter((sec): sec is ParsedSection & { loomId: string } => sec.branchGroup === groupId && sec.loomId !== null)
+		.sort((a, b) => a.line - b.line);
+	if (branches.length === 0) return null;
+	const lines = text.split(/\r?\n/);
+	const trueEnd = (sec: ParsedSection) => nextSectionAtLevel(parsed, sec.line, sec.level) ?? lines.length;
+
+	const insertAt = branches[0].line;
+	const removeEnd = trueEnd(branches[branches.length - 1]);
+	const blocks = new Map<string, string[]>(branches.map((sec) => [sec.loomId, lines.slice(sec.line, trueEnd(sec))]));
+
+	const order = [
+		...orderedSectionIds.filter((id) => blocks.has(id)),
+		...branches.map((sec) => sec.loomId).filter((id) => !orderedSectionIds.includes(id)),
+	];
+	const rebuilt: string[] = [];
+	for (const id of order) {
+		const block = blocks.get(id);
+		if (!block) continue;
+		const clean = [...block];
+		while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+		rebuilt.push(...clean, '');
 	}
 
 	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);

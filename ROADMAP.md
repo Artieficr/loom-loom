@@ -853,6 +853,55 @@ Still to build:
   chapter follows it — `src/fountain.ts` (`ParsedPageBreak`, `pageBreaks`, `nextTopSectionLine`,
   `ensureSceneIds`, `topLevelEntries`, `reorderTopLevelEntries`, `reorderTopSections`,
   `appendPageBreak`, `removePageBreak`), `src/views/script-view.tsx`
+- [x] Page-break follow-ups: fixed the Outline's own top-level drag (data-seq-row lived one DOM
+  level too deep for the sibling query to see anything but itself, capping drags at "move by one
+  slot"); a run of consecutive `===` now all classify as boundary breaks instead of only the
+  last one; the Title page is a jump target in both the nav panel and Outline (a real row in the
+  table, undraggable); Outline rows show their own page number (title page, breaks included) —
+  `src/views/script-view.tsx`
+- [x] Scene/Chapter pages' own Script/Pages tabs now scroll themselves into view on every click,
+  matching the main Script view's `tabsRef`/`scrollTabsIntoView` — `src/views/entity-view.tsx`
+  (`sceneScriptTabsRef`/`chapterScriptTabsRef`)
+- [x] Chapter page's Scenes section restyled to match the main Script view's Outline (dashed
+  leader, right-aligned "p. X–Y" page range per scene, computed from a fresh parse of the
+  chapter's own excerpt) instead of its own plainer list — `src/views/entity-view.tsx`
+- [x] Nav panel branch grouping: siblings sharing one `= branch: <id>` now nest under a shared,
+  non-clickable parent label (the identifier itself) instead of sitting as flush siblings under
+  their scene, so the panel shows how many decision points a scene has, not just the branches —
+  `NavItem`'s new `branchPoint` kind, shared by all three nav panels — `src/views/script-view.tsx`
+- [x] Fixed Script↔Pages preview switching on the Scene/Chapter pages scrolling the tabs out of
+  view: the section's own preview box is a small self-scrolling box nested inside the page's
+  much bigger outer scroll, and `scrollIntoView` cascades through every scrollable ancestor by
+  default. New `scrollIntoContainer` moves only the one specific container instead —
+  `src/views/entity-view.tsx`
+- [x] Chapter and Scene pages' Script sections gained a third "Outline" mode (alongside
+  Script/Pages preview), replacing the standalone approaches each page had before:
+  - Chapter's Outline replaces the old separate "Scenes" field-section outright — same
+    dashed-leader/page-range rows, same drag-reorder, just living in the tab; its toolbar
+    swaps search for "+ New scene" (`CreateEntityModal`'s new `defaultChapter` option
+    pre-picks this chapter, so a scene added from here doesn't need re-picking it)
+  - Scene's Outline shows the scene's own branch structure (from a dedicated
+    excerpt-numbered `sceneOutlineTree`, not the nav panel's `sceneNavTree`) as a
+    DRAGGABLE tree, given the exact same row shape as Chapter's Outline and the main
+    Script view's — `.loom-script-scene-row` grip/caret placeholder + num placeholder +
+    title + dashed leader + page-range count (`sceneOutlinePageRange`), each row wrapped
+    in a `.loom-script-outline-chapter` box so children hang off the shared
+    `.loom-script-outline-scenes` rail, rather than the bespoke `loom-script-nav-*`
+    label classes it first shipped with. Only a branch point's own children (siblings
+    sharing one decision-point identifier) are draggable, via `reorderBranchGroup`
+    (fountain.ts), scoped so a branch can never land under a different identifier.
+    Chapter's own Outline stays scenes-only (no branches); the main Script view's
+    Outline is unchanged (chapters + page breaks only)
+  - Fixed both this tree AND the Navigate mini nav panel showing branches flush,
+    ungrouped, with no `DP-xx` header at all: each was bounded to start AFTER the
+    scene's own heading line (deliberately, to keep the scene from repeating itself
+    as a row), but `buildNavTree` only starts grouping a branch-tagged section under
+    a shared decision-point parent once it has seen a real scene item in its own
+    merge loop — excluding the heading meant it never saw one, so every branch fell
+    through as an ungrouped sibling. New `sceneOwnTree` (entity-view.tsx) builds
+    WITH the heading included instead, then unwraps that one scene item back out
+  — `src/views/entity-view.tsx`, `src/fountain.ts` (`reorderBranchGroup`,
+  `nextSectionAtLevel`), `src/views/script-view.tsx` (`NavNode.loomId`)
 
 ## Next session (committed)
 
