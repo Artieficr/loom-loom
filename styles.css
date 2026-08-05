@@ -4945,6 +4945,24 @@ span.loom-row-caret {
 	font-weight: 400;
 }
 
+/* A decision point's own label — the identifier from `= branch: <id>`,
+   grouping its sibling branches together underneath it. Not a jump target
+   (a decision point has no line of its own), so it's a plain `<span>`
+   rather than reusing the button-scoped rules above; small and muted so it
+   reads as a group heading, distinct from both the scene above it and the
+   branches nested beneath it. */
+.loom-view .loom-script-nav-branchpoint {
+	display: block;
+	width: 100%;
+	padding: 0.25em 0.3em;
+	margin-top: 0.4em;
+	font-size: 0.78em;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--text-faint);
+}
+
 /* Indents everything under a chapter/section one step — scenes, branches,
    and any further-nested sections all recurse into their own
    `.loom-script-nav-children` for the SAME additional indent, so every

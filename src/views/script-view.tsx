@@ -2095,11 +2095,16 @@ export interface NavNode {
 	title: string;
 	line: number;
 	branchGroup: string | null;
+	/** The section's own hidden `[[loom:…]]` id — `null` for the synthetic
+	 *  root node (`line: -1`) and for the brief window before a freshly
+	 *  typed section gets one. Reordering a branch group needs this. */
+	loomId: string | null;
 	items: NavItem[];
 }
 export type NavItem =
 	| { kind: 'scene'; scene: ParsedScene; items: NavItem[] }
-	| { kind: 'section'; node: NavNode };
+	| { kind: 'section'; node: NavNode }
+	| { kind: 'branchPoint'; id: string; items: NavItem[] };
 
 /**
  * Builds the script navigation tree — every section LEVEL, not just the
@@ -2132,7 +2137,7 @@ export type NavItem =
  * a resolved choice point from staying nested inside the last branch.
  */
 export function buildNavTree(parsed: ParsedScript, startLine = 0, endLine = Infinity): NavNode {
-	const root: NavNode = { title: '', line: -1, branchGroup: null, items: [] };
+	const root: NavNode = { title: '', line: -1, branchGroup: null, loomId: null, items: [] };
 	type SceneItem = Extract<NavItem, { kind: 'scene' }>;
 	const stack: { node: NavNode; level: number }[] = [{ node: root, level: 0 }];
 	let lastScene: SceneItem | null = null;
@@ -2145,6 +2150,7 @@ export function buildNavTree(parsed: ParsedScript, startLine = 0, endLine = Infi
 				level: s.level,
 				title: s.text,
 				branchGroup: s.branchGroup,
+				loomId: s.loomId,
 			})),
 		...parsed.scenes
 			.filter((s) => s.line >= startLine && s.line < endLine)
@@ -2154,9 +2160,31 @@ export function buildNavTree(parsed: ParsedScript, startLine = 0, endLine = Infi
 		if (m.kind === 'section') {
 			while (stack.length > 1 && stack[stack.length - 1].level >= m.level) stack.pop();
 			const top = stack[stack.length - 1];
-			const node: NavNode = { title: m.title, line: m.line, branchGroup: m.branchGroup, items: [] };
+			const node: NavNode = {
+				title: m.title,
+				line: m.line,
+				branchGroup: m.branchGroup,
+				loomId: m.loomId,
+				items: [],
+			};
 			if (m.branchGroup !== null && lastScene) {
-				lastScene.items.push({ kind: 'section', node });
+				// Every sibling sharing this decision point's identifier nests
+				// under ONE shared parent (rather than sitting as flush siblings
+				// under the scene), so the nav panel shows the decision point
+				// itself — and how many of them a scene has — not just its
+				// branches. Several groups in a row (a reaction choice, then an
+				// item choice) each get their own parent; find-by-id rather than
+				// "reuse the last one" copes with that even if they aren't
+				// perfectly contiguous.
+				let group = lastScene.items.find(
+					(it): it is Extract<NavItem, { kind: 'branchPoint' }> =>
+						it.kind === 'branchPoint' && it.id === m.branchGroup
+				);
+				if (!group) {
+					group = { kind: 'branchPoint', id: m.branchGroup, items: [] };
+					lastScene.items.push(group);
+				}
+				group.items.push({ kind: 'section', node });
 			} else {
 				top.node.items.push({ kind: 'section', node });
 			}
@@ -2190,6 +2218,21 @@ export function renderNavTreeItem(
 	jump: (line: number) => void
 ): ReactElement {
 	if (item.kind === 'section') return renderNavTreeNode(item.node, depth, jump);
+	if (item.kind === 'branchPoint') {
+		return (
+			<div key={`branch-${item.id}`}>
+				{/* Not clickable — a decision point has no line of its own to
+				    jump to, it's just the shared identifier its sibling
+				    branches were tagged with (`= branch: <id>`). */}
+				<span className="loom-script-nav-chapter loom-script-nav-sub loom-script-nav-branchpoint">
+					{item.id}
+				</span>
+				<div className="loom-script-nav-children">
+					{item.items.map((child) => renderNavTreeItem(child, depth + 1, jump))}
+				</div>
+			</div>
+		);
+	}
 	return (
 		<div key={item.scene.loomId ?? item.scene.line}>
 			<button

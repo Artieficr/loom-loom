@@ -930,6 +930,11 @@ export interface CreateEntityOptions {
 	 *  pick uses this so it can hand the created chapter straight to its own
 	 *  chapter picker instead of navigating away mid-scene-creation. */
 	onChapterCreated?: (record: EntityRecord) => void;
+	/** Scenes only: pre-picks the Chapter field — the Chapter page's own
+	 *  "+ New scene" button uses this so a scene added from there lands in
+	 *  THIS chapter without making the user pick it again. Still changeable;
+	 *  just a starting pick, not a lock. */
+	defaultChapter?: EntityRecord;
 }
 
 export class CreateEntityModal extends Modal {
@@ -1828,7 +1833,7 @@ export class CreateEntityModal extends Modal {
 		let mainLoc = '';
 		let subLoc = '';
 		let timeOfDay = '';
-		let pickedChapter: EntityRecord | null = null;
+		let pickedChapter: EntityRecord | null = this.options.defaultChapter ?? null;
 		let sceneAppendToEnd = true;
 		let notes = '';
 		// Reassigned once the position picker is built further down — declared
