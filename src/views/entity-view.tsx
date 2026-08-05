@@ -29,10 +29,12 @@ import {
 	pcGroupStub,
 } from '../types';
 import {
+	AltTextModal,
 	ConfirmModal,
 	CreateEntityModal,
 	EntityTypeSuggestModal,
 	RecordSuggestModal,
+	TextInputModal,
 	createEntity,
 	createItemCopy,
 	entityFileName,
@@ -54,6 +56,7 @@ import {
 	locationLabel,
 	mainLocationFirst,
 	recordLabel,
+	scrollIntoContainer,
 } from './common';
 import { ConnectedEntities } from './connected-entities';
 import { LinkOption } from './link-textarea';
@@ -65,18 +68,21 @@ import { MiniGraph } from './mini-graph';
 import { findMapsFile } from './map-view';
 import { useIndexVersion } from './hooks';
 import {
+	PagesPreviewBody,
 	buildNavTree,
 	chapterScriptText,
 	deleteScriptEntity,
 	editScriptAndSync,
-	highlight,
 	pushChapterTitles,
 	renderNavTreeItem,
 	sceneScriptText,
 	useScriptText,
 	type NavItem,
 	type NavNode,
+	type ScriptSearchMatch,
 } from './script-view';
+import { CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
+import { CommentPopover } from './annotation-popover';
 import {
 	moveSceneToSection,
 	moveSceneBefore,
@@ -86,16 +92,14 @@ import {
 	replaceSceneBody,
 	joinLocationSub,
 	setSceneHeadingParts,
-	elementText,
+	findAnnotationSpans,
+	type AnnotationSpan,
 	nextSectionAtLevel,
 	nextTopSectionLine,
 	parseFountain,
 	parseSceneHeading,
-	preventOrphans,
-	renderInline,
 	reorderBranchGroup,
 	sceneEndLine,
-	stripEntityLinksForDisplay,
 	type ParsedScript,
 } from '../fountain';
 import { pdfPages } from '../pdf';
@@ -159,23 +163,6 @@ export class EntityView extends LoomFileReactView {
 	protected renderReact(): ReactElement {
 		return <EntityPage key={this.file?.path ?? ''} view={this} />;
 	}
-}
-
-/**
- * Scrolls `target` into view within `container` ONLY — never `Element.
- * scrollIntoView`, which cascades through every scrollable ancestor by
- * default. The Scene/Chapter Script section's own preview box is one small
- * self-scrolling box nested deep inside the page's own much bigger outer
- * scroll; `scrollIntoView` on something inside it drags that outer scroll
- * along too, which could scroll the whole page far enough that the
- * Script/Pages tabs sitting above the box went off-screen the moment Pages
- * mode finished restoring its scroll position.
- */
-function scrollIntoContainer(container: HTMLElement, target: HTMLElement, behavior: ScrollBehavior): void {
-	const containerRect = container.getBoundingClientRect();
-	const targetRect = target.getBoundingClientRect();
-	const top = container.scrollTop + (targetRect.top - containerRect.top);
-	container.scrollTo({ top: Math.max(0, top), behavior });
 }
 
 /** `buildNavTree` only starts grouping branch-tagged sections under a shared
@@ -306,6 +293,335 @@ function EntityPage({ view }: { view: EntityView }) {
 	// hook, so it can't sit behind the early returns below) and unused by every
 	// other entity type.
 	const scriptText = useScriptText(plugin, project);
+	/** Comment bodies + alt-text option lists — same project-level sidecar
+	 *  the main Script view reads/writes, kept live the same way. Unused by
+	 *  every entity type but Scene/Chapter, same as `scriptText` above. */
+	const scriptNotes = useScriptNotes(plugin, project);
+	/** Which comment's popover is open (Scene and Chapter pages share this
+	 *  one piece of state — a page is only ever one or the other, never
+	 *  both, so there's no risk of them fighting over it). */
+	const [openComment, setOpenComment] = useState<{ id: string; rect: DOMRect } | null>(null);
+	/** A marker id the current Chapter/Scene search match points at — same
+	 *  role as the main Script view's own `highlightedAnnotationId`. */
+	const [highlightedAnnotationId, setHighlightedAnnotationId] = useState<string | null>(null);
+	/** Comment/alt-text handlers — identical logic to the main Script view's
+	 *  own (script-view.tsx's `Script` component), just guarded on `project`
+	 *  being resolved here rather than gated behind an early return. Shared
+	 *  by both the Chapter and Scene Script sections below. */
+	/** `wrapRef`/`pagesRefArg` are whichever of the Chapter/Scene section's own
+	 *  wrapper refs is currently mounted — same "take the caller's own ref as
+	 *  a parameter" pattern as `handleCycleAlt`/`handleOpenAltMenu` below,
+	 *  since this one handler is shared by both and only one is ever live.
+	 *  Opens the popover immediately (see script-view.tsx's own
+	 *  `handleCreateComment` for why a frame's delay is defensive, not load-
+	 *  bearing — CM6 updates its gutter synchronously as part of dispatch).
+	 *  Deliberately does NOT pre-create a sidecar entry — same reasoning as
+	 *  script-view.tsx's own copy of this handler: `entries: []` is what
+	 *  lands the user in the popover's always-available reply box instead of
+	 *  a pre-created blank row. */
+	const handleCreateComment = (
+		wrapRef: { current: HTMLDivElement | null },
+		pagesRefArg: { current: HTMLDivElement | null },
+		id: string,
+		_selectedText: string
+	) => {
+		window.requestAnimationFrame(() => {
+			const icon =
+				wrapRef.current?.querySelector(`[data-loom-annotation-id="${id}"]`) ??
+				pagesRefArg.current?.querySelector(`[data-loom-annotation-id="${id}"]`);
+			if (icon instanceof HTMLElement) handleOpenComment(id, icon.getBoundingClientRect());
+		});
+	};
+	/** Wraps the selection as option 0, then immediately prompts for a SECOND
+	 *  option (same `TextInputModal` the right-click menu's "Add
+	 *  alternative…" uses) — matches the comment flow's "picking the menu
+	 *  item opens something to type into" expectation. Cancelling (closing
+	 *  the modal without submitting) undoes the WHOLE creation — same
+	 *  reasoning as script-view.tsx's own copy of this handler: a span stuck
+	 *  at one option is exactly the "nothing left to alternate between" case
+	 *  `handleDeleteAltOption` already strips back to plain text for, so
+	 *  backing out here does the same. `onCreateAlt` (unlike the alt-text
+	 *  action handlers above) is wired directly to BOTH the Chapter's and
+	 *  the Scene's own `FountainField` with no fieldRef parameter — since
+	 *  only one is ever mounted, trying both refs (same "chain of ??"
+	 *  pattern `handleDeleteCommentEntry` already uses) reaches whichever
+	 *  one is actually live. */
+	const handleCreateAlt = (id: string, selectedText: string) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => ({
+			...notes,
+			altText: { ...notes.altText, [id]: { id, options: [selectedText], activeIndex: 0, acceptedIndex: null } },
+		}));
+		new TextInputModal(plugin.app, {
+			title: 'Add an alternative wording',
+			placeholder: selectedText,
+			cta: 'Add',
+			onSubmit: (value) => {
+				if (!project) return;
+				void mutateScriptNotes(plugin.app, project, (notes) => {
+					const cur = notes.altText[id];
+					if (!cur) return notes;
+					return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options: [...cur.options, value] } } };
+				});
+			},
+			onCancel: () => {
+				if (!project) return;
+				void mutateScriptNotes(plugin.app, project, (notes) => {
+					const { [id]: _dropped, ...rest } = notes.altText;
+					return { ...notes, altText: rest };
+				}).then(() => {
+					chapterScriptEditorRef.current?.removeAnnotationMarkers(id);
+					sceneScriptEditorRef.current?.removeAnnotationMarkers(id);
+					commitFieldEdit(chapterScriptEditorRef);
+					commitFieldEdit(sceneScriptEditorRef);
+				});
+			},
+		}).open();
+	};
+	/** Persists whatever `fieldRef` (the Chapter/Scene section's own live CM6
+	 *  instance) currently holds — same reasoning as script-view.tsx's own
+	 *  `commitFieldEdit`: alt-text cycling/drafting/accepting/deleting, all
+	 *  reachable from a gutter/margin icon or `AltTextModal`, apply their
+	 *  edit straight through the ref without ever putting real EDITOR FOCUS
+	 *  on it, so the normal write-on-blur path never fires and the change
+	 *  would otherwise sit in the live document only, lost on reload. Reads
+	 *  the fresh EXCERPT text off the ref (`getValue`), then writes it back
+	 *  into the FULL script via `replaceChapterBody`/`replaceSceneBody` —
+	 *  `record.type` alone (not a fieldRef identity check) decides which,
+	 *  since a page is only ever one or the other and `chapterId`/`sceneId`
+	 *  are plain always-present fields on `EntityRecord`, not narrowed by a
+	 *  discriminated union. */
+	const commitFieldEdit = (fieldRef: { current: FountainFieldHandle | null }) => {
+		if (!project || !record) return;
+		const fresh = fieldRef.current?.getValue();
+		if (fresh === undefined) return;
+		if (record.type === 'chapter') {
+			void editScriptAndSync(plugin, project, (raw) => replaceChapterBody(raw, record.chapterId, fresh));
+		} else if (record.type === 'scene') {
+			void editScriptAndSync(plugin, project, (raw) => replaceSceneBody(raw, record.sceneId, fresh));
+		}
+	};
+	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
+	/** Saves an EDIT to one reply's text — same reasoning as script-view.tsx's
+	 *  own `handleSaveCommentEntry`. */
+	const handleSaveCommentEntry = (id: string, index: number, text: string) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const list = notes.comments[id];
+			if (!list || index < 0 || index >= list.length) return notes;
+			const next = list.slice();
+			next[index] = { ...next[index], text, updatedAt: Date.now() };
+			return { ...notes, comments: { ...notes.comments, [id]: next } };
+		});
+	};
+	const handleToggleCommentResolved = (id: string, index: number) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const list = notes.comments[id];
+			if (!list || index < 0 || index >= list.length) return notes;
+			const existing = list[index];
+			const resolved = !existing.resolved;
+			const next = list.slice();
+			next[index] = { ...existing, resolved, resolvedAt: resolved ? Date.now() : null };
+			return { ...notes, comments: { ...notes.comments, [id]: next } };
+		});
+	};
+	/** Same reasoning as script-view.tsx's own `handleDeleteCommentEntry` — an
+	 *  empty thread also has to strip the marker pair from the document, or
+	 *  an orphaned marker with no sidecar data behind it keeps rendering as a
+	 *  live span. This page's `CommentPopover` is shared by the Chapter and
+	 *  Scene sections with no per-call record of which one opened it, so
+	 *  (mirroring `handleCreateComment` above's own "chain of ??" pattern)
+	 *  this just tries both refs — whichever section isn't currently mounted
+	 *  has a null `.current`, so the call on it is a no-op. */
+	const handleDeleteCommentEntry = (id: string, index: number) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const list = notes.comments[id];
+			if (!list || index < 0 || index >= list.length) return notes;
+			const next = list.filter((_, i) => i !== index);
+			if (next.length === 0) {
+				const { [id]: _dropped, ...rest } = notes.comments;
+				return { ...notes, comments: rest };
+			}
+			return { ...notes, comments: { ...notes.comments, [id]: next } };
+		}).then((next) => {
+			if (!next.comments[id]) {
+				chapterScriptEditorRef.current?.removeAnnotationMarkers(id);
+				sceneScriptEditorRef.current?.removeAnnotationMarkers(id);
+				commitFieldEdit(chapterScriptEditorRef);
+				commitFieldEdit(sceneScriptEditorRef);
+				setOpenComment((prev) => (prev && prev.id === id ? null : prev));
+			}
+		});
+	};
+	const handleAddCommentReply = (id: string, text: string) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const list = notes.comments[id] ?? [];
+			const entry: CommentEntry = {
+				id,
+				text,
+				resolved: false,
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				resolvedAt: null,
+			};
+			return { ...notes, comments: { ...notes.comments, [id]: [...list, entry] } };
+		});
+	};
+	/** `fieldRef` is whichever `FountainFieldHandle` currently owns the live
+	 *  document — the Chapter and Scene sections each pass their OWN ref
+	 *  here (`chapterScriptEditorRef`/`sceneScriptEditorRef`), since only one
+	 *  of the two is ever mounted at a time. */
+	/** Same "compute the next index INSIDE the fresh re-read" shape as
+	 *  script-view.tsx's own `handleCycleAlt` — a click landing before
+	 *  `scriptNotes` React state has caught up with a just-written change
+	 *  would otherwise recompute the same "next" index every time and the
+	 *  cycle would stall after one step. */
+	const handleCycleAlt = (fieldRef: { current: FountainFieldHandle | null }, id: string) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const cur = notes.altText[id];
+			if (!cur || cur.options.length === 0) return notes;
+			const nextIndex = (cur.activeIndex + 1) % cur.options.length;
+			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: nextIndex } } };
+		}).then((next) => {
+			const cur = next.altText[id];
+			if (cur) {
+				fieldRef.current?.replaceAltContent(id, cur.options[cur.activeIndex]);
+				commitFieldEdit(fieldRef);
+			}
+		});
+	};
+	/** A row was picked as the DRAFT — clears `acceptedIndex` (choosing a
+	 *  different draft means the span is back to "still deciding"), same
+	 *  reasoning as script-view.tsx's own `handleDraftAlt`. */
+	const handleDraftAlt = (fieldRef: { current: FountainFieldHandle | null }, id: string, index: number) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const cur = notes.altText[id];
+			if (!cur || index < 0 || index >= cur.options.length) return notes;
+			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: null } } };
+		}).then((next) => {
+			const cur = next.altText[id];
+			if (cur) {
+				fieldRef.current?.replaceAltContent(id, cur.options[cur.activeIndex]);
+				commitFieldEdit(fieldRef);
+			}
+		});
+	};
+	/** A row was picked as the ACCEPTED, final option. */
+	const handleAcceptAlt = (fieldRef: { current: FountainFieldHandle | null }, id: string, index: number) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const cur = notes.altText[id];
+			if (!cur || index < 0 || index >= cur.options.length) return notes;
+			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: index } } };
+		}).then((next) => {
+			const cur = next.altText[id];
+			if (cur) {
+				fieldRef.current?.replaceAltContent(id, cur.options[cur.activeIndex]);
+				commitFieldEdit(fieldRef);
+			}
+		});
+	};
+	/** An existing option's wording was edited in place inside `AltTextModal`
+	 *  — same reasoning as script-view.tsx's own `handleEditAltOption`: if
+	 *  it's the currently ACTIVE option, the live document has to follow. */
+	const handleEditAltOption = (
+		fieldRef: { current: FountainFieldHandle | null },
+		id: string,
+		index: number,
+		newText: string
+	) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const cur = notes.altText[id];
+			if (!cur || index < 0 || index >= cur.options.length) return notes;
+			const options = cur.options.slice();
+			options[index] = newText;
+			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options } } };
+		}).then((next) => {
+			const cur = next.altText[id];
+			if (cur && cur.activeIndex === index) {
+				fieldRef.current?.replaceAltContent(id, newText);
+				commitFieldEdit(fieldRef);
+			}
+		});
+	};
+	const handleAddAltOption = (id: string, text: string) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (notes) => {
+			const cur = notes.altText[id];
+			if (!cur) return notes;
+			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options: [...cur.options, text] } } };
+		});
+	};
+	/** Same reasoning/renumbering as script-view.tsx's own
+	 *  `handleDeleteAltOption` — deleting down to exactly one remaining
+	 *  option strips the `[[loom-alt:<id>]]` wrapper entirely (nothing left
+	 *  to alternate between), leaving the survivor's wording as plain text,
+	 *  same as a comment thread's own "delete the last one" behavior. The
+	 *  modal awaits the resolved value to re-sync its own local list. */
+	const handleDeleteAltOption = (fieldRef: { current: FountainFieldHandle | null }, id: string, index: number) => {
+		if (!project) return Promise.resolve(undefined);
+		let strippedTo: string | null = null;
+		return mutateScriptNotes(plugin.app, project, (notes) => {
+			const cur = notes.altText[id];
+			if (!cur || cur.options.length <= 1 || index < 0 || index >= cur.options.length) return notes;
+			const options = cur.options.slice();
+			options.splice(index, 1);
+			if (options.length <= 1) {
+				strippedTo = options[0] ?? '';
+				const { [id]: _dropped, ...rest } = notes.altText;
+				return { ...notes, altText: rest };
+			}
+			let activeIndex = cur.activeIndex;
+			if (index === activeIndex) activeIndex = Math.min(index, options.length - 1);
+			else if (index < activeIndex) activeIndex -= 1;
+			let acceptedIndex = cur.acceptedIndex;
+			if (acceptedIndex !== null) {
+				if (index === acceptedIndex) acceptedIndex = null;
+				else if (index < acceptedIndex) acceptedIndex -= 1;
+			}
+			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options, activeIndex, acceptedIndex } } };
+		}).then((next) => {
+			if (strippedTo !== null) {
+				fieldRef.current?.replaceAltContent(id, strippedTo);
+				fieldRef.current?.removeAnnotationMarkers(id);
+				commitFieldEdit(fieldRef);
+				return undefined;
+			}
+			const cur = next.altText[id];
+			if (cur) {
+				fieldRef.current?.replaceAltContent(id, cur.options[cur.activeIndex]);
+				commitFieldEdit(fieldRef);
+			}
+			return cur;
+		});
+	};
+	/** Right-click: opens `AltTextModal` (project.ts — a real closeable
+	 *  window, same as script-view.tsx's own) instead of the old truncating
+	 *  `Menu`. `fieldRef` is whichever of the Chapter/Scene section's own
+	 *  `FountainFieldHandle` is currently mounted — closed over directly by
+	 *  the modal's callbacks, since the modal is a one-shot imperative
+	 *  dialog with no need to remember it across a React re-render. */
+	const handleOpenAltMenu = (fieldRef: { current: FountainFieldHandle | null }, id: string) => {
+		if (!project) return;
+		const entry = scriptNotes.altText[id];
+		if (!entry) return;
+		new AltTextModal(plugin.app, {
+			options: entry.options,
+			activeIndex: entry.activeIndex,
+			acceptedIndex: entry.acceptedIndex,
+			onDraft: (index) => handleDraftAlt(fieldRef, id, index),
+			onAccept: (index) => handleAcceptAlt(fieldRef, id, index),
+			onEditOption: (index, newText) => handleEditAltOption(fieldRef, id, index, newText),
+			onAddOption: (text) => handleAddAltOption(id, text),
+			onDeleteOption: (index) => handleDeleteAltOption(fieldRef, id, index),
+		}).open();
+	};
 	/** Feeds the scene excerpt's live-preview autocomplete the same known
 	 *  names as the main Script view — parsed from the WHOLE script, not
 	 *  just this scene's own slice, so it offers every character/location
@@ -326,6 +642,11 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [sceneScriptQuery, setSceneScriptQuery] = useState('');
 	const [sceneScriptMatchIndex, setSceneScriptMatchIndex] = useState(0);
 	const sceneScriptEditorRef = useRef<FountainFieldHandle | null>(null);
+	/** The Script-mode wrapper div (`.loom-scene-script`) — scoped lookups for
+	 *  a comment's rendered gutter icon (search-driven auto-open) read from
+	 *  here rather than the whole document, in case more than one script
+	 *  editor happens to be mounted at once across different open panes. */
+	const sceneScriptEditorWrapRef = useRef<HTMLDivElement | null>(null);
 	const sceneScriptPagesRef = useRef<HTMLDivElement | null>(null);
 	/** Scrolled into view on every tab click (mirrors the main Script view's
 	 *  `tabsRef`/`scrollTabsIntoView`) so switching Script/Pages always lands
@@ -344,10 +665,64 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [chapterScriptQuery, setChapterScriptQuery] = useState('');
 	const [chapterScriptMatchIndex, setChapterScriptMatchIndex] = useState(0);
 	const chapterScriptEditorRef = useRef<FountainFieldHandle | null>(null);
+	/** Same as `sceneScriptEditorWrapRef`, for the Chapter page's own Script
+	 *  section. */
+	const chapterScriptEditorWrapRef = useRef<HTMLDivElement | null>(null);
 	const chapterScriptPagesRef = useRef<HTMLDivElement | null>(null);
 	/** Same as `sceneScriptTabsRef`, for the Chapter page's own Script section. */
 	const chapterScriptTabsRef = useRef<HTMLDivElement | null>(null);
 	const pendingChapterScrollLineRef = useRef<number | null>(null);
+	/** `openComment.rect` is a one-time snapshot — without this, scrolling
+	 *  the Scene/Chapter Script section left the popover floating in the same
+	 *  screen spot while the commented text scrolled out from under it. Same
+	 *  live-tracking approach as the main Script view's own copy of this
+	 *  effect (script-view.tsx): re-measure the icon's rect on every scroll
+	 *  and follow it, closing if the icon can no longer be found. Only one of
+	 *  the Scene/Chapter sections is ever mounted at a time, so trying all
+	 *  four wrap/pages refs is safe — exactly the "chain of ??" pattern
+	 *  `handleCreateComment` above already uses. */
+	useEffect(() => {
+		if (!openComment) return;
+		const id = openComment.id;
+		const containers = [
+			sceneScriptEditorWrapRef.current,
+			sceneScriptPagesRef.current,
+			chapterScriptEditorWrapRef.current,
+			chapterScriptPagesRef.current,
+		].filter((c): c is HTMLDivElement => c !== null);
+		const track = () => {
+			let icon: Element | null = null;
+			let container: HTMLDivElement | null = null;
+			for (const c of containers) {
+				const found = c.querySelector(`[data-loom-annotation-id="${id}"]`);
+				if (found) {
+					icon = found;
+					container = c;
+					break;
+				}
+			}
+			if (!(icon instanceof HTMLElement)) {
+				setOpenComment(null);
+				return;
+			}
+			// The icon can still be IN THE DOM (passing the check above) while
+			// scrolled fully outside its own container's visible viewport — see
+			// script-view.tsx's own copy of this effect for why that matters:
+			// repositioning the popover to that clamped spot overlapped the tabs/
+			// search bar above the editor instead of tracking the actual text.
+			const rect = icon.getBoundingClientRect();
+			if (container) {
+				const containerRect = container.getBoundingClientRect();
+				if (rect.bottom < containerRect.top || rect.top > containerRect.bottom) {
+					setOpenComment(null);
+					return;
+				}
+			}
+			setOpenComment((prev) => (prev && prev.id === id ? { id, rect } : prev));
+		};
+		document.addEventListener('scroll', track, true);
+		return () => document.removeEventListener('scroll', track, true);
+	}, [openComment?.id]);
 	/** Same collapsible nav panel as the main Script view, scoped to just this
 	 *  scene's/chapter's own bounded tree — rendered INSIDE the editor box
 	 *  (`.loom-script-nav-sticky-inset` in styles.css), not stacked above it,
@@ -394,6 +769,69 @@ function EntityPage({ view }: { view: EntityView }) {
 		pendingChapterScrollLineRef.current = null;
 		chapterScriptEditorRef.current?.scrollToLine(line);
 	}, [chapterScriptMode]);
+
+	/** Same idea as `pendingSceneScrollLineRef`/`pendingChapterScrollLineRef`
+	 *  just above, for the Comments/Alternatives browser panels' own "jump to
+	 *  this text" action (script-view.tsx's own copy of this pattern) — needs
+	 *  a real SELECTION, not just a scroll position, and can be triggered
+	 *  from Pages/Outline mode, not only Script. */
+	const pendingSceneSelectRangeRef = useRef<{ from: number; to: number } | null>(null);
+	useEffect(() => {
+		if (sceneScriptMode !== 'script') return;
+		const range = pendingSceneSelectRangeRef.current;
+		if (!range) return;
+		pendingSceneSelectRangeRef.current = null;
+		sceneScriptEditorRef.current?.selectRange(range.from, range.to);
+	}, [sceneScriptMode]);
+	const pendingChapterSelectRangeRef = useRef<{ from: number; to: number } | null>(null);
+	useEffect(() => {
+		if (chapterScriptMode !== 'script') return;
+		const range = pendingChapterSelectRangeRef.current;
+		if (!range) return;
+		pendingChapterSelectRangeRef.current = null;
+		chapterScriptEditorRef.current?.selectRange(range.from, range.to);
+	}, [chapterScriptMode]);
+
+	/** Comments/Alternatives browser panels — same overlaid side-panel slot as
+	 *  the nav toggle, one independent pair per Chapter/Scene section (only
+	 *  one of the two sections is ever mounted at a time, but each keeps its
+	 *  own state rather than sharing script-view.tsx's single `openSidePanel`,
+	 *  since nothing here forces the two sections' panels to be mutually
+	 *  exclusive with each other the way Script/Pages/Outline already are). */
+	const [sceneCommentsPanelOpen, setSceneCommentsPanelOpen] = useState(false);
+	const [sceneAltPanelOpen, setSceneAltPanelOpen] = useState(false);
+	const openSceneSidePanel = (panel: 'nav' | 'comments' | 'alt' | null) => {
+		setSceneNavOpen(panel === 'nav');
+		setSceneCommentsPanelOpen(panel === 'comments');
+		setSceneAltPanelOpen(panel === 'alt');
+	};
+	const [chapterCommentsPanelOpen, setChapterCommentsPanelOpen] = useState(false);
+	const [chapterAltPanelOpen, setChapterAltPanelOpen] = useState(false);
+	const openChapterSidePanel = (panel: 'nav' | 'comments' | 'alt' | null) => {
+		setChapterNavOpen(panel === 'nav');
+		setChapterCommentsPanelOpen(panel === 'comments');
+		setChapterAltPanelOpen(panel === 'alt');
+	};
+	useEffect(() => {
+		if (!sceneCommentsPanelOpen && !sceneAltPanelOpen) return;
+		const onDown = (e: MouseEvent) => {
+			const el = e.target as HTMLElement | null;
+			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle, .loom-script-side-toggles')) return;
+			openSceneSidePanel(null);
+		};
+		document.addEventListener('mousedown', onDown);
+		return () => document.removeEventListener('mousedown', onDown);
+	}, [sceneCommentsPanelOpen, sceneAltPanelOpen]);
+	useEffect(() => {
+		if (!chapterCommentsPanelOpen && !chapterAltPanelOpen) return;
+		const onDown = (e: MouseEvent) => {
+			const el = e.target as HTMLElement | null;
+			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle, .loom-script-side-toggles')) return;
+			openChapterSidePanel(null);
+		};
+		document.addEventListener('mousedown', onDown);
+		return () => document.removeEventListener('mousedown', onDown);
+	}, [chapterCommentsPanelOpen, chapterAltPanelOpen]);
 
 	/** Label a record is searched/shown by in free-text draft inputs: the
 	 *  display name — for sessions, their formatted date (their file name is
@@ -4708,7 +5146,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											<button
 												className="loom-script-nav-toggle"
 												aria-label={chapterNavOpen ? 'Hide navigation' : 'Show navigation'}
-												onClick={() => setChapterNavOpen(!chapterNavOpen)}
+												onClick={() => openChapterSidePanel(chapterNavOpen ? null : 'nav')}
 											>
 												<Icon name={chapterNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
 											</button>
@@ -4774,7 +5212,8 @@ function EntityPage({ view }: { view: EntityView }) {
 											) : null}
 										</div>
 									) : null;
-								const chapterMatches: number[] = [];
+								const chapterAnnotationSpans = findAnnotationSpans(chapterExcerpt);
+								const chapterMatches: ScriptSearchMatch[] = [];
 								if (chapterScriptQuery.trim() !== '') {
 									const needle = chapterScriptQuery.toLowerCase();
 									const hay = chapterDraft.toLowerCase();
@@ -4783,30 +5222,73 @@ function EntityPage({ view }: { view: EntityView }) {
 										at !== -1;
 										at = hay.indexOf(needle, at + needle.length)
 									) {
-										chapterMatches.push(at);
+										chapterMatches.push({ kind: 'text', offset: at });
 									}
+									for (const [id, entries] of Object.entries(scriptNotes.comments)) {
+										if (entries[0]?.text.toLowerCase().includes(needle)) chapterMatches.push({ kind: 'comment', id });
+									}
+									for (const [id, entry] of Object.entries(scriptNotes.altText)) {
+										entry.options.forEach((opt, optionIndex) => {
+											if (opt.toLowerCase().includes(needle)) chapterMatches.push({ kind: 'altOption', id, optionIndex });
+										});
+									}
+									const posOf = (m: ScriptSearchMatch) =>
+										m.kind === 'text' ? m.offset : (chapterAnnotationSpans.find((s) => s.id === m.id)?.from ?? Infinity);
+									chapterMatches.sort((a, b) => posOf(a) - posOf(b));
 								}
 								const gotoChapterMatch = (index: number) => {
 									if (chapterMatches.length === 0) return;
 									const next =
 										((index % chapterMatches.length) + chapterMatches.length) % chapterMatches.length;
 									setChapterScriptMatchIndex(next);
+									const m = chapterMatches[next];
+									if (m.kind === 'text') {
+										setOpenComment(null);
+										setHighlightedAnnotationId(null);
+										if (chapterScriptMode === 'script') {
+											chapterScriptEditorRef.current?.selectRange(m.offset, m.offset + chapterScriptQuery.length);
+										} else {
+											// Only TEXT matches render as a `<mark>` — the Nth one in
+											// DOM order is the Nth TEXT match strictly, not the Nth
+											// match overall (comment/alt matches interleaved before it
+											// in document order don't produce a mark at all).
+											const textIndex = chapterMatches.slice(0, next).filter((x) => x.kind === 'text').length;
+											window.requestAnimationFrame(() => {
+												const container = chapterScriptPagesRef.current;
+												const mark = container?.querySelectorAll('mark')[textIndex];
+												if (!container || !mark) return;
+												const containerRect = container.getBoundingClientRect();
+												const markRect = mark.getBoundingClientRect();
+												const target =
+													container.scrollTop +
+													(markRect.top - containerRect.top) -
+													container.clientHeight / 2 +
+													markRect.height / 2;
+												container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+											});
+										}
+										return;
+									}
+									const span = chapterAnnotationSpans.find((s) => s.id === m.id);
+									if (!span) return;
+									setHighlightedAnnotationId(m.kind === 'altOption' ? m.id : null);
 									if (chapterScriptMode === 'script') {
-										const offset = chapterMatches[next];
-										chapterScriptEditorRef.current?.selectRange(offset, offset + chapterScriptQuery.length);
+										chapterScriptEditorRef.current?.selectRange(span.contentFrom, span.contentFrom);
+										if (m.kind === 'comment') {
+											window.requestAnimationFrame(() => {
+												const icon = chapterScriptEditorWrapRef.current?.querySelector(
+													`[data-loom-annotation-id="${m.id}"]`
+												);
+												if (icon instanceof HTMLElement) handleOpenComment(m.id, icon.getBoundingClientRect());
+											});
+										}
 									} else {
 										window.requestAnimationFrame(() => {
 											const container = chapterScriptPagesRef.current;
-											const mark = container?.querySelectorAll('mark')[next];
-											if (!container || !mark) return;
-											const containerRect = container.getBoundingClientRect();
-											const markRect = mark.getBoundingClientRect();
-											const target =
-												container.scrollTop +
-												(markRect.top - containerRect.top) -
-												container.clientHeight / 2 +
-												markRect.height / 2;
-											container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+											const icon = container?.querySelector(`[data-loom-annotation-id="${m.id}"]`);
+											if (!container || !(icon instanceof HTMLElement)) return;
+											scrollIntoContainer(container, icon, 'smooth');
+											if (m.kind === 'comment') handleOpenComment(m.id, icon.getBoundingClientRect());
 										});
 									}
 								};
@@ -4848,6 +5330,118 @@ function EntityPage({ view }: { view: EntityView }) {
 										setChapterScriptMode(next);
 									}
 								};
+								/** Comments/Alternatives browser panels, scoped to just this
+								 *  chapter's own excerpt — `findAnnotationSpans(chapterDraft)`
+								 *  rather than the whole script, since `chapterDraft` (heading
+								 *  stripped) is the EXACT text `chapterScriptEditorRef`'s CM6
+								 *  instance holds, so a span's offsets already line up with
+								 *  `selectRange` with no line-math conversion needed (unlike
+								 *  the nav tree above, which is built from the whole document
+								 *  and has to convert absolute lines back to excerpt-relative
+								 *  ones). Marker ids are globally unique regardless of which
+								 *  slice of the script they're scanned from, so `scriptNotes`
+								 *  lookups by id still resolve correctly. */
+								const chapterAnnotationSpansAll = findAnnotationSpans(chapterDraft);
+								const chapterUnresolvedCommentSpans = chapterAnnotationSpansAll
+									.filter((s) => s.kind === 'comment')
+									.map((s) => ({
+										span: s,
+										unresolvedEntries: (scriptNotes.comments[s.id] ?? []).filter((e) => !e.resolved),
+									}))
+									.filter((x) => x.unresolvedEntries.length > 0);
+								const chapterUndecidedAltSpans = chapterAnnotationSpansAll.filter(
+									(s) => s.kind === 'alt' && (scriptNotes.altText[s.id]?.acceptedIndex ?? null) === null
+								);
+								const chapterExcerptOf = (span: AnnotationSpan): string => {
+									const raw = chapterDraft.slice(span.contentFrom, span.contentTo).replace(/\s+/g, ' ').trim();
+									return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
+								};
+								const jumpToChapterAnnotation = (span: AnnotationSpan) => {
+									openChapterSidePanel(null);
+									if (chapterScriptMode === 'script') {
+										chapterScriptEditorRef.current?.selectRange(span.contentFrom, span.contentTo);
+									} else {
+										pendingChapterSelectRangeRef.current = { from: span.contentFrom, to: span.contentTo };
+										switchChapterMode('script');
+									}
+								};
+								// Same box-local sticky slot as `chapterNavPanel` above, just
+								// rendered only while open (no permanent toggle button of its
+								// own inside the slot -- the toolbar's standalone icon buttons
+								// are that toggle). Only one of nav/comments/alt is ever open
+								// at a time (`openChapterSidePanel`), so these never actually
+								// stack visibly even though all three can be present in the
+								// tree.
+								const chapterCommentsAside = chapterCommentsPanelOpen ? (
+									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+										<aside className="loom-script-nav">
+											<div className="loom-script-nav-head">
+												Unresolved comments
+												<button
+													className="loom-rel-filter"
+													aria-label="Hide comments"
+													onClick={() => setChapterCommentsPanelOpen(false)}
+												>
+													<Icon name="chevron-left" />
+												</button>
+											</div>
+											{chapterUnresolvedCommentSpans.length === 0 ? (
+												<div className="loom-script-nav-empty">No unresolved comments.</div>
+											) : (
+												chapterUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
+													<div key={span.id} className="loom-script-comments-panel-group">
+														<button
+															className="loom-script-nav-chapter loom-script-comments-panel-excerpt"
+															onClick={() => jumpToChapterAnnotation(span)}
+														>
+															{chapterExcerptOf(span)}
+														</button>
+														<div className="loom-script-comments-panel-nested">
+															{unresolvedEntries.map((entry) => (
+																<button
+																	key={entry.id + entry.createdAt}
+																	className="loom-script-comments-panel-reply"
+																	onClick={() => jumpToChapterAnnotation(span)}
+																>
+																	{entry.text.trim() === '' ? '(empty)' : entry.text}
+																</button>
+															))}
+														</div>
+													</div>
+												))
+											)}
+										</aside>
+									</div>
+								) : null;
+								const chapterAltAside = chapterAltPanelOpen ? (
+									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+										<aside className="loom-script-nav">
+											<div className="loom-script-nav-head">
+												Unfinalized alternatives
+												<button
+													className="loom-rel-filter"
+													aria-label="Hide alternatives"
+													onClick={() => setChapterAltPanelOpen(false)}
+												>
+													<Icon name="chevron-left" />
+												</button>
+											</div>
+											{chapterUndecidedAltSpans.length === 0 ? (
+												<div className="loom-script-nav-empty">Every alternative has been accepted.</div>
+											) : (
+												chapterUndecidedAltSpans.map((span) => (
+													<button
+														key={span.id}
+														className="loom-script-nav-chapter loom-script-comments-panel-excerpt"
+														onClick={() => jumpToChapterAnnotation(span)}
+													>
+														{chapterExcerptOf(span)}
+													</button>
+												))
+											)}
+										</aside>
+									</div>
+								) : null;
 								/** Scrolls the section into view on every tab click, even a
 								 *  re-click of the pane already active — mirrors the main
 								 *  Script view's `clickTab`/`scrollTabsIntoView`, so working
@@ -4884,6 +5478,24 @@ function EntityPage({ view }: { view: EntityView }) {
 													onClick={() => clickChapterTab('pages')}
 												>
 													Pages preview
+												</button>
+											</div>
+											<div className="loom-script-side-toggles">
+												<button
+													className={
+														chapterCommentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
+													}
+													aria-label={chapterCommentsPanelOpen ? 'Hide comments' : 'Browse comments'}
+													onClick={() => openChapterSidePanel(chapterCommentsPanelOpen ? null : 'comments')}
+												>
+													<Icon name="message-square" />
+												</button>
+												<button
+													className={chapterAltPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+													aria-label={chapterAltPanelOpen ? 'Hide alternatives' : 'Browse undecided alternatives'}
+													onClick={() => openChapterSidePanel(chapterAltPanelOpen ? null : 'alt')}
+												>
+													<Icon name="repeat" fallback="arrow-right-left" />
 												</button>
 											</div>
 											<div className="loom-shell-spacer" />
@@ -4974,8 +5586,10 @@ function EntityPage({ view }: { view: EntityView }) {
 											) : null}
 										</div>
 										{chapterScriptMode === 'script' ? (
-											<div className="loom-scene-script">
+											<div className="loom-scene-script" ref={chapterScriptEditorWrapRef}>
 												{chapterNavPanel}
+												{chapterCommentsAside}
+												{chapterAltAside}
 												<FountainField
 													ref={chapterScriptEditorRef}
 													value={chapterDraft}
@@ -5006,44 +5620,35 @@ function EntityPage({ view }: { view: EntityView }) {
 													}}
 													onOpenChapter={() => view.openEntity(record.path)}
 													onOpenEntity={(path) => view.openEntity(path)}
+													comments={scriptNotes.comments}
+													altText={scriptNotes.altText}
+													onCreateComment={(id, text) =>
+														handleCreateComment(chapterScriptEditorWrapRef, chapterScriptPagesRef, id, text)
+													}
+													onCreateAlt={handleCreateAlt}
+													onOpenComment={handleOpenComment}
+													onCycleAlt={(id) => handleCycleAlt(chapterScriptEditorRef, id)}
+													onOpenAltMenu={(id) => handleOpenAltMenu(chapterScriptEditorRef, id)}
+													highlightedAnnotationId={highlightedAnnotationId}
 												/>
 											</div>
 										) : chapterScriptMode === 'pages' ? (
 											<div className="loom-screenplay loom-scene-pages" ref={chapterScriptPagesRef}>
 												{chapterNavPanel}
-												{chapterBodyPages.map((elements, i) => (
-													<div key={i} className="loom-screenplay-page" data-page={i + 1}>
-														{elements.map((el, j) =>
-															el.type === 'scene-heading' ? (
-																<p key={j} className="loom-sp-scene-heading" data-line={el.line}>
-																	<span
-																		dangerouslySetInnerHTML={{
-																			__html: highlight(
-																				renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))),
-																				chapterScriptQuery
-																			),
-																		}}
-																	/>
-																	{el.sceneNumber ? (
-																		<span className="loom-sp-scene-num">{el.sceneNumber}</span>
-																	) : null}
-																</p>
-															) : (
-																<p
-																	key={j}
-																	className={`loom-sp-${el.type}`}
-																	data-line={el.line}
-																	dangerouslySetInnerHTML={{
-																		__html: highlight(
-																			renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))),
-																			chapterScriptQuery
-																		),
-																	}}
-																/>
-															)
-														)}
-													</div>
-												))}
+												{chapterCommentsAside}
+												{chapterAltAside}
+												<PagesPreviewBody
+													pages={chapterBodyPages}
+													startPageNumber={null}
+													query={chapterScriptQuery}
+													rawText={chapterExcerpt}
+													comments={scriptNotes.comments}
+													altText={scriptNotes.altText}
+													onOpenComment={handleOpenComment}
+													onCycleAlt={(id) => handleCycleAlt(chapterScriptEditorRef, id)}
+													onOpenAltMenu={(id) => handleOpenAltMenu(chapterScriptEditorRef, id)}
+													highlightedAnnotationId={highlightedAnnotationId}
+												/>
 											</div>
 										) : (
 											<div
@@ -5648,7 +6253,8 @@ function EntityPage({ view }: { view: EntityView }) {
 						<span className="loom-field-label">Script</span>
 						{sceneExcerpt !== null
 							? (() => {
-									const sceneMatches: number[] = [];
+									const sceneAnnotationSpans = findAnnotationSpans(sceneExcerpt);
+									const sceneMatches: ScriptSearchMatch[] = [];
 									if (sceneScriptQuery.trim() !== '') {
 										const needle = sceneScriptQuery.toLowerCase();
 										const hay = sceneDraft.toLowerCase();
@@ -5657,38 +6263,80 @@ function EntityPage({ view }: { view: EntityView }) {
 											at !== -1;
 											at = hay.indexOf(needle, at + needle.length)
 										) {
-											sceneMatches.push(at);
+											sceneMatches.push({ kind: 'text', offset: at });
 										}
+										for (const [id, entries] of Object.entries(scriptNotes.comments)) {
+											if (entries[0]?.text.toLowerCase().includes(needle)) sceneMatches.push({ kind: 'comment', id });
+										}
+										for (const [id, entry] of Object.entries(scriptNotes.altText)) {
+											entry.options.forEach((opt, optionIndex) => {
+												if (opt.toLowerCase().includes(needle)) sceneMatches.push({ kind: 'altOption', id, optionIndex });
+											});
+										}
+										const posOf = (m: ScriptSearchMatch) =>
+											m.kind === 'text' ? m.offset : (sceneAnnotationSpans.find((s) => s.id === m.id)?.from ?? Infinity);
+										sceneMatches.sort((a, b) => posOf(a) - posOf(b));
 									}
 									const gotoSceneMatch = (index: number) => {
 										if (sceneMatches.length === 0) return;
 										const next = ((index % sceneMatches.length) + sceneMatches.length) % sceneMatches.length;
 										setSceneScriptMatchIndex(next);
+										const m = sceneMatches[next];
+										if (m.kind === 'text') {
+											setOpenComment(null);
+											setHighlightedAnnotationId(null);
+											if (sceneScriptMode === 'script') {
+												sceneScriptEditorRef.current?.selectRange(m.offset, m.offset + sceneScriptQuery.length);
+											} else {
+												// Pages mode has no offset-to-page mapping to scroll by (this
+												// excerpt isn't laid out against the whole document) — the
+												// `<mark>`s render in the same reading order as the TEXT
+												// matches, so the Nth text match is the Nth `<mark>` in the
+												// DOM (comment/alt matches interleaved before it don't
+												// render as a mark at all, so they're excluded from this
+												// count); wait a frame for the highlight to actually be in
+												// the DOM before finding it. Scrolled manually via scrollTop
+												// rather than the mark's own `scrollIntoView`, which scrolls
+												// EVERY scrollable ancestor needed to bring it into view —
+												// including the whole entity page behind this one small
+												// preview box, not just the box.
+												const textIndex = sceneMatches.slice(0, next).filter((x) => x.kind === 'text').length;
+												window.requestAnimationFrame(() => {
+													const container = sceneScriptPagesRef.current;
+													const mark = container?.querySelectorAll('mark')[textIndex];
+													if (!container || !mark) return;
+													const containerRect = container.getBoundingClientRect();
+													const markRect = mark.getBoundingClientRect();
+													const target =
+														container.scrollTop +
+														(markRect.top - containerRect.top) -
+														container.clientHeight / 2 +
+														markRect.height / 2;
+													container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+												});
+											}
+											return;
+										}
+										const span = sceneAnnotationSpans.find((s) => s.id === m.id);
+										if (!span) return;
+										setHighlightedAnnotationId(m.kind === 'altOption' ? m.id : null);
 										if (sceneScriptMode === 'script') {
-											const offset = sceneMatches[next];
-											sceneScriptEditorRef.current?.selectRange(offset, offset + sceneScriptQuery.length);
+											sceneScriptEditorRef.current?.selectRange(span.contentFrom, span.contentFrom);
+											if (m.kind === 'comment') {
+												window.requestAnimationFrame(() => {
+													const icon = sceneScriptEditorWrapRef.current?.querySelector(
+														`[data-loom-annotation-id="${m.id}"]`
+													);
+													if (icon instanceof HTMLElement) handleOpenComment(m.id, icon.getBoundingClientRect());
+												});
+											}
 										} else {
-											// Pages mode has no offset-to-page mapping to scroll by (this
-											// excerpt isn't laid out against the whole document) — the
-											// `<mark>`s render in the same reading order as `sceneMatches`,
-											// so the Nth one in the DOM is the Nth match; wait a frame for
-											// the highlight to actually be in the DOM before finding it.
-											// Scrolled manually via scrollTop rather than the mark's own
-											// `scrollIntoView`, which scrolls EVERY scrollable ancestor
-											// needed to bring it into view — including the whole entity
-											// page behind this one small preview box, not just the box.
 											window.requestAnimationFrame(() => {
 												const container = sceneScriptPagesRef.current;
-												const mark = container?.querySelectorAll('mark')[next];
-												if (!container || !mark) return;
-												const containerRect = container.getBoundingClientRect();
-												const markRect = mark.getBoundingClientRect();
-												const target =
-													container.scrollTop +
-													(markRect.top - containerRect.top) -
-													container.clientHeight / 2 +
-													markRect.height / 2;
-												container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+												const icon = container?.querySelector(`[data-loom-annotation-id="${m.id}"]`);
+												if (!container || !(icon instanceof HTMLElement)) return;
+												scrollIntoContainer(container, icon, 'smooth');
+												if (m.kind === 'comment') handleOpenComment(m.id, icon.getBoundingClientRect());
 											});
 										}
 									};
@@ -5742,6 +6390,105 @@ function EntityPage({ view }: { view: EntityView }) {
 											setSceneScriptMode(next);
 										}
 									};
+									/** Same reasoning as the Chapter panel's own copy of this —
+									 *  `findAnnotationSpans(sceneDraft)`, not `sceneExcerpt`, since
+									 *  `sceneDraft` (heading stripped) is the EXACT text
+									 *  `sceneScriptEditorRef`'s CM6 instance holds, so a span's
+									 *  offsets already line up with `selectRange` directly. */
+									const sceneAnnotationSpansAll = findAnnotationSpans(sceneDraft);
+									const sceneUnresolvedCommentSpans = sceneAnnotationSpansAll
+										.filter((s) => s.kind === 'comment')
+										.map((s) => ({
+											span: s,
+											unresolvedEntries: (scriptNotes.comments[s.id] ?? []).filter((e) => !e.resolved),
+										}))
+										.filter((x) => x.unresolvedEntries.length > 0);
+									const sceneUndecidedAltSpans = sceneAnnotationSpansAll.filter(
+										(s) => s.kind === 'alt' && (scriptNotes.altText[s.id]?.acceptedIndex ?? null) === null
+									);
+									const sceneExcerptOf = (span: AnnotationSpan): string => {
+										const raw = sceneDraft.slice(span.contentFrom, span.contentTo).replace(/\s+/g, ' ').trim();
+										return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
+									};
+									const jumpToSceneAnnotation = (span: AnnotationSpan) => {
+										openSceneSidePanel(null);
+										if (sceneScriptMode === 'script') {
+											sceneScriptEditorRef.current?.selectRange(span.contentFrom, span.contentTo);
+										} else {
+											pendingSceneSelectRangeRef.current = { from: span.contentFrom, to: span.contentTo };
+											switchSceneMode('script');
+										}
+									};
+									const sceneCommentsAside = sceneCommentsPanelOpen ? (
+										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+											<aside className="loom-script-nav">
+												<div className="loom-script-nav-head">
+													Unresolved comments
+													<button
+														className="loom-rel-filter"
+														aria-label="Hide comments"
+														onClick={() => setSceneCommentsPanelOpen(false)}
+													>
+														<Icon name="chevron-left" />
+													</button>
+												</div>
+												{sceneUnresolvedCommentSpans.length === 0 ? (
+													<div className="loom-script-nav-empty">No unresolved comments.</div>
+												) : (
+													sceneUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
+														<div key={span.id} className="loom-script-comments-panel-group">
+															<button
+																className="loom-script-nav-chapter loom-script-comments-panel-excerpt"
+																onClick={() => jumpToSceneAnnotation(span)}
+															>
+																{sceneExcerptOf(span)}
+															</button>
+															<div className="loom-script-comments-panel-nested">
+																{unresolvedEntries.map((entry) => (
+																	<button
+																		key={entry.id + entry.createdAt}
+																		className="loom-script-comments-panel-reply"
+																		onClick={() => jumpToSceneAnnotation(span)}
+																	>
+																		{entry.text.trim() === '' ? '(empty)' : entry.text}
+																	</button>
+																))}
+															</div>
+														</div>
+													))
+												)}
+											</aside>
+										</div>
+									) : null;
+									const sceneAltAside = sceneAltPanelOpen ? (
+										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+											<aside className="loom-script-nav">
+												<div className="loom-script-nav-head">
+													Unfinalized alternatives
+													<button
+														className="loom-rel-filter"
+														aria-label="Hide alternatives"
+														onClick={() => setSceneAltPanelOpen(false)}
+													>
+														<Icon name="chevron-left" />
+													</button>
+												</div>
+												{sceneUndecidedAltSpans.length === 0 ? (
+													<div className="loom-script-nav-empty">Every alternative has been accepted.</div>
+												) : (
+													sceneUndecidedAltSpans.map((span) => (
+														<button
+															key={span.id}
+															className="loom-script-nav-chapter loom-script-comments-panel-excerpt"
+															onClick={() => jumpToSceneAnnotation(span)}
+														>
+															{sceneExcerptOf(span)}
+														</button>
+													))
+												)}
+											</aside>
+										</div>
+									) : null;
 									/** Same as the Chapter panel's `clickChapterTab` (switch first,
 									 *  scroll on the next frame — see its comment for why). */
 									const clickSceneTab = (next: 'script' | 'pages' | 'outline') => {
@@ -5769,7 +6516,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												<button
 													className="loom-script-nav-toggle"
 													aria-label={sceneNavOpen ? 'Hide navigation' : 'Show navigation'}
-													onClick={() => setSceneNavOpen(!sceneNavOpen)}
+													onClick={() => openSceneSidePanel(sceneNavOpen ? null : 'nav')}
 												>
 													<Icon name={sceneNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
 												</button>
@@ -5858,6 +6605,24 @@ function EntityPage({ view }: { view: EntityView }) {
 														Pages preview
 													</button>
 												</div>
+												<div className="loom-script-side-toggles">
+													<button
+														className={
+															sceneCommentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
+														}
+														aria-label={sceneCommentsPanelOpen ? 'Hide comments' : 'Browse comments'}
+														onClick={() => openSceneSidePanel(sceneCommentsPanelOpen ? null : 'comments')}
+													>
+														<Icon name="message-square" />
+													</button>
+													<button
+														className={sceneAltPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+														aria-label={sceneAltPanelOpen ? 'Hide alternatives' : 'Browse undecided alternatives'}
+														onClick={() => openSceneSidePanel(sceneAltPanelOpen ? null : 'alt')}
+													>
+														<Icon name="repeat" fallback="arrow-right-left" />
+													</button>
+												</div>
 												<div className="loom-shell-spacer" />
 												{/* Deliberately NOT part of the Script/Pages pill —
 												    same reasoning as the main Script view's own
@@ -5932,8 +6697,10 @@ function EntityPage({ view }: { view: EntityView }) {
 												)}
 											</div>
 											{sceneScriptMode === 'script' ? (
-												<div className="loom-scene-script">
+												<div className="loom-scene-script" ref={sceneScriptEditorWrapRef}>
 													{sceneNavPanel}
+													{sceneCommentsAside}
+													{sceneAltAside}
 													<FountainField
 														ref={sceneScriptEditorRef}
 														value={sceneDraft}
@@ -5961,41 +6728,35 @@ function EntityPage({ view }: { view: EntityView }) {
 															if (sceneChapterRecord) view.openEntity(sceneChapterRecord.path);
 														}}
 														onOpenEntity={(path) => view.openEntity(path)}
+														comments={scriptNotes.comments}
+														altText={scriptNotes.altText}
+														onCreateComment={(id, text) =>
+															handleCreateComment(sceneScriptEditorWrapRef, sceneScriptPagesRef, id, text)
+														}
+														onCreateAlt={handleCreateAlt}
+														onOpenComment={handleOpenComment}
+														onCycleAlt={(id) => handleCycleAlt(sceneScriptEditorRef, id)}
+														onOpenAltMenu={(id) => handleOpenAltMenu(sceneScriptEditorRef, id)}
+														highlightedAnnotationId={highlightedAnnotationId}
 													/>
 												</div>
 											) : sceneScriptMode === 'pages' ? (
 												<div className="loom-screenplay loom-scene-pages" ref={sceneScriptPagesRef}>
 													{sceneNavPanel}
-													{sceneBodyPages.map((elements, i) => (
-														<div key={i} className="loom-screenplay-page" data-page={i + 1}>
-															{elements.map((el, j) =>
-																el.type === 'scene-heading' ? (
-																	<p key={j} className="loom-sp-scene-heading" data-line={el.line}>
-																		<span
-																			dangerouslySetInnerHTML={{
-																				__html: highlight(
-																					renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))),
-																					sceneScriptQuery
-																				),
-																			}}
-																		/>
-																		{el.sceneNumber ? (
-																			<span className="loom-sp-scene-num">{el.sceneNumber}</span>
-																		) : null}
-																	</p>
-																) : (
-																	<p
-																		key={j}
-																		className={`loom-sp-${el.type}`}
-																		data-line={el.line}
-																		dangerouslySetInnerHTML={{
-																			__html: highlight(renderInline(preventOrphans(stripEntityLinksForDisplay(elementText(el)))), sceneScriptQuery),
-																		}}
-																	/>
-																)
-															)}
-														</div>
-													))}
+													{sceneCommentsAside}
+													{sceneAltAside}
+													<PagesPreviewBody
+														pages={sceneBodyPages}
+														startPageNumber={null}
+														query={sceneScriptQuery}
+														rawText={sceneExcerpt}
+														comments={scriptNotes.comments}
+														altText={scriptNotes.altText}
+														onOpenComment={handleOpenComment}
+														onCycleAlt={(id) => handleCycleAlt(sceneScriptEditorRef, id)}
+														onOpenAltMenu={(id) => handleOpenAltMenu(sceneScriptEditorRef, id)}
+														highlightedAnnotationId={highlightedAnnotationId}
+													/>
 												</div>
 											) : (
 												<div className="loom-subloc-list loom-script-outline">
@@ -6393,6 +7154,17 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			<ConnectedEntities navigator={view} record={record} project={project} />
 			</div>
+			{openComment ? (
+				<CommentPopover
+					anchorRect={openComment.rect}
+					entries={scriptNotes.comments[openComment.id] ?? []}
+					onSaveEntry={(index, text) => handleSaveCommentEntry(openComment.id, index, text)}
+					onToggleResolvedEntry={(index) => handleToggleCommentResolved(openComment.id, index)}
+					onDeleteEntry={(index) => handleDeleteCommentEntry(openComment.id, index)}
+					onAddEntry={(text) => handleAddCommentReply(openComment.id, text)}
+					onClose={() => setOpenComment(null)}
+				/>
+			) : null}
 		</div>
 	);
 }										

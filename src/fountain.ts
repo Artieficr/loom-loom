@@ -50,6 +50,154 @@ export function stripLoomIds(text: string): string {
 	return text.replace(LOOM_ID_RE_G, '');
 }
 
+// --- Annotation markers (comments / alternative text) -----------------------
+//
+// Paired siblings of the `[[loom:<id>]]` marker above — same non-exporting
+// Fountain "Note" syntax, but wrapping a RANGE instead of tagging one line's
+// end: `[[loom-comment:<id>]]`…`[[/loom-comment:<id>]]` marks a commented
+// span, `[[loom-alt:<id>]]`…`[[/loom-alt:<id>]]` marks an alternative-text
+// span. The wrapped text is always whatever's currently displayed — for a
+// comment that's just the commented text, untouched; for alt-text it's
+// whichever option is presently active (cycling REPLACES it with a different
+// option's text as an ordinary document edit, see fountain-field.tsx), so
+// there's nothing to "resolve" at export time beyond removing the two marker
+// tokens (`stripAnnotationMarkers`, below the entity-link section).
+//
+// Position is never stored anywhere: the marker's location IS wherever the
+// user's edits have left it. This also gives garbage collection for free —
+// deleting the whole wrapped span (both markers included) removes them in
+// the same edit, no special-case code needed; the only extra case is a LONE
+// surviving marker (only one half of a pair got deleted), handled by
+// `cleanAnnotationMarkers` below.
+
+/** Exact marker token, no surrounding whitespace swallowed — used for span-
+ *  boundary math (`findAnnotationSpans`) where `from`/`to` must land exactly
+ *  on the bracket characters, and for classification/extraction stripping
+ *  (`parseFountain`'s tokenizer, `parseSceneHeading`) where a marker can
+ *  legitimately sit mid-sentence — unlike `LOOM_ID_RE_G`, this deliberately
+ *  does NOT swallow adjacent whitespace, or removing a mid-sentence marker
+ *  would eat a real space between two words. */
+const ANNOTATION_MARKER_RE = /\[\[(\/?)loom-(comment|alt):([A-Za-z0-9]+)\]\]/g;
+
+export interface AnnotationSpan {
+	kind: 'comment' | 'alt';
+	id: string;
+	/** Whole marker pair: open marker's start through close marker's end. */
+	from: number;
+	to: number;
+	/** The wrapped (= currently displayed) text's own span. */
+	contentFrom: number;
+	contentTo: number;
+}
+
+/**
+ * Every well-formed `[[loom-comment:<id>]]`/`[[loom-alt:<id>]]` pair in
+ * `text`, in document order. Character-offset-preserving like
+ * `findEntityLinks` below — always call this with the FULL text whose
+ * offsets you want to use (the live CM6 document, or a whole script string),
+ * never a substring, since a substring's offsets wouldn't line up with
+ * anything outside it.
+ *
+ * A marker with no matching partner (only the open or only the close half
+ * survived some edit) is simply left out — see `findStrayAnnotationMarkers`
+ * for finding those instead.
+ */
+export function findAnnotationSpans(text: string): AnnotationSpan[] {
+	type Token = { close: boolean; kind: 'comment' | 'alt'; id: string; from: number; to: number };
+	const tokens: Token[] = [];
+	for (const m of text.matchAll(ANNOTATION_MARKER_RE)) {
+		tokens.push({
+			close: m[1] === '/',
+			kind: m[2] as 'comment' | 'alt',
+			id: m[3],
+			from: m.index ?? 0,
+			to: (m.index ?? 0) + m[0].length,
+		});
+	}
+	const spans: AnnotationSpan[] = [];
+	const open = new Map<string, Token>();
+	for (const tok of tokens) {
+		const key = `${tok.kind}:${tok.id}`;
+		if (!tok.close) {
+			open.set(key, tok);
+			continue;
+		}
+		const opener = open.get(key);
+		if (!opener) continue; // a close with no matching open — stray, not a span
+		open.delete(key);
+		spans.push({
+			kind: tok.kind,
+			id: tok.id,
+			from: opener.from,
+			to: tok.to,
+			contentFrom: opener.to,
+			contentTo: tok.from,
+		});
+	}
+	return spans.sort((a, b) => a.from - b.from);
+}
+
+/** Marker tokens with no matching partner — orphaned by a partial delete
+ *  (only one half of a pair got removed, e.g. backspacing across just the
+ *  close marker). Dead by definition: there's no content span left for them
+ *  to describe, so they're pure clutter once left this way. */
+export function findStrayAnnotationMarkers(text: string): { from: number; to: number }[] {
+	type Token = { close: boolean; kind: string; id: string; from: number; to: number };
+	const tokens: Token[] = [];
+	for (const m of text.matchAll(ANNOTATION_MARKER_RE)) {
+		tokens.push({ close: m[1] === '/', kind: m[2], id: m[3], from: m.index ?? 0, to: (m.index ?? 0) + m[0].length });
+	}
+	const open = new Map<string, Token>();
+	const strays: { from: number; to: number }[] = [];
+	for (const tok of tokens) {
+		const key = `${tok.kind}:${tok.id}`;
+		if (!tok.close) {
+			// A second open of the same id with no close in between shouldn't
+			// normally happen (ids are freshly generated per creation), but
+			// treat the earlier, now-superseded one as stray defensively.
+			const prev = open.get(key);
+			if (prev) strays.push({ from: prev.from, to: prev.to });
+			open.set(key, tok);
+			continue;
+		}
+		const opener = open.get(key);
+		if (opener) {
+			open.delete(key);
+		} else {
+			strays.push({ from: tok.from, to: tok.to });
+		}
+	}
+	for (const opener of open.values()) strays.push({ from: opener.from, to: opener.to });
+	// Back-to-front, so removing one in `cleanAnnotationMarkers` doesn't shift
+	// the offsets of the ones still to come.
+	return strays.sort((a, b) => b.from - a.from);
+}
+
+/**
+ * Strips every STRAY marker token (leaves every well-formed pair, and the
+ * text it wraps, completely untouched). The subtractive counterpart to
+ * `ensureSceneIds` — pure, idempotent, safe to run on every commit. Together
+ * with `findAnnotationSpans` naturally forgetting an id the moment BOTH its
+ * markers are gone (the ordinary "delete the whole commented text" case,
+ * which needs no special handling at all), this is what keeps a lone
+ * surviving marker from lingering forever as invisible clutter.
+ */
+export function cleanAnnotationMarkers(text: string): { text: string; changed: boolean } {
+	const strays = findStrayAnnotationMarkers(text);
+	if (strays.length === 0) return { text, changed: false };
+	let next = text;
+	for (const s of strays) next = next.slice(0, s.from) + next.slice(s.to);
+	return { text: next, changed: true };
+}
+
+/** Marker ids currently backed by a COMPLETE pair — the annotation
+ *  equivalent of `liveSceneIds`/`liveChapterIds` further down, feeding the
+ *  sidecar-pruning GC pass in script-view.tsx's `runCommit`/
+ *  `editScriptAndSync`. */
+export function liveAnnotationIds(text: string): Set<string> {
+	return new Set(findAnnotationSpans(text).map((s) => s.id));
+}
+
 // --- Entity links ------------------------------------------------------------
 
 /**
@@ -119,6 +267,63 @@ export function findEntityLinks(text: string): {
  */
 export function stripEntityLinksForDisplay(text: string): string {
 	return text.replace(ENTITY_LINK_RE, (_full, name: string, display?: string) => (display ?? name).trim());
+}
+
+/**
+ * Removes every `[[loom-comment:…]]`/`[[/loom-comment:…]]`/`[[loom-alt:…]]`/
+ * `[[/loom-alt:…]]` marker token, leaving the text between them untouched.
+ *
+ * Export/render only, same contract as `stripLoomIds`/
+ * `stripEntityLinksForDisplay` above — never run over the live document.
+ * Because cycling alt-text is a real document edit that replaces the wrapped
+ * text in place (fountain-field.tsx), the text between the markers already
+ * IS whatever's currently active — stripping the two tokens is the entire
+ * "resolve to the active version" step, nothing further to compute.
+ */
+export function stripAnnotationMarkers(text: string): string {
+	return text.replace(ANNOTATION_MARKER_RE, '');
+}
+
+/** Matches a BALANCED marker pair — the backreference (`\1`/`\2`) ties a
+ *  close to the open of the SAME kind+id, so nested spans of different ids
+ *  each self-pair correctly regardless of what sits between them. */
+const ANNOTATION_PAIR_RE = /\[\[loom-(comment|alt):([A-Za-z0-9]+)\]\]([\s\S]*?)\[\[\/loom-\1:\2\]\]/g;
+
+/**
+ * Render-only counterpart to `stripAnnotationMarkers`, for the interactive
+ * Pages preview only: a BALANCED marker pair (both open and close present in
+ * the given text — true whenever a comment/alt-text span doesn't cross an
+ * ELEMENT boundary, which covers the overwhelming common case, since a
+ * dialogue block's several physical lines already merge into one `element`)
+ * becomes a real `<span>` wrapping its content instead of vanishing outright,
+ * so the preview can box it with a dashed border the same way the live CM6
+ * editor does. A marker with no partner IN THIS STRING (the span crosses
+ * into a different element) has nothing to safely pair against here and is
+ * just stripped same as `stripAnnotationMarkers` — no box, but no
+ * mismatched/dangling tag either. Callers pass one element's own text at a
+ * time (never a whole multi-element document), same contract as
+ * `stripAnnotationMarkers`'s own call sites.
+ */
+export function wrapAnnotationMarkersForDisplay(
+	text: string,
+	highlightedId: string | null,
+	/** Comment marker ids that still need attention (no replies yet, or at
+	 *  least one unresolved) — mirrors the live CM6 editor's own persistent
+	 *  tint for the same state (fountain-field.tsx's `buildDecorations`). A
+	 *  plain `Set<string>`, not `Record<string, CommentEntry[]>`, so this
+	 *  file never has to import a type from script-notes.ts (which pulls in
+	 *  Obsidian) — the caller (`PagesPreviewBody`, script-view.tsx) computes
+	 *  it once from its own `comments` prop. */
+	unresolvedCommentIds: Set<string>
+): string {
+	const wrapped = text.replace(ANNOTATION_PAIR_RE, (_match, kind: string, id: string, inner: string) => {
+		const cls =
+			`loom-sp-annotation-span loom-sp-annotation-span-${kind}` +
+			(kind === 'comment' && unresolvedCommentIds.has(id) ? ' loom-sp-annotation-span-unresolved' : '') +
+			(id === highlightedId ? ' loom-sp-annotation-span-highlight' : '');
+		return `<span class="${cls}" data-loom-annotation-content="${id}">${inner}</span>`;
+	});
+	return stripAnnotationMarkers(wrapped);
 }
 
 // --- Title page ------------------------------------------------------------
@@ -327,6 +532,12 @@ function scenePrefixOf(line: string): string | null {
  */
 export function parseSceneHeading(rawLine: string): SceneHeadingParts {
 	let line = rawLine.trim();
+	// A comment/alt-text marker can legitimately wrap a whole heading (or sit
+	// mid-heading) — stripped FIRST so every caller that hands this function
+	// the raw source line (several do, reading straight from `lines[]`) gets
+	// correct INT./EXT./location/time parsing regardless, without each of
+	// them needing to remember to pre-strip it themselves.
+	line = line.replace(ANNOTATION_MARKER_RE, '').trim();
 	const loomId = readLoomId(line);
 	line = line.replace(LOOM_ID_RE_G, '').trim();
 
@@ -537,6 +748,19 @@ export function parseFountain(text: string): ParsedScript {
 	while (i < lines.length) {
 		const rawLine = lines[i];
 		const line = rawLine.trim();
+		// Every classification test below (`startsWith`, `scenePrefixOf`,
+		// `looksLikeCharacter`/`looksLikeTransition`'s uppercase check) has to
+		// see PAST a comment/alt-text marker — one can legitimately open right
+		// at a line's start (commenting a whole scene heading or character cue
+		// is ordinary), and without this the real content gets pushed out of
+		// position and silently misclassified as plain action text. `cls` is
+		// `line` with every marker token removed EXACTLY (no whitespace
+		// swallowed, since a marker can sit mid-sentence) — used only for
+		// classification/extraction here; nothing below needs the original
+		// `line` back once `cls` exists, since `stripAnnotations` already
+		// strips ANY `[[...]]` from action/character/dialogue text regardless
+		// of position, and `parseSceneHeading` now strips markers internally.
+		const cls = line.replace(ANNOTATION_MARKER_RE, '');
 
 		if (inBoneyard) {
 			if (line.includes('*/')) inBoneyard = false;
@@ -556,15 +780,15 @@ export function parseFountain(text: string): ParsedScript {
 		// Page break: three or more `=`, optionally carrying a hidden loom id
 		// (only ones recognized as sitting BETWEEN chapters ever get one — see
 		// the `pageBreaks` derivation below). Checked before synopsis, `=`.
-		if (/^={3,}$/.test(rawLine.replace(LOOM_ID_RE_G, '').trim())) {
+		if (/^={3,}$/.test(cls.replace(LOOM_ID_RE_G, '').trim())) {
 			elements.push({ type: 'page-break', text: '', line: i, loomId: readLoomId(rawLine) });
 			i++;
 			continue;
 		}
 		// Section — structural only, never exported. This is why a chapter that
 		// must appear in the PDF also needs a centered-bold title.
-		if (line.startsWith('#')) {
-			const level = /^#+/.exec(line)?.[0].length ?? 1;
+		if (cls.startsWith('#')) {
+			const level = /^#+/.exec(cls)?.[0].length ?? 1;
 			const loomId = readLoomId(line);
 			// A `= branch: <id>` tag directly beneath (no blank line) — consumed
 			// here rather than left to fall through to the generic synopsis
@@ -580,7 +804,7 @@ export function parseFountain(text: string): ParsedScript {
 			}
 			const heading: ParsedSection = {
 				level,
-				text: line.slice(level).replace(LOOM_ID_RE_G, '').trim(),
+				text: cls.slice(level).replace(LOOM_ID_RE_G, '').trim(),
 				line: i,
 				loomId,
 				branchGroup,
@@ -590,36 +814,36 @@ export function parseFountain(text: string): ParsedScript {
 			i += consumed;
 			continue;
 		}
-		if (line.startsWith('=')) {
-			elements.push({ type: 'synopsis', text: line.slice(1).trim(), line: i });
+		if (cls.startsWith('=')) {
+			elements.push({ type: 'synopsis', text: cls.slice(1).trim(), line: i });
 			i++;
 			continue;
 		}
 		// Centered: `> text <`. Must be checked before forced transitions.
-		if (line.startsWith('>') && line.endsWith('<')) {
-			elements.push({ type: 'centered', text: line.slice(1, -1).trim(), line: i });
+		if (cls.startsWith('>') && cls.endsWith('<')) {
+			elements.push({ type: 'centered', text: cls.slice(1, -1).trim(), line: i });
 			i++;
 			continue;
 		}
-		if (line.startsWith('>')) {
-			elements.push({ type: 'transition', text: line.slice(1).trim(), line: i });
+		if (cls.startsWith('>')) {
+			elements.push({ type: 'transition', text: cls.slice(1).trim(), line: i });
 			i++;
 			continue;
 		}
-		if (line.startsWith('!')) {
-			elements.push({ type: 'action', text: stripAnnotations(line.slice(1)), line: i });
+		if (cls.startsWith('!')) {
+			elements.push({ type: 'action', text: stripAnnotations(cls.slice(1)), line: i });
 			i++;
 			continue;
 		}
-		if (line.startsWith('~')) {
-			elements.push({ type: 'lyrics', text: line.slice(1).trim(), line: i });
+		if (cls.startsWith('~')) {
+			elements.push({ type: 'lyrics', text: cls.slice(1).trim(), line: i });
 			i++;
 			continue;
 		}
 
 		// Scene heading: a prefix (or a forcing `.`) with a blank line before it.
-		const forced = line.startsWith('.') && !line.startsWith('..');
-		if ((forced || scenePrefixOf(line) !== null) && isBlank(i - 1)) {
+		const forced = cls.startsWith('.') && !cls.startsWith('..');
+		if ((forced || scenePrefixOf(cls) !== null) && isBlank(i - 1)) {
 			// DISPLAY text: the hidden loom id and the forcing `.` are stripped,
 			// so nothing that renders this (preview, HTML export) can leak the
 			// id. The scene derivation below re-parses the RAW line instead, and
@@ -637,8 +861,8 @@ export function parseFountain(text: string): ParsedScript {
 
 		// Character cue: uppercase, blank line before, non-blank line after.
 		// `@[` is an entity link (see ENTITY_LINK_RE above), not a forced cue.
-		const forcedCharacter = line.startsWith('@') && line.charAt(1) !== '[';
-		const cueLine = forcedCharacter ? line.slice(1).trim() : line;
+		const forcedCharacter = cls.startsWith('@') && cls.charAt(1) !== '[';
+		const cueLine = forcedCharacter ? cls.slice(1).trim() : cls;
 		if (
 			(forcedCharacter || (looksLikeCharacter(cueLine) && !looksLikeTransition(cueLine))) &&
 			isBlank(i - 1) &&
@@ -664,9 +888,16 @@ export function parseFountain(text: string): ParsedScript {
 			};
 			while (i < lines.length && lines[i].trim() !== '') {
 				const block = lines[i].trim();
-				if (block.startsWith('(') && block.endsWith(')')) {
+				// Same reasoning as the outer `cls` — a fully-commented
+				// parenthetical (`[[loom-comment:x]](beat)[[/loom-comment:x]]`)
+				// no longer starts/ends with its parens once wrapped, so the
+				// classification test needs the marker-stripped view too; the
+				// stored text switches to it as well (previously `block` here
+				// had NO stripping at all, unlike every other element type).
+				const blockCls = block.replace(ANNOTATION_MARKER_RE, '');
+				if (blockCls.startsWith('(') && blockCls.endsWith(')')) {
 					flushDialogue();
-					elements.push({ type: 'parenthetical', text: block, line: i });
+					elements.push({ type: 'parenthetical', text: blockCls, line: i });
 					dialogueLine = i + 1;
 				} else {
 					if (dialogue.length === 0) dialogueLine = i;
@@ -679,8 +910,8 @@ export function parseFountain(text: string): ParsedScript {
 		}
 
 		// Unforced transition: uppercase, ends in TO:, blank lines both sides.
-		if (looksLikeTransition(line) && isBlank(i - 1) && isBlank(i + 1)) {
-			elements.push({ type: 'transition', text: line, line: i });
+		if (looksLikeTransition(cls) && isBlank(i - 1) && isBlank(i + 1)) {
+			elements.push({ type: 'transition', text: cls, line: i });
 			i++;
 			continue;
 		}
@@ -1147,7 +1378,7 @@ export function renderScreenplayHtml(parsed: ParsedScript): string {
 		.map(
 			(elements, i) => `<div class="page">
 	${i > 0 ? `<div class="page-number">${i + 1}.</div>` : ''}
-	${elements.map((e) => `<p class="${e.type}">${renderInline(stripEntityLinksForDisplay(elementText(e)))}</p>`).join('\n\t')}
+	${elements.map((e) => `<p class="${e.type}">${renderInline(stripAnnotationMarkers(stripEntityLinksForDisplay(elementText(e))))}</p>`).join('\n\t')}
 </div>`
 		)
 		.join('\n');

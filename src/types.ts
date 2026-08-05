@@ -575,6 +575,13 @@ export const SCRIPT_EXTENSION = 'fountain';
 export const SCRIPT_LABEL = 'Script';
 export const SCRIPT_ICON = 'file-text';
 
+/** Comments and alternative-text bodies, keyed by the hidden `[[loom-comment:…]]`/
+ *  `[[loom-alt:…]]` marker ids embedded in the script — never in the script
+ *  itself (it has no frontmatter to hold them) and never on a Scene/Chapter
+ *  note (a marked range can span a scene boundary or predate any note).
+ *  Sits under `Entities/` beside the type folders, same reasoning as Maps. */
+export const SCRIPT_NOTES_FOLDER = 'Entities/Script Notes';
+
 /** Standard graph/map node sizes (radius px), pickable per node. */
 export const NODE_SIZE_PRESETS = {
 	small: 12,
