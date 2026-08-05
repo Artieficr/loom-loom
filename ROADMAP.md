@@ -902,6 +902,40 @@ Still to build:
     WITH the heading included instead, then unwraps that one scene item back out
   — `src/views/entity-view.tsx`, `src/fountain.ts` (`reorderBranchGroup`,
   `nextSectionAtLevel`), `src/views/script-view.tsx` (`NavNode.loomId`)
+- [x] **Script comments & alternative text** — select a range of script text, right-click →
+  "Comment" or "Alternative text…". A comment shows a `message-square`/`message-square-dot`
+  (unresolved) margin icon next to the commented text, editable/deletable/resolvable via a
+  portal-anchored popover (resolving keeps it in history, never deletes it); alternative
+  text shows an `arrow-right-left` icon that left-click **cycles** through stored options
+  (swaps the displayed text, not additive) and right-click opens a menu to jump to any
+  option directly or add a new one. Both are hidden, non-exporting `[[loom-comment:<id>]]`
+  /`[[loom-alt:<id>]]` marker PAIRS embedded directly in the `.fountain` text (the same
+  trick `[[loom:<id>]]` already uses for scene/chapter identity, extended to wrap a range),
+  so position is never stored and never drifts, and deleting the whole commented/alt-texted
+  span (both markers) garbage-collects it with zero special-case code — only a lone
+  surviving marker from a partial delete needs an explicit sweep (`cleanAnnotationMarkers`).
+  Comment/alt-text BODY data lives in a new project-level JSON sidecar
+  (`Entities/Script Notes/<Project> Script Notes.json`, modeled on the Maps precedent),
+  never in note frontmatter. Works identically in **all three** places script text renders
+  — main Script view, Scene page, Chapter page — via a shared `PagesPreviewBody` component
+  (also fixes a pre-existing gap: the main view's own Pages preview never had `data-line`
+  before this) and a new right-side CM6 gutter (`side: 'after'`) in the raw editor. Search
+  now also matches comment bodies and alt-text options (`ScriptSearchMatch`, merged into the
+  existing text-substring scan and sorted into document order): a comment match auto-opens
+  its popover, an alt-text match highlights its icon without changing what's active. Never
+  exports — `stripAnnotationMarkers` (fountain.ts) runs at every render/export boundary
+  (PDF, `.fountain` export, both Pages previews) alongside the existing
+  `stripLoomIds`/`stripEntityLinksForDisplay` strips. Fixed a real parser bug the feature
+  would otherwise have introduced along the way: a marker opening at a line's very start
+  (commenting a whole scene heading or character cue) pushed the real content out of
+  position and silently misclassified the line as plain action text — fixed via a
+  marker-stripped `cls` view used only for classification, never for the stored element
+  text — `src/fountain.ts` (`findAnnotationSpans`, `cleanAnnotationMarkers`,
+  `liveAnnotationIds`, `stripAnnotationMarkers`), `src/views/fountain-field.tsx` (gutter,
+  context menu, `replaceAltContent`), `src/views/script-notes.ts` (new), `src/views/
+  annotation-popover.tsx` (new), `src/views/script-view.tsx` (`PagesPreviewBody`,
+  `ScriptSearchMatch`, GC wiring in `runCommit`/`editScriptAndSync`), `src/views/
+  entity-view.tsx` (Scene/Chapter wiring), `src/pdf.ts`, `styles.css`
 
 ## Next session (committed)
 

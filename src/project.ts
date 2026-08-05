@@ -12,6 +12,7 @@ import {
 	TFile,
 	TFolder,
 	normalizePath,
+	setIcon,
 } from 'obsidian';
 import {
 	DEFAULT_MEMBER_ROLE,
@@ -381,6 +382,8 @@ export async function purgeEntityReferences(
 
 /** One-line text prompt (rename, alias, date…). Enter or the CTA submits. */
 export class TextInputModal extends Modal {
+	private submitted = false;
+
 	constructor(
 		app: App,
 		private opts: {
@@ -389,6 +392,12 @@ export class TextInputModal extends Modal {
 			placeholder?: string;
 			cta?: string;
 			onSubmit: (value: string) => void;
+			/** Called once, only if the modal closes WITHOUT ever submitting
+			 *  (the X button, Esc, or a click outside) — for a caller that
+			 *  already made some provisional change in anticipation of this
+			 *  modal's answer (e.g. inserting a fresh marker pair right before
+			 *  opening it) and needs to undo that if the user backs out. */
+			onCancel?: () => void;
 		}
 	) {
 		super(app);
@@ -402,6 +411,7 @@ export class TextInputModal extends Modal {
 		const submit = () => {
 			const value = input.value.trim();
 			if (value === '') return;
+			this.submitted = true;
 			this.close();
 			this.opts.onSubmit(value);
 		};
@@ -418,6 +428,209 @@ export class TextInputModal extends Modal {
 			input.focus();
 			input.select();
 		}, 0);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+		if (!this.submitted) this.opts.onCancel?.();
+	}
+}
+
+/**
+ * A real closeable window (replacing an earlier `new Menu()`/anchored-popover
+ * version) for an alt-text span's option list — opened by right-clicking its
+ * gutter/margin icon. Every option renders as its own EDITABLE textarea (not
+ * read-only, unlike the old menu which just showed truncated labels to pick
+ * from): the user can rewrite an existing alternative's wording in place, not
+ * just add new ones. Owns its own local `options`/`activeIndex`/
+ * `acceptedIndex` copy and re-renders its list after every action, so it
+ * never needs to be re-created or externally refreshed while open — the
+ * caller's callbacks only need to persist the change to the sidecar (and,
+ * for the active option specifically, push it into the live document), never
+ * hand data back in EXCEPT `onDeleteOption`, which has to (deleting can shift
+ * every later index, and duplicating that renumbering logic here as well as
+ * in the caller would be one more place for the two to drift apart).
+ *
+ * "Draft" and "Accept" replace an earlier single "Use this" button: both make
+ * an option the currently-displayed text, but only Accept marks it as the
+ * FINALIZED choice for this span (`acceptedIndex`) — Draft explicitly clears
+ * any prior acceptance, since picking a different draft means the span is
+ * back to "still deciding." Whichever row is currently ACTIVE gets an accent
+ * background so it stands out in the list at a glance; the pressed pill
+ * (`.loom-seg-on`, this codebase's usual segmented-pill class) distinguishes
+ * "this is just the draft" from "this is the accepted one."
+ */
+export class AltTextModal extends Modal {
+	private options: string[];
+	private activeIndex: number;
+	private acceptedIndex: number | null;
+	private listEl: HTMLElement | null = null;
+
+	constructor(
+		app: App,
+		private opts: {
+			options: string[];
+			activeIndex: number;
+			acceptedIndex: number | null;
+			/** A row was picked as the active DRAFT (clears acceptance). */
+			onDraft: (index: number) => void;
+			/** A row was picked as the ACCEPTED, final option. */
+			onAccept: (index: number) => void;
+			/** An existing option's wording was edited in place. */
+			onEditOption: (index: number, newText: string) => void;
+			/** A brand-new option was appended (never activated automatically —
+			 *  add and swap stay distinct actions, same as the old menu). */
+			onAddOption: (text: string) => void;
+			/** Removes one option outright — the caller re-derives (and
+			 *  persists) the shifted `activeIndex`/`acceptedIndex` and hands the
+			 *  fresh values back so this modal's own list stays in sync without
+			 *  reimplementing that renumbering itself. `undefined` means the
+			 *  delete was refused (e.g. the last remaining option). */
+			onDeleteOption: (
+				index: number
+			) => Promise<{ options: string[]; activeIndex: number; acceptedIndex: number | null } | undefined>;
+		}
+	) {
+		super(app);
+		this.options = opts.options.slice();
+		this.activeIndex = opts.activeIndex;
+		this.acceptedIndex = opts.acceptedIndex;
+	}
+
+	onOpen(): void {
+		this.setTitle('Alternative text');
+		this.modalEl.addClass('loom-alt-modal');
+		this.listEl = this.contentEl.createDiv({ cls: 'loom-alt-modal-list' });
+		this.renderList();
+
+		const addRow = this.contentEl.createDiv({ cls: 'loom-alt-modal-add' });
+		// A `<textarea>`, not `<input type="text">` — a new alternative's
+		// wording can be multi-line same as an existing option's, so Enter has
+		// to make a newline here too, not submit (an input's own Enter-submits
+		// convention was actively wrong for that). Auto-grows with typing (same
+		// technique as each option's own textarea in `renderList` below) up to
+		// a CSS `max-height`, past which `overflow-y: auto` takes over rather
+		// than growing the modal itself indefinitely.
+		const input = addRow.createEl('textarea', {
+			cls: 'loom-modal-input loom-alt-modal-add-textarea',
+			attr: { placeholder: 'New alternative wording…', rows: 1 },
+		});
+		// A plain button, not `Setting(...).addButton(...)` — a `Setting` wraps
+		// its own content in a full `.setting-item` (its own internal flex
+		// layout, a name/description column it assumes is there, and a default
+		// top border meant to separate list rows), which fought with `addRow`'s
+		// own single-row flex layout instead of joining it: the button landed
+		// pushed to the setting-item's own far edge rather than centered next
+		// to the input, and that stray top border showed as a half-cut
+		// separator line above the row.
+		const addBtn = addRow.createEl('button', { cls: 'mod-cta loom-alt-modal-add-btn', text: 'Add' });
+		const autoGrowAddTextarea = () => {
+			input.setCssProps({ height: 'auto' });
+			input.style.height = `${input.scrollHeight}px`;
+		};
+		// Measured, not guessed via matching CSS padding — a `<textarea>` and a
+		// `<button>` don't share the same default border/padding, so no amount
+		// of CSS tweaking landed them on the exact same pixel height. Reading
+		// the textarea's own natural (single empty line) `scrollHeight` once at
+		// mount and copying THAT value onto the button's fixed `height`
+		// guarantees an exact match regardless of what either element's
+		// individual box-model happens to be. Deferred a frame — neither
+		// element is laid out yet (0 `scrollHeight`) synchronously right after
+		// `createEl` inserts them.
+		window.setTimeout(() => {
+			autoGrowAddTextarea();
+			addBtn.style.height = `${input.scrollHeight}px`;
+		}, 0);
+		input.addEventListener('input', autoGrowAddTextarea);
+		const submit = () => {
+			const value = input.value.trim();
+			if (value === '') return;
+			this.options.push(value);
+			this.opts.onAddOption(value);
+			input.value = '';
+			autoGrowAddTextarea();
+			this.renderList();
+		};
+		addBtn.addEventListener('click', submit);
+	}
+
+	private renderList(): void {
+		const listEl = this.listEl;
+		if (!listEl) return;
+		listEl.empty();
+		this.options.forEach((opt, i) => {
+			const row = listEl.createDiv({
+				cls: i === this.activeIndex ? 'loom-alt-modal-row loom-alt-modal-row-highlight' : 'loom-alt-modal-row',
+			});
+			const textarea = row.createEl('textarea', { cls: 'loom-alt-modal-textarea', attr: { rows: 1 } });
+			textarea.value = opt;
+			const autoGrow = () => {
+				textarea.setCssProps({ height: 'auto' });
+				textarea.style.height = `${textarea.scrollHeight}px`;
+			};
+			// Deferred a frame — the textarea isn't laid out yet (0 scrollHeight)
+			// synchronously right after `createEl` inserts it.
+			window.setTimeout(autoGrow, 0);
+			textarea.addEventListener('input', autoGrow);
+			textarea.addEventListener('blur', () => {
+				const value = textarea.value;
+				if (value.trim() === '' || value === this.options[i]) {
+					textarea.value = this.options[i];
+					return;
+				}
+				this.options[i] = value;
+				this.opts.onEditOption(i, value);
+			});
+
+			const actions = row.createDiv({ cls: 'loom-alt-modal-row-actions' });
+			const pills = actions.createDiv({ cls: 'loom-seg loom-alt-modal-pills' });
+			const draftBtn = pills.createEl('button', { cls: 'loom-seg-btn', text: 'Draft' });
+			const acceptBtn = pills.createEl('button', { cls: 'loom-seg-btn', text: 'Accept' });
+			draftBtn.classList.toggle('loom-seg-on', i === this.activeIndex && this.acceptedIndex !== i);
+			acceptBtn.classList.toggle('loom-seg-on', i === this.acceptedIndex);
+			draftBtn.addEventListener('click', () => {
+				this.activeIndex = i;
+				this.acceptedIndex = null;
+				this.opts.onDraft(i);
+				this.renderList();
+			});
+			acceptBtn.addEventListener('click', () => {
+				this.activeIndex = i;
+				this.acceptedIndex = i;
+				this.opts.onAccept(i);
+				this.renderList();
+			});
+
+			const deleteBtn = actions.createEl('button', {
+				cls: 'loom-alt-modal-delete',
+				attr: { 'aria-label': 'Delete this alternative' },
+			});
+			setIcon(deleteBtn, 'trash-2');
+			deleteBtn.disabled = this.options.length <= 1;
+			deleteBtn.addEventListener('click', () => {
+				new ConfirmModal(
+					this.app,
+					'Delete this alternative?',
+					opt.length > 120 ? `${opt.slice(0, 120)}…` : opt,
+					async () => {
+						const next = await this.opts.onDeleteOption(i);
+						if (!next) {
+							// `undefined` means the span was stripped down to plain
+							// text (the last-alternative-standing case) — there's no
+							// longer anything for this window to show, so close it
+							// rather than leave it open on a now-stale option list.
+							this.close();
+							return;
+						}
+						this.options = next.options;
+						this.activeIndex = next.activeIndex;
+						this.acceptedIndex = next.acceptedIndex;
+						this.renderList();
+					},
+					'Delete'
+				).open();
+			});
+		});
 	}
 
 	onClose(): void {

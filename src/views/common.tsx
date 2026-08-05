@@ -675,3 +675,20 @@ export function ViewShell({
 export function noProjectMessage(): ReactNode {
 	return <div className="loom-empty">No project found. Open a project home file (.loom) first.</div>;
 }
+
+/**
+ * Scrolls `target` into view within `container` ONLY — never `Element.
+ * scrollIntoView`, which cascades through every scrollable ancestor by
+ * default. A small self-scrolling box (a Scene/Chapter Script section's own
+ * preview, the main Script view's Pages scroller) nested inside the page's
+ * own much bigger outer scroll would otherwise drag that outer scroll along
+ * too on every jump — a search next/previous match, a nav click — which
+ * could scroll the whole page far enough to carry the surrounding UI (tabs,
+ * toolbar) off-screen along with it.
+ */
+export function scrollIntoContainer(container: HTMLElement, target: HTMLElement, behavior: ScrollBehavior): void {
+	const containerRect = container.getBoundingClientRect();
+	const targetRect = target.getBoundingClientRect();
+	const top = container.scrollTop + (targetRect.top - containerRect.top);
+	container.scrollTo({ top: Math.max(0, top), behavior });
+}

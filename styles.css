@@ -4985,6 +4985,47 @@ span.loom-row-caret {
 	font-size: 0.85em;
 }
 
+/* Comments/Alternatives browser panels (script-view.tsx) — reuse
+   `.loom-script-nav-chapter`'s jump-target button look for each excerpt row,
+   single-line ellipsis like the chapter list (not wrapped) so the panel's
+   own width never grows to fit a long passage. */
+.loom-view button.loom-script-comments-panel-excerpt {
+	font-weight: 500;
+}
+
+.loom-script-comments-panel-group {
+	margin-top: 0.2em;
+}
+
+.loom-script-comments-panel-nested {
+	margin-left: 1.4em;
+	padding-left: var(--size-2-3);
+	border-left: 2px solid var(--background-modifier-border);
+}
+
+.loom-view button.loom-script-comments-panel-reply {
+	display: block;
+	width: 100%;
+	background: none;
+	box-shadow: none;
+	border: none;
+	text-align: left;
+	font-size: 0.85em;
+	font-weight: 400;
+	color: var(--text-muted);
+	cursor: pointer;
+	padding: 0.2em 0.3em;
+	border-radius: var(--radius-s);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-view button.loom-script-comments-panel-reply:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
 /* Scene entries: number in a fixed gutter so titles line up. `button` type
    selector (like `.loom-script-nav-chapter` above) so this beats Obsidian's
    own default button styling on specificity — a bare class-only rule lost
@@ -5037,6 +5078,15 @@ span.loom-row-caret {
 	display: flex;
 	align-items: center;
 	margin: 0.5em 0;
+}
+
+/* Comments/Alternatives toggle buttons — a clear gap from the Script/Pages
+   pill they sit next to, so they don't read as an extra pair of segments
+   glued onto it. */
+.loom-view .loom-script-side-toggles {
+	display: flex;
+	gap: var(--size-2-2);
+	margin-left: var(--size-4-3);
 }
 
 /* The Outline button: standalone on the far right of the tabs row, not part
@@ -5716,4 +5766,476 @@ div.loom-scene-script {
    plenty else on it, not the whole view). */
 .loom-view .loom-scene-pages {
 	max-height: 210mm;
+}
+
+/* Comment/alt-text margin gutter — a real CM6 gutter (`side: 'after'` in
+   fountain-field.tsx, so it needs no CSS reordering trick), roughly matching
+   the Pages preview's own 1in right margin so the live editor's proportions
+   keep mirroring the printed page's (same reasoning as every other
+   measurement already in this section). `min-width` (not `width`) reserves
+   the space even when a line's marker set is empty (the `initialSpacer`),
+   so scrolling never jitters as icons come and go from view. */
+.loom-fountain-field .cm-gutters {
+	background: transparent;
+	border: none;
+	min-width: 0.9in;
+}
+
+.loom-fountain-gutter-icons {
+	display: flex;
+	gap: 2px;
+	padding-left: 0.15in;
+}
+
+.loom-fountain-gutter-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.1em;
+	height: 1.1em;
+	color: var(--text-faint);
+	cursor: pointer;
+	border-radius: var(--radius-s);
+}
+
+.loom-fountain-gutter-icon:hover {
+	color: #000;
+	background: rgba(0, 0, 0, 0.08);
+}
+
+.loom-fountain-gutter-icon.loom-fountain-gutter-icon-highlight {
+	color: var(--text-on-accent);
+	background: var(--interactive-accent);
+}
+
+.loom-fountain-gutter-icon svg {
+	width: 0.85em;
+	height: 0.85em;
+}
+
+/* Pages-preview margin icons (`PagesPreviewBody`, script-view.tsx): each
+   element's `<p>` is wrapped in one `.loom-sp-line-wrap` (a plain block with
+   no margin/padding of its own, so the `<p>`'s normal margins still collapse
+   through it as if it weren't there) so the icon can be absolutely
+   positioned relative to THIS one line — no rect measurement needed, it
+   just inherits the `<p>`'s own vertical position for free. `right: -0.7in`
+   reaches from the content column's edge into the page's existing unused
+   1in right margin (`.loom-screenplay-page`'s own `padding-right: 1in`,
+   already home to `.loom-screenplay-pagenum` at the very top of that band). */
+.loom-view .loom-sp-line-wrap {
+	position: relative;
+}
+
+.loom-view .loom-sp-annotation-icons {
+	position: absolute;
+	top: 0;
+	right: -0.7in;
+	display: flex;
+	gap: 2px;
+}
+
+.loom-view .loom-sp-annotation-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 0.22in;
+	height: 0.22in;
+	color: var(--text-faint);
+	cursor: pointer;
+	border-radius: var(--radius-s);
+}
+
+.loom-view .loom-sp-annotation-icon:hover {
+	color: #000;
+	background: rgba(0, 0, 0, 0.08);
+}
+
+.loom-view .loom-sp-annotation-icon.loom-sp-annotation-icon-highlight {
+	color: var(--text-on-accent);
+	background: var(--interactive-accent);
+}
+
+.loom-view .loom-sp-annotation-icon svg {
+	width: 0.14in;
+	height: 0.14in;
+}
+
+/* Dashed UNDERLINE beneath the commented/alt-text CONTENT itself — like a
+   selection that never clears, so it's obvious which text a comment/alt-text
+   span actually covers. A full box border was tried first and dropped: a
+   `border` on an inline element that wraps across lines gets its own
+   top+bottom edge on EVERY line fragment (only left/right respect first/last
+   — standard CSS inline-fragmentation behavior), so a 2-line span showed a
+   doubled/merged dash right at the wrap point where one line's bottom border
+   sat flush against the next line's top border. `border-bottom` alone (one
+   edge, not four) fixed THAT, but a border — even one-sided — still adds to
+   the element's own rendered box height on every fragment it appears on
+   (so does `padding`), and the live CM6 editor (unlike the Pages preview,
+   plain static HTML the browser lays out on its own) relies on measuring
+   that height itself to track where every line sits; a decoration quietly
+   taller than what CM6 expected drifted its Y-coordinate math over a long
+   document, eventually resolving a click to the WRONG line entirely
+   (reported: clicking a wrapped line's later rows placed the cursor on the
+   line below it instead). `background-image` — a `repeating-linear-gradient`
+   faking the dashes — paints WITHIN the box's existing bounds and never
+   affects layout size, so it gets the identical visual with none of the
+   measurement risk; kept for both surfaces (not just the CM6 editor, which
+   is the only one actually exposed to this bug) so they still look the
+   same. Same class names, same colors, on both surfaces that render
+   annotated text: the live CM6 editor (fountain-field.tsx,
+   `.loom-fountain-annotation-span-*`) and the Pages preview
+   (`PagesPreviewBody` in script-view.tsx, via `wrapAnnotationMarkersForDisplay`
+   in fountain.ts, `.loom-sp-annotation-span-*`). */
+.loom-fountain-annotation-span,
+.loom-view .loom-sp-annotation-span {
+	background-image: repeating-linear-gradient(to right, var(--text-faint) 0 3px, transparent 3px 6px);
+	background-position: bottom;
+	background-size: 100% 2px;
+	background-repeat: no-repeat;
+}
+
+.loom-fountain-annotation-span-alt,
+.loom-view .loom-sp-annotation-span-alt {
+	background-image: repeating-linear-gradient(to right, var(--interactive-accent) 0 3px, transparent 3px 6px);
+}
+
+/* A comment thread with anything still unresolved (no replies yet, or at
+   least one not checked off) gets a persistent tint — the "needs attention"
+   state — on top of the same dashed underline; a fully-resolved thread drops
+   back to the plain base rule above (dashes only, no tint). `background-color`
+   specifically, not the `background` shorthand — the shorthand resets
+   `background-image` too, which would silently erase the dashes above. It
+   paints BEHIND `background-image` by spec, so both show together. */
+.loom-fountain-annotation-span-unresolved,
+.loom-view .loom-sp-annotation-span-unresolved {
+	background-color: color-mix(in srgb, var(--color-yellow, #d8b13c) 18%, transparent);
+}
+
+/* A search match currently pointing here — solid + stronger tint, layered
+   over either state above regardless of resolved status (a transient
+   navigational cue, not a permanent one). Overrides the dashed
+   `background-image` with a solid one instead of trying to make a gradient
+   "look solid." */
+.loom-fountain-annotation-span-highlight,
+.loom-view .loom-sp-annotation-span-highlight {
+	background-image: linear-gradient(var(--interactive-accent), var(--interactive-accent));
+	background-position: bottom;
+	background-size: 100% 2px;
+	background-repeat: no-repeat;
+	background-color: color-mix(in srgb, var(--interactive-accent) 15%, transparent);
+}
+
+/* Draggable start/end boundary handles (fountain-field.tsx) — a `position:
+   fixed` overlay (`AnnotationHandlesOverlay`), positioned via `coordsAtPos`
+   rather than living inside CM6's own content flow as a decoration, so a
+   comment span's coverage can be adjusted after creation without the handle
+   itself interfering with CM6's line layout/click-to-caret math (a
+   `Decoration.widget` version of this broke cursor placement on a wrapped
+   paragraph's second visual line). Deliberately small and low-opacity at
+   rest (this is a fiddly editing affordance, not something that should
+   visually compete with the script text), brightening on hover/drag to
+   confirm it's grabbable. */
+.loom-fountain-annotation-handle {
+	position: fixed;
+	display: none;
+	width: 4px;
+	background: var(--interactive-accent);
+	opacity: 0.35;
+	cursor: ew-resize;
+	touch-action: none;
+	z-index: var(--layer-menu);
+}
+
+.loom-fountain-annotation-handle:hover {
+	opacity: 1;
+}
+
+/* The live preview bar shown while dragging a handle — plain fixed-position
+   DOM, not a CM6 decoration, so it can track the pointer every frame with no
+   document-rebuild cost; removed the moment the drag ends. */
+.loom-fountain-annotation-drag-preview {
+	position: fixed;
+	width: 2px;
+	background: var(--interactive-accent);
+	pointer-events: none;
+	z-index: var(--layer-menu);
+	display: none;
+}
+
+/* Comment popover (annotation-popover.tsx) — portalled to `document.body`
+   like `.loom-tooltip` (same reason: Obsidian's workspace-leaf DOM applies
+   CSS `contain`, which re-bases `position: fixed` to the leaf instead of the
+   true viewport), but interactive rather than a hover hint, so unlike
+   `.loom-tooltip` it takes pointer events and sits at menu priority. */
+.loom-comment-popover {
+	position: fixed;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+	color: var(--text-normal);
+	padding: var(--size-4-2);
+	z-index: var(--layer-menu);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	max-height: 60vh;
+	overflow-y: auto;
+}
+
+/* One entry in the thread. */
+.loom-comment-popover-row {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	padding-bottom: var(--size-4-2);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.loom-comment-popover-row:last-of-type {
+	border-bottom: none;
+	padding-bottom: 0;
+}
+
+.loom-comment-popover-row-content {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: var(--size-2-2);
+}
+
+.loom-comment-popover-row-text {
+	flex: 1 1 auto;
+	font-size: 0.9em;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.loom-comment-popover-row-icons {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+	flex: 0 0 auto;
+}
+
+/* A plain icon, not a framed button — same recipe as `.loom-map-icon-btn`
+   (map-view.tsx), just not scoped under `.loom-view` since this popover is
+   portalled straight to `document.body`, outside that ancestor. `border:
+   none`/`padding: 0` are the load-bearing bits: without them Obsidian's own
+   default `<button>` chrome still showed through, and the icon's SVG ended
+   up visually cramped inside that leftover box. The bare `button` type
+   selector (not just the class) is ALSO load-bearing — Obsidian's own base
+   button rule is scoped under a class too (`.theme-light button` /
+   `.theme-dark button`), which otherwise out-specifies a single-class
+   selector regardless of source order, the same fight CLAUDE.md already
+   documents for `.loom-script-nav-chapter` elsewhere in this codebase. */
+button.loom-comment-popover-icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	background: transparent;
+	border: none;
+	border-radius: var(--radius-s);
+	box-shadow: none;
+	color: var(--text-faint);
+	cursor: pointer;
+}
+
+.loom-comment-popover-icon-btn svg {
+	width: 14px;
+	height: 14px;
+}
+
+button.loom-comment-popover-icon-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* A resolved comment's check reads as pressed/toggled — green and bolder,
+   not just the usual hover tint. `button.`-prefixed, same specificity as the
+   base rule above (a plain class alone lost to it, showing green ONLY on
+   `:hover`, whose selector WAS already boosted, instead of always). */
+button.loom-comment-popover-icon-btn-resolved {
+	color: var(--text-success, #3cb371);
+}
+
+.loom-comment-popover-icon-btn-resolved svg {
+	stroke-width: 3;
+}
+
+button.loom-comment-popover-icon-btn-resolved:hover {
+	color: var(--text-success, #3cb371);
+	background: color-mix(in srgb, var(--text-success, #3cb371) 15%, transparent);
+}
+
+.loom-comment-popover-text {
+	width: 100%;
+	min-height: 3.5em;
+	resize: vertical;
+	font-family: inherit;
+	font-size: 0.9em;
+}
+
+.loom-comment-popover-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-2-2);
+}
+
+.loom-comment-popover-reply {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+.loom-comment-popover-add {
+	align-self: flex-end;
+}
+
+/* Alt-text picker window (`AltTextModal`, project.ts) — a real Obsidian
+   Modal (closeable, scrollable), opened by right-clicking an alt-text icon.
+   Every option is its own EDITABLE textarea, not a read-only row. */
+.loom-alt-modal .modal-content {
+	max-height: 70vh;
+	overflow-y: auto;
+	/* Explicit padding, not just whatever Obsidian's own default happens to
+	   be — `overflow-y: auto` here forces `overflow-x` to also become a real
+	   clipping axis per the CSS spec (either overflow axis set to non-visible
+	   makes BOTH axes establish a scroll container), so a focused row's
+	   own focus ring — a box-shadow/outline extending slightly past its
+	   border box — needs real breathing room on every side or it gets sliced
+	   off at the scroll container's edge instead of rendering in full. */
+	padding: var(--size-4-3);
+}
+
+.loom-alt-modal-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
+.loom-alt-modal-row {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	padding: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+}
+
+/* The row currently ACTIVE (a draft, or the accepted option) stands out with
+   an accent-tinted background — visible at a glance in a long list, not just
+   from the pressed pill inside it. */
+.loom-alt-modal-row-highlight {
+	border-color: var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 18%, var(--background-secondary));
+}
+
+/* Same color as the modal's own background (not the row's), so the field
+   reads as flowing text rather than a second nested box inside the row. */
+.loom-alt-modal-textarea {
+	width: 100%;
+	resize: none;
+	/* Grows with typing (JS-driven, `scrollHeight`) up to this cap, then
+	   scrolls vertically instead of growing the modal itself indefinitely —
+	   same treatment as `.loom-alt-modal-add-textarea` below, the "New
+	   alternative wording" field; an existing option's own wording is no
+	   less likely to run long. */
+	max-height: 8em;
+	overflow-y: auto;
+	font-family: inherit;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	padding: var(--size-2-2);
+}
+
+.loom-alt-modal-row-actions {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.loom-alt-modal-pills .loom-seg-btn {
+	font-size: 0.85em;
+}
+
+/* Plain icon, not a framed button — same recipe (and the same red-on-hover
+   delete convention) as `.loom-map-icon-btn.loom-map-danger` in map-view.tsx;
+   duplicated rather than shared since this modal isn't a descendant of
+   `.loom-view`, which that rule is scoped under. */
+button.loom-alt-modal-delete {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	background: transparent;
+	border: none;
+	border-radius: var(--radius-s);
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.loom-alt-modal-delete svg {
+	width: 14px;
+	height: 14px;
+}
+
+button.loom-alt-modal-delete:hover:not(:disabled) {
+	background: var(--background-modifier-error);
+	color: #ffffff;
+}
+
+.loom-alt-modal-delete:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.loom-alt-modal-add {
+	display: flex;
+	/* Bottom-anchored, not centered — the textarea can grow taller than one
+	   line as the wording wraps, and a chat-style "send button sits at the
+	   bottom" reads more naturally than the button drifting to the vertical
+	   middle of a multi-line box. */
+	align-items: flex-end;
+	gap: var(--size-2-2);
+	margin-top: var(--size-4-3);
+	padding: var(--size-4-3) var(--size-2-2) var(--size-2-2);
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.loom-alt-modal-add-textarea {
+	flex: 1 1 auto;
+	/* `.loom-modal-input`'s own `margin-bottom` (meant for stacked vertical
+	   form fields) made `align-items` center/end against the field's MARGIN
+	   box instead of its visible one, throwing off alignment with the button
+	   next to it. */
+	margin-bottom: 0;
+	resize: none;
+	max-height: 8em;
+	overflow-y: auto;
+	font-family: inherit;
+	/* Explicit box-sizing/padding, matched to `.loom-alt-modal-add-btn`'s own
+	   below, rather than trusting a `<textarea>` and a `<button>` to land on
+	   the same natural height by coincidence — their browser/Obsidian
+	   default padding differs, which is what made the Add button look
+	   mismatched against the wording field at its resting (single-line)
+	   height. Padding only, NOT a fixed `height`/`line-height` — those would
+	   fight the JS auto-grow once the wording wraps past one line, spacing
+	   wrapped lines absurdly far apart instead of growing normally. */
+	box-sizing: border-box;
+	padding: var(--size-2-2) var(--size-4-2);
+}
+
+.loom-alt-modal-add-btn {
+	box-sizing: border-box;
+	padding-top: var(--size-2-2);
+	padding-bottom: var(--size-2-2);
 }

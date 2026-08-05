@@ -1,4 +1,12 @@
-import { FountainElement, ParsedScript, TitlePage, elementText, hasTitlePage, stripEntityLinksForDisplay } from './fountain';
+import {
+	FountainElement,
+	ParsedScript,
+	TitlePage,
+	elementText,
+	hasTitlePage,
+	stripAnnotationMarkers,
+	stripEntityLinksForDisplay,
+} from './fountain';
 
 /**
  * A minimal PDF writer, just wide enough for a screenplay.
@@ -58,7 +66,11 @@ const LAYOUT: Record<string, { indent: number; width: number; align?: 'right' | 
  * so the backslash itself doesn't leak into the printed page.
  */
 function plainText(rawText: string): string {
-	const text = stripEntityLinksForDisplay(rawText);
+	// Comment/alt-text markers never reach the printed page — only whichever
+	// text currently sits between an alt-text pair's markers exports (that IS
+	// the active option, per fountain-field.tsx's cycle-as-document-edit
+	// design), and a comment's own markers carry no printable content at all.
+	const text = stripAnnotationMarkers(stripEntityLinksForDisplay(rawText));
 	const escapedChars: string[] = [];
 	const withPlaceholders = text.replace(/\\([*_\\])/g, (_, ch: string) => {
 		escapedChars.push(ch);
