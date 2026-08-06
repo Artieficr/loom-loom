@@ -3,3 +3,4 @@ main.js
 *.js.map
 .claude/
 dev active notes.txt
+/ROADMAP.md

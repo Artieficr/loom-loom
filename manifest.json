@@ -3,7 +3,7 @@
 	"name": "Loom Loom",
 	"version": "0.1.0",
 	"minAppVersion": "1.13.0",
-	"description": "`Loom Loom!` weaves TTRPG campaigns into typed entities — characters, locations, factions, items, events and sessions — with relationship tracking, a session timeline, and a layered story graph.",
+	"description": "Track TTRPG campaigns or write screenplays with typed, linked entities — characters, locations, factions, items, and quests — a session timeline, a layered story graph, spatial maps, and a full Fountain script editor.",
 	"author": "Artie Tsoy",
 	"authorUrl": "https://github.com/Artieficr",
 	"isDesktopOnly": false
