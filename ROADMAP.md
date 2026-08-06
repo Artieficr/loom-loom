@@ -13,24 +13,25 @@ lives, and keep `CLAUDE.md`'s file map in sync.
 
 ## Licensing
 
-Freemium: one project of each kind is free with every feature available; a license key
-unlocks unlimited projects, activatable on up to 3 devices; must not break offline (30-day
-cached grace period). See CLAUDE.md's "Key architectural decisions" for the full reasoning.
+Freemium: one project of each kind is free with every feature available; a ONE-TIME
+license key purchase (not a subscription) unlocks unlimited projects, activatable on up
+to 3 devices; must not break offline (30-day cached grace period). See CLAUDE.md's "Key
+architectural decisions" for the full reasoning.
 
 - [x] Provider-agnostic `LicenseProvider` seam + types (`CachedLicenseState`, `LicenseStatus`) — `src/license/provider.ts`, `src/license/types.ts`
 - [x] 30-day offline grace period, pure + boundary-verified — `src/license/grace.ts`
 - [x] Per-device cache (device id + activation), `App.loadLocalStorage`/`saveLocalStorage` so it never syncs with the vault — `src/license/cache-store.ts`
-- [x] `minAppVersion` bumped to `1.13.0` (past this API's `@since 1.8.7`) once Obsidian 1.13 shipped publicly, so the pre-1.8.7 feature-detection/in-memory fallback this used to need is gone
+- [x] `minAppVersion` is `1.13.0` (past `loadLocalStorage`/`saveLocalStorage`'s `@since 1.8.7`), called directly with no feature-detection fallback
 - [x] Free-tier gate (`canCreateProjectOfKind`) — `src/license/gating.ts`
 - [x] `LicenseManager` (activate/deactivate/revalidate, recheck throttle, offline "forget locally" fallback) — `src/license/manager.ts`
 - [x] `StubLicenseProvider` (in-memory, 3-device cap simulation, network-down toggle) — the active provider for now — `src/license/stub-provider.ts`
-- [x] Settings → License tab (key field, activate/deactivate/re-check, status) — `src/settings.ts`
-- [x] `main.ts` wiring: manager construction, startup re-check, recurring background re-check interval — `src/main.ts`
+- [x] Settings → General → License section (key field, activate/deactivate, status) — `src/settings.ts`; re-verification is silent (periodic timer + a `window` `'online'` listener in `main.ts`), no manual re-check control
+- [x] `main.ts` wiring: manager construction, startup re-check, recurring background re-check interval, online-reconnect re-check — `src/main.ts`
 - [x] Gate `SetupProjectModal` (disabled Create button + inline upsell, authoritative re-check in `submit()`) — `src/project.ts`
+- [x] README Pricing section documenting the freemium/one-time-purchase model + network-use disclosure (license-key checks only, never vault data) — `README.md`
+- [x] Repo license: MIT → PolyForm Shield 1.0.0 — `LICENSE.txt`, `package.json`, `README.md`; source stays fully public, but a paywall-stripped competing fork is now a license violation, not just legally permitted
 - [ ] **Blocked on a Polar.sh account existing:** verify `PolarLicenseProvider`'s wire format against the live API (field-name casing is currently a documented guess), then flip `main.ts` from `StubLicenseProvider` to it — `src/license/polar-provider.ts`
 - [ ] Purchase/checkout link UI (not designed yet — out of scope until the provider is live)
-- [ ] **Unresolved, blocking any public pricing:** confirm with Obsidian whether the community plugin directory allows paywalling in-app functionality itself (vs. paywalling a backend service called from the plugin) — research during planning could not confirm either way
-- [ ] README network-use disclosure once the real provider is live (the stub makes no real network calls, so the current disclosure already covers it, but it needs a fresh pass once `PolarLicenseProvider` is wired up)
 
 ## Entities
 

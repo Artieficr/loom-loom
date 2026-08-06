@@ -166,6 +166,17 @@ export default class LoomLoomPlugin extends Plugin {
 				void this.licenseManager.revalidateNow(this.settings.licenseKey);
 			}, LICENSE_RECHECK_TICK_MS)
 		);
+
+		// A device that's been offline a while has its OWN `lastCheckAt` sliding
+		// forward on every failed periodic-tick attempt (`doRevalidate` stamps it
+		// even on a thrown/network error), so the tick's own throttle
+		// (`MIN_RECHECK_GAP_MS`) can't be trusted to fire again right away just
+		// because connectivity came back. Reconnecting is real new information,
+		// so this bypasses the throttle explicitly (`force: true`) rather than
+		// waiting out however much of it remains.
+		this.registerDomEvent(window, 'online', () => {
+			void this.licenseManager.revalidateNow(this.settings.licenseKey, true);
+		});
 	}
 
 	/** Every per-file, path-keyed UI-state dict that a rename/delete needs to

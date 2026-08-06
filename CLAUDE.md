@@ -473,15 +473,33 @@ and a custom layered graph view.
   two machines sharing one vault silently share or clobber one "device" record instead
   of representing two. Must not break offline: a cached "paid" verdict keeps unlocking
   unlimited projects for a 30-day grace period (`GRACE_PERIOD_MS`, `src/license/
-  grace.ts`) with no successful re-check required, re-verified periodically in the
-  background (`main.ts`'s `registerInterval`) and on demand. A provider result
-  distinguishes a *definite* rejection (`{ok:false, reason}` — revoke immediately, e.g.
-  a refunded key) from *not reaching the server at all* (a thrown error — leave the
-  cached verdict alone and let the grace period keep counting down); see `provider.ts`.
-  **Open and unresolved, not a settled decision**: whether Obsidian's official community
-  plugin directory allows paywalling in-app functionality itself (vs. paywalling a
-  backend service the plugin calls) — resolve with Obsidian before any public pricing
-  copy ships.
+  grace.ts`) with no successful re-check required, re-verified silently in the
+  background — a periodic timer (`main.ts`'s `registerInterval`) and a `window`
+  `'online'` listener (so reconnecting after an offline stretch doesn't wait for the
+  next timer tick), both calling `LicenseManager.revalidateNow`. There is no manual
+  "re-check" control in the UI; the License section's "Re-activate" button hits the
+  network unconditionally for anyone who wants to force a check by hand. A provider
+  result distinguishes a *definite* rejection (`{ok:false, reason}` — revoke
+  immediately, e.g. a refunded or deactivated key) from *not reaching the server at
+  all* (a thrown error — leave the cached verdict alone and let the grace period keep
+  counting down); see `provider.ts`. One-time purchase, not a subscription — the
+  license unlocks unlimited projects permanently once activated, no recurring charge.
+  Community-directory paywalling: user research indicates Obsidian's official
+  community plugin directory allows this model (paywalling in-app functionality, not
+  just a backend service the plugin calls) — see README.md's Pricing section, which
+  documents the model publicly; not an official confirmation from Obsidian itself, so
+  revisit if that ever surfaces a conflict. Confirmed directly against
+  `docs.obsidian.md/Developer+policies`: no specific license type is mandated for
+  community plugins (a LICENSE file + clearly stating the license is what's actually
+  required), and payment-for-full-access only needs disclosing in the README (which
+  the Pricing section already does) — this is what cleared the way for **the repo's
+  license itself to change from MIT to PolyForm Shield 1.0.0** (`LICENSE.txt`):
+  plain MIT gave anyone explicit permission to fork the repo, strip the license-gating
+  code, and redistribute a free competing version — Shield keeps the source fully
+  public (readable, forkable, self-hostable, contributable) while prohibiting
+  exactly that one thing, shipping a competing product from the code. `package.json`'s
+  `license` field reads `"SEE LICENSE IN LICENSE.txt"` (PolyForm licenses have no
+  registered SPDX identifier npm would recognize directly).
 
 ## Constraints
 

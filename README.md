@@ -32,8 +32,18 @@ Worldbuilding inside Obsidian for your writing or TTGRPG games.
    `relationships` list.
 4. Open the timeline and graph from home.
 
-All data stays local in your vault. The plugin makes no network requests.
+All your worldbuilding data stays local in your vault, in plain `.md` files — your notes,
+entities, and relationships are never transmitted anywhere. The plugin makes a network
+request only when checking an entered license key against the licensing provider (see
+Pricing below); nothing else in the plugin calls out to the network.
+
+## Pricing
+
+Free: one project of each kind (Player/GM/Writer) per vault, with every feature
+available — no trial, no time limit, no feature gating on the free tier beyond the
+project-count cap. A one-time license key purchase (not a subscription) unlocks
+unlimited projects of every kind, activatable on up to 3 devices.
 
 ## License
 
-MIT
+[PolyForm Shield 1.0.0 © Artyom Tsoy](https://github.com/Artieficr/loom-loom/blob/main/LICENSE.txt)

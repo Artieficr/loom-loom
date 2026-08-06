@@ -597,15 +597,18 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 
 	/** Talks only to `this.plugin.licenseManager` (see `src/license/manager.ts`)
 	 *  — the network call itself, the per-device activation cache, and the
-	 *  30-day offline grace period all live there, not here. A `render` block
-	 *  on the General page, under its own "License" heading (moved off its
-	 *  own tab so it's one less place to look), rather than a declarative
-	 *  `items` sub-array — its content is heavily async/status-dependent
-	 *  (several buttons whose text and presence depend on `manager.getStatus()`,
-	 *  each needing the whole section re-rendered afterward — `this.update()`,
-	 *  the outer tab's, since this section is just one row within General's
-	 *  own declarative items now, not a standalone page with its own
-	 *  `display()`), which the declarative model isn't a good fit for. No
+	 *  30-day offline grace period all live there, not here. Re-verification
+	 *  is silent and automatic (the periodic tick in main.ts, plus a `window`
+	 *  `'online'` listener there so reconnecting doesn't have to wait for the
+	 *  next tick), so there is no manual "Re-check" button; "Re-activate"
+	 *  still hits the network unconditionally (unlike `revalidateNow`, no
+	 *  throttle) for anyone who wants to force a fresh check by hand. A
+	 *  `render` block — one row within General's own declarative `items`,
+	 *  under its own "License" heading — rather than declarative `control`
+	 *  definitions: its content is heavily async/status-dependent (several
+	 *  buttons whose text and presence depend on `manager.getStatus()`, each
+	 *  needing the whole section re-rendered afterward via `this.update()`,
+	 *  the outer tab's), which the declarative model isn't a good fit for. No
 	 *  "Restore defaults" row for this section — "Deactivate this device" /
 	 *  "Forget this device locally" already serve as its reset actions, and
 	 *  folding `licenseKey` into General's own restore-defaults button would
@@ -674,20 +677,6 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 				)
 			);
 		}
-		actions.addButton((btn) =>
-			btn.setButtonText('Re-check now').onClick(() =>
-				void (async () => {
-					const key = this.plugin.settings.licenseKey.trim();
-					if (key === '') {
-						new Notice('Enter a license key first.');
-						return;
-					}
-					btn.setDisabled(true).setButtonText('Checking…');
-					await manager.revalidateNow(key, true);
-					this.update();
-				})()
-			)
-		);
 
 		const info = containerEl.createDiv({ cls: 'setting-item-description' });
 		info.createEl('p', {
@@ -698,7 +687,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			info.createEl('p', {
 				text:
 					`Verified until ${new Date(status.graceExpiresAt).toLocaleDateString()} without needing to ` +
-					'reconnect (checked periodically in the background, and on demand via "Re-check now").',
+					'reconnect (re-checked silently in the background — periodically, and whenever this device comes back online).',
 			});
 		}
 		if (status.lastCheckAt !== null) {
