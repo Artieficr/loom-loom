@@ -623,6 +623,14 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			);
 		void plugin.saveSettings();
 	}, [pinned, project, plugin]);
+	/** Render order: pinned nodes last, so they sit on top of the graph.
+	 *  `layout.nodes`/`pinned` only change on an actual layout/pin update, not
+	 *  on every drag/spring/animation-tick re-render, so sorting here (instead
+	 *  of inline in the JSX) skips re-sorting on every one of those frames. */
+	const renderNodes = useMemo(
+		() => [...layout.nodes].sort((a, b) => (pinned.has(a.id) ? 1 : 0) - (pinned.has(b.id) ? 1 : 0)),
+		[layout.nodes, pinned]
+	);
 	// Esc clears the selection, then (on a second press) any pins. Right-click
 	// focus otherwise needs an empty-space click to dismiss.
 	useEffect(() => {
@@ -1105,9 +1113,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			next.set(id, { wx, wy });
 			return next;
 		});
-	/** Unpins `node` and eases it back to its force-layout home (seed the drag/pin
-	 *  spot as a displacement so it springs from there instead of jumping — the
-	 *  fix for a dismissed pin that used to stick until the next interaction). */
+	/** Unpins `node` and eases it back to its force-layout home — seeds the
+	 *  drag/pin spot as a displacement so it springs from there instead of
+	 *  jumping; without this, a just-dismissed pin sits frozen in place until
+	 *  some unrelated interaction happens to wake the spring loop. */
 	const unpinNode = (node: LayoutNode) => {
 		const pin = pinnedRef.current.get(node.id);
 		if (pin) {
@@ -1367,10 +1376,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	// A node drag lives on window listeners, not the node's element + pointer
 	// capture: a re-render (index refresh, live reflow) can unmount/replace the
-	// captured <g>, which drops the capture and used to freeze the drag (then the
-	// node sprang back home). The window can't be unmounted, so the drag survives
-	// every re-render. `dragHandlers` keeps the latest closures so the once-per-
-	// drag listeners always call fresh state.
+	// captured <g>, which would drop the capture and freeze the drag mid-gesture
+	// (the node stuck under the cursor until release, then sprang back home).
+	// The window can't be unmounted, so the drag survives every re-render.
+	// `dragHandlers` keeps the latest closures so the once-per-drag listeners
+	// always call fresh state.
 	const dragHandlers = useRef<{
 		move: (e: PointerEvent) => void;
 		up: (e: PointerEvent) => void;
@@ -1954,6 +1964,22 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				: [],
 		[plugin, project, version]
 	);
+	// The filter popover's "Focus on entities" search options — every project
+	// entity not already picked. The popover can stay open through a drag/
+	// spring/animation replay (which re-renders this component continuously),
+	// so this is memoized the same way `panelLinkNames` above is rather than
+	// rebuilt from the full project entity list on every one of those frames.
+	const filterPickOptions = useMemo(
+		() =>
+			project
+				? plugin.indexer
+						.getAll(undefined, project.root)
+						.filter((r) => !pickedPaths.has(r.path))
+						.sort((a, b) => recordLabel(a, project).localeCompare(recordLabel(b, project)))
+						.map((r) => ({ value: r.path, label: recordLabel(r, project) }))
+				: [],
+		[plugin, project, version, pickedPaths]
+	);
 
 	// When selecting shrinks the viewport (side panel mounts) or the node sits
 	// at the edge, pan so the node stays clear of the panel and the borders.
@@ -2261,13 +2287,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 											<div className="loom-filter-pick-search">
 												<SearchableSelect
 													placeholder="Add an entity…"
-													options={plugin.indexer
-														.getAll(undefined, project.root)
-														.filter((r) => !pickedPaths.has(r.path))
-														.sort((a, b) =>
-															recordLabel(a, project).localeCompare(recordLabel(b, project))
-														)
-														.map((r) => ({ value: r.path, label: recordLabel(r, project) }))}
+													options={filterPickOptions}
 													onPick={(path) => {
 														// A left-click selection dims everything not connected to
 														// it — clear it so the focus set isn't shown pre-dimmed.
@@ -2528,11 +2548,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								);
 							})}
 						{/* Pinned nodes render last so they sit on top of the graph. */}
-						{!animActive && [...layout.nodes]
-								.sort((a, b) => (pinned.has(a.id) ? 1 : 0) - (pinned.has(b.id) ? 1 : 0))
-								.map((node) => {
+						{!animActive && renderNodes.map((node) => {
 								// The dragged node always renders even if it slides out of the
-								// cull range (losing its element mid-drag was the old freeze bug).
+								// cull range — losing its DOM element mid-drag would drop its
+								// pointer capture and freeze the drag (see the window-listener
+								// note on `dragHandlers` above).
 								// A pinned node scrolls off-screen like any node — an edge
 								// indicator (below) points to it — but stays exempt from filter/
 								// pick hiding so pinning keeps it visible when it's on screen.

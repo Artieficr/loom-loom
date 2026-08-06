@@ -566,10 +566,8 @@ export const MAPS_IMAGES_FOLDER = `${MAPS_FOLDER}/Images`;
  * note as a wikilink; and an own extension round-trips byte-for-byte with
  * external Fountain apps (Better Fountain, Highland, Fade In), which is what
  * makes "Open in external app" honest. Scenes and chapters are parsed out of
- * it into their own entity notes.
- *
- * Placeholder: the constants pin the decision down; the parser and editor
- * aren't built yet.
+ * it into their own entity notes — see `src/fountain.ts` for the parser and
+ * `src/views/script-view.tsx`/`fountain-field.tsx` for the editor.
  */
 export const SCRIPT_EXTENSION = 'fountain';
 export const SCRIPT_LABEL = 'Script';

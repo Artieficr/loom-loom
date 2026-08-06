@@ -193,11 +193,40 @@ function useFrontmatterWriter(plugin: LoomLoomPlugin, file: TFile | null) {
 	);
 }
 
-/**
- * Sets a frontmatter key, first removing other casings of it — Obsidian's
- * Properties UI treats names case-insensitively and may have rewritten ours —
- * plus any listed legacy keys.
- */
+/** A debounced (600ms idle) writer for one frontmatter key — the Description
+ *  and Reward fields commit this exact way (no blur-style moment reliably
+ *  fires before navigation), differing only in which key to write and what to
+ *  log on failure. */
+function useDebouncedFrontmatterField(plugin: LoomLoomPlugin, file: TFile | null, key: string, label: string) {
+	return useMemo(() => {
+		let timer = 0;
+		return (value: string) => {
+			window.clearTimeout(timer);
+			timer = window.setTimeout(() => {
+				if (!file) return;
+				plugin.app.fileManager
+					.processFrontMatter(file, (fm: Record<string, unknown>) => {
+						setLoomKey(fm, key, value);
+					})
+					.catch((e) => {
+						console.error(`Loom Loom: failed to save ${label}`, e);
+					});
+			}, 600);
+		};
+	}, [plugin, file, key, label]);
+}
+
+/** Deletes a frontmatter key by any of its spellings (loom-prefixed and
+ *  legacy), case-insensitively — several fields here clear a relationship by
+ *  removing the key entirely rather than writing it empty (detaching a
+ *  sublocation, clearing a region, reviving a PC). */
+function clearFmKeys(fm: Record<string, unknown>, ...names: string[]): void {
+	const wanted = new Set(names.map((n) => n.toLowerCase()));
+	for (const k of Object.keys(fm)) {
+		if (wanted.has(k.toLowerCase())) delete fm[k];
+	}
+}
+
 interface RelationshipDraft {
 	type: string;
 	target: string;
@@ -1029,41 +1058,11 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	// Description commits on idle (the markdown field has no blur-style
 	// moment that reliably fires before navigation).
-	const saveDescription = useMemo(() => {
-		let timer = 0;
-		return (value: string) => {
-			window.clearTimeout(timer);
-			timer = window.setTimeout(() => {
-				if (!file) return;
-				plugin.app.fileManager
-					.processFrontMatter(file, (fm: Record<string, unknown>) => {
-						setLoomKey(fm, FM.description, value);
-					})
-					.catch((e) => {
-						console.error('Loom Loom: failed to save description', e);
-					});
-			}, 600);
-		};
-	}, [plugin, file]);
+	const saveDescription = useDebouncedFrontmatterField(plugin, file, FM.description, 'description');
 
 	// Reward supports markdown (links, multiple lines); commits on idle like the
 	// description field.
-	const saveReward = useMemo(() => {
-		let timer = 0;
-		return (value: string) => {
-			window.clearTimeout(timer);
-			timer = window.setTimeout(() => {
-				if (!file) return;
-				plugin.app.fileManager
-					.processFrontMatter(file, (fm: Record<string, unknown>) => {
-						setLoomKey(fm, FM.reward, value);
-					})
-					.catch((e) => {
-						console.error('Loom Loom: failed to save reward', e);
-					});
-			}, 600);
-		};
-	}, [plugin, file]);
+	const saveReward = useDebouncedFrontmatterField(plugin, file, FM.reward, 'reward');
 
 	/** Opens a wikilink target from the markdown fields: loom entities get
 	 *  their entity page, anything else Obsidian's normal link opening. */
@@ -1773,7 +1772,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	// Objective reorder (active sublist): live sliding modeled on the sublocation
 	// grip. `active`/`resolved` are the two draft partitions; a drop rewrites the
 	// stored list as reordered-actives followed by the resolved ones.
-	const objRowStyle = (i: number, count: number): CSSProperties | undefined => {
+	const objRowStyle = (i: number): CSSProperties | undefined => {
 		if (!objDrag) return undefined;
 		const slot = objDragRef.current?.slot ?? 40;
 		if (objDrag.from === i)
@@ -1782,7 +1781,6 @@ function EntityPage({ view }: { view: EntityView }) {
 		let sh = 0;
 		if (from < i && i <= over) sh = -1;
 		else if (over <= i && i < from) sh = 1;
-		void count;
 		return sh !== 0 ? { transform: `translateY(${sh * slot}px)` } : undefined;
 	};
 	const objGrip = (i: number, active: ObjectiveDraft[], resolved: ObjectiveDraft[]) => (
@@ -1985,10 +1983,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		void (async () => {
 			try {
 				await plugin.app.fileManager.processFrontMatter(childFile, (fm: Record<string, unknown>) => {
-					for (const k of Object.keys(fm)) {
-						const lower = k.toLowerCase();
-						if (lower === 'loomparentlocation' || lower === 'parentlocation') delete fm[k];
-					}
+					clearFmKeys(fm, 'loomparentlocation', 'parentlocation');
 				});
 				// Back to the top-level name (no parent).
 				await renameLocationFile(s, undefined);
@@ -2026,10 +2021,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		const f = plugin.app.vault.getFileByPath(record.path);
 		if (!f) return;
 		void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-			for (const k of Object.keys(fm)) {
-				const lower = k.toLowerCase();
-				if (lower === 'loomregion' || lower === 'region') delete fm[k];
-			}
+			clearFmKeys(fm, 'loomregion', 'region');
 		});
 	};
 	// Region page: its member locations, ordered by the region's `regionOrder`.
@@ -2070,10 +2062,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		const f = plugin.app.vault.getFileByPath(l.path);
 		if (!f) return;
 		void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-			for (const k of Object.keys(fm)) {
-				const lower = k.toLowerCase();
-				if (lower === 'loomregion' || lower === 'region') delete fm[k];
-			}
+			clearFmKeys(fm, 'loomregion', 'region');
 		});
 		writeRegionOrder(regionLocations.filter((o) => o.path !== l.path));
 	};
@@ -2136,10 +2125,6 @@ function EntityPage({ view }: { view: EntityView }) {
 		});
 		await renameLocationFile(rec, parent.name);
 	};
-	/** "Turn to a sublocation": fuzzy-searchable picker over every other
-	 *  location (including sublocations — the whole child hierarchy moves
-	 *  along), minus this location's own descendants so a cycle can't be
-	 *  built. A search, not a plain menu — projects can get huge. */
 	/** The project's Maps store (`Entities/Maps/<Project> Maps.json`), or null. */
 	const mapFileFor = (): TFile | null => (project ? findMapsFile(plugin.app, project) : null);
 	const zoneIsThisLocation = (z: unknown): boolean => {
@@ -2199,6 +2184,10 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 		return false;
 	};
+	/** "Turn to a sublocation": fuzzy-searchable picker over every other
+	 *  location (including sublocations — the whole child hierarchy moves
+	 *  along), minus this location's own descendants so a cycle can't be
+	 *  built. A search, not a plain menu — projects can get huge. */
 	const openTurnIntoPicker = () => {
 		const candidates = projectLocations
 			.filter((l) => l.path !== record.path && !descendsFromThis(l))
@@ -3060,35 +3049,32 @@ function EntityPage({ view }: { view: EntityView }) {
 						(b.target ? ENTITY_TYPES.indexOf(b.target.type) : 99) ||
 					(a.target?.name ?? a.lp).localeCompare(b.target?.name ?? b.lp)
 			);
-	const writeEntryInvolved = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) => {
+	/** Rewrites one list field on a note entry's frontmatter object (`involved`/
+	 *  `group`/`places` are the same shape, differing only in the key and
+	 *  whether an emptied-out list drops the key entirely — a `group` snapshot
+	 *  cleared down to nothing means "no Group here", not "an empty array"). */
+	const writeEntryField = (
+		en: LocNoteEntry,
+		key: 'involved' | 'group' | 'places',
+		apply: (list: unknown[]) => unknown[],
+		dropIfEmpty = false
+	) => {
 		writeOwnerNotes(en.owner, (arr) => {
 			const item = arr[en.idx];
-			if (typeof item === 'object' && item !== null) {
-				const cur = (item as { involved?: unknown }).involved;
-				(item as { involved?: unknown }).involved = apply(Array.isArray(cur) ? cur : []);
-			}
+			if (typeof item !== 'object' || item === null) return;
+			const obj = item as Record<string, unknown>;
+			const cur = obj[key];
+			const next = apply(Array.isArray(cur) ? cur : []);
+			if (dropIfEmpty && next.length === 0) delete obj[key];
+			else obj[key] = next;
 		});
 	};
-	const writeEntryGroup = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) => {
-		writeOwnerNotes(en.owner, (arr) => {
-			const item = arr[en.idx];
-			if (typeof item === 'object' && item !== null) {
-				const cur = (item as { group?: unknown }).group;
-				const next = apply(Array.isArray(cur) ? cur : []);
-				if (next.length > 0) (item as { group?: unknown }).group = next;
-				else delete (item as { group?: unknown }).group;
-			}
-		});
-	};
-	const writeEntryPlaces = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) => {
-		writeOwnerNotes(en.owner, (arr) => {
-			const item = arr[en.idx];
-			if (typeof item === 'object' && item !== null) {
-				const cur = (item as { places?: unknown }).places;
-				(item as { places?: unknown }).places = apply(Array.isArray(cur) ? cur : []);
-			}
-		});
-	};
+	const writeEntryInvolved = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) =>
+		writeEntryField(en, 'involved', apply);
+	const writeEntryGroup = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) =>
+		writeEntryField(en, 'group', apply, true);
+	const writeEntryPlaces = (en: LocNoteEntry, apply: (list: unknown[]) => unknown[]) =>
+		writeEntryField(en, 'places', apply);
 	const involveTargets = project
 		? plugin.indexer
 				.getAll(undefined, project.root)
@@ -3204,12 +3190,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		record.type === 'character' && record.loomTags.includes(PC_TAG) && kindFeatures.pcLifecycle;
 	const deathSession =
 		record.deathSession !== null ? plugin.indexer.resolve(record.deathSession, record.path) : null;
-	const clearDeathKey = (fm: Record<string, unknown>) => {
-		for (const k of Object.keys(fm)) {
-			const lower = k.toLowerCase();
-			if (lower === 'loomdeathsession' || lower === 'deathsession') delete fm[k];
-		}
-	};
+	const clearDeathKey = (fm: Record<string, unknown>) => clearFmKeys(fm, 'loomdeathsession', 'deathsession');
 	const setAlive = (alive: boolean) => {
 		writeFm((fm) => {
 			setLoomKey(fm, FM.alive, alive);
@@ -5225,7 +5206,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										chapterMatches.push({ kind: 'text', offset: at });
 									}
 									for (const [id, entries] of Object.entries(scriptNotes.comments)) {
-										if (entries[0]?.text.toLowerCase().includes(needle)) chapterMatches.push({ kind: 'comment', id });
+										if (entries.some((e) => e.text.toLowerCase().includes(needle))) chapterMatches.push({ kind: 'comment', id });
 									}
 									for (const [id, entry] of Object.entries(scriptNotes.altText)) {
 										entry.options.forEach((opt, optionIndex) => {
@@ -5865,7 +5846,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										objectiveRow(
 											r.idx,
 											objGrip(i, activeDrafts, resolvedDrafts),
-											objRowStyle(i, active.length),
+											objRowStyle(i),
 											objDrag?.from === i
 										)
 									)}
@@ -6266,7 +6247,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											sceneMatches.push({ kind: 'text', offset: at });
 										}
 										for (const [id, entries] of Object.entries(scriptNotes.comments)) {
-											if (entries[0]?.text.toLowerCase().includes(needle)) sceneMatches.push({ kind: 'comment', id });
+											if (entries.some((e) => e.text.toLowerCase().includes(needle))) sceneMatches.push({ kind: 'comment', id });
 										}
 										for (const [id, entry] of Object.entries(scriptNotes.altText)) {
 											entry.options.forEach((opt, optionIndex) => {

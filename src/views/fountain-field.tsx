@@ -47,6 +47,29 @@ import { EntityType } from '../types';
  * would just be noise on every heading.
  */
 
+/** True when `[from, to)` partially overlaps `[sFrom, sTo)` — neither
+ *  disjoint, nested inside it, nor fully surrounding it. Nesting/surrounding
+ *  is fine (spans stay well-nested either way); only a true partial cross is
+ *  a conflict. Shared by the two places that must reject one: creating a new
+ *  comment/alt-text span over a selection (`openContextMenu`) and dragging an
+ *  existing comment span's edge handle onto a new position
+ *  (`startAnnotationHandleDrag`). */
+function partiallyOverlaps(from: number, to: number, sFrom: number, sTo: number): boolean {
+	const disjoint = to <= sFrom || from >= sTo;
+	const nestedIn = from >= sFrom && to <= sTo;
+	const surrounds = from <= sFrom && to >= sTo;
+	return !(disjoint || nestedIn || surrounds);
+}
+
+/** A comment span is "unresolved" (needs attention, gets the persistent tint/
+ *  gutter glyph) when its thread has anything not yet checked off, or no
+ *  replies at all — alt-text spans have no resolved concept and are never
+ *  unresolved. Shared by the content-mark decoration (`buildDecorations`) and
+ *  the gutter icon (`annotationGutter`). */
+function isUnresolvedComment(kind: 'comment' | 'alt', entries: CommentEntry[]): boolean {
+	return kind === 'comment' && !(entries.length > 0 && entries.every((e) => e.resolved));
+}
+
 const LOOM_ID_RE = /\s*\[\[loom:[A-Za-z0-9]+\]\]/;
 const INTEXT_OPTIONS = ['INT.', 'EXT.', 'INT./EXT.', 'EST.'];
 /** Mirrors `SCENE_PREFIXES` in fountain.ts (not exported — this only needs
@@ -490,17 +513,23 @@ export const FountainField = forwardRef(function FountainField(
 			const preview = view.dom.doc.body.createDiv({ cls: 'loom-fountain-annotation-drag-preview' });
 			let lastTarget: number | null = null;
 
-			const clampTarget = (raw: number, span: ReturnType<typeof findAnnotationSpans>[number]) =>
+			// The span's own position can't change mid-drag — nothing else
+			// dispatches a document edit while this gesture is in progress, only
+			// `finish` does and only once, on drop — so finding it here ONCE
+			// (rather than re-parsing the whole document on every `pointermove`)
+			// is exact, not an approximation.
+			const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'comment' && s.id === id);
+			if (!span) return;
+
+			const clampTarget = (raw: number) =>
 				edge === 'start'
 					? Math.max(0, Math.min(raw, span.contentTo - 1))
 					: Math.max(span.contentFrom + 1, Math.min(raw, view.state.doc.length));
 
 			const onMove = (e: PointerEvent) => {
-				const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'comment' && s.id === id);
-				if (!span) return;
 				const raw = view.posAtCoords({ x: e.clientX, y: e.clientY });
 				if (raw == null) return;
-				const target = clampTarget(raw, span);
+				const target = clampTarget(raw);
 				lastTarget = target;
 				const coords = view.coordsAtPos(target);
 				if (!coords) {
@@ -520,22 +549,16 @@ export const FountainField = forwardRef(function FountainField(
 				preview.remove();
 				if (!commit || lastTarget == null) return;
 				const target = lastTarget;
-				const text = view.state.doc.toString();
-				const spans = findAnnotationSpans(text);
-				const span = spans.find((s) => s.kind === 'comment' && s.id === id);
-				if (!span) return;
 				const markerFrom = edge === 'start' ? span.from : span.contentTo;
 				const markerTo = edge === 'start' ? span.contentFrom : span.to;
 				if (target === markerFrom) return; // dropped back where it started
+				const text = view.state.doc.toString();
 				const markerText = text.slice(markerFrom, markerTo);
 				const newContentFrom = edge === 'start' ? target : span.contentFrom;
 				const newContentTo = edge === 'end' ? target : span.contentTo;
-				const overlaps = spans.some((s) => {
+				const overlaps = findAnnotationSpans(text).some((s) => {
 					if (s.kind === 'comment' && s.id === id) return false;
-					const disjoint = newContentTo <= s.contentFrom || newContentFrom >= s.contentTo;
-					const nestedIn = newContentFrom >= s.contentFrom && newContentTo <= s.contentTo;
-					const surrounds = newContentFrom <= s.contentFrom && newContentTo >= s.contentTo;
-					return !(disjoint || nestedIn || surrounds);
+					return partiallyOverlaps(newContentFrom, newContentTo, s.contentFrom, s.contentTo);
 				});
 				if (overlaps) {
 					new Notice("Can't resize a comment span to partially overlap another one.");
@@ -750,7 +773,7 @@ export const FountainField = forwardRef(function FountainField(
 					// underline, no tint. Alt-text spans have no resolved concept —
 					// unaffected.
 					const commentEntries = span.kind === 'comment' ? (commentsRef.current[span.id] ?? []) : [];
-					const unresolved = span.kind === 'comment' && !(commentEntries.length > 0 && commentEntries.every((e) => e.resolved));
+					const unresolved = isUnresolvedComment(span.kind, commentEntries);
 					const cls =
 						`loom-fountain-annotation-span loom-fountain-annotation-span-${span.kind}` +
 						(unresolved ? ' loom-fountain-annotation-span-unresolved' : '') +
@@ -1026,12 +1049,7 @@ export const FountainField = forwardRef(function FountainField(
 			if (sel.empty) return false;
 			event.preventDefault();
 			const spans = findAnnotationSpans(view.state.doc.toString());
-			const overlaps = spans.some((s) => {
-				const disjoint = sel.to <= s.from || sel.from >= s.to;
-				const nestedIn = sel.from >= s.from && sel.to <= s.to;
-				const surrounds = sel.from <= s.from && sel.to >= s.to;
-				return !(disjoint || nestedIn || surrounds);
-			});
+			const overlaps = spans.some((s) => partiallyOverlaps(sel.from, sel.to, s.from, s.to));
 			if (overlaps) {
 				new Notice("Comments and alternative text can't partially overlap an existing one.");
 			}
@@ -1059,11 +1077,25 @@ export const FountainField = forwardRef(function FountainField(
 		 *  placement (no CSS reordering trick needed). One marker per LINE
 		 *  that a span STARTS on (not every line it covers) — a multi-line
 		 *  comment shows its icon beside its first line only. */
+		// `lineMarker` is called once per VISIBLE line every time the gutter
+		// recomputes, so re-parsing the whole document's annotation spans
+		// inside it would redo that parse once per line on screen. CM6's `Text`
+		// is immutable and shared by reference when the document hasn't
+		// changed, so caching on that reference (not the stringified text)
+		// also skips the `.toString()` itself across calls within one pass.
+		let annotationSpansCache: { doc: EditorState['doc']; spans: ReturnType<typeof findAnnotationSpans> } | null = null;
+		const annotationSpansFor = (view: EditorView) => {
+			if (annotationSpansCache?.doc !== view.state.doc) {
+				annotationSpansCache = { doc: view.state.doc, spans: findAnnotationSpans(view.state.doc.toString()) };
+			}
+			return annotationSpansCache.spans;
+		};
+
 		const annotationGutter = gutter({
 			class: 'loom-fountain-annotation-gutter',
 			side: 'after',
 			lineMarker: (gutterView, line) => {
-				const spans = findAnnotationSpans(gutterView.state.doc.toString());
+				const spans = annotationSpansFor(gutterView);
 				const lineNo = gutterView.state.doc.lineAt(line.from).number;
 				const onThisLine = spans.filter((s) => gutterView.state.doc.lineAt(s.from).number === lineNo);
 				if (onThisLine.length === 0) return null;
@@ -1072,7 +1104,7 @@ export const FountainField = forwardRef(function FountainField(
 					return {
 						kind: s.kind,
 						id: s.id,
-						unresolved: s.kind === 'comment' && !(commentEntries.length > 0 && commentEntries.every((e) => e.resolved)),
+						unresolved: isUnresolvedComment(s.kind, commentEntries),
 						highlighted: s.id === highlightedAnnotationIdRef.current,
 					};
 				});

@@ -1,11 +1,10 @@
-import { debounce, setIcon, setTooltip } from 'obsidian';
+import { setIcon, setTooltip } from 'obsidian';
 import {
 	KeyboardEvent as ReactKeyboardEvent,
 	MouseEvent as ReactMouseEvent,
 	ReactNode,
 	RefObject,
 	useEffect,
-	useMemo,
 	useRef,
 	useState,
 } from 'react';
@@ -78,48 +77,6 @@ export function autoGrowTextarea(el: HTMLTextAreaElement | null): void {
 	el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
 }
 
-/**
- * Remembers a textarea's resized height per entity file, restoring it on
- * mount and persisting (debounced) on every change — whether resized via
- * `.loom-resize-edge` or the browser's native corner grip.
- */
-export function useBoxSizeMemory(
-	plugin: LoomLoomPlugin,
-	filePath: string,
-	fieldKey: string,
-	ref: RefObject<HTMLTextAreaElement | null>,
-	// On cold Obsidian boot the entity page's first render or two can land
-	// before the index has rebuilt, when the textarea isn't mounted yet (the
-	// page shows its "not found" placeholder instead). This makes the caller
-	// pass a flag that flips once the real form (and the ref) is live, so the
-	// effect re-runs and actually finds the element — a plain [ref, ...] dep
-	// array never re-fires on that later mount, since the ref object itself
-	// never changes identity.
-	ready = true
-): void {
-	const persist = useMemo(
-		() =>
-			debounce(
-				(height: number) => {
-					plugin.settings.entityBoxSizes[filePath] = {
-						...plugin.settings.entityBoxSizes[filePath],
-						[fieldKey]: height,
-					};
-					void plugin.saveSettings();
-				},
-				500,
-				true
-			),
-		[plugin, filePath, fieldKey]
-	);
-
-	// Boxes always auto-size to content now — nothing to restore or persist.
-	void ref;
-	void persist;
-	void ready;
-
-}
-
 /** Renders a Lucide icon by name. */
 export function Icon({ name, fallback }: { name: string; fallback?: string }) {
 	const ref = useRef<HTMLSpanElement>(null);
@@ -154,6 +111,23 @@ export function Truncated({ text, className }: { text: string; className: string
 	);
 }
 
+/** Closes an open dropdown on any pointer press outside `wrapRef` — shared by
+ *  `SuggestInput` and `SearchableSelect`. */
+function useCloseOnOutsideClick<T extends HTMLElement>(
+	wrapRef: RefObject<T | null>,
+	open: boolean,
+	setOpen: (open: boolean) => void
+): void {
+	useEffect(() => {
+		if (!open) return;
+		const onDown = (e: PointerEvent) => {
+			if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+		};
+		document.addEventListener('pointerdown', onDown, true);
+		return () => document.removeEventListener('pointerdown', onDown, true);
+	}, [open, wrapRef, setOpen]);
+}
+
 /**
  * A text input with its own suggestion dropdown (a native <datalist> only
  * shows its list on the second click). The list opens on the first press,
@@ -186,16 +160,7 @@ export function SuggestInput({
 	// takes whichever entry is highlighted (defaults to the top match).
 	const [active, setActive] = useState(0);
 	const wrapRef = useRef<HTMLDivElement>(null);
-
-	// Close on any press outside the component.
-	useEffect(() => {
-		if (!open) return;
-		const onDown = (e: PointerEvent) => {
-			if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-		};
-		document.addEventListener('pointerdown', onDown, true);
-		return () => document.removeEventListener('pointerdown', onDown, true);
-	}, [open]);
+	useCloseOnOutsideClick(wrapRef, open, setOpen);
 
 	const query = value.trim().toLowerCase();
 	const filtered = options.filter((o) => o.toLowerCase().includes(query));
@@ -301,15 +266,7 @@ export function SearchableSelect({
 		}
 	}, [autoFocus]);
 
-	// Close on any press outside the component.
-	useEffect(() => {
-		if (!open) return;
-		const onDown = (e: PointerEvent) => {
-			if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-		};
-		document.addEventListener('pointerdown', onDown, true);
-		return () => document.removeEventListener('pointerdown', onDown, true);
-	}, [open]);
+	useCloseOnOutsideClick(wrapRef, open, setOpen);
 
 	const filtered = options.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()));
 

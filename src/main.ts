@@ -110,25 +110,14 @@ export default class LoomLoomPlugin extends Plugin {
 
 		this.addSettingTab(new LoomLoomSettingTab(this.app, this));
 
-		// Keep per-file UI state (settings.entityBoxSizes, settings.graphManualX)
-		// attached to the right file across renames, dropped on delete.
+		// Keep per-file UI state (settings.graphManualX, graphPins, …) attached to
+		// the right file across renames, dropped on delete — both handlers walk
+		// the same set of path-keyed maps, so it's pulled out once.
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
 				if (!(file instanceof TFile)) return;
 				let changed = false;
-				const sizes = this.settings.entityBoxSizes[oldPath];
-				if (sizes) {
-					delete this.settings.entityBoxSizes[oldPath];
-					this.settings.entityBoxSizes[file.path] = sizes;
-					changed = true;
-				}
-			const renameMaps: Record<string, unknown>[] = [
-					...Object.values(this.settings.graphManualX),
-					...Object.values(this.settings.graphManualY),
-					...Object.values(this.settings.graphPins),
-					...Object.values(this.settings.timelineManualOrder),
-				];
-				for (const entries of renameMaps) {
+				for (const entries of this.perFileStateMaps()) {
 					if (oldPath in entries) {
 						entries[file.path] = entries[oldPath];
 						delete entries[oldPath];
@@ -142,17 +131,7 @@ export default class LoomLoomPlugin extends Plugin {
 			this.app.vault.on('delete', (file) => {
 				if (!(file instanceof TFile)) return;
 				let changed = false;
-				if (file.path in this.settings.entityBoxSizes) {
-					delete this.settings.entityBoxSizes[file.path];
-					changed = true;
-				}
-			const deleteMaps: Record<string, unknown>[] = [
-					...Object.values(this.settings.graphManualX),
-					...Object.values(this.settings.graphManualY),
-					...Object.values(this.settings.graphPins),
-					...Object.values(this.settings.timelineManualOrder),
-				];
-				for (const entries of deleteMaps) {
+				for (const entries of this.perFileStateMaps()) {
 					if (file.path in entries) {
 						delete entries[file.path];
 						changed = true;
@@ -187,6 +166,17 @@ export default class LoomLoomPlugin extends Plugin {
 				void this.licenseManager.revalidateNow(this.settings.licenseKey);
 			}, LICENSE_RECHECK_TICK_MS)
 		);
+	}
+
+	/** Every per-file, path-keyed UI-state dict that a rename/delete needs to
+	 *  follow (or drop) — one list shared by both `vault.on` handlers above. */
+	private perFileStateMaps(): Record<string, unknown>[] {
+		return [
+			...Object.values(this.settings.graphManualX),
+			...Object.values(this.settings.graphManualY),
+			...Object.values(this.settings.graphPins),
+			...Object.values(this.settings.timelineManualOrder),
+		];
 	}
 
 	/**

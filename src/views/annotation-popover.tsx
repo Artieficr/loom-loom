@@ -52,8 +52,7 @@ export function CommentPopover({
 	onClose: () => void;
 }): ReactElement {
 	/** Which row (by index) is currently swapped into its own edit textarea —
-	 *  at most one at a time, mirroring the old single-comment popover's own
-	 *  edit/read split, just per-row now instead of for the whole card. */
+	 *  at most one at a time, per row rather than for the whole card. */
 	const [editingIndex, setEditingIndex] = useState<number | null>(null);
 	const [editDraft, setEditDraft] = useState('');
 	const [replyDraft, setReplyDraft] = useState('');
@@ -193,11 +192,3 @@ export function CommentPopover({
 		document.body
 	);
 }
-
-// The alt-text right-click picker used to live here too, as an anchored
-// `AltTextPopover` (same portal/outside-click shape as `CommentPopover`
-// above). It's now `AltTextModal` in project.ts, a real Obsidian `Modal` —
-// closeable, scrollable, and with every option in an EDITABLE textarea
-// rather than a read-only row — alongside this codebase's other modals
-// (`TextInputModal`, `ConfirmModal`), not a React popover, so it lives with
-// them instead of here.

@@ -768,6 +768,12 @@ function Script({ view }: { view: ScriptView }) {
 
 	// The outline re-parses on every keystroke — that's cheap and needs no ids.
 	const parsed = useMemo(() => (text === null ? null : parseFountain(text)), [text]);
+	// The PDF's real typeset layout of the whole document — memoized on
+	// `parsed` (not recomputed inline in the render body) so unrelated
+	// re-renders that never touch the text — outline drag pointer-move, panel
+	// toggles, … — don't redo it. Must sit above the early-return guards below
+	// so this hook always runs, same reasoning as `parsed` just above.
+	const bodyPages = useMemo(() => (parsed === null ? [] : pdfPages(parsed)), [parsed]);
 
 	/**
 	 * Writes the script, gives every heading an id, and mirrors the scenes into
@@ -1441,9 +1447,6 @@ function Script({ view }: { view: ScriptView }) {
 		};
 
 	// --- Pagination ---------------------------------------------------------
-	// From the PDF's real typeset geometry, not the parser's line-budget
-	// estimate, so the preview and the exported file agree page for page.
-	const bodyPages = pdfPages(parsed);
 	// The PDF puts the title page first, so the preview must too — otherwise
 	// every page number in the app is one off from the exported file.
 	const titleFirst = hasTitlePage(parsed.titlePage);
@@ -1499,7 +1502,7 @@ function Script({ view }: { view: ScriptView }) {
 			matches.push({ kind: 'text', offset: at });
 		}
 		for (const [id, entries] of Object.entries(scriptNotes.comments)) {
-			if (entries[0]?.text.toLowerCase().includes(needle)) matches.push({ kind: 'comment', id });
+			if (entries.some((e) => e.text.toLowerCase().includes(needle))) matches.push({ kind: 'comment', id });
 		}
 		for (const [id, entry] of Object.entries(scriptNotes.altText)) {
 			entry.options.forEach((opt, optionIndex) => {
@@ -1600,7 +1603,6 @@ function Script({ view }: { view: ScriptView }) {
 		}
 	};
 
-	/** Scrolls the active pane to a script line (outline navigation). */
 	/** Scrolls the preview to a page (the pages all exist; navigation moves).
 	 *  `behavior` defaults to smooth for an explicit jump (Prev/Next, the page
 	 *  number field, search) — landing back where you were on a mode switch
@@ -2798,7 +2800,9 @@ export function PagesPreviewBody({
 									{lineSpans.length > 0 ? (
 										<span className="loom-sp-annotation-icons">
 											{lineSpans.map((s) => {
-												const unresolved = s.kind === 'comment' ? !(comments[s.id]?.[0]?.resolved ?? false) : false;
+												const entries = comments[s.id] ?? [];
+												const unresolved =
+													s.kind === 'comment' ? !(entries.length > 0 && entries.every((e) => e.resolved)) : false;
 												return (
 													<span
 														key={s.id}
@@ -2884,7 +2888,6 @@ export function useScriptText(plugin: LoomLoomPlugin, project: ProjectDef | null
 	return text;
 }
 
-/** The lines of the script belonging to one scene, by its loom id. */
 /** One node in the script navigation tree — a chapter or a nested `##`/`###`
  *  section (a branch-tagged one carries its own `branchGroup`). */
 export interface NavNode {

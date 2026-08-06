@@ -129,6 +129,12 @@ const HIDDEN_LINK_KEYS = [
 	'regionorder',
 ];
 
+/** The managed file path for `file` if renamed to `base` in its own folder. */
+function managedNotePath(file: TFile, base: string): string {
+	const parent = file.parent?.path ?? '';
+	return normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+}
+
 function isHiddenLinkKey(key: string): boolean {
 	const lower = key.toLowerCase();
 	// List entries come through as "attendance.0", "attendance.1", …
@@ -158,6 +164,18 @@ function fmLoom(fm: FrontMatterCache | Record<string, unknown>, key: string): un
 		if (v !== undefined) return v;
 	}
 	return undefined;
+}
+
+/** Reads a loom key as a trimmed string, or '' if absent/not a string. */
+function fmString(fm: FrontMatterCache | Record<string, unknown>, key: string): string {
+	const v = fmLoom(fm, key);
+	return typeof v === 'string' ? v.trim() : '';
+}
+
+/** Reads a loom key as a linkpath, or null if absent/not a string. */
+function fmLinkpath(fm: FrontMatterCache | Record<string, unknown>, key: string): string | null {
+	const v = fmLoom(fm, key);
+	return typeof v === 'string' ? extractLinkpath(v) : null;
 }
 
 /**
@@ -427,8 +445,7 @@ export class LoomIndexer extends Component {
 				? managedEntityFileName(project.name, record.type, copyNaming.name, undefined, copyNaming.owner)
 				: managedEntityFileName(project.name, record.type, displayName, parentNameOf.get(record.path));
 			if (file.basename === base) continue;
-			const parent = file.parent?.path ?? '';
-			const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+			const newPath = managedNotePath(file, base);
 			// The managed name is taken by another note. Historically this appended
 			// " 2", " 3", … — which, on a synced vault where the same collision
 			// happens on both machines, manufactures an unbounded pile of numbered
@@ -639,8 +656,7 @@ export class LoomIndexer extends Component {
 				}
 				const base = managedEntityFileName(project.name, 'item', origin.name, undefined, owner.name);
 				if (file.basename !== base) {
-					const parent = file.parent?.path ?? '';
-					const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+					const newPath = managedNotePath(file, base);
 					// Never invent " 2", " 3", … on a clash: on a synced vault the same
 					// clash occurs on every machine, and the numbered copies then sync
 					// into each other without bound. Leave the file where it is.
@@ -811,11 +827,7 @@ export class LoomIndexer extends Component {
 		const nameValue = fmLoom(fm, FM.name);
 		const descriptionValue = fmLoom(fm, FM.description);
 		const aliveValue = fmLoom(fm, FM.alive);
-		const deathValue = fmLoom(fm, FM.deathSession);
-		const receivedValue = fmLoom(fm, FM.questReceived);
 		const outcomeValue = fmLoom(fm, FM.questOutcome);
-		const outcomeSessionValue = fmLoom(fm, FM.questOutcomeSession);
-		const parentValue = fmLoom(fm, FM.parentLocation);
 		const rewardValue = fmLoom(fm, FM.reward);
 		return {
 			path: file.path,
@@ -837,82 +849,49 @@ export class LoomIndexer extends Component {
 			sessionNotes,
 			date: parseLoomDate(fmLoom(fm, FM.date), calendar, project.config),
 			attendance: parseLinkList(fmLoom(fm, FM.attendance)),
-			parentLocation: typeof parentValue === 'string' ? extractLinkpath(parentValue) : null,
+			parentLocation: fmLinkpath(fm, FM.parentLocation),
 			sublocationOrder: parseLinkList(fmLoom(fm, FM.sublocationOrder)),
-			region: (() => {
-				const v = fmLoom(fm, FM.region);
-				return typeof v === 'string' ? extractLinkpath(v) : null;
-			})(),
+			region: fmLinkpath(fm, FM.region),
 			regionOrder: parseLinkList(fmLoom(fm, FM.regionOrder)),
 			items: parseLinkList(fmLoom(fm, FM.items)),
-			itemOrigin: (() => {
-				const v = fmLoom(fm, FM.itemOrigin);
-				return typeof v === 'string' ? extractLinkpath(v) : null;
-			})(),
-			itemOwner: (() => {
-				const v = fmLoom(fm, FM.itemOwner);
-				return typeof v === 'string' ? extractLinkpath(v) : null;
-			})(),
+			itemOrigin: fmLinkpath(fm, FM.itemOrigin),
+			itemOwner: fmLinkpath(fm, FM.itemOwner),
 			members: parseMemberList(fmLoom(fm, FM.members)),
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
 			active: fmLoom(fm, FM.active) !== false,
-			deathSession: typeof deathValue === 'string' ? extractLinkpath(deathValue) : null,
-			questReceived: typeof receivedValue === 'string' ? extractLinkpath(receivedValue) : null,
+			deathSession: fmLinkpath(fm, FM.deathSession),
+			questReceived: fmLinkpath(fm, FM.questReceived),
 			questOutcome:
 				typeof outcomeValue === 'string' &&
 				(QUEST_OUTCOMES as readonly string[]).includes(outcomeValue.toLowerCase())
 					? outcomeValue.toLowerCase()
 					: '',
-			questOutcomeSession:
-				typeof outcomeSessionValue === 'string' ? extractLinkpath(outcomeSessionValue) : null,
+			questOutcomeSession: fmLinkpath(fm, FM.questOutcomeSession),
 			questGivers: parseLinkList(fmLoom(fm, FM.questGiver)),
 			reward: typeof rewardValue === 'string' ? rewardValue : '',
 			objectives,
-			seq: typeof fmLoom(fm, FM.seq) === 'number' ? (fmLoom(fm, FM.seq) as number) : null,
+			seq: (() => {
+				const v = fmLoom(fm, FM.seq);
+				return typeof v === 'number' ? v : null;
+			})(),
 			eventKind: (() => {
 				const v = fmLoom(fm, FM.eventKind);
 				return typeof v === 'string' && isEventKind(v.toLowerCase()) ? (v.toLowerCase() as EventKind) : '';
 			})(),
 			happened: fmLoom(fm, FM.happened) === true,
 			npcLines: parseTagList(fmLoom(fm, FM.npcLines)),
-			displayTitle: (() => {
-				const v = fmLoom(fm, FM.displayTitle);
-				return typeof v === 'string' ? v.trim() : '';
-			})(),
-			sceneId: (() => {
-				const v = fmLoom(fm, FM.sceneId);
-				return typeof v === 'string' ? v.trim() : '';
-			})(),
-			sceneIntExt: (() => {
-				const v = fmLoom(fm, FM.sceneIntExt);
-				return typeof v === 'string' ? v.trim() : '';
-			})(),
-			sceneTime: (() => {
-				const v = fmLoom(fm, FM.sceneTime);
-				return typeof v === 'string' ? v.trim() : '';
-			})(),
-			sceneLocation: (() => {
-				const v = fmLoom(fm, FM.sceneLocation);
-				const lp = typeof v === 'string' ? extractLinkpath(v) : null;
-				return lp ?? '';
-			})(),
+			displayTitle: fmString(fm, FM.displayTitle),
+			sceneId: fmString(fm, FM.sceneId),
+			sceneIntExt: fmString(fm, FM.sceneIntExt),
+			sceneTime: fmString(fm, FM.sceneTime),
+			sceneLocation: fmLinkpath(fm, FM.sceneLocation) ?? '',
 			sceneCast: parseLinkList(fmLoom(fm, FM.sceneCast)),
 			sceneFactions: parseLinkList(fmLoom(fm, FM.sceneFactions)),
 			sceneItems: parseLinkList(fmLoom(fm, FM.sceneItems)),
 			sceneMentionedLocations: parseLinkList(fmLoom(fm, FM.sceneMentionedLocations)),
-			sceneChapter: (() => {
-				const v = fmLoom(fm, FM.sceneChapter);
-				const lp = typeof v === 'string' ? extractLinkpath(v) : null;
-				return lp ?? '';
-			})(),
-			sceneBranch: (() => {
-				const v = fmLoom(fm, FM.sceneBranch);
-				return typeof v === 'string' ? v.trim() : '';
-			})(),
-			chapterId: (() => {
-				const v = fmLoom(fm, FM.chapterId);
-				return typeof v === 'string' ? v.trim() : '';
-			})(),
+			sceneChapter: fmLinkpath(fm, FM.sceneChapter) ?? '',
+			sceneBranch: fmString(fm, FM.sceneBranch),
+			chapterId: fmString(fm, FM.chapterId),
 			// Loom-managed timestamps win over the filesystem stats (cloud-sync can
 			// overwrite ctime/mtime with the sync time); stats are the fallback for
 			// notes not yet stamped.
@@ -1023,7 +1002,7 @@ export class LoomIndexer extends Component {
 				linked.add(target.path);
 			}
 		}
-	// Ticked attendance connects the PC to the session (typed edge); the
+		// Ticked attendance connects the PC to the session (typed edge); the
 		// key stays in HIDDEN_LINK_KEYS only to keep the generic pass from
 		// double-counting it as a plain link.
 		for (const lp of record.attendance) {
@@ -1063,7 +1042,7 @@ export class LoomIndexer extends Component {
 				linked.add(region.path);
 			}
 		}
-	for (const note of record.sessionNotes) {
+		for (const note of record.sessionNotes) {
 			const target = note.session ? this.resolve(note.session, record.path) : null;
 			if (target?.type === 'session' && !linked.has(target.path)) {
 				out.push({ record: target, relType: 'session note', direction: 'outgoing' });

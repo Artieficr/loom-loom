@@ -191,8 +191,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 	const groups = (() => {
 		const map = new Map<string, { session: EntityRecord | null; entries: GroupNoteEntry[] }>();
 		for (const e of entries) {
-			const ses = e.session !== null ? plugin.indexer.resolve(e.session, e.owner.path) : null;
-			const session = ses && roleOf(ses.type) === 'anchor' ? ses : null;
+			const session = entrySession(e);
 			const key = session?.path ?? 'none';
 			if (!map.has(key)) map.set(key, { session, entries: [] });
 			map.get(key)?.entries.push(e);

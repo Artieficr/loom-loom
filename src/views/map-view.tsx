@@ -75,8 +75,6 @@ interface MapZone {
 	locked: boolean;
 }
 
-/** One named map page inside a project's Maps file. Pages nest via `parentId`
- *  (folder-like) and order among siblings via `order`. */
 /**
  * A background image placed on a map page — always the BOTTOM layer, under every
  * zone, road and marker, so you draw over it.
@@ -105,6 +103,8 @@ interface MapImage {
 	opacity: number;
 }
 
+/** One named map page inside a project's Maps file. Pages nest via `parentId`
+ *  (folder-like) and order among siblings via `order`. */
 interface MapPage {
 	id: string;
 	name: string;
@@ -892,6 +892,35 @@ function resizeImage(orig: MapImage, handle: ImageHandle, p: { x: number; y: num
 		case 's':
 			return { ...orig, x: cx - w / 2, w, h };
 	}
+}
+
+/** A freshly drawn zone/road's shared defaults — width scaled to the page's
+ *  element scale, the map's own draw color, no location/pins yet. The three
+ *  ways to create one (freeform polygon, road, rectangle) differ only in
+ *  `kind`, `points`, and (a road only) `startLoc`/`endLoc`. */
+function newZone(
+	kind: 'zone' | 'road',
+	points: { x: number; y: number }[],
+	scale: number,
+	color: string,
+	extra?: Partial<Pick<MapZone, 'startLoc' | 'endLoc'>>
+): MapZone {
+	return {
+		id: newId(),
+		kind,
+		points,
+		width: DEFAULT_ROAD_WIDTH * scale,
+		color,
+		alpha: DEFAULT_ALPHA,
+		location: null,
+		node: null,
+		nodeSize: 'regular',
+		doors: [],
+		itemPins: [],
+		subPins: [],
+		locked: false,
+		...extra,
+	};
 }
 
 /** Patch re-fitting everything a road carries — its own location node, doors,
@@ -2274,21 +2303,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 
 	const finishDraft = () => {
 		if (draft.length < 3) return;
-		const zone: MapZone = {
-			id: newId(),
-			kind: 'zone',
-			points: draft.map((p) => ({ ...p })),
-			width: DEFAULT_ROAD_WIDTH * scale,
-			color: plugin.settings.mapsColor,
-			alpha: DEFAULT_ALPHA,
-			location: null,
-			node: null,
-			nodeSize: 'regular',
-			doors: [],
-			itemPins: [],
-			subPins: [],
-			locked: false,
-		};
+		const zone = newZone(
+			'zone',
+			draft.map((p) => ({ ...p })),
+			scale,
+			plugin.settings.mapsColor
+		);
 		snapshot();
 		commit([...zonesRef.current, zone]);
 		setDraft([]);
@@ -2302,23 +2322,13 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	};
 	/** Creates a road connecting two locations, with the drawn waypoints between. */
 	const finishRoad = (startLoc: string, endLoc: string, waypoints: { x: number; y: number }[]) => {
-		const road: MapZone = {
-			id: newId(),
-			kind: 'road',
-			points: waypoints.map((p) => ({ ...p })),
-			startLoc,
-			endLoc,
-			width: DEFAULT_ROAD_WIDTH * scale,
-			color: plugin.settings.mapsColor,
-			alpha: DEFAULT_ALPHA,
-			location: null,
-			node: null,
-			nodeSize: 'regular',
-			doors: [],
-			itemPins: [],
-			subPins: [],
-			locked: false,
-		};
+		const road = newZone(
+			'road',
+			waypoints.map((p) => ({ ...p })),
+			scale,
+			plugin.settings.mapsColor,
+			{ startLoc, endLoc }
+		);
 		snapshot();
 		commit([...zonesRef.current, road]);
 		setRoadDraft(null);
@@ -2342,26 +2352,17 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const k = cameraRef.current.k;
 		// Ignore a tiny drag (effectively a click).
 		if ((x1 - x0) * k < 6 || (y1 - y0) * k < 6) return;
-		const zone: MapZone = {
-			id: newId(),
-			kind: 'zone',
-			points: [
+		const zone = newZone(
+			'zone',
+			[
 				{ x: x0, y: y0 },
 				{ x: x1, y: y0 },
 				{ x: x1, y: y1 },
 				{ x: x0, y: y1 },
 			],
-			width: DEFAULT_ROAD_WIDTH * scale,
-			color: plugin.settings.mapsColor,
-			alpha: DEFAULT_ALPHA,
-			location: null,
-			node: null,
-			nodeSize: 'regular',
-			doors: [],
-			itemPins: [],
-			subPins: [],
-			locked: false,
-		};
+			scale,
+			plugin.settings.mapsColor
+		);
 		snapshot();
 		commit([...zonesRef.current, zone]);
 		const ctr = centroid(zone.points);
@@ -3576,132 +3577,146 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							{squish >= 0.995
 								? null
 								: zones.flatMap((z) => {
-									const dt = z.node ?? centroid(z.points);
-									const ds = 1 - squish;
-									const pinSquish =
-										squish > 0.001
-											? `translate(${dt.x},${dt.y}) scale(${ds}) translate(${-dt.x},${-dt.y})`
-											: undefined;
-									const itemColor = plugin.settings.nodeColors.item;
-									return z.itemPins.map((it, i) => {
-										const itemR = itemPinRadius(z, it.size);
-										return (
-									<g
-										key={`itempin-${z.id}-${i}`}
-										className="loom-map-door"
-										transform={pinSquish}
-										opacity={squish > 0.001 ? ds : undefined}
-										onPointerDown={(e) => {
-											if (tool !== "select") return;
-											if (e.button !== 0) return;
-											e.stopPropagation();
-											setSelectedZone(z.id);
-											beginPending();
-											drag.current = { kind: "itempin", id: z.id, index: i, startX: e.clientX, startY: e.clientY, moved: false };
-											setDragActive(true);
-										}}
-										onContextMenu={(e) => {
-											e.preventDefault();
-											e.stopPropagation();
-											openPinMenu(e, z, 'item', i);
-										}}
-										onDoubleClick={(e) => {
-											e.stopPropagation();
-											openItem(it.item);
-										}}
-									>
-										<circle
-											cx={it.x}
-											cy={it.y}
-											r={itemR * nodeUnit}
-											fill={itemColor}
-											className="loom-map-node-dot"
-										/>
-										<g
-											className="loom-map-item-glyph"
-											transform={`translate(${it.x},${it.y}) scale(${(itemR * 1.1) * nodeUnit / 24}) translate(-12,-12)`}
-											fill="none"
-											stroke={glyphInk(itemColor)}
-											strokeWidth={2}
-											strokeLinecap="round"
-											strokeLinejoin="round"
-										>
-											<path d="M6 3h12l4 6-10 13L2 9Z" />
-											<path d="M11 3 8 9l4 13 4-13-3-6" />
-											<path d="M2 9h20" />
-										</g>
-										<text
-											x={it.x}
-											y={it.y + (itemR + 12) * nodeUnit}
-											textAnchor="middle"
-											className="loom-map-node-label"
-											style={{ fontSize: `${11 * nodeUnit}px` }}
-										>
-											{clampLabel(itemName(it.item))}
-										</text>
-									</g>
-										);
-									});
-								})}
+										const dt = z.node ?? centroid(z.points);
+										const ds = 1 - squish;
+										const pinSquish =
+											squish > 0.001
+												? `translate(${dt.x},${dt.y}) scale(${ds}) translate(${-dt.x},${-dt.y})`
+												: undefined;
+										const itemColor = plugin.settings.nodeColors.item;
+										return z.itemPins.map((it, i) => {
+											const itemR = itemPinRadius(z, it.size);
+											return (
+												<g
+													key={`itempin-${z.id}-${i}`}
+													className="loom-map-door"
+													transform={pinSquish}
+													opacity={squish > 0.001 ? ds : undefined}
+													onPointerDown={(e) => {
+														if (tool !== 'select') return;
+														if (e.button !== 0) return;
+														e.stopPropagation();
+														setSelectedZone(z.id);
+														beginPending();
+														drag.current = {
+															kind: 'itempin',
+															id: z.id,
+															index: i,
+															startX: e.clientX,
+															startY: e.clientY,
+															moved: false,
+														};
+														setDragActive(true);
+													}}
+													onContextMenu={(e) => {
+														e.preventDefault();
+														e.stopPropagation();
+														openPinMenu(e, z, 'item', i);
+													}}
+													onDoubleClick={(e) => {
+														e.stopPropagation();
+														openItem(it.item);
+													}}
+												>
+													<circle
+														cx={it.x}
+														cy={it.y}
+														r={itemR * nodeUnit}
+														fill={itemColor}
+														className="loom-map-node-dot"
+													/>
+													<g
+														className="loom-map-item-glyph"
+														transform={`translate(${it.x},${it.y}) scale(${(itemR * 1.1 * nodeUnit) / 24}) translate(-12,-12)`}
+														fill="none"
+														stroke={glyphInk(itemColor)}
+														strokeWidth={2}
+														strokeLinecap="round"
+														strokeLinejoin="round"
+													>
+														<path d="M6 3h12l4 6-10 13L2 9Z" />
+														<path d="M11 3 8 9l4 13 4-13-3-6" />
+														<path d="M2 9h20" />
+													</g>
+													<text
+														x={it.x}
+														y={it.y + (itemR + 12) * nodeUnit}
+														textAnchor="middle"
+														className="loom-map-node-label"
+														style={{ fontSize: `${11 * nodeUnit}px` }}
+													>
+														{clampLabel(itemName(it.item))}
+													</text>
+												</g>
+											);
+										});
+									})}
 							{/* Sublocation nodes — smaller nodes for a location’s sublocations,
 							    inside the zone. Double-click opens the sublocation; squish like doors. */}
 							{squish >= 0.995
 								? null
 								: zones.flatMap((z) => {
-									const dt = z.node ?? centroid(z.points);
-									const ds = 1 - squish;
-									const spSquish =
-										squish > 0.001
-											? `translate(${dt.x},${dt.y}) scale(${ds}) translate(${-dt.x},${-dt.y})`
-											: undefined;
-									const col = darker(z.color);
-									return z.subPins.map((sp, i) => {
-										const spR = subPinRadius(z, sp.loc, sp.size);
-										return (
-									<g
-										key={`subpin-${z.id}-${i}`}
-										className="loom-map-node"
-										transform={spSquish}
-										opacity={squish > 0.001 ? ds : undefined}
-										onPointerDown={(e) => {
-											if (tool !== "select") return;
-											if (e.button !== 0) return;
-											e.stopPropagation();
-											setSelectedZone(z.id);
-											beginPending();
-											drag.current = { kind: "subpin", id: z.id, index: i, startX: e.clientX, startY: e.clientY, moved: false };
-											setDragActive(true);
-										}}
-										onContextMenu={(e) => {
-											e.preventDefault();
-											e.stopPropagation();
-											openPinMenu(e, z, 'sub', i);
-										}}
-										onDoubleClick={(e) => {
-											e.stopPropagation();
-											openSubloc(sp.loc);
-										}}
-									>
-										<circle
-											cx={sp.x}
-											cy={sp.y}
-											r={spR * nodeUnit}
-											fill={col}
-											className="loom-map-node-dot"
-										/>
-										<text
-											x={sp.x}
-											y={sp.y + (spR + 9) * nodeUnit}
-											textAnchor="middle"
-											className="loom-map-node-label"
-											style={{ fontSize: `${11 * nodeUnit}px` }}
-										>
-											{clampLabel(sublocName(sp.loc))}
-										</text>
-									</g>
-										);
-									});
-								})}
+										const dt = z.node ?? centroid(z.points);
+										const ds = 1 - squish;
+										const spSquish =
+											squish > 0.001
+												? `translate(${dt.x},${dt.y}) scale(${ds}) translate(${-dt.x},${-dt.y})`
+												: undefined;
+										const col = darker(z.color);
+										return z.subPins.map((sp, i) => {
+											const spR = subPinRadius(z, sp.loc, sp.size);
+											return (
+												<g
+													key={`subpin-${z.id}-${i}`}
+													className="loom-map-node"
+													transform={spSquish}
+													opacity={squish > 0.001 ? ds : undefined}
+													onPointerDown={(e) => {
+														if (tool !== 'select') return;
+														if (e.button !== 0) return;
+														e.stopPropagation();
+														setSelectedZone(z.id);
+														beginPending();
+														drag.current = {
+															kind: 'subpin',
+															id: z.id,
+															index: i,
+															startX: e.clientX,
+															startY: e.clientY,
+															moved: false,
+														};
+														setDragActive(true);
+													}}
+													onContextMenu={(e) => {
+														e.preventDefault();
+														e.stopPropagation();
+														openPinMenu(e, z, 'sub', i);
+													}}
+													onDoubleClick={(e) => {
+														e.stopPropagation();
+														openSubloc(sp.loc);
+													}}
+												>
+													<circle
+														cx={sp.x}
+														cy={sp.y}
+														r={spR * nodeUnit}
+														fill={col}
+														className="loom-map-node-dot"
+													/>
+													<text
+														x={sp.x}
+														y={sp.y + (spR + 9) * nodeUnit}
+														textAnchor="middle"
+														className="loom-map-node-label"
+														style={{ fontSize: `${11 * nodeUnit}px` }}
+													>
+														{clampLabel(sublocName(sp.loc))}
+													</text>
+												</g>
+											);
+										});
+									})}
 							{/* Ghost preview while dragging a sublocation/item from the menu. */}
 							{pinDrag && pinDragPos
 								? (() => {
@@ -4102,6 +4117,90 @@ function ObsidianSlider({
 	return <div className="loom-map-obsidian-slider" ref={ref} />;
 }
 
+/**
+ * One zone-panel "pin list" popover — search + a scrollable list of draggable
+ * rows, each with an open button and a pin-in-zone checkbox. `ZonePanel`'s
+ * sublocations/doors/items palettes are this exact shape three times over,
+ * differing only in labels/icons/callbacks; this is the shared body each of
+ * their `openPanel === '…'` branches renders.
+ */
+function ZonePinList({
+	columnLabel,
+	searchPlaceholder,
+	dragTitle,
+	rowIcon,
+	rowIconFallback,
+	pinAriaLabel = 'Show as node in the zone',
+	options,
+	pinned,
+	query,
+	onQueryChange,
+	onToggle,
+	onOpen,
+	onDragStart,
+}: {
+	columnLabel: string;
+	searchPlaceholder: string;
+	dragTitle: string;
+	rowIcon: string;
+	rowIconFallback?: string;
+	pinAriaLabel?: string;
+	options: { value: string; label: string }[];
+	pinned: Set<string>;
+	query: string;
+	onQueryChange: (v: string) => void;
+	onToggle: (value: string) => void;
+	onOpen: (value: string) => void;
+	onDragStart: (value: string) => void;
+}): ReactElement {
+	const q = query.trim().toLowerCase();
+	const filtered = q ? options.filter((o) => o.label.toLowerCase().includes(q)) : options;
+	return (
+		<div className="loom-map-palette-pop loom-map-doors-pop">
+			<input
+				className="loom-map-subs-search"
+				type="text"
+				placeholder={searchPlaceholder}
+				value={query}
+				onChange={(e) => onQueryChange(e.target.value)}
+			/>
+			<div className="loom-map-subs-head">
+				<span>{columnLabel}</span>
+				<span>Node</span>
+			</div>
+			<div className="loom-map-subs-list">
+				{filtered.map((o) => (
+					<div key={o.value} className="loom-map-doors-row loom-map-subs-row">
+						<button
+							className="loom-map-doors-open"
+							title={dragTitle}
+							draggable
+							onDragStart={(e) => {
+								e.dataTransfer.effectAllowed = 'copy';
+								e.dataTransfer.setData('text/plain', o.value);
+								// Hide the default row drag image — only the node ghost shows.
+								e.dataTransfer.setDragImage(new Image(), 0, 0);
+								onDragStart(o.value);
+							}}
+							onClick={() => onOpen(o.value)}
+						>
+							<Icon name={rowIcon} fallback={rowIconFallback} />
+							<span>{o.label}</span>
+						</button>
+						<input
+							type="checkbox"
+							checked={pinned.has(o.value)}
+							onChange={() => onToggle(o.value)}
+							aria-label={pinAriaLabel}
+						/>
+					</div>
+				))}
+				{filtered.length === 0 ? <div className="loom-map-subs-more">No matches</div> : null}
+			</div>
+		</div>
+	);
+}
+
 /** The horizontal per-zone context menu. Style settings (color + transparency)
  *  live behind the palette icon; the rest are icon-only. */
 function ZonePanel({
@@ -4263,58 +4362,21 @@ function ZonePanel({
 					>
 						<Icon name="list" />
 					</button>
-					{openPanel === 'subs'
-						? (() => {
-								const q = subQuery.trim().toLowerCase();
-								const filtered = q
-									? sublocations.filter((s) => s.label.toLowerCase().includes(q))
-									: sublocations;
-								return (
-									<div className="loom-map-palette-pop loom-map-doors-pop">
-										<input
-											className="loom-map-subs-search"
-											type="text"
-											placeholder="Search sublocations…"
-											value={subQuery}
-											onChange={(e) => setSubQuery(e.target.value)}
-										/>
-										<div className="loom-map-subs-head">
-											<span>Location</span>
-											<span>Node</span>
-										</div>
-										<div className="loom-map-subs-list">
-											{filtered.map((sub) => (
-												<div key={sub.value} className="loom-map-doors-row loom-map-subs-row">
-													<button
-														className="loom-map-doors-open"
-														title="Click to open · drag onto the map to place its node"
-														draggable
-														onDragStart={(e) => {
-															e.dataTransfer.effectAllowed = 'copy';
-															e.dataTransfer.setData('text/plain', sub.value);
-															// Hide the default row drag image — only the node ghost shows.
-															e.dataTransfer.setDragImage(new Image(), 0, 0);
-															onSubDragStart(sub.value);
-														}}
-														onClick={() => onOpenSub(sub.value)}
-													>
-														<Icon name="map-pin" />
-														<span>{sub.label}</span>
-													</button>
-													<input
-														type="checkbox"
-														checked={subPinned.has(sub.value)}
-														onChange={() => onToggleSub(sub.value)}
-														aria-label="Show as node in the zone"
-													/>
-												</div>
-											))}
-											{filtered.length === 0 ? <div className="loom-map-subs-more">No matches</div> : null}
-										</div>
-									</div>
-								);
-							})()
-						: null}
+					{openPanel === 'subs' ? (
+						<ZonePinList
+							columnLabel="Location"
+							searchPlaceholder="Search sublocations…"
+							dragTitle="Click to open · drag onto the map to place its node"
+							rowIcon="map-pin"
+							options={sublocations}
+							pinned={subPinned}
+							query={subQuery}
+							onQueryChange={setSubQuery}
+							onToggle={onToggleSub}
+							onOpen={onOpenSub}
+							onDragStart={onSubDragStart}
+						/>
+					) : null}
 				</div>
 			) : null}
 			{/* Doors: portal links to other map pages. */}
@@ -4326,57 +4388,23 @@ function ZonePanel({
 				>
 					<Icon name="door-open" fallback="log-in" />
 				</button>
-				{openPanel === 'doors'
-					? (() => {
-							const q = doorQuery.trim().toLowerCase();
-							const filtered = q
-								? mapPageOptions.filter((o) => o.label.toLowerCase().includes(q))
-								: mapPageOptions;
-							return (
-								<div className="loom-map-palette-pop loom-map-doors-pop">
-									<input
-										className="loom-map-subs-search"
-										type="text"
-										placeholder="Search map pages"
-										value={doorQuery}
-										onChange={(e) => setDoorQuery(e.target.value)}
-									/>
-									<div className="loom-map-subs-head">
-										<span>Map</span>
-										<span>Node</span>
-									</div>
-									<div className="loom-map-subs-list">
-										{filtered.map((pg) => (
-											<div key={pg.value} className="loom-map-doors-row loom-map-subs-row">
-												<button
-													className="loom-map-doors-open"
-													title="Click to open · drag onto the map to place its door"
-													draggable
-													onDragStart={(e) => {
-														e.dataTransfer.effectAllowed = 'copy';
-														e.dataTransfer.setData('text/plain', pg.value);
-														e.dataTransfer.setDragImage(new Image(), 0, 0);
-														onDoorDragStart(pg.value);
-													}}
-													onClick={() => onOpenPage(pg.value)}
-												>
-													<Icon name="door-open" fallback="log-in" />
-													<span>{pg.label}</span>
-												</button>
-												<input
-													type="checkbox"
-													checked={doorPinned.has(pg.value)}
-													onChange={() => onToggleDoor(pg.value)}
-													aria-label="Show a door in the zone"
-												/>
-											</div>
-										))}
-										{filtered.length === 0 ? <div className="loom-map-subs-more">No matches</div> : null}
-									</div>
-								</div>
-							);
-						})()
-					: null}
+				{openPanel === 'doors' ? (
+					<ZonePinList
+						columnLabel="Map"
+						searchPlaceholder="Search map pages"
+						dragTitle="Click to open · drag onto the map to place its door"
+						rowIcon="door-open"
+						rowIconFallback="log-in"
+						pinAriaLabel="Show a door in the zone"
+						options={mapPageOptions}
+						pinned={doorPinned}
+						query={doorQuery}
+						onQueryChange={setDoorQuery}
+						onToggle={onToggleDoor}
+						onOpen={onOpenPage}
+						onDragStart={onDoorDragStart}
+					/>
+				) : null}
 			</div>
 			{/* Items dropped inside the zone. */}
 			<div className="loom-map-palette">
@@ -4387,57 +4415,21 @@ function ZonePanel({
 				>
 					<Icon name="gem" />
 				</button>
-				{openPanel === 'items'
-					? (() => {
-							const q = itemQuery.trim().toLowerCase();
-							const filtered = q
-								? itemOptions.filter((o) => o.label.toLowerCase().includes(q))
-								: itemOptions;
-							return (
-								<div className="loom-map-palette-pop loom-map-doors-pop">
-									<input
-										className="loom-map-subs-search"
-										type="text"
-										placeholder="Search items"
-										value={itemQuery}
-										onChange={(e) => setItemQuery(e.target.value)}
-									/>
-									<div className="loom-map-subs-head">
-										<span>Item</span>
-										<span>Node</span>
-									</div>
-									<div className="loom-map-subs-list">
-										{filtered.map((it) => (
-											<div key={it.value} className="loom-map-doors-row loom-map-subs-row">
-												<button
-													className="loom-map-doors-open"
-													title="Click to open · drag onto the map to place its node"
-													draggable
-													onDragStart={(e) => {
-														e.dataTransfer.effectAllowed = 'copy';
-														e.dataTransfer.setData('text/plain', it.value);
-														e.dataTransfer.setDragImage(new Image(), 0, 0);
-														onItemDragStart(it.value);
-													}}
-													onClick={() => onOpenItem(it.value)}
-												>
-													<Icon name="gem" />
-													<span>{it.label}</span>
-												</button>
-												<input
-													type="checkbox"
-													checked={itemPinned.has(it.value)}
-													onChange={() => onToggleItem(it.value)}
-													aria-label="Show as node in the zone"
-												/>
-											</div>
-										))}
-										{filtered.length === 0 ? <div className="loom-map-subs-more">No matches</div> : null}
-									</div>
-								</div>
-							);
-						})()
-					: null}
+				{openPanel === 'items' ? (
+					<ZonePinList
+						columnLabel="Item"
+						searchPlaceholder="Search items"
+						dragTitle="Click to open · drag onto the map to place its node"
+						rowIcon="gem"
+						options={itemOptions}
+						pinned={itemPinned}
+						query={itemQuery}
+						onQueryChange={setItemQuery}
+						onToggle={onToggleItem}
+						onOpen={onOpenItem}
+						onDragStart={onItemDragStart}
+					/>
+				) : null}
 			</div>
 			<span className="loom-map-sep" />
 			{/* Group: node size + style + lock. */}

@@ -633,8 +633,8 @@ export function MarkdownField({
 								icons: false,
 							}),
 							// Tab indents (nesting bullets) instead of leaving the field;
-						// lowest precedence so an open completion still accepts on Tab.
-						keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
+							// lowest precedence so an open completion still accepts on Tab.
+							keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
 							EditorView.updateListener.of((update) => {
 								if (update.docChanged) onChangeRef.current(update.state.doc.toString());
 								if (update.focusChanged) {
