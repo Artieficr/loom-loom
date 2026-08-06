@@ -3,70 +3,28 @@ import { CachedLicenseState, emptyLicenseState } from './types';
 
 /**
  * Per-device license cache, backed by `App.loadLocalStorage`/`saveLocalStorage`
- * (real `localStorage`, `@since 1.8.7`) — deliberately NOT `Plugin.saveData()`.
- * `saveData` writes into `<vault>/.obsidian/plugins/loom-loom/data.json`, a file
- * INSIDE the vault folder, and this codebase already treats vault-folder files
- * as synced across the user's own machines (Dropbox, Obsidian Sync — see
+ * (real `localStorage`) — deliberately NOT `Plugin.saveData()`. `saveData`
+ * writes into `<vault>/.obsidian/plugins/loom-loom/data.json`, a file INSIDE
+ * the vault folder, and this codebase already treats vault-folder files as
+ * synced across the user's own machines (Dropbox, Obsidian Sync — see
  * `docs/ARCHITECTURE.md`'s "Playing nicely with file sync"). A device id or an
  * activation record written there would sync between two machines sharing one
  * vault and corrupt the "3 distinct devices" model instead of representing it.
  * `localStorage` lives in the Electron installation's own local profile, never
  * inside the vault, so it stays genuinely per-device even when the vault itself
- * is shared.
- *
- * `minAppVersion` here is still 1.7.2 (see CLAUDE.md), older than 1.8.7, so
- * every read/write is feature-detected and degrades to an in-memory, session-
- * only cache (never crashes, license state just doesn't persist) rather than
- * assuming the API exists.
+ * is shared. `minAppVersion` is 1.13.0 (past this API's `@since 1.8.7`), so
+ * these are called directly — no feature-detection/in-memory fallback needed.
  */
 
 const DEVICE_ID_KEY = 'loom-loom/license-device-id';
 const CACHE_KEY = 'loom-loom/license-cache';
 
-/**
- * Accessed through an unrelated structural type (not `App &`) rather than
- * `App`'s own declared members — same reason `main.ts`'s
- * `registerTimestampPropertyTypes` casts `this.app` through an anonymous
- * type instead of calling a declared method directly: it's a real, guarded,
- * feature-detected optional call, and going through the typed `App` API
- * would tie it to that API's `@since` version regardless of the runtime
- * guard already covering older Obsidian builds gracefully.
- */
-interface LocalStorageApi {
-	loadLocalStorage?(key: string): unknown;
-	saveLocalStorage?(key: string, data: unknown): void;
-}
-
-function localStorageApi(app: App): LocalStorageApi {
-	const api: LocalStorageApi = app;
-	return api;
-}
-
-let warnedNoLocalStorage = false;
-/** Session-only fallback for pre-1.8.7 Obsidian, so state at least survives
- *  within one running session instead of erroring. */
-const memoryFallback = new Map<string, unknown>();
-
 function readRaw(app: App, key: string): unknown {
-	const api = localStorageApi(app);
-	if (typeof api.loadLocalStorage === 'function') return api.loadLocalStorage(key);
-	if (!warnedNoLocalStorage) {
-		warnedNoLocalStorage = true;
-		console.warn(
-			'Loom Loom: this Obsidian version has no loadLocalStorage/saveLocalStorage (added in 1.8.7) — ' +
-				'license state will not persist across restarts.'
-		);
-	}
-	return memoryFallback.get(key) ?? null;
+	return app.loadLocalStorage(key);
 }
 
 function writeRaw(app: App, key: string, value: unknown): void {
-	const api = localStorageApi(app);
-	if (typeof api.saveLocalStorage === 'function') {
-		api.saveLocalStorage(key, value);
-		return;
-	}
-	memoryFallback.set(key, value);
+	app.saveLocalStorage(key, value);
 }
 
 function randomId(): string {

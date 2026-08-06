@@ -2705,16 +2705,23 @@ export class SetupProjectModal extends Modal {
 
 	onOpen(): void {
 		this.setTitle('Set up project');
+		// Obsidian vertically centers a modal by default — this one's height
+		// changes a lot switching Create/Use (a different field set each way),
+		// so centering kept shifting the box's own TOP edge up and down on
+		// every switch (centering holds the MIDDLE fixed, not the top).
+		// Anchoring to the top instead keeps the top edge planted in one spot
+		// regardless of height.
+		this.containerEl.addClass('loom-setup-modal-container');
 		this.render();
 	}
 
 	private render(): void {
 		this.contentEl.empty();
 
-		const pills = this.contentEl.createDiv({ cls: 'loom-tab-bar' });
+		const pills = this.contentEl.createDiv({ cls: 'loom-seg loom-setup-mode-pills' });
 		const pill = (mode: 'create' | 'use', label: string) => {
 			const btn = pills.createEl('button', {
-				cls: 'loom-tab' + (this.mode === mode ? ' loom-tab-active' : ''),
+				cls: 'loom-seg-btn' + (this.mode === mode ? ' loom-seg-on' : ''),
 				text: label,
 			});
 			btn.addEventListener('click', () => {
@@ -2760,7 +2767,7 @@ export class SetupProjectModal extends Modal {
 			});
 
 		// The kind decides which entity types the project holds, so it is
-		// picked up front — switching later is possible but moves files.
+		// picked up front — fixed at creation, not something you switch later.
 		new Setting(this.contentEl)
 			.setName('Project type')
 			.setDesc(PROJECT_KIND_META[this.kind].description)
@@ -2770,6 +2777,25 @@ export class SetupProjectModal extends Modal {
 					this.kind = v as ProjectKind;
 					this.render();
 				});
+				// The current kind's icon, same one used everywhere else this app
+				// shows a kind (the Projects settings table's Type column) — placed
+				// before the `<select>` so it reads left-to-right as "this kind's
+				// dropdown", and re-created fresh on every `render()` call (which
+				// already fires on every kind change), so it stays in sync for free
+				// with no separate update wiring.
+				const icon = createSpan({ cls: 'loom-setup-kind-icon' });
+				setIcon(icon, PROJECT_KIND_META[this.kind].icon);
+				dd.selectEl.before(icon);
+				// A fixed width covering the longest option ("Game Master") — without
+				// it the control resized per selection (narrow for "Player", wider for
+				// "Game Master"), and the OPEN option list, which matches the
+				// control's own width, was cramped against "Game Master"'s text with
+				// no breathing room when "Player" (the narrower option) was selected.
+				// Set as an INLINE style (via `setCssProps`, not a CSS class) —
+				// Obsidian's own `.dropdown` rule was still winning the width
+				// over a class-based override, and an inline style outranks any
+				// external stylesheet rule that isn't itself `!important`.
+				dd.selectEl.setCssProps({ width: '17ch' });
 			});
 		this.contentEl.createEl('p', {
 			cls: 'setting-item-description',
@@ -2789,10 +2815,20 @@ export class SetupProjectModal extends Modal {
 			this.kind
 		);
 		if (blocked) {
-			this.contentEl.createEl('p', {
-				cls: 'setting-item-description',
-				text: `This vault already has a free-tier ${PROJECT_KIND_META[this.kind].label.toLowerCase()} project. A license key unlocks unlimited projects of every type — see settings → license.`,
-			});
+			// Its own `Setting` row (no name, no control) purely so it picks up
+			// the same native top-border separator every other row in this modal
+			// already has — without it, this read as though it belonged to the
+			// "Project type" row right above rather than its own distinct notice.
+			new Setting(this.contentEl).setDesc(
+				createFragment((frag) => {
+					const box = frag.createDiv({ cls: 'loom-setup-warning' });
+					box.createDiv({
+						text: `This vault already has a free-tier ${PROJECT_KIND_META[this.kind].label.toLowerCase()} project.`,
+					});
+					box.createDiv({ text: 'A license key unlocks unlimited projects of any type.' });
+					box.createDiv({ text: 'See Settings → General → License' });
+				})
+			);
 		}
 
 		new Setting(this.contentEl).addButton((btn) =>

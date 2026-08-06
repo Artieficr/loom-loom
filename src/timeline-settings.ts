@@ -78,13 +78,18 @@ export class TimelineSettingsEditor {
 			.setDesc('How dates are displayed in the timeline and graph.')
 			.addDropdown((dd) => {
 				const sample = sampleDate(this.config);
-				for (const format of formats) {
-					dd.addOption(format, formatLoomDate(sample, { ...this.config, dateFormat: format }));
-				}
+				const labels = formats.map((format) => formatLoomDate(sample, { ...this.config, dateFormat: format }));
+				for (let i = 0; i < formats.length; i++) dd.addOption(formats[i], labels[i]);
 				dd.setValue(this.config.dateFormat).onChange((v) => {
 					this.config.dateFormat = v as DateFormat;
 					this.changed();
 				});
+				// Same fixed-width fix as the Timeline section's own "Project"
+				// dropdown (settings.ts) and Set-up-project's kind dropdown —
+				// sample-formatted dates vary a lot in length ("Mar 4th, 2003" vs.
+				// "2003-03-04"), so without this the control (and the cramped
+				// open option list matching its width) resized per selection.
+				dd.selectEl.setCssProps({ width: `${Math.max(...labels.map((l) => l.length)) + 3}ch` });
 			});
 
 		new Setting(containerEl)

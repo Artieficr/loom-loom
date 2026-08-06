@@ -4102,7 +4102,6 @@ function ObsidianSlider({
 		const s = new SliderComponent(host);
 		s.setLimits(min, max, step);
 		s.setValue(value);
-		s.setDynamicTooltip();
 		s.onChange((v) => onChangeRef.current(v));
 		slider.current = s;
 		return () => {
