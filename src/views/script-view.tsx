@@ -1024,6 +1024,7 @@ function Script({ view }: { view: ScriptView }) {
 			title: 'Add an alternative wording',
 			placeholder: selectedText,
 			cta: 'Add',
+			multiline: true,
 			onSubmit: (value) => {
 				void mutateScriptNotes(plugin.app, project, (notes) => {
 					const cur = notes.altText[id];
@@ -1117,6 +1118,34 @@ function Script({ view }: { view: ScriptView }) {
 		});
 	};
 
+	/** The CURRENT live text between an alt-text span's markers, straight from
+	 *  the document (`text` React state, kept in sync with the CM6 editor on
+	 *  every keystroke) — not the sidecar's own stored copy, which is exactly
+	 *  the point: the active option's wording can be, and normally is, edited
+	 *  directly in the script rather than through `AltTextModal`, and that
+	 *  edit needs somewhere to land before the span switches away from it. */
+	const liveAltSpanText = (id: string): string | null => {
+		if (text === null) return null;
+		const span = findAnnotationSpans(text).find((s) => s.kind === 'alt' && s.id === id);
+		return span ? text.slice(span.contentFrom, span.contentTo) : null;
+	};
+
+	/** Rewrites `cur`'s OUTGOING (currently active) option to match whatever
+	 *  is actually live in the document right now, before a swap moves away
+	 *  from it — shared by every handler below that changes `activeIndex`.
+	 *  Without this, a hand-edit typed directly into the active option's text
+	 *  (the normal way to revise it, not through the modal) never reached the
+	 *  sidecar: switching to a different option and back later would silently
+	 *  revert the edit, restoring the STALE text the sidecar last remembered
+	 *  instead of what was actually left on the page. */
+	const syncOutgoingAltOption = (id: string, cur: AltTextEntry): AltTextEntry => {
+		const live = liveAltSpanText(id);
+		if (live === null || live === cur.options[cur.activeIndex]) return cur;
+		const options = cur.options.slice();
+		options[cur.activeIndex] = live;
+		return { ...cur, options };
+	};
+
 	/** Left-click cycle: computes the next option and persists it, then calls
 	 *  back into the live `FountainField` (the only thing holding the actual
 	 *  `EditorView`) to apply the swap in the document. The next index is
@@ -1128,8 +1157,9 @@ function Script({ view }: { view: ScriptView }) {
 	 *  SAME "next" index every time and the cycle would stall after one step. */
 	const handleCycleAlt = (id: string) => {
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || cur.options.length === 0) return notes;
+			const cur0 = notes.altText[id];
+			if (!cur0 || cur0.options.length === 0) return notes;
+			const cur = syncOutgoingAltOption(id, cur0);
 			const nextIndex = (cur.activeIndex + 1) % cur.options.length;
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: nextIndex } } };
 		}).then((next) => {
@@ -1147,12 +1177,22 @@ function Script({ view }: { view: ScriptView }) {
 	 *  chars, couldn't be scrolled, and only ever let you PICK an option, not
 	 *  rewrite one. The modal owns its own local copy of `options`/
 	 *  `activeIndex` and re-renders itself after every action, so it needs no
-	 *  React state here to track "is it open." */
+	 *  React state here to track "is it open." **`syncOutgoingAltOption`
+	 *  patches the active row's text before handing it over** — `entry`
+	 *  itself is the sidecar's own stored copy, stale for the active option
+	 *  the instant it's hand-edited directly in the script (the sidecar only
+	 *  actually catches up lazily, on the next cycle/draft/accept SWAP), so
+	 *  opening the modal right after such an edit used to show the OLD
+	 *  wording for a beat until the next swap resynced it. This only patches
+	 *  what's DISPLAYED, not a write — the sidecar itself stays lazily synced
+	 *  exactly as before, still caught up for real the next time a swap
+	 *  actually happens. */
 	const handleOpenAltMenu = (id: string) => {
 		const entry = scriptNotes.altText[id];
 		if (!entry) return;
+		const { options } = syncOutgoingAltOption(id, entry);
 		new AltTextModal(plugin.app, {
-			options: entry.options,
+			options,
 			activeIndex: entry.activeIndex,
 			acceptedIndex: entry.acceptedIndex,
 			onDraft: (index) => handleDraftAlt(id, index),
@@ -1170,8 +1210,9 @@ function Script({ view }: { view: ScriptView }) {
 	 *  "still deciding," even if it had a finalized choice before. */
 	const handleDraftAlt = (id: string, index: number) => {
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || index < 0 || index >= cur.options.length) return notes;
+			const cur0 = notes.altText[id];
+			if (!cur0 || index < 0 || index >= cur0.options.length) return notes;
+			const cur = syncOutgoingAltOption(id, cur0);
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: null } } };
 		}).then((next) => {
 			const cur = next.altText[id];
@@ -1188,8 +1229,9 @@ function Script({ view }: { view: ScriptView }) {
 	 *  is still `null`). */
 	const handleAcceptAlt = (id: string, index: number) => {
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || index < 0 || index >= cur.options.length) return notes;
+			const cur0 = notes.altText[id];
+			if (!cur0 || index < 0 || index >= cur0.options.length) return notes;
+			const cur = syncOutgoingAltOption(id, cur0);
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: index } } };
 		}).then((next) => {
 			const cur = next.altText[id];
