@@ -504,8 +504,17 @@ function Script({ view }: { view: ScriptView }) {
 	/** Chapters currently collapsed in the Outline panel (hiding their nested
 	 *  scenes) — a Chapter/loom-id set, default empty (everything expanded). */
 	const [collapsedChapters, setCollapsedChapters] = useState<Set<string>>(new Set());
-	/** Page shown in the pages preview (1-based). */
-	const [page, setPage] = useState(1);
+	/** Page shown in the pages preview (1-based) — remembered per file in
+	 *  `localStorage`, same UI-preference reasoning as `mode` just below, so
+	 *  reopening a script left on Pages mode restores the actual page rather
+	 *  than always landing back on page 1 (the scroll-restore effect further
+	 *  down is what turns this remembered number into an actual scroll on
+	 *  first mount; this state alone only drives the readout/nav math). */
+	const [page, setPage] = useState(() => {
+		const saved = file ? window.localStorage.getItem(`loom-script-page:${file.path}`) : null;
+		const n = saved ? Number(saved) : NaN;
+		return Number.isFinite(n) && n >= 1 ? n : 1;
+	});
 	/** The page-number input's own typed text while being edited — separate
 	 *  from `page` so clearing the field to type a new number doesn't
 	 *  immediately snap back to showing the current page (a controlled input
@@ -646,8 +655,21 @@ function Script({ view }: { view: ScriptView }) {
 	/** A script line to land on once the Script pane is back — set when
 	 *  leaving Pages mode, consumed by the effect below once `FountainField`
 	 *  has remounted (it's torn down and rebuilt on every mode switch, so
-	 *  the scroll has to be applied after the fact, not inline). */
-	const pendingScrollLineRef = useRef<number | null>(null);
+	 *  the scroll has to be applied after the fact, not inline). Also
+	 *  DOUBLES as the initial-open restore: seeded from `loom-script-line:
+	 *  <path>` in `localStorage` (the Script editor's own last-scrolled line,
+	 *  persisted on blur below) so a freshly-opened script — not just a
+	 *  Pages→Script toggle within the same session — lands back where the
+	 *  cursor was left rather than always at the top. The consuming effect
+	 *  below doesn't care which of the two set it. */
+	const pendingScrollLineRef = useRef<number | null>(
+		(() => {
+			if (!file) return null;
+			const saved = window.localStorage.getItem(`loom-script-line:${file.path}`);
+			const n = saved ? Number(saved) : NaN;
+			return Number.isFinite(n) && n >= 0 ? n : null;
+		})()
+	);
 	/** Same idea as `pendingScrollLineRef` just above, for the Comments/
 	 *  Alternatives browser panels' own "jump to this text" action, which
 	 *  needs a real SELECTION (not just a scroll position) and can be
@@ -734,16 +756,51 @@ function Script({ view }: { view: ScriptView }) {
 		window.localStorage.setItem(`loom-script-mode:${file.path}`, mode);
 	}, [file?.path, mode]);
 
+	// Persists the Pages-mode page number the same way — `page` changes both
+	// on explicit navigation and on the scroll-tracking effect below, so
+	// whichever page the user last actually had on screen is what's saved.
+	useEffect(() => {
+		if (!file) return;
+		window.localStorage.setItem(`loom-script-page:${file.path}`, String(page));
+	}, [file?.path, page]);
+
+	// Restores the remembered scroll position ONCE, the first time Pages mode
+	// has something rendered to scroll to — covers reopening a file that was
+	// left on Pages mode (mode/page both come back from localStorage via their
+	// lazy initializers above, but nothing has actually scrolled the container
+	// yet). Guarded so it never re-fires on a later, ordinary mode switch —
+	// `switchMode` already handles restoring position for that case itself.
+	const restoredInitialPage = useRef(false);
+	useEffect(() => {
+		if (restoredInitialPage.current || mode !== 'pages') return;
+		const container = pagesRef.current;
+		if (!container) return;
+		const el = container.querySelector(`[data-page="${page}"]`);
+		if (!(el instanceof HTMLElement)) return; // pages not rendered yet this tick
+		restoredInitialPage.current = true;
+		if (page === 1) return; // already there, nothing to scroll
+		scrollIntoContainer(container, el, 'auto');
+	}, [mode, page, text]);
+
 	// Script/Pages scroll sync (the other direction, script view -> pages,
 	// happens inline in `switchMode` below since the pages DOM only needs a
 	// scrollIntoView, not a freshly-mounted CM6 view to hand a ref to).
+	// Also applies the initial-open restore seeded into `pendingScrollLineRef`
+	// above — `text` is in the dependency list for that case specifically:
+	// the ref's value is already set by the time this component FIRST
+	// commits (still showing the "Loading…" placeholder, before `text` has
+	// loaded), so `fountainFieldRef.current` is still null then; without
+	// retrying once `text` actually arrives (and `FountainField` exists to
+	// scroll), the pending line would never get consumed.
 	useEffect(() => {
 		if (mode !== 'script') return;
 		const line = pendingScrollLineRef.current;
 		if (line === null) return;
+		const field = fountainFieldRef.current;
+		if (!field) return; // not mounted yet — retry on the next relevant render
 		pendingScrollLineRef.current = null;
-		fountainFieldRef.current?.scrollToLine(line);
-	}, [mode]);
+		field.scrollToLine(line);
+	}, [mode, text]);
 
 	// Pages preview: the page-number readout should track manual scrolling, not
 	// just the explicit jump buttons — otherwise it silently goes stale the
@@ -1618,6 +1675,21 @@ function Script({ view }: { view: ScriptView }) {
 			// the outer view's own scroll along with it on every search/nav jump.
 			if (container && el instanceof HTMLElement) scrollIntoContainer(container, el, behavior);
 		});
+	};
+
+	/** Persists the Script-mode editor's own scroll position — separate from
+	 *  `mode`/`page` above (those cover WHICH pane and, for Pages, which page;
+	 *  this covers where you actually were within the Script editor itself).
+	 *  Captured on the field's `onBlur`, the same moment `commit` already
+	 *  fires — every point the editor is genuinely left (a mode switch,
+	 *  clicking elsewhere, or closing the note), so this stays fresh without
+	 *  needing its own scroll listener. Read back into `pendingScrollLineRef`
+	 *  above (see its own comment) on the next fresh open. */
+	const saveScriptLine = () => {
+		if (!file) return;
+		const top = fountainFieldRef.current?.getTopLine();
+		if (top === undefined) return;
+		window.localStorage.setItem(`loom-script-line:${file.path}`, String(top));
 	};
 
 	const jumpToLine = (line: number) => {
@@ -2562,7 +2634,10 @@ function Script({ view }: { view: ScriptView }) {
 								ref={fountainFieldRef}
 								value={text}
 								onChange={setText}
-								onBlur={() => void commit(text)}
+								onBlur={() => {
+									saveScriptLine();
+									void commit(text);
+								}}
 								characters={parsed.characters}
 								locations={parsed.locations}
 								entityOptions={entityOptions}

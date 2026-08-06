@@ -666,8 +666,15 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** Draft of the scene's script body (everything under its heading). */
 	const [sceneBody, setSceneBody] = useState<string | null>(null);
 	/** Scene page's Script section: same Script/Pages preview + search pattern
-	 *  as the main Script view, scoped to just this scene's own excerpt. */
-	const [sceneScriptMode, setSceneScriptMode] = useState<'script' | 'pages' | 'outline'>('script');
+	 *  as the main Script view, scoped to just this scene's own excerpt.
+	 *  Remembered per-note in `localStorage` — same "which pane was open last
+	 *  time" preference the main Script view keeps under `loom-script-mode:`,
+	 *  just keyed separately since a Scene note's own excerpt view is a
+	 *  distinct surface from the whole-script one. */
+	const [sceneScriptMode, setSceneScriptMode] = useState<'script' | 'pages' | 'outline'>(() => {
+		const saved = record ? window.localStorage.getItem(`loom-scene-script-mode:${record.path}`) : null;
+		return saved === 'pages' || saved === 'outline' ? saved : 'script';
+	});
 	const [sceneScriptQuery, setSceneScriptQuery] = useState('');
 	const [sceneScriptMatchIndex, setSceneScriptMatchIndex] = useState(0);
 	const sceneScriptEditorRef = useRef<FountainFieldHandle | null>(null);
@@ -684,13 +691,28 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sceneScriptTabsRef = useRef<HTMLDivElement | null>(null);
 	/** A body line to land on once the scene's Script pane is back — same
 	 *  "stash it, apply once FountainField remounts" pattern as the main
-	 *  Script view's `pendingScrollLineRef`. */
-	const pendingSceneScrollLineRef = useRef<number | null>(null);
+	 *  Script view's `pendingScrollLineRef`. Also doubles as the initial-open
+	 *  restore, seeded from `loom-scene-script-line:<path>` in `localStorage`
+	 *  (persisted on the field's own `onBlur` below) — same reasoning as the
+	 *  main Script view's identical seeding of its own `pendingScrollLineRef`. */
+	const pendingSceneScrollLineRef = useRef<number | null>(
+		(() => {
+			if (!record) return null;
+			const saved = window.localStorage.getItem(`loom-scene-script-line:${record.path}`);
+			const n = saved ? Number(saved) : NaN;
+			return Number.isFinite(n) && n >= 0 ? n : null;
+		})()
+	);
 	/** Draft of the chapter's script body (its `#` line through every scene
 	 *  under it) — same shape as `sceneBody`, for the Chapter page's own
 	 *  Script section. */
 	const [chapterBody, setChapterBody] = useState<string | null>(null);
-	const [chapterScriptMode, setChapterScriptMode] = useState<'script' | 'pages' | 'outline'>('script');
+	/** Same per-note pane memory as `sceneScriptMode` above, own key since a
+	 *  Chapter note's excerpt is its own separate surface too. */
+	const [chapterScriptMode, setChapterScriptMode] = useState<'script' | 'pages' | 'outline'>(() => {
+		const saved = record ? window.localStorage.getItem(`loom-chapter-script-mode:${record.path}`) : null;
+		return saved === 'pages' || saved === 'outline' ? saved : 'script';
+	});
 	const [chapterScriptQuery, setChapterScriptQuery] = useState('');
 	const [chapterScriptMatchIndex, setChapterScriptMatchIndex] = useState(0);
 	const chapterScriptEditorRef = useRef<FountainFieldHandle | null>(null);
@@ -700,7 +722,16 @@ function EntityPage({ view }: { view: EntityView }) {
 	const chapterScriptPagesRef = useRef<HTMLDivElement | null>(null);
 	/** Same as `sceneScriptTabsRef`, for the Chapter page's own Script section. */
 	const chapterScriptTabsRef = useRef<HTMLDivElement | null>(null);
-	const pendingChapterScrollLineRef = useRef<number | null>(null);
+	/** Same idea as `pendingSceneScrollLineRef` above, own key since a
+	 *  Chapter note's excerpt is its own separate surface too. */
+	const pendingChapterScrollLineRef = useRef<number | null>(
+		(() => {
+			if (!record) return null;
+			const saved = window.localStorage.getItem(`loom-chapter-script-line:${record.path}`);
+			const n = saved ? Number(saved) : NaN;
+			return Number.isFinite(n) && n >= 0 ? n : null;
+		})()
+	);
 	/** `openComment.rect` is a one-time snapshot — without this, scrolling
 	 *  the Scene/Chapter Script section left the popover floating in the same
 	 *  screen spot while the commented text scrolled out from under it. Same
@@ -783,21 +814,33 @@ function EntityPage({ view }: { view: EntityView }) {
 		return () => document.removeEventListener('mousedown', onDown);
 	}, [chapterNavOpen]);
 
+	// `scriptText` is in the dependency list for the same reason the main
+	// Script view's identical effect needs `text`: on the initial-open restore
+	// (the ref seeded straight from `localStorage` above, not from a mode
+	// switch), this can fire before `scriptText` — and so `sceneExcerpt` and
+	// the `FountainField` mounted from it — has actually loaded; guarding on
+	// the ref instead of unconditionally clearing it lets the effect retry
+	// once `scriptText` arrives, rather than silently dropping the restore.
 	useEffect(() => {
 		if (sceneScriptMode !== 'script') return;
 		const line = pendingSceneScrollLineRef.current;
 		if (line === null) return;
+		const field = sceneScriptEditorRef.current;
+		if (!field) return;
 		pendingSceneScrollLineRef.current = null;
-		sceneScriptEditorRef.current?.scrollToLine(line);
-	}, [sceneScriptMode]);
+		field.scrollToLine(line);
+	}, [sceneScriptMode, scriptText]);
 
+	// Same `scriptText` dependency, same reason as the scene effect above.
 	useEffect(() => {
 		if (chapterScriptMode !== 'script') return;
 		const line = pendingChapterScrollLineRef.current;
 		if (line === null) return;
+		const field = chapterScriptEditorRef.current;
+		if (!field) return;
 		pendingChapterScrollLineRef.current = null;
-		chapterScriptEditorRef.current?.scrollToLine(line);
-	}, [chapterScriptMode]);
+		field.scrollToLine(line);
+	}, [chapterScriptMode, scriptText]);
 
 	/** Same idea as `pendingSceneScrollLineRef`/`pendingChapterScrollLineRef`
 	 *  just above, for the Comments/Alternatives browser panels' own "jump to
@@ -820,6 +863,18 @@ function EntityPage({ view }: { view: EntityView }) {
 		pendingChapterSelectRangeRef.current = null;
 		chapterScriptEditorRef.current?.selectRange(range.from, range.to);
 	}, [chapterScriptMode]);
+
+	// Persists the Scene/Chapter pane memory above — separate from the read,
+	// which only needs to happen once (the lazy `useState` initializers),
+	// while these need to re-fire on every later switch.
+	useEffect(() => {
+		if (!record) return;
+		window.localStorage.setItem(`loom-scene-script-mode:${record.path}`, sceneScriptMode);
+	}, [record?.path, sceneScriptMode]);
+	useEffect(() => {
+		if (!record) return;
+		window.localStorage.setItem(`loom-chapter-script-mode:${record.path}`, chapterScriptMode);
+	}, [record?.path, chapterScriptMode]);
 
 	/** Comments/Alternatives browser panels — same overlaid side-panel slot as
 	 *  the nav toggle, one independent pair per Chapter/Scene section (only
@@ -5576,6 +5631,13 @@ function EntityPage({ view }: { view: EntityView }) {
 													value={chapterDraft}
 													onChange={setChapterBody}
 													onBlur={() => {
+														// Scroll-position memory, ahead of the unrelated
+														// no-op-on-unchanged-draft guard below — the editor
+														// position is worth saving even when nothing was typed.
+														const top = chapterScriptEditorRef.current?.getTopLine();
+														if (top !== undefined) {
+															window.localStorage.setItem(`loom-chapter-script-line:${record.path}`, String(top));
+														}
 														if (!project || chapterDraft === chapterBodyOf(chapterExcerpt)) return;
 														void editScriptAndSync(plugin, project, (raw) =>
 															replaceChapterBody(raw, record.chapterId, chapterDraft)
@@ -6687,6 +6749,12 @@ function EntityPage({ view }: { view: EntityView }) {
 														value={sceneDraft}
 														onChange={setSceneBody}
 														onBlur={() => {
+															// Scroll-position memory — see the identical comment
+															// on the Chapter page's own Script section above.
+															const top = sceneScriptEditorRef.current?.getTopLine();
+															if (top !== undefined) {
+																window.localStorage.setItem(`loom-scene-script-line:${record.path}`, String(top));
+															}
 															if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
 															void editScriptAndSync(plugin, project, (raw) =>
 																replaceSceneBody(raw, record.sceneId, sceneDraft)
