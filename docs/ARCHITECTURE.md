@@ -239,9 +239,11 @@ as the section above, plus one new distinction of its own:
    designed to be called with just the public license key, so there's no secret to
    protect and nothing to host. Everything else talks to a `LicenseProvider` interface,
    never to a concrete backend's shape directly, so the provider is swappable —
-   `StubLicenseProvider` (in-memory, no account needed) is what's wired up today;
-   `PolarLicenseProvider` is written but not yet the active provider, since its exact
-   wire format is unverified without a live Polar.sh account.
+   `PolarLicenseProvider` is the active provider (`src/license/polar-provider.ts`, wired
+   in `main.ts` 2026-08-06 against a real Polar.sh org/product); `StubLicenseProvider`
+   (in-memory, no account needed) remains for offline dev/testing. The wire format is
+   re-verified against Polar's REST docs but still wants one real activate/validate/
+   deactivate smoke test against a live key — no sandbox exists for this product.
 4. **Gate creation, never possession.** The free-tier check
    (`canCreateProjectOfKind`) only runs in `SetupProjectModal.submit()` — never when
    opening or using an existing project. A vault that already had five player projects
