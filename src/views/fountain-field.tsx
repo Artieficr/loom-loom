@@ -154,7 +154,9 @@ function scanEntityLinks(
 	for (const link of findEntityLinks(text)) {
 		if (touches(link.from, link.to)) continue;
 		const path = byName.get(link.name.toLowerCase());
-		const attributes = path ? { 'data-loom-fountain-entity': path } : undefined;
+		const attributes = path
+			? { 'data-loom-fountain-entity': path, title: 'Ctrl/Cmd+click to open' }
+			: undefined;
 		// The visible "@" (kept, not hidden) and the visible display text are
 		// two separate mark ranges around the hidden `[`/`Name|`/`]` pieces.
 		spans.push({ from: link.from, to: link.from + 1, deco: Decoration.mark({ class: 'loom-fountain-entity-link', attributes }) });
@@ -696,10 +698,12 @@ export const FountainField = forwardRef(function FountainField(
 					}
 				}
 
-				// Character cues are clickable — the whole line, not just the
-				// name substring (extensions like `(V.O.)` and the `^` dual
-				// marker make carving out just the name fragile for no real
-				// benefit; the line IS the cue).
+				// Character cues are Ctrl/Cmd-clickable — the whole line, not
+				// just the name substring (extensions like `(V.O.)` and the `^`
+				// dual marker make carving out just the name fragile for no
+				// real benefit; the line IS the cue). Modifier-gated in
+				// `openLinkOnMousedown`, since a plain click has to stay free
+				// to place the caret on the ONLY line that is this cue.
 				if (element.type === 'character' && onOpenCharacterRef.current) {
 					const docLine = view.state.doc.line(element.line + 1);
 					if (docLine.text.trim() !== '') {
@@ -708,7 +712,7 @@ export const FountainField = forwardRef(function FountainField(
 							to: docLine.to,
 							deco: Decoration.mark({
 								class: 'loom-fountain-char-link',
-								attributes: { 'data-loom-fountain-char': element.text },
+								attributes: { 'data-loom-fountain-char': element.text, title: 'Ctrl/Cmd+click to open this character' },
 							}),
 						});
 					}
@@ -724,7 +728,7 @@ export const FountainField = forwardRef(function FountainField(
 						to: docLine.to,
 						deco: Decoration.mark({
 							class: 'loom-fountain-scene-link',
-							attributes: { 'data-loom-fountain-scene': loomId },
+							attributes: { 'data-loom-fountain-scene': loomId, title: 'Ctrl/Cmd+click to open this scene’s location' },
 						}),
 					});
 				}
@@ -738,7 +742,7 @@ export const FountainField = forwardRef(function FountainField(
 						to: docLine.to,
 						deco: Decoration.mark({
 							class: 'loom-fountain-chapter-link',
-							attributes: { 'data-loom-fountain-chapter': loomId },
+							attributes: { 'data-loom-fountain-chapter': loomId, title: 'Ctrl/Cmd+click to open this chapter' },
 						}),
 					});
 				}
@@ -987,6 +991,19 @@ export const FountainField = forwardRef(function FountainField(
 
 		const openLinkOnMousedown = (event: MouseEvent): boolean => {
 			if (event.button !== 0) return false;
+			// Ctrl/Cmd-gated, unlike markdown-field.tsx's plain-click wikilinks —
+			// there, the rendered link is only ever a SHORT span with ordinary
+			// editable text around it on the same line, so clicking just past it
+			// still places a cursor normally. A character cue or a chapter's `#`
+			// line is marked end-to-end (see the comment below on why it can't be
+			// carved down to just the name), so a plain click ANYWHERE on that
+			// line's actual text had no way to fall through to the default
+			// caret-placement behavior — every click meant to edit the name
+			// instead navigated away (and, since `preventDefault` also blocks the
+			// browser from moving native selection, a follow-up arrow-key press
+			// then moved relative to wherever the caret silently still was,
+			// reading as "arrow keys skip this line").
+			if (!(event.ctrlKey || event.metaKey)) return false;
 			const target = event.target instanceof HTMLElement ? event.target : null;
 			const char = target?.closest('[data-loom-fountain-char]');
 			if (char instanceof HTMLElement && char.dataset.loomFountainChar && onOpenCharacterRef.current) {
@@ -1185,10 +1202,20 @@ export const FountainField = forwardRef(function FountainField(
 					EditorView.updateListener.of((update) => {
 						if (update.docChanged) onChangeRef.current(update.state.doc.toString());
 						if (update.focusChanged && !update.view.hasFocus) onBlurRef.current?.();
+						// A bare `selectionSet` also fires for plain Up/Down-arrow
+						// cursor motion (CM6 annotates keyboard cursor movement as
+						// user event "select", vs. a real click's "select.pointer") —
+						// popping the completion list open on every arrow-key landing
+						// on an empty cue-eligible line meant the NEXT arrow press got
+						// eaten navigating the popup instead of moving the cursor,
+						// which read as arrow keys randomly skipping lines near
+						// chapter/scene boundaries (where a doubled blank line is
+						// common). Only an actual click should pop it open
+						// unprompted; typing (`docChanged`) still does too.
 						if (
 							update.view.hasFocus &&
-							(update.docChanged || update.selectionSet) &&
-							emptyCueLine(update.state)
+							emptyCueLine(update.state) &&
+							(update.docChanged || update.transactions.some((tr) => tr.isUserEvent('select.pointer')))
 						) {
 							startCompletion(update.view);
 						}

@@ -5411,7 +5411,18 @@ span.loom-row-caret {
 	font-weight: 700;
 	text-transform: uppercase;
 	color: var(--text-accent);
-	margin-top: 1em;
+	/* `padding-top`, deliberately NOT `margin-top` — CM6 measures each line's
+	   own height via `getBoundingClientRect()`, which by spec excludes
+	   margin. A margin here is real on screen but invisible to CM6's internal
+	   per-line height map (built from those measurements), so its Y-to-line
+	   lookup — used by BOTH click placement (`posAtCoords`) and arrow-key
+	   vertical motion (`moveVertically`) — silently drifts low by 1em after
+	   every scene heading, compounding with each one further down the
+	   document: clicks and arrow-key navigation land a line later than
+	   intended, worse the more scene headings precede the click point.
+	   Padding is part of the line's own measured border box, so CM6 accounts
+	   for it correctly. */
+	padding-top: 1em;
 }
 
 .loom-fountain-field .cm-line.loom-fountain-character {
