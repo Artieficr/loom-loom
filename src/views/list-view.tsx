@@ -23,7 +23,7 @@ import {
 	isEntityType,
 	pcGroupStub,
 } from '../types';
-import { projectRoleType, roleOf } from '../project-kind';
+import { features, projectRoleType, roleOf } from '../project-kind';
 import {
 	AddRelationshipModal,
 	AddToHoldersModal,
@@ -153,6 +153,7 @@ function EntityList({
 }) {
 	const plugin = view.plugin;
 	const version = useIndexVersion(plugin.indexer);
+	const project = resolveProject(plugin.indexer, projectRoot);
 	const dated = type === 'event' || type === 'session';
 	const role = roleOf(type);
 	// Scenes share the 'beat' role with Events, but a Chapter (role 'anchor')
@@ -167,14 +168,19 @@ function EntityList({
 	 *  and Chapters check their OWN script presence (`notInScript`); the rest
 	 *  check the project-wide `connectivity` graph below. Quests and Maps are
 	 *  deliberately excluded — quests track their own resolution lifecycle,
-	 *  and maps are a separate workflow entirely. */
+	 *  and maps are a separate workflow entirely. Meaningless outside a
+	 *  Writer project (no script to be "in" at all) — without this gate,
+	 *  every Character/Location/Faction/Item in a Player/GM project read as
+	 *  disconnected, since `connectivity` is built from Scenes that project
+	 *  will never have. */
 	const hasScriptFilter =
-		type === 'scene' ||
-		type === 'chapter' ||
-		type === 'character' ||
-		type === 'location' ||
-		type === 'faction' ||
-		type === 'item';
+		features(project?.config).script &&
+		(type === 'scene' ||
+			type === 'chapter' ||
+			type === 'character' ||
+			type === 'location' ||
+			type === 'faction' ||
+			type === 'item');
 	const filterable = hasInvolvedLocationFilter || hasScriptFilter;
 	// Chapters and scenes carry a script order rather than a date, and a story
 	// reads front to back — where a campaign log wants the latest session on
@@ -215,8 +221,6 @@ function EntityList({
 	/** Locations only: explicit per-parent collapse choices; parents absent
 	 *  here auto-collapse once they hold more than 5 sublocations. */
 	const [collapseOverride, setCollapseOverride] = useState<ReadonlyMap<string, boolean>>(new Map());
-
-	const project = resolveProject(plugin.indexer, projectRoot);
 	// Only characters offer "Sort: appearance", but the hook has to run
 	// unconditionally (React's rules of hooks) — reading the script for every
 	// OTHER entity type is wasted work, so it's gated to just that case.
