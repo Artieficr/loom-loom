@@ -7,7 +7,13 @@ and a custom layered graph view.
 
 > **Doc upkeep is part of finishing a task, not a separate chore.** Whenever files are
 > added, moved, renamed, or a feature is completed, update the file map below,
-> `ROADMAP.md`, and (for design changes) `docs/ARCHITECTURE.md` in the same change.
+> `ROADMAP.md`, and (for design changes) `docs/ARCHITECTURE.md` in the same change. For a
+> user-facing feature, also update the relevant page on the
+> [GitHub wiki](https://github.com/Artieficr/loom-loom/wiki) — a separate repo cloned as
+> the sibling folder `../loom-loom.wiki` (`loom-loom.wiki.git`, own history, own push) —
+> the wiki is meant to stay current incrementally,
+> not get rewritten in one pass later. README.md stays a short pitch + feature list that
+> links into the wiki, not a place for detailed how-to content.
 
 ## File map
 
@@ -41,7 +47,8 @@ and a custom layered graph view.
 ## Key architectural decisions
 
 - **Project kinds** (`src/project-kind.ts`): a project is a **Player**, **Game Master** or
-  **Writer** project (`kind` in its .loom config, picked at setup, switchable in settings).
+  **Writer** project (`kind` in its .loom config, picked at setup and locked from then on —
+  see `src/settings.ts`'s "Projects" page entry for why there's deliberately no switcher).
   A kind is a *config layer over one shared data model, never a fork* — it decides which
   entity types the project holds (`typesFor`) and which optional behaviour is on
   (`KindFeatures`). Chapter/Scene are their **own entity types**, not renamed

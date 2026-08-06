@@ -1,48 +1,27 @@
-# Loom Loom! (WIP, not release ready)
+# Loom Loom!
 
-Worldbuilding inside Obsidian for your writing or TTGRPG games.
-`Loom Loom!` tracks your characters, locations, factions, items, events, and game sessions — shows Obsidian style connections, and weaves everything into a session timeline anda layered story graph.
+Worldbuilding inside Obsidian for your writing or TTRPG games. `Loom Loom!` tracks your characters, locations, factions, items, quests, events, and game sessions — shows Obsidian-style connections, and weaves everything into a session timeline and a layered story graph. A dedicated **Writer** mode adds a real Fountain screenplay editor; a **Maps** view adds a spatial drawing canvas for your world.
 
-## Features (v0.1)
+📖 **[Full documentation is on the wiki](https://github.com/Artieficr/loom-loom/wiki)** — this README stays a short pitch and feature list; the wiki has the how and why for everything, kept up to date as features ship.
 
-- **Project scaffolding** — pick a folder; the plugin creates the entity and timeline
-  structure inside it. Multiple projects can coexist in one vault (one active at a time).
-- **Entities as plain notes** — every entity is a normal `.md` file with YAML
-  frontmatter. Native `[[wikilinks]]` everywhere, so Obsidian's backlinks and graph keep
-  working. No plugin lock-in: delete the plugin and your notes are still just notes.
-- **Typed relationships** — declared in frontmatter (`- type: ally`,
-  `target: "[[Sam]]"`), visible from both sides like backlinks.
-- **Home & list views** — browse each entity type with search, sort, and plugin-tag
-  filters (PC/NPC/Cast out of the box, configurable per type).
-- **Timeline** — sessions and events ordered by date, with events nested under their
-  linked session. Multiple timelines per project via small definition files. The date
-  model is calendar-agnostic, ready for custom in-game calendars.
-- **Story graph** — a custom layered graph: sessions and events in chronological rows,
-  characters and other entities on their own axis below, pulled toward what they connect
-  to. Drag nodes (they spring back), click one to dim everything unconnected and inspect
-  its connections in a side panel.
+## Features
 
-## Usage
+- **Project scaffolding** — pick a folder; the plugin creates the entity and timeline structure inside it. Multiple projects can coexist in one vault, each a **Player**, **Game Master**, or **Writer** project. See [Project Kinds](https://github.com/Artieficr/loom-loom/wiki/Project-Kinds).
+- **Entities as plain notes** — every entity is a normal `.md` file with YAML frontmatter. Native `[[wikilinks]]` everywhere, so Obsidian's backlinks and graph keep working. No plugin lock-in: delete the plugin and your notes are still just notes. See [Entities & Relationships](https://github.com/Artieficr/loom-loom/wiki/Entities-and-Relationships).
+- **Timeline & story graph** — sessions/chapters and their events/scenes in chronological order, plus a custom layered graph pulling every other entity toward what it connects to. See [Timeline & Graph](https://github.com/Artieficr/loom-loom/wiki/Timeline-and-Graph).
+- **Maps** — a spatial drawing canvas: zones, roads, multi-page maps, background images, and an in-map connections graph. See [Maps](https://github.com/Artieficr/loom-loom/wiki/Maps).
+- **Writer mode** — a real Fountain screenplay editor, with chapters/scenes kept in sync with the script automatically, PDF export, narrative branching, and script comments/alternative text. See [Writer Mode](https://github.com/Artieficr/loom-loom/wiki/Writer-Mode).
+- **Quests** — tracked as their own entity, resolving against sessions or scenes depending on project kind. See [Quests](https://github.com/Artieficr/loom-loom/wiki/Entities-and-Relationships#quests).
 
-1. Run **Set up project** (or open the home view from the dice ribbon icon) and pick a
-   project folder.
-2. Create entities from the home page, list views, or the `Create …` commands.
-3. Link events to sessions via the `linkedSession` frontmatter field (one link or a
-   list — an event can span several sessions); add typed relationships in the
-   `relationships` list.
-4. Open the timeline and graph from home.
+## Getting started
 
-All your worldbuilding data stays local in your vault, in plain `.md` files — your notes,
-entities, and relationships are never transmitted anywhere. The plugin makes a network
-request only when checking an entered license key against the licensing provider (see
-Pricing below); nothing else in the plugin calls out to the network.
+See [Getting Started](https://github.com/Artieficr/loom-loom/wiki/Getting-Started) on the wiki for installation and setting up your first project.
+
+All your worldbuilding data stays local in your vault, in plain `.md` files — your notes, entities, and relationships are never transmitted anywhere. The plugin makes a network request only when checking an entered license key against the licensing provider (see Pricing below); nothing else in the plugin calls out to the network.
 
 ## Pricing
 
-Free: one project of each kind (Player/GM/Writer) per vault, with every feature
-available — no trial, no time limit, no feature gating on the free tier beyond the
-project-count cap. A one-time license key purchase (not a subscription) unlocks
-unlimited projects of every kind, activatable on up to 3 devices.
+Free: one project of each kind (Player/GM/Writer) per vault, with every feature available — no trial, no time limit, no feature gating on the free tier beyond the project-count cap. A one-time license key purchase (not a subscription) unlocks unlimited projects of every kind, activatable on up to 3 devices. Details: [Licensing & Pricing](https://github.com/Artieficr/loom-loom/wiki/Licensing-and-Pricing).
 
 ## License
 
