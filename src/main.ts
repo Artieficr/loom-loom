@@ -29,7 +29,7 @@ import { GroupView } from './views/group-view';
 import { MapView } from './views/map-view';
 import { ScriptView } from './views/script-view';
 import { LicenseManager } from './license/manager';
-import { StubLicenseProvider } from './license/stub-provider';
+import { POLAR_ORGANIZATION_ID, PolarLicenseProvider } from './license/polar-provider';
 
 /** How often the plugin re-checks an activated license in the background,
  *  independent of the manual "Re-check now" button. Well inside the 30-day
@@ -41,16 +41,16 @@ export default class LoomLoomPlugin extends Plugin {
 	settings: LoomLoomSettings = DEFAULT_SETTINGS;
 	indexer!: LoomIndexer;
 	/** Freemium gate: one project of each kind is free, a license key unlocks
-	 *  unlimited projects — see `src/license/`. `StubLicenseProvider` is the
-	 *  active provider until a real Polar.sh account exists to swap in
-	 *  (`PolarLicenseProvider`, written but intentionally not wired up yet). */
+	 *  unlimited projects — see `src/license/`. `PolarLicenseProvider` is the
+	 *  active provider (the Polar.sh org/product this points at is
+	 *  `POLAR_ORGANIZATION_ID`, `src/license/polar-provider.ts`). */
 	licenseManager!: LicenseManager;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.applyTextSize();
 
-		this.licenseManager = new LicenseManager(this.app, new StubLicenseProvider());
+		this.licenseManager = new LicenseManager(this.app, new PolarLicenseProvider(POLAR_ORGANIZATION_ID));
 
 		this.indexer = this.addChild(new LoomIndexer(this.app, this));
 

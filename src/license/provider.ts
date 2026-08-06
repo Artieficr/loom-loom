@@ -31,6 +31,23 @@ export interface ValidateResult {
 export interface DeactivateResult {
 	ok: boolean;
 	reason?: string;
+	/** True when `ok` is false specifically because the server couldn't be
+	 *  reached at all (offline/DNS/timeout) — set by `LicenseManager.
+	 *  deactivateThisDevice`, which is the one place in this seam that
+	 *  catches a provider's thrown "unreachable" error itself rather than
+	 *  letting it propagate, so the distinction has to be re-surfaced here
+	 *  for the settings UI to act on (e.g. showing "Can't reach the server"
+	 *  instead of a generic failure message). */
+	unreachable?: boolean;
+	/** True when `ok` is false because the server has no record of this
+	 *  activation any more (a definite 404, not a network issue) — the
+	 *  device is, as far as the license server is concerned, already not
+	 *  activated. `LicenseManager.deactivateThisDevice` treats this as
+	 *  success and reconciles the local cache to match, rather than leaving
+	 *  the device stuck looking activated forever with no way to recover
+	 *  (this cache/server mismatch is exactly what a stale/incorrectly
+	 *  parsed activation id from a much earlier bug would produce). */
+	notFound?: boolean;
 }
 
 export interface LicenseProvider {

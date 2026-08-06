@@ -1618,6 +1618,38 @@ span.loom-row-caret {
 	padding: 0;
 }
 
+/* The real bug behind every "too much empty space in the box" report this
+   session: `.loom-settings-block`'s own `padding: 0` (above) has NEVER
+   actually won against Obsidian's `.setting-group .setting-item:not(.
+   setting-item-heading)` rule, which sets `padding: var(--setting-items-
+   padding-y) var(--setting-items-padding-x)` on the SAME element — that
+   selector is 3 class-equivalents (`.setting-group`, `.setting-item`, the
+   class inside `:not()`) against our 1, so it always won the specificity
+   fight despite `.loom-settings-block`'s own doc comment assuming otherwise.
+   (An earlier attempt here tried to compensate with a negative `margin-top`
+   referencing `var(--setting-items-padding)` — which doesn't exist; 1.13.4
+   split it into the `-x`/`-y` pair above, so that whole declaration was
+   silently invalid and did nothing, which is why it never visibly helped.)
+   `!important` is the only way to actually win this — kept as its own
+   modifier class, not folded into `.loom-settings-block` itself, so the fix
+   stays scoped to the two sections it was actually asked for (License,
+   Projects) rather than silently changing every other `.loom-settings-block`
+   consumer in this file. */
+.loom-settings-block-zero-pad {
+	padding: 0 !important;
+}
+
+/* The top-level page list ("General" / "Projects" / "Entities" / "Graph",
+   each a `.setting-item.mod-navigable` row) — bigger per direct feedback.
+   `.loom-settings-root` (added to `containerEl` once in the constructor,
+   `LoomLoomSettingTab`) scopes this to only OUR plugin's own settings
+   content: `.mod-navigable` itself is the declarative-settings framework's
+   generic "this row links to a page" class, shared by every plugin/core
+   section using it, not unique to Loom Loom. */
+.loom-settings-root .setting-item.mod-navigable .setting-item-name {
+	font-size: calc(var(--font-ui-medium) * 1.2);
+}
+
 .loom-danger-btn {
 	background: var(--background-primary);
 	border: 1px solid #c62828;
@@ -1642,15 +1674,124 @@ span.loom-row-caret {
 	border-top: 1px solid var(--background-modifier-border);
 }
 
+/* Generic "start a new subsection" divider — same visual as `.loom-restore-group`
+   but not tied to that row's specific meaning. Used by the License section
+   (`renderLicenseSection`) to separate the free/paid blurb, the license-key
+   block, and the status block without drawing three separate `Setting` rows'
+   worth of native top borders. Equal above/below the line per direct
+   feedback — the two used to be an asymmetric 32px/16px. */
+.loom-settings-divider {
+	margin-top: var(--size-4-3);
+	padding-top: var(--size-4-3);
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+/* License section: bumped up from the default `.setting-item-description`
+   size (`--font-ui-smaller`, 12px) per direct feedback — matches
+   `.setting-item-name`'s own size (`--font-ui-medium`) so the label and body
+   text read as one consistent scale rather than the name looking oversized
+   against a noticeably smaller description underneath it. Needs the extra
+   class-selector specificity to win against Obsidian's own same-specificity
+   `.setting-item-description` rule. */
+.loom-license-section .setting-item-description {
+	font-size: var(--font-ui-medium);
+}
+
+/* Re-adds, deliberately and explicitly, the same inset `.loom-settings-
+   block-zero-pad` (above) now genuinely removes — License reads fine with
+   the box's normal padding (prose, unlike Projects' dense table), so this
+   restores that same look on purpose rather than depending on the
+   specificity bug that used to produce it as a side effect. */
+.loom-license-section {
+	padding: var(--setting-items-padding-y) var(--setting-items-padding-x) !important;
+}
+
+/* Stacks the free/paid blurb's several lines (and the status block's) with a
+   small, controlled gap — replacing the `<p>` tags these used to be (browser
+   UA margin was the actual source of "too much empty space above Free:",
+   not the group box's own padding, which already matches every other
+   settings section once that stray margin is gone). */
+.loom-license-text {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-1);
+}
+
+/* License key + "Activate this device": plain divs/input/`ButtonComponent`s
+   (see `renderLicenseSection`), not a `Setting` — `.setting-item`'s own
+   box-model (padding, the first-child's `margin-inline-end`, its flex
+   alignment) kept fighting every attempt to force it into a plain full-width
+   stacked layout, including a real left-edge offset against the plain
+   `.loom-license-text` block above it. Sharing the exact same box-model as
+   that block (no Setting-specific rules involved) is what guarantees the
+   left/right edges actually line up. */
+.loom-license-key-block .setting-item-name {
+	margin-bottom: var(--size-4-2);
+	/* Forced explicitly rather than trusting the native `.setting-item-name`
+	   rule to already match `.setting-item-description`'s own (also forced)
+	   size — some themes redefine one of the two independently, which is
+	   what made the label visibly smaller than the rest of the section under
+	   the active theme here even though core Obsidian's own CSS has them
+	   equal. */
+	font-size: var(--font-ui-medium);
+}
+
+/* Full-width key input — a 41-character key must never get cut off.
+   `--background-primary` rather than the default `--background-modifier-
+   form-field` — under the active theme here the latter renders almost
+   indistinguishable from the section box's own `--setting-items-background`
+   (`--background-primary-alt`), so the input needs an explicitly different
+   variable to actually read as a field, not just "set" in principle.
+   `!important`: Obsidian's own `input[type='text']` rule is a type +
+   attribute selector — specificity (0,1,1) — which outranks this single
+   class (0,1,0) regardless of source order, so the plain declaration never
+   actually applied; same specificity-loss pattern as everything else fixed
+   in this file this session. */
+.loom-license-key-input {
+	box-sizing: border-box;
+	width: 100%;
+	min-width: 44ch;
+	background-color: var(--background-primary) !important;
+}
+
+/* Button right-aligned under the input, matching its right edge — a plain
+   flex row (not `Setting`'s `.setting-item-control`). Only ever holds one
+   button (Activate XOR Deactivate, never both), but stays a flex row rather
+   than a bare button for consistent right-alignment either way. */
+.loom-license-key-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-2);
+}
+
+/* "Can't reach the server" under "Deactivate this device" — a definite
+   rejection still goes through the generic `Notice` (`renderLicenseSection`),
+   this is only for the specific case that used to need a manual "Forget this
+   device locally" escape hatch: now just an inline retry prompt instead of a
+   whole extra setting. */
+.loom-license-warning {
+	color: var(--text-error);
+	font-size: var(--font-ui-small);
+	margin-top: var(--size-4-1);
+	text-align: right;
+}
+
 /* Projects settings tab — the only real `<table>` in this plugin, first one:
    a plain read-only Title | Type list, no per-row interactivity beyond the
    title link, so a `<table>` is simpler than the CSS-grid row primitive
-   used for interactive/draggable lists elsewhere (script-view.tsx's Outline). */
+   used for interactive/draggable lists elsewhere (script-view.tsx's Outline).
+   Sits at true zero padding (`.loom-settings-block-zero-pad` on the
+   containing `.setting-item` — see that class's own doc comment) flush
+   against the box — its `border-radius` matches the box's OWN
+   (`--setting-items-radius`), not the smaller generic `--radius-s`, so the
+   two curves coincide into one continuous rounded corner instead of the
+   table's flatter corner visibly cutting across the box's tighter one. */
 .loom-settings-table {
 	width: 100%;
 	border-collapse: collapse;
 	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
+	border-radius: var(--setting-items-radius);
 	overflow: hidden;
 }
 

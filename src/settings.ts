@@ -1,5 +1,6 @@
 import {
 	App,
+	ButtonComponent,
 	Notice,
 	PluginSettingTab,
 	Setting,
@@ -9,9 +10,10 @@ import {
 	setIcon,
 } from 'obsidian';
 import { ENTITY_META, ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera } from './types';
-import { DEFAULT_PROJECT_KIND, PROJECT_KIND_META, typesFor } from './project-kind';
+import { DEFAULT_PROJECT_KIND, PROJECT_KIND_META, PROJECT_KINDS, typesFor } from './project-kind';
 import { ConfirmModal } from './project';
 import { TimelineSettingsEditor } from './timeline-settings';
+import { POLAR_CHECKOUT_URL } from './license/polar-provider';
 import type LoomLoomPlugin from './main';
 
 export type LoomTextSize = 'compact' | 'normal' | 'large';
@@ -475,9 +477,24 @@ const REFRESH_VIEWS_KEYS = new Set<string>([
 export class LoomLoomSettingTab extends PluginSettingTab {
 	/** Project whose timeline settings the Graph page currently shows. */
 	private timelineProjectRoot: string | null = null;
+	/** Set right under "Deactivate this device" when the last attempt failed
+	 *  specifically because the server couldn't be reached — a `render`
+	 *  callback has nowhere else to keep UI-only state across the re-render
+	 *  `this.update()` triggers (same reasoning as `timelineProjectRoot`
+	 *  above). Cleared at the start of every new attempt. */
+	private licenseDeactivateUnreachable = false;
 
 	constructor(app: App, private plugin: LoomLoomPlugin) {
 		super(app, plugin);
+		// A stable per-plugin scoping hook: `containerEl` is a single DOM node
+		// reused across every open of this tab (the declarative renderer only
+		// ever fills its contents, never replaces it), so a class added here
+		// once safely scopes CSS to ONLY this plugin's own settings content —
+		// needed because generic declarative-API classes like `.setting-item.
+		// mod-navigable` (a page-link row, e.g. "Projects" in the top-level
+		// page list) are shared by every plugin/core section using the same
+		// framework, not unique to us.
+		this.containerEl.addClass('loom-settings-root');
 	}
 
 	/** Reads through a dotted path (`'nodeColors.character'`) as well as a
@@ -575,7 +592,6 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 				items: [
 					{
 						type: 'group',
-						heading: 'Projects',
 						items: [{ name: 'Projects', render: (setting) => this.renderProjectsTable(setting) }],
 					},
 				],
@@ -617,30 +633,68 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	private renderLicenseSection(setting: Setting): void {
 		const containerEl = setting.settingEl;
 		containerEl.empty();
-		containerEl.addClass('loom-settings-block');
+		containerEl.addClass('loom-settings-block', 'loom-settings-block-zero-pad', 'loom-license-section');
 		const manager = this.plugin.licenseManager;
 		const status = manager.getStatus();
 
-		new Setting(containerEl)
-			.setName('License key')
-			.setDesc(
-				'Free: one project of each type per vault, with every feature available. ' +
-					'A license key unlocks unlimited projects and can be activated on up to 3 devices.'
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder('Paste your license key')
-					.setValue(this.plugin.settings.licenseKey)
-					.onChange(async (value) => {
-						this.plugin.settings.licenseKey = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
+		// --- What's free / what a license unlocks ------------------------
+		// `createDiv`, not `createEl('p', …)` — a `<p>` carries the browser's own
+		// default top/bottom margin that `.setting-item-description` doesn't
+		// reset, which was the real source of the excess space above this block
+		// (not the group box's own padding, which already matches every other
+		// settings section). `.loom-license-text`'s own `gap` replaces it with a
+		// controlled, consistent amount instead.
+		const textBlock = containerEl.createDiv({ cls: 'loom-license-text' });
+		const freeP = textBlock.createDiv({ cls: 'setting-item-description' });
+		freeP.createEl('strong', { text: 'Free:' });
+		freeP.appendText(
+			' one project of each kind (Player, Game Master, Writer) per vault, with every ' +
+				'feature available — no trial, no feature gating on the free tier beyond that project-count cap.'
+		);
+		textBlock.createDiv({
+			cls: 'setting-item-description',
+			text: 'A one-time purchase unlocks unlimited projects of every kind, activatable on up to 3 devices.',
+		});
+		if (status.tier !== 'paid') {
+			const buyP = textBlock.createDiv({ cls: 'setting-item-description' });
+			buyP.createEl('a', { text: 'Get your license', href: POLAR_CHECKOUT_URL, cls: 'external-link' });
+		}
 
-		const actions = new Setting(containerEl).setName('This device');
-		actions.addButton((btn) =>
-			btn
-				.setButtonText(status.activated ? 'Re-activate' : 'Activate this device')
+		// --- License key + activate/deactivate ----------------------------
+		// Hand-rolled divs/inputs/`ButtonComponent`s rather than a `Setting` —
+		// `Setting`'s own `.setting-item`/`.setting-item-info`/`.setting-item-
+		// control` DOM comes with box-model rules (padding, margin-inline-end
+		// on the first child, flex alignment) that fought every attempt to
+		// force it into a plain full-width stacked layout, including a real
+		// left-edge misalignment against the plain description text above it
+		// that even `!important` overrides on the obvious properties didn't
+		// fully pin down. Plain elements guarantee the same left/right edges
+		// as `textBlock`/`info` above and below, since they share the exact
+		// same box-model as those (no Setting-specific CSS in the way).
+		const keyBlock = containerEl.createDiv({ cls: 'loom-settings-divider loom-license-key-block' });
+		const keyLabel = keyBlock.createDiv({ cls: 'setting-item-name' });
+		keyLabel.createEl('strong', { text: 'License key' });
+		const keyInput = keyBlock.createEl('input', {
+			type: 'text',
+			placeholder: 'Paste your license key',
+			cls: 'loom-license-key-input',
+		});
+		keyInput.value = this.plugin.settings.licenseKey;
+		keyInput.addEventListener('input', () => {
+			void (async () => {
+				this.plugin.settings.licenseKey = keyInput.value.trim();
+				await this.plugin.saveSettings();
+			})();
+		});
+
+		// Activate and Deactivate are mutually exclusive, never both shown —
+		// there's nothing to "re-activate" once a device is already active
+		// (background re-validation already keeps it verified silently), and
+		// nothing to deactivate before it is.
+		const keyActions = keyBlock.createDiv({ cls: 'loom-license-key-actions' });
+		if (!status.activated) {
+			const activateBtn = new ButtonComponent(keyActions)
+				.setButtonText('Activate this device')
 				.setCta()
 				.onClick(() =>
 					void (async () => {
@@ -649,7 +703,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 							new Notice('Enter a license key first.');
 							return;
 						}
-						btn.setDisabled(true).setButtonText('Activating…');
+						activateBtn.setDisabled(true).setButtonText('Activating…');
 						const result = await manager.activate(key);
 						new Notice(
 							result.ok
@@ -658,60 +712,44 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 						);
 						this.update();
 					})()
-				)
-		);
-		if (status.activated) {
-			actions.addButton((btn) =>
-				btn.setButtonText('Deactivate this device').onClick(() =>
-					void (async () => {
-						const key = this.plugin.settings.licenseKey.trim();
-						btn.setDisabled(true).setButtonText('Deactivating…');
-						const result = await manager.deactivateThisDevice(key);
-						new Notice(
-							result.ok
-								? 'Device deactivated.'
-								: (result.reason ?? 'Could not deactivate — try "Forget this device locally" below.')
-						);
-						this.update();
-					})()
-				)
-			);
-		}
-
-		const info = containerEl.createDiv({ cls: 'setting-item-description' });
-		info.createEl('p', {
-			text: `Tier: ${status.tier === 'paid' ? 'Paid — unlimited projects.' : 'Free — one project of each type.'}`,
-		});
-		info.createEl('p', { text: `Device id: ${status.deviceId}` });
-		if (status.activated && status.graceExpiresAt !== null) {
-			info.createEl('p', {
-				text:
-					`Verified until ${new Date(status.graceExpiresAt).toLocaleDateString()} without needing to ` +
-					'reconnect (re-checked silently in the background — periodically, and whenever this device comes back online).',
-			});
-		}
-		if (status.lastCheckAt !== null) {
-			const outcome =
-				status.lastCheckOk === true ? 'ok' : status.lastCheckOk === false ? 'rejected' : 'could not reach the server';
-			info.createEl('p', { text: `Last check: ${new Date(status.lastCheckAt).toLocaleString()} — ${outcome}.` });
-		}
-		if (status.lastError) info.createEl('p', { text: status.lastError });
-
-		if (status.activated) {
-			new Setting(containerEl)
-				.setName('Forget this device locally')
-				.setDesc(
-					'If "Deactivate this device" can\'t reach the server (offline), this clears the activation on ' +
-						"THIS device only — it does not free the slot on the license server's side."
-				)
-				.addButton((btn) =>
-					btn.setButtonText('Forget locally').onClick(() => {
-						manager.forgetDeviceLocally();
-						new Notice('Forgotten on this device.');
-						this.update();
-					})
 				);
+		} else {
+			const deactivateBtn = new ButtonComponent(keyActions).setButtonText('Deactivate this device').onClick(() =>
+				void (async () => {
+					const key = this.plugin.settings.licenseKey.trim();
+					this.licenseDeactivateUnreachable = false;
+					deactivateBtn.setDisabled(true).setButtonText('Deactivating…');
+					const result = await manager.deactivateThisDevice(key);
+					if (result.ok) {
+						new Notice('Device deactivated.');
+					} else if (result.unreachable) {
+						this.licenseDeactivateUnreachable = true;
+					} else {
+						new Notice(result.reason ?? 'Could not deactivate this device.');
+					}
+					this.update();
+				})()
+			);
+			if (this.licenseDeactivateUnreachable) {
+				keyBlock.createDiv({ cls: 'loom-license-warning', text: "Can't reach the server." });
+			}
 		}
+
+		// --- Status -------------------------------------------------------
+		const info = containerEl.createDiv({ cls: 'loom-settings-divider loom-license-text' });
+		const tierP = info.createDiv({ cls: 'setting-item-description' });
+		tierP.createEl('strong', { text: 'Current tier:' });
+		tierP.appendText(` ${status.tier === 'paid' ? 'Paid — unlimited projects.' : 'Free — one project of each kind.'}`);
+
+		const projectsP = info.createDiv({ cls: 'setting-item-description' });
+		projectsP.createEl('strong', { text: 'Projects:' });
+		const projects = this.plugin.indexer.getProjects();
+		const cap = status.tier === 'paid' ? '∞' : '1';
+		const counts = PROJECT_KINDS.map((kind) => {
+			const n = projects.filter((p) => p.config.kind === kind).length;
+			return `${n}/${cap} ${PROJECT_KIND_META[kind].label}`;
+		}).join(', ');
+		projectsP.appendText(` ${counts}`);
 	}
 
 	// --- Projects -------------------------------------------------------
@@ -731,7 +769,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// is squeezed into a single flex item, which visually corrupts row
 		// height and can crush borders on a taller cell (see `renderTimeline`'s
 		// own doc comment for the worse version of this same bug).
-		containerEl.addClass('loom-settings-block');
+		containerEl.addClass('loom-settings-block', 'loom-settings-block-zero-pad');
 		const projects = this.plugin.indexer.getProjects();
 		if (projects.length === 0) {
 			containerEl.createEl('p', {

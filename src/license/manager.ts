@@ -89,39 +89,38 @@ export class LicenseManager {
 		}
 	}
 
-	/** Frees this device's slot server-side. If that fails while offline, the
-	 *  settings UI should offer `forgetDeviceLocally` as a fallback rather than
-	 *  leaving the device stuck looking activated forever. */
+	/** Frees this device's slot server-side. A thrown "unreachable" error is
+	 *  reported back as `{ok:false, unreachable:true}` rather than retried or
+	 *  worked around locally — the settings UI just surfaces that and leaves
+	 *  the cached activation alone, so the user can try again once back
+	 *  online. A definite 404 (`notFound` — the server has no record of this
+	 *  activation) is the opposite case: there is nothing left to free, so
+	 *  this reconciles the local cache to match and reports success rather
+	 *  than leaving the device stuck looking activated with no way back to
+	 *  the free tier — the one path that can produce this (a stale/wrong
+	 *  cached activation id from an earlier bug, or the activation having
+	 *  already been removed some other way) has no other recovery route
+	 *  since there's no local-only "forget" control any more. */
 	async deactivateThisDevice(key: string): Promise<DeactivateResult> {
 		const activation = this.cache.activation;
 		if (!activation) return { ok: true };
 		try {
 			const result = await this.provider.deactivate(key, activation.activationId, this.cache.deviceId);
-			if (result.ok) {
+			if (result.ok || result.notFound) {
 				this.cache.activation = null;
 				this.cache.lastError = null;
-			} else {
-				this.cache.lastError = result.reason ?? 'Could not deactivate this device.';
+				saveCache(this.app, this.cache);
+				return { ok: true };
 			}
+			this.cache.lastError = result.reason ?? 'Could not deactivate this device.';
 			saveCache(this.app, this.cache);
 			return result;
 		} catch (e) {
 			const reason = e instanceof Error ? e.message : 'Could not reach the license server.';
 			this.cache.lastError = reason;
 			saveCache(this.app, this.cache);
-			return { ok: false, reason };
+			return { ok: false, reason, unreachable: true };
 		}
-	}
-
-	/** Clears this device's activation from the LOCAL cache only, without
-	 *  calling the provider — the fallback when `deactivateThisDevice` can't
-	 *  reach the server (offline) and the device would otherwise look
-	 *  permanently activated. Does not free the slot server-side; the user still
-	 *  needs the provider's own portal for that. */
-	forgetDeviceLocally(): void {
-		this.cache.activation = null;
-		this.cache.lastError = null;
-		saveCache(this.app, this.cache);
 	}
 
 	/**
