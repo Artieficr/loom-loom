@@ -276,33 +276,26 @@ export const TimelineStrip = memo(function TimelineStrip({
 			.map((c) => c.record);
 	};
 
-	const editList = (path: string, key: string, apply: (arr: unknown[]) => unknown[] | void) => {
+	/** Shared write path for both helpers below: look up the file, mutate its
+	 *  frontmatter, and surface any failure the same way. */
+	const withFrontMatter = (path: string, key: string, mutate: (fm: Record<string, unknown>) => void) => {
 		const f = plugin.app.vault.getFileByPath(path);
 		if (!f) return;
-		plugin.app.fileManager
-			.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				const cur = fmLoomValue(fm, key);
-				const arr = Array.isArray(cur) ? cur : [];
-				setLoomKey(fm, key, apply(arr) ?? arr);
-			})
-			.catch((e) => {
-				console.error(`Loom Loom: failed to update ${key}`, e);
-				new Notice('Could not save the change.');
-			});
+		plugin.app.fileManager.processFrontMatter(f, mutate).catch((e) => {
+			console.error(`Loom Loom: failed to update ${key}`, e);
+			new Notice('Could not save the change.');
+		});
 	};
 
-	const setKey = (path: string, key: string, value: unknown) => {
-		const f = plugin.app.vault.getFileByPath(path);
-		if (!f) return;
-		plugin.app.fileManager
-			.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, key, value);
-			})
-			.catch((e) => {
-				console.error(`Loom Loom: failed to update ${key}`, e);
-				new Notice('Could not save the change.');
-			});
-	};
+	const editList = (path: string, key: string, apply: (arr: unknown[]) => unknown[] | void) =>
+		withFrontMatter(path, key, (fm) => {
+			const cur = fmLoomValue(fm, key);
+			const arr = Array.isArray(cur) ? cur : [];
+			setLoomKey(fm, key, apply(arr) ?? arr);
+		});
+
+	const setKey = (path: string, key: string, value: unknown) =>
+		withFrontMatter(path, key, (fm) => setLoomKey(fm, key, value));
 
 	/**
 	 * Rewrites every frontmatter binding between the event and its current

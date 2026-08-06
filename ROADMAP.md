@@ -234,8 +234,12 @@ A spatial drawing canvas per project — zones (polygons) associated with locati
 - [x] Zones associate a **main location only** (`locationOptions` filters `parentLocation === null`); entity-page "Turn to a sublocation" **warns + deletes** the location's map zone when it becomes a sublocation — `src/views/map-view.tsx`, `src/views/entity-view.tsx`
 - [x] **Undo / redo** (map-local): `Ctrl+Z` / `Ctrl+Shift+Z` (+`Ctrl+Y`), field-focus guarded — a `zones` snapshot `history` ref, discrete actions push before-change snapshots and drag/slider gestures coalesce to one step (`snapshot`/`beginPending`/`commitPending`, `HISTORY_CAP`) — `src/views/map-view.tsx`
 - [x] Combo searches (`SearchableSelect` + `SuggestInput` → `.loom-combo-*`) render as a **plain edge-to-edge list** (no per-item button chrome), matching Obsidian's native suggestion popup — `styles.css`
-- [ ] **Sublocations panel** (zone menu "list" button → sub-panel, columns **Title | Node**): Title = clickable `EntityChip` link; Node = checkbox (checked ⇒ sublocation shows as a node in the zone); chips are **drag-and-drop** (ghost on cursor, drop inside the zone places the node); **Add all** (warn `"There is not enough space for all sublocation nodes in this zone"` when it won't fit) and **Remove all** (confirm `"This will remove all sublocation nodes from the zone."`, button `"Yes, remove"`). Introduces sublocation nodes → wire in the sizing rule above
-- [ ] **Items panel** — same Title|Node panel for a location's items (checkbox, draggable chips, add/remove all). PREREQ: confirm/implement **item inheritance up the location ancestry** on entity pages (a sublocation's item should surface in ancestor locations' Items section, noting which sublocation holds it — `src/views/entity-view.tsx` + `src/indexer.ts`)
+- [x] **Sublocations panel** (zone menu "list" button → sub-panel, columns **Title | Node**): Title = clickable `EntityChip` link; Node = checkbox (checked ⇒ sublocation shows as a node in the zone); chips are **drag-and-drop** (ghost on cursor, drop inside the zone places the node) — `src/views/map-view.tsx`
+- [x] **Items panel** — same Title|Node panel for a location's items (checkbox, draggable chips). Item inheritance up the location ancestry (the prerequisite) is built — "Items in sublocations" on entity pages — `src/views/map-view.tsx`, `src/views/entity-view.tsx`
+- [ ] **Add all / Remove all** on both panels: neither panel has the bulk actions yet — "Add all"
+  (should warn `"There is not enough space for all sublocation nodes in this zone"` when it
+  won't fit) and "Remove all" (should confirm `"This will remove all sublocation/item nodes from
+  the zone."`, button `"Yes, remove"`) are still one-row-at-a-time only — `src/views/map-view.tsx`
 - [x] **Size dropdown fixes** (`ZonePanel` S/M/L/XL select): no longer clipped to the 28px icon-btn width (was hiding the selected value and overlapping neighbours) — it's a plain inline `.loom-map-size-btn` select now, hover-tint only, showing the current S/M/L/XL
 - [x] Persistence: `Entities/Maps/<Project> Maps.json` (multi-map `MapsFile`, debounced) — maps belong under `Entities/` with the rest of the project's content, not in a folder beside it. A one-shot migration moved existing stores there (and their `Maps/Images`, rewriting stored `MapImage.path` prefixes); **that migration code has since been deleted** — every vault had moved, so it was dead weight, and the new path is now the only one read. `mapsFilePath`/`mapsImagesPath`/`findMapsFile`/`countMapPages` are exported from map-view and used by entity-view's zone scrub and home-view's count — `src/types.ts`, `src/views/map-view.tsx`, `src/views/entity-view.tsx`, `src/views/home-view.tsx`
 - [x] **Node single-click opens a focus graph in the map** (`FocusGraphLayer`, replacing the old sublocation-tree `SubGraphLayer`): the location's connected entities (`focusNeighborhood` in `mini-graph.tsx` — focus + `getConnections` + one event hop, so sessions come in via events) rendered in **WORLD space** (sibling `<g>` under the camera transform, full opacity) so it pans/zooms with the map while the map camera `<g>` stays dimmed to 0.12. Laid out in a **maps-specific vertical hierarchy** (`focusLayerOf`: region straight above → focus + main locations → sublocations → items → quests → characters → factions → events → sessions), main-graph-style routed edges (see the entry below), **checker row stagger** when labels would overlap. **Grows out like a web** on open (local rAF `prog`, per-layer stagger) and plays the **reverse animation on close** (`focusClosing` keeps it mounted until `prog`→0). A short `NODE_DBL_MS` manual double-click opens the page (so open/close clicks aren't swallowed). Double-click a node opens it, click the focus node / Esc hides — `src/views/map-view.tsx`, `src/views/mini-graph.tsx`, `styles.css`
@@ -302,8 +306,9 @@ creation and switchable in settings, stored in the .loom config. Player mode is 
     carry a **Display title** field (`FM.displayTitle`) — see the export note below.
   - [x] Quests and descriptions are kept as-is (game design / main plot pushers).
   - [x] The session graph is the Chapter graph — same code, role-driven label.
-  - [ ] Chapter reordering UI (drag to re-stamp `loomSeq`), and a Scene page shell beyond
-    the shared one.
+  - [x] Chapter reordering UI (Script view Outline drag, `reorderTopLevelEntries`); Scene
+    pages stay on the shared entity-page shell, heavily gated per `record.type === 'scene'`,
+    rather than a dedicated shell — deliberate, not an unbuilt gap.
   - The Map view is a core part of this kind (spatial level/room layout).
 
 ## Writer: Fountain script (in progress)
@@ -422,23 +427,14 @@ Still to build:
   structural edit automatically. Also: the number now renders as a plain number, not `#7#` —
   the hashes are Fountain source markup, not print convention — `src/fountain.ts`, `src/pdf.ts`,
   `src/views/script-view.tsx`
-- [ ] Scene identity across edits: **a hidden `[[loom:<id>]]` Fountain note in the scene
-  heading** (decided). Non-exporting by spec, survives any rewrite or reorder, and our editor
-  hides it entirely; the accepted cost is that it shows as a small note if the file is opened
-  in Better Fountain or a plain text editor. Chosen deliberately over heuristic re-matching:
-  a scene renamed *and* moved in one edit would silently detach under heuristics, taking its
-  relationships, notes and quest links with it, and a silent data loss is worse than a
-  visible token.
-  - **Strip the ids on export, never on "Open in external app".** Export produces a *copy*,
-    so a clean `.fountain` (or PDF) is right. "Open in external app" hands over the *live*
-    file, which the external editor writes back to in place — stripping there would destroy
-    every id on the first external save.
-  - That leaves exactly one lossy path: export stripped → edit externally → import back over
-    the same project. **Heuristic matching (heading text + position + content hash) belongs
-    there and only there** — as a recovery fallback for a round trip that already lost the
-    ids, not as the primary identity mechanism.
-  - A script imported with no ids at all (written elsewhere) simply gets fresh ones on parse,
-    which is the same path as the backward-compatible import above — nothing to detach from.
+- [x] Scene identity across edits: **a hidden `[[loom:<id>]]` Fountain note in the scene
+  heading** — non-exporting by spec, survives any rewrite or reorder, hidden entirely by our
+  editor (shows as a small note only if the file is opened in Better Fountain or a plain text
+  editor, an accepted cost). Ids are stripped on export only (`stripLoomIds`, the "Export as
+  .fountain (no Loom ids)…" menu action) and never on "Open in external app" (which hands over
+  the live file); heuristic matching (heading text + position, `reattachSceneIds`) is the
+  recovery fallback for the one lossy path — export stripped → edit externally → import back —
+  never the primary identity mechanism — `src/fountain.ts`, `src/views/script-view.tsx`
 - [x] **Pages are modular editing windows.** A Scene page edits its own stretch of the script
   (`replaceSceneBody` — the heading and its hidden id stay owned by the script, only the body
   is editable), re-assigning its chapter MOVES the block in the script
@@ -559,14 +555,16 @@ Still to build:
   Prev/Next (there's no offset-to-page mapping to compute here, since the excerpt isn't laid
   out against the whole document — instead it scrolls the Nth `<mark>` in the DOM into view,
   since marks render in the same reading order as the match list) — `src/views/entity-view.tsx`.
-- [ ] **Chapters can't be created or reordered from the app** — only by writing a `#` section
-  in the script. "Add a chapter" should insert a section (with a fresh `[[loom:…]]`), and
-  reordering chapters should move their whole section blocks.
-- [ ] **Deleting a scene from the file explorer** (rather than from its page) still leaves it
-  in the script. The page's Delete handles both; a `vault.on('delete')` listener would need
-  the record's `sceneId` cached before the record is dropped from the index.
-- [ ] **A chapter deleted from its page doesn't remove its `#` section** (and would strand its
-  scenes). Needs a decision first: delete the scenes with it, or move them out?
+- [x] **Chapters can be created and reordered from the app** — "+ New chapter" (`appendChapter`)
+  inserts a fresh section with its own `[[loom:…]]`, with a position picker
+  (`reorderTopSections`) in the creation modal; the Script view's Outline drags chapters
+  (and page breaks) via `reorderTopLevelEntries`, moving each one's whole section block —
+  `src/fountain.ts`, `src/project.ts`, `src/views/script-view.tsx`
+- [ ] **Deleting a Scene/Chapter note from the file explorer** (rather than from its own page,
+  the entity list, or the graph) still leaves it in the script. Every in-app delete path
+  (entity page, list-view) goes through `deleteScriptEntity`, but there is no `vault.on('delete')`
+  listener that catches a note trashed from the file explorer itself — it would need the
+  record's `sceneId`/`chapterId` cached before the record drops from the index — `src/indexer.ts`
 - [x] **Live-preview Fountain editor** (`src/views/fountain-field.tsx`, a new CM6 field replacing
   the plain textarea in Script mode): per-element-type line decorations computed by re-parsing
   the doc on every change (`parseFountain` — dependency-free, cheap enough to run per keystroke)
@@ -996,4 +994,37 @@ An in-app guided tutorial that teaches the plugin's features, on by default for 
 
 ## Code health
 
-- [ ] **Dedicated code-efficiency audit** — because features were built in a fragmented, token-budgeted way (reading/writing code in slices, not the whole tree), duplicated/mergeable logic and dead code can accumulate unnoticed. Periodically spend a whole session scanning the full project for consolidation, dead code, and shared-helper opportunities. (`/simplify` covers changed-code cleanups; this is the broader whole-tree pass.)
+- [x] **Dedicated code-efficiency audit** — because features were built in a fragmented, token-budgeted way (reading/writing code in slices, not the whole tree), duplicated/mergeable logic and dead code can accumulate unnoticed. Periodically spend a whole session scanning the full project for consolidation, dead code, and shared-helper opportunities. (`/simplify` covers changed-code cleanups; this is the broader whole-tree pass.) **First full pass done 2026-08-06**: every file under `src/` reviewed (parallelized across several agents on disjoint file groups). Removed dead code (`EdgeRoute`'s unused `'elbow'` kind, `pdf.ts`'s already-flagged-dead `renderScreenplayHtml`/`SCREENPLAY_CSS`, the no-op `useBoxSizeMemory` hook and its now-fully-dead `settings.entityBoxSizes` field), deduplicated ~15 copy-pasted blocks into shared helpers (frontmatter parsing in indexer.ts, settings validation in settings.ts, `useCloseOnOutsideClick`/`withFrontMatter`/`ZonePinList`/`newZone`/`useDebouncedFrontmatterField`/`clearFmKeys`/`writeEntryField` and others), fixed several real bugs found along the way (a custom-calendar date-preview bug, a comment-thread search/resolved-state bug checking only the first reply instead of the whole thread, `CreateEntityModal` silently discarding a re-picked "Sublocation of" parent, a character-faction modal row blanking its own display text on re-render), and fixed a couple of perf issues (re-parsing the whole script on every `pointermove` during an annotation-handle drag, a few missing `useMemo`s recomputing on unrelated re-renders). Should be repeated periodically as a whole-tree pass, same as this one — not a one-time checkbox.
+- [ ] **Flagged during the 2026-08-06 audit, not acted on — needs a dedicated look, not a quick fix:**
+  - `src/views/markdown-field.tsx`: `INLINE_RULES` (feeds `lineTokens`) and `displayTextOf` hardcode
+    the same 6 markdown-marker regexes twice, in two different shapes. Unifying them safely means
+    reproducing the "leading guard capture group" offset math `lineTokens` already does — risked a
+    subtle live-editor/copy-text mismatch, so left alone this pass.
+  - `src/views/graph-view.tsx` ~line 525: `liveManual` (a ref for a live-reflow manual-position
+    override) is never assigned a non-null value anywhere — every read of it and every
+    `hadLive`-gated branch (3 call sites) is dead in practice. Its own comment ("Retained but
+    inert... kept only so runLayout and the drop handlers read a stable 'no live override'") reads
+    like a deliberate decision, not an oversight, so it wasn't ripped out — but nobody's actually
+    confirmed it's still wanted as scaffolding for a future live-reflow feature vs. just dead weight.
+  - `src/project.ts`: the character "Add faction" and faction "Add member" row-renderers in
+    `CreateEntityModal` (~70 lines each, same shape) weren't merged — the faction block has an
+    extra "of" label the character block doesn't. Also ~7 separate "search → pick → chip(s) →
+    refresh()" field blocks across the same file were left un-generalized — real differences, but
+    also real repetition; a human should judge whether a shared helper is worth the parameterization
+    given how frequently this creation-modal code changes.
+  - `src/views/map-view.tsx`: `addDoor`/`addItemPin`/`toggleSubPin` (and their remove counterparts)
+    all share an "offset from zone center by 18×count×scale, clamp to zone" placement shape; the
+    door/item-pin/sub-pin SVG rendering layers (~3×60 lines: squish transform, drag setup,
+    double-click-open, circle+label) are structurally identical but each hand-codes its own glyph
+    markup and field names. Genuine duplication, but dense, carefully-tuned interactive/SVG code —
+    left alone rather than risk the drag machinery for a parameterization win.
+  - `src/views/entity-view.tsx`: the Chapter and Scene pages' own "Script section" implementations
+    (nav panel, search/match building, Script/Pages/Outline tabs, `FountainField` wiring — several
+    hundred lines each) are near-total mirrors of each other, differing only by chapter/scene
+    identifiers. Almost certainly the single largest duplication in the codebase — diffed the two
+    blocks directly and found no divergence bug between them, so it's safe as-is, but unifying two
+    ~500-line stateful sections (each with its own dozen refs/state vars) is a real rewrite, not a
+    surgical fix. Worth a dedicated session if this area needs touching again anyway.
+  - `src/license/manager.ts`: the try/catch error-handling shape in `activate`/
+    `deactivateThisDevice`/`doRevalidate` is duplicated 3x with minor variations — low priority,
+    flagged only because it's the one other spot in the codebase with this shape.

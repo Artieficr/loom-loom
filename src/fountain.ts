@@ -892,8 +892,7 @@ export function parseFountain(text: string): ParsedScript {
 				// parenthetical (`[[loom-comment:x]](beat)[[/loom-comment:x]]`)
 				// no longer starts/ends with its parens once wrapped, so the
 				// classification test needs the marker-stripped view too; the
-				// stored text switches to it as well (previously `block` here
-				// had NO stripping at all, unlike every other element type).
+				// stored text uses it as well, same as every other element type.
 				const blockCls = block.replace(ANNOTATION_MARKER_RE, '');
 				if (blockCls.startsWith('(') && blockCls.endsWith(')')) {
 					flushDialogue();
@@ -1040,6 +1039,29 @@ export function parseFountain(text: string): ParsedScript {
  * lose. It only ever ADDS: an existing id is never changed or removed, so the
  * operation is idempotent and safe to run on every load.
  */
+/** Every loom id currently in use anywhere in the script — scenes, sections
+ *  (chapters and branch-tagged sub-sections), and chapter-boundary page
+ *  breaks all share one `[[loom:…]]` namespace, so any op that's about to
+ *  hand out a fresh id has to check against all three first. */
+function allLoomIds(parsed: ParsedScript): Set<string> {
+	return new Set(
+		[...parsed.scenes, ...parsed.sections, ...parsed.pageBreaks]
+			.map((s) => s.loomId)
+			.filter((id): id is string => id !== null)
+	);
+}
+
+/** A fresh id guaranteed not to collide with anything in `seen` —
+ *  `newSceneId()`'s own collision-resistance is already high, but every id
+ *  already in the script is a hard constraint regardless (a genuine
+ *  duplicate would silently conflate two different things), so every
+ *  id-issuing op re-rolls against the script's actual current ids. */
+function freshSceneId(seen: Set<string>): string {
+	let id = newSceneId();
+	while (seen.has(id)) id = newSceneId();
+	return id;
+}
+
 export function ensureSceneIds(text: string): { text: string; changed: boolean } {
 	const parsed = parseFountain(text);
 	// Top-level sections are chapters, and they need a stable identity for the
@@ -1061,14 +1083,9 @@ export function ensureSceneIds(text: string): { text: string; changed: boolean }
 	if (missing.length === 0) return { text, changed: false };
 
 	const lines = text.split(/\r?\n/);
-	const seen = new Set(
-		[...parsed.scenes, ...parsed.sections, ...parsed.pageBreaks]
-			.map((s) => s.loomId)
-			.filter((id): id is string => id !== null)
-	);
+	const seen = allLoomIds(parsed);
 	for (const line of missing) {
-		let id = newSceneId();
-		while (seen.has(id)) id = newSceneId();
+		const id = freshSceneId(seen);
 		seen.add(id);
 		lines[line] = `${lines[line].trimEnd()} [[loom:${id}]]`;
 	}
@@ -1321,83 +1338,6 @@ export function preventOrphans(text: string): string {
 	);
 }
 
-/** Screenplay CSS: US Letter margins, 12pt Courier, standard element indents. */
-const SCREENPLAY_CSS = `
-@page { size: Letter; margin: 1in 1in 1in 1.5in; }
-body { background: #525659; margin: 0; padding: 24px 0; font-family: "Courier New", Courier, monospace; font-size: 12pt; line-height: 1; }
-.page { background: #fff; color: #000; width: 8.5in; min-height: 11in; box-sizing: border-box; padding: 1in 1in 1in 1.5in; margin: 0 auto 24px; position: relative; box-shadow: 0 2px 12px rgba(0,0,0,.4); }
-.page-number { position: absolute; top: .5in; right: 1in; font-size: 12pt; }
-.title-page { text-align: center; }
-.title-page .title { margin-top: 3.5in; text-transform: uppercase; font-weight: bold; }
-.title-page .byline { margin-top: .5in; }
-.title-page .lower-left { position: absolute; left: 1.5in; bottom: 1in; text-align: left; }
-p { margin: 0 0 1em; white-space: pre-wrap; }
-.scene-heading { font-weight: bold; text-transform: uppercase; }
-.action { }
-.character { margin-left: 2.2in; margin-bottom: 0; text-transform: uppercase; }
-.parenthetical { margin-left: 1.6in; margin-bottom: 0; }
-.dialogue { margin-left: 1in; margin-right: 1.5in; margin-bottom: 1em; }
-.transition { text-align: right; text-transform: uppercase; }
-.centered { text-align: center; }
-.lyrics { margin-left: 1in; font-style: italic; }
-@media print {
-  body { background: #fff; padding: 0; }
-  .page { box-shadow: none; margin: 0; width: auto; min-height: 0; padding: 0; page-break-after: always; }
-  .page:last-child { page-break-after: auto; }
-}
-`;
-
-/**
- * Renders the script as standalone, print-ready HTML — the export path to PDF.
- *
- * Deliberately not a PDF generator: a browser's own "Print → Save as PDF"
- * produces a correct screenplay from this with no bundled PDF library, and the
- * file is readable and re-styleable on its own. Loom ids never reach it, since
- * everything rendered comes from the parse rather than the raw text.
- */
-export function renderScreenplayHtml(parsed: ParsedScript): string {
-	const t = parsed.titlePage;
-	const pages = paginate(parsed);
-
-	const titleBlock =
-		t.title.trim() === '' && t.author.trim() === ''
-			? ''
-			: `<div class="page title-page">
-	<div class="title">${renderInline(t.title)}</div>
-	${t.credit.trim() !== '' ? `<div class="byline">${renderInline(t.credit)}</div>` : ''}
-	${t.author.trim() !== '' ? `<div class="byline">${renderInline(t.author)}</div>` : ''}
-	${t.source.trim() !== '' ? `<div class="byline">${renderInline(t.source)}</div>` : ''}
-	<div class="lower-left">
-		${t.draftDate.trim() !== '' ? `<div>${renderInline(t.draftDate)}</div>` : ''}
-		${t.contact.trim() !== '' ? `<div>${renderInline(t.contact)}</div>` : ''}
-		${t.copyright.trim() !== '' ? `<div>${renderInline(t.copyright)}</div>` : ''}
-	</div>
-</div>`;
-
-	const body = pages
-		.map(
-			(elements, i) => `<div class="page">
-	${i > 0 ? `<div class="page-number">${i + 1}.</div>` : ''}
-	${elements.map((e) => `<p class="${e.type}">${renderInline(stripAnnotationMarkers(stripEntityLinksForDisplay(elementText(e))))}</p>`).join('\n\t')}
-</div>`
-		)
-		.join('\n');
-
-	return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>${escapeHtml(t.title.trim() === '' ? 'Screenplay' : t.title.replace(/\n/g, ' '))}</title>
-<style>${SCREENPLAY_CSS}</style>
-</head>
-<body>
-${titleBlock}
-${body}
-</body>
-</html>
-`;
-}
-
 // --- Import ----------------------------------------------------------------
 
 /**
@@ -1608,6 +1548,19 @@ export function sceneEndLine(parsed: ParsedScript, scene: ParsedScene): number {
 	return cap === null ? scene.endLine : Math.min(scene.endLine, cap);
 }
 
+/** Drops trailing blank lines off a captured block of raw lines — shared by
+ *  every op below that lifts a chunk of the script out and re-splices it
+ *  elsewhere (`moveSceneToSection`, `moveSceneBefore`, `reorderScenesInSection`,
+ *  `reorderBranchGroup`, `rebuildTopLevel`): a captured span often ends with
+ *  the blank line that used to separate it from whatever followed, and
+ *  re-inserting that verbatim would double up with the blank line each call
+ *  site adds back itself. */
+function trimTrailingBlankLines(block: string[]): string[] {
+	const clean = [...block];
+	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+	return clean;
+}
+
 /**
  * Moves a scene under a different chapter: its whole block is lifted out and
  * re-inserted at the end of the target section, so re-assigning a chapter on
@@ -1628,8 +1581,7 @@ export function moveSceneToSection(text: string, sceneId: string, sectionId: str
 	// Removing the block shifts everything after it up.
 	if (insertAt > scene.line) insertAt -= end - scene.line;
 	while (insertAt > 0 && lines[insertAt - 1]?.trim() === '') insertAt--;
-	const clean = [...block];
-	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+	const clean = trimTrailingBlankLines(block);
 	lines.splice(insertAt, 0, '', ...clean, '');
 	return lines.join('\n');
 }
@@ -1698,8 +1650,7 @@ export function moveSceneBefore(text: string, sceneId: string, beforeSceneId: st
 	lines.splice(scene.line, end - scene.line);
 	if (insertAt > scene.line) insertAt -= end - scene.line;
 	while (insertAt > 0 && lines[insertAt - 1]?.trim() === '') insertAt--;
-	const clean = [...block];
-	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+	const clean = trimTrailingBlankLines(block);
 	lines.splice(insertAt, 0, '', ...clean, '');
 	return lines.join('\n');
 }
@@ -1752,8 +1703,7 @@ export function reorderScenesInSection(
 	for (const id of order) {
 		const block = blocks.get(id);
 		if (!block) continue;
-		const clean = [...block];
-		while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+		const clean = trimTrailingBlankLines(block);
 		rebuilt.push('', ...clean, '');
 	}
 
@@ -1797,8 +1747,7 @@ export function reorderBranchGroup(text: string, groupId: string, orderedSection
 	for (const id of order) {
 		const block = blocks.get(id);
 		if (!block) continue;
-		const clean = [...block];
-		while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+		const clean = trimTrailingBlankLines(block);
 		rebuilt.push(...clean, '');
 	}
 
@@ -1865,8 +1814,7 @@ function rebuildTopLevel(text: string, parsed: ParsedScript, order: string[]): s
 	for (const id of finalOrder) {
 		const block = blocks.get(id);
 		if (!block) continue;
-		const clean = [...block];
-		while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
+		const clean = trimTrailingBlankLines(block);
 		rebuilt.push(...clean, '');
 	}
 
@@ -2005,11 +1953,7 @@ export function renameSectionTitle(text: string, sectionId: string, newTitle: st
  */
 export function appendChapter(text: string, title: string): string {
 	const parsed = parseFountain(text);
-	const seen = new Set(
-		[...parsed.scenes, ...parsed.sections].map((s) => s.loomId).filter((id): id is string => id !== null)
-	);
-	let id = newSceneId();
-	while (seen.has(id)) id = newSceneId();
+	const id = freshSceneId(allLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	return `${trimmed}\n\n# ${title.trim()} [[loom:${id}]]\n`;
 }
@@ -2025,13 +1969,7 @@ export function appendChapter(text: string, title: string): string {
  */
 export function appendPageBreak(text: string): string {
 	const parsed = parseFountain(text);
-	const seen = new Set(
-		[...parsed.scenes, ...parsed.sections, ...parsed.pageBreaks]
-			.map((s) => s.loomId)
-			.filter((id): id is string => id !== null)
-	);
-	let id = newSceneId();
-	while (seen.has(id)) id = newSceneId();
+	const id = freshSceneId(allLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	return `${trimmed}\n\n=== [[loom:${id}]]\n`;
 }
@@ -2049,11 +1987,7 @@ export function appendPageBreak(text: string): string {
  */
 export function appendScene(text: string, location: string): string {
 	const parsed = parseFountain(text);
-	const seen = new Set(
-		[...parsed.scenes, ...parsed.sections].map((s) => s.loomId).filter((id): id is string => id !== null)
-	);
-	let id = newSceneId();
-	while (seen.has(id)) id = newSceneId();
+	const id = freshSceneId(allLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	const heading = location.trim() === '' ? 'NEW LOCATION' : location.trim().toUpperCase();
 	return `${trimmed}\n\nINT. ${heading} - DAY [[loom:${id}]]\n`;

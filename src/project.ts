@@ -437,25 +437,24 @@ export class TextInputModal extends Modal {
 }
 
 /**
- * A real closeable window (replacing an earlier `new Menu()`/anchored-popover
- * version) for an alt-text span's option list — opened by right-clicking its
- * gutter/margin icon. Every option renders as its own EDITABLE textarea (not
- * read-only, unlike the old menu which just showed truncated labels to pick
- * from): the user can rewrite an existing alternative's wording in place, not
- * just add new ones. Owns its own local `options`/`activeIndex`/
- * `acceptedIndex` copy and re-renders its list after every action, so it
- * never needs to be re-created or externally refreshed while open — the
- * caller's callbacks only need to persist the change to the sidecar (and,
- * for the active option specifically, push it into the live document), never
- * hand data back in EXCEPT `onDeleteOption`, which has to (deleting can shift
- * every later index, and duplicating that renumbering logic here as well as
- * in the caller would be one more place for the two to drift apart).
+ * A real closeable window for an alt-text span's option list — opened by
+ * right-clicking its gutter/margin icon. Every option renders as its own
+ * EDITABLE textarea, not a read-only label to pick from: the user can
+ * rewrite an existing alternative's wording in place, not just add new ones.
+ * Owns its own local `options`/`activeIndex`/`acceptedIndex` copy and
+ * re-renders its list after every action, so it never needs to be
+ * re-created or externally refreshed while open — the caller's callbacks
+ * only need to persist the change to the sidecar (and, for the active
+ * option specifically, push it into the live document), never hand data
+ * back in EXCEPT `onDeleteOption`, which has to (deleting can shift every
+ * later index, and duplicating that renumbering logic here as well as in
+ * the caller would be one more place for the two to drift apart).
  *
- * "Draft" and "Accept" replace an earlier single "Use this" button: both make
- * an option the currently-displayed text, but only Accept marks it as the
- * FINALIZED choice for this span (`acceptedIndex`) — Draft explicitly clears
- * any prior acceptance, since picking a different draft means the span is
- * back to "still deciding." Whichever row is currently ACTIVE gets an accent
+ * "Draft" and "Accept" are two distinct actions: both make an option the
+ * currently-displayed text, but only Accept marks it as the FINALIZED
+ * choice for this span (`acceptedIndex`) — Draft explicitly clears any
+ * prior acceptance, since picking a different draft means the span is back
+ * to "still deciding." Whichever row is currently ACTIVE gets an accent
  * background so it stands out in the list at a glance; the pressed pill
  * (`.loom-seg-on`, this codebase's usual segmented-pill class) distinguishes
  * "this is just the draft" from "this is the accepted one."
@@ -479,7 +478,7 @@ export class AltTextModal extends Modal {
 			/** An existing option's wording was edited in place. */
 			onEditOption: (index: number, newText: string) => void;
 			/** A brand-new option was appended (never activated automatically —
-			 *  add and swap stay distinct actions, same as the old menu). */
+			 *  add and swap stay distinct actions). */
 			onAddOption: (text: string) => void;
 			/** Removes one option outright — the caller re-derives (and
 			 *  persists) the shifted `activeIndex`/`acceptedIndex` and hands the
@@ -1629,6 +1628,11 @@ export class CreateEntityModal extends Modal {
 				.sort((a, b) => a.name.localeCompare(b.name));
 			// Row list lives BELOW the add button (created after it).
 			let rowsEl: HTMLElement;
+			// Rebuilds recreate every row's inputs — restore their values from the
+			// stored fields (link targets → display names), or adding a second row
+			// visually wipes every earlier one's Faction/Location text.
+			const displayNameOf = (records: EntityRecord[], linkTarget: string) =>
+				records.find((r) => linkTargetOf(r) === linkTarget)?.name ?? linkTarget;
 			const render = () => {
 				rowsEl.empty();
 				(this.fields.factions ?? []).forEach((m, i) => {
@@ -1638,6 +1642,7 @@ export class CreateEntityModal extends Modal {
 					roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
 					row.createSpan({ text: 'of', cls: 'loom-modal-faction-lbl' });
 					const factionInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Faction…' } });
+					factionInput.value = m.faction === '' ? '' : displayNameOf(factions, m.faction);
 					new RecordInputSuggest(
 						this.app,
 						factionInput,
@@ -1651,6 +1656,7 @@ export class CreateEntityModal extends Modal {
 					);
 					row.createSpan({ text: 'at', cls: 'loom-modal-faction-lbl' });
 					const locInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Location…' } });
+					locInput.value = m.location === '' ? '' : displayNameOf(locations, m.location);
 					new RecordInputSuggest(
 						this.app,
 						locInput,
@@ -1938,7 +1944,11 @@ export class CreateEntityModal extends Modal {
 				target: linkTargetOf(connectTo.record),
 			};
 		}
-	if (this.options.parentLocation) this.fields.parentLocation = linkTargetOf(this.options.parentLocation);
+		// `fields.parentLocation` is NOT re-derived from `options.parentLocation`
+		// here — the "Sublocation of" field (built below, for `type === 'location'`)
+		// already seeds it from that option AND keeps it current as the user picks
+		// a different parent or clears it; re-applying the original option here
+		// would silently discard that choice.
 		if (this.options.noteSession) this.fields.noteSession = linkTargetOf(this.options.noteSession);
 		else if (this.pickedSession) this.fields.noteSession = linkTargetOf(this.pickedSession);
 		if (this.type === 'quest')
@@ -1963,8 +1973,6 @@ export class CreateEntityModal extends Modal {
 		}
 	}
 
-	/** Pins an existing entity to `session` via a session note (skips if it's
-	 *  already there), then closes — the session-page hub picks it up. */
 	/** Writes the just-created character into each chosen faction's `members`
 	 *  (a plain link for a default-role/no-location membership, else an object). */
 	private async applyFactions(charBasename: string): Promise<void> {
@@ -1990,6 +1998,8 @@ export class CreateEntityModal extends Modal {
 		}
 	}
 
+	/** Pins an existing entity to `session` via a session note (skips if it's
+	 *  already there), then closes — the session-page hub picks it up. */
 	private async pinExisting(entity: EntityRecord, session: EntityRecord): Promise<void> {
 		const already = entity.sessionNotes.some(
 			(n) => n.session !== null && this.plugin.indexer.resolve(n.session, entity.path)?.path === session.path

@@ -17,7 +17,7 @@ function sampleDate(config: ProjectConfig): LoomDate {
 		raw: '2003-03-04',
 		sortKey: 0,
 		year: custom ? 763 : 2003,
-		month: custom ? Math.min(1, config.customCalendar.monthCount) : 3,
+		month: custom ? Math.min(3, config.customCalendar.monthCount) : 3,
 		day: custom ? 3 : 4,
 		calendar: custom ? 'custom' : 'gregorian',
 	};

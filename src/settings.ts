@@ -115,9 +115,6 @@ export interface LoomLoomSettings {
 	graphCameras: Record<string, GraphCamera>;
 	/** Last map camera per project root — remembered across sessions. */
 	mapCameras: Record<string, GraphCamera>;
-	/** Resized textarea heights (px) per entity file path, keyed by field name
-	 *  (e.g. "description", "notes") — not user-facing, remembered across sessions. */
-	entityBoxSizes: Record<string, Record<string, number>>;
 	/** Drag-reordered x of unconnected global graph nodes, per project root then
 	 *  note path — not user-facing. Connected nodes follow their forces instead. */
 	graphManualX: Record<string, Record<string, number>>;
@@ -196,7 +193,6 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	loomButtonIcon: '#fff8e6',
 	graphCameras: {},
 	mapCameras: {},
-	entityBoxSizes: {},
 	graphManualX: {},
 	graphManualY: {},
 	graphPins: {},
@@ -207,6 +203,59 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	licenseKey: '',
 };
 
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+/** A stored color, kept only if it's a valid 6-digit hex string. */
+function parseHexColor(value: unknown, fallback: string): string {
+	return typeof value === 'string' && HEX_COLOR_RE.test(value) ? value : fallback;
+}
+
+/** A stored `Record<string, GraphCamera>` (graph/map camera positions per project root). */
+function parseCameraMap(value: unknown): Record<string, GraphCamera> {
+	const out: Record<string, GraphCamera> = {};
+	if (typeof value !== 'object' || value === null) return out;
+	for (const [root, cam] of Object.entries(value as Record<string, Partial<GraphCamera> | undefined>)) {
+		if (cam && typeof cam.tx === 'number' && typeof cam.ty === 'number' && typeof cam.k === 'number') {
+			out[root] = { tx: cam.tx, ty: cam.ty, k: cam.k };
+		}
+	}
+	return out;
+}
+
+/** A stored `Record<string, { x, y }>` — pinned/dropped node positions keyed by note path. */
+function parsePinsMap(value: unknown): Record<string, { x: number; y: number }> {
+	const out: Record<string, { x: number; y: number }> = {};
+	if (typeof value !== 'object' || value === null) return out;
+	for (const [path, p] of Object.entries(value as Record<string, unknown>)) {
+		if (
+			p &&
+			typeof p === 'object' &&
+			Number.isFinite((p as { x?: unknown }).x) &&
+			Number.isFinite((p as { y?: unknown }).y)
+		) {
+			out[path] = { x: (p as { x: number }).x, y: (p as { y: number }).y };
+		}
+	}
+	return out;
+}
+
+/** A stored `Record<string, Record<string, number>>` — per-project-root maps of
+ *  note path -> a finite number (manual x/y, timeline rank, …); roots left with
+ *  nothing valid are dropped. */
+function parseNumberMapSetting(value: unknown): Record<string, Record<string, number>> {
+	const out: Record<string, Record<string, number>> = {};
+	if (typeof value !== 'object' || value === null) return out;
+	for (const [root, entries] of Object.entries(value as Record<string, unknown>)) {
+		if (typeof entries !== 'object' || entries === null) continue;
+		const nums: Record<string, number> = {};
+		for (const [path, n] of Object.entries(entries as Record<string, unknown>)) {
+			if (typeof n === 'number' && Number.isFinite(n)) nums[path] = n;
+		}
+		if (Object.keys(nums).length > 0) out[root] = nums;
+	}
+	return out;
+}
+
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	const base: LoomLoomSettings = {
 		...DEFAULT_SETTINGS,
@@ -216,7 +265,6 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		globalLayerOrder: [...DEFAULT_SETTINGS.globalLayerOrder],
 		graphCameras: {},
 		mapCameras: {},
-		entityBoxSizes: {},
 		graphManualX: {},
 		graphManualY: {},
 		graphPins: {},
@@ -273,17 +321,13 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof data.questTagColors === 'object' && data.questTagColors !== null) {
 		for (const k of ['main', 'important', 'side'] as const) {
 			const color = (data.questTagColors as Record<string, unknown>)[k];
-			if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) {
-				base.questTagColors[k] = color;
-			}
+			base.questTagColors[k] = parseHexColor(color, base.questTagColors[k]);
 		}
 	}
 	if (typeof data.nodeColors === 'object' && data.nodeColors !== null) {
 		for (const type of ENTITY_TYPES) {
 			const color = (data.nodeColors as Record<string, unknown>)[type];
-			if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) {
-				base.nodeColors[type] = color;
-			}
+			base.nodeColors[type] = parseHexColor(color, base.nodeColors[type]);
 		}
 	}
 	if (typeof data.nodeSizes === 'object' && data.nodeSizes !== null) {
@@ -294,12 +338,8 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			}
 		}
 	}
-	if (typeof data.groupColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.groupColor)) {
-		base.groupColor = data.groupColor;
-	}
-	if (typeof data.mapsColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.mapsColor)) {
-		base.mapsColor = data.mapsColor;
-	}
+	base.groupColor = parseHexColor(data.groupColor, base.groupColor);
+	base.mapsColor = parseHexColor(data.mapsColor, base.mapsColor);
 	if (data.loomButtonStyle === 'original' || data.loomButtonStyle === 'custom') {
 		base.loomButtonStyle = data.loomButtonStyle;
 	} else if (
@@ -309,12 +349,8 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		// Short-lived fixed presets, superseded by the theme-following original.
 		base.loomButtonStyle = 'original';
 	}
-	if (typeof data.loomButtonBg === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.loomButtonBg)) {
-		base.loomButtonBg = data.loomButtonBg;
-	}
-	if (typeof data.loomButtonIcon === 'string' && /^#[0-9a-fA-F]{6}$/.test(data.loomButtonIcon)) {
-		base.loomButtonIcon = data.loomButtonIcon;
-	}
+	base.loomButtonBg = parseHexColor(data.loomButtonBg, base.loomButtonBg);
+	base.loomButtonIcon = parseHexColor(data.loomButtonIcon, base.loomButtonIcon);
 	if (Array.isArray(data.globalLayerOrder)) {
 		const order: EntityType[] = [];
 		for (const t of data.globalLayerOrder) {
@@ -329,64 +365,13 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		}
 		base.globalLayerOrder = order;
 	}
-	if (typeof data.graphCameras === 'object' && data.graphCameras !== null) {
-		for (const [root, cam] of Object.entries(data.graphCameras)) {
-			if (cam && typeof cam.tx === 'number' && typeof cam.ty === 'number' && typeof cam.k === 'number') {
-				base.graphCameras[root] = { tx: cam.tx, ty: cam.ty, k: cam.k };
-			}
-		}
-	}
-	if (typeof data.mapCameras === 'object' && data.mapCameras !== null) {
-		for (const [root, cam] of Object.entries(data.mapCameras)) {
-			if (cam && typeof cam.tx === 'number' && typeof cam.ty === 'number' && typeof cam.k === 'number') {
-				base.mapCameras[root] = { tx: cam.tx, ty: cam.ty, k: cam.k };
-			}
-		}
-	}
-	if (typeof data.entityBoxSizes === 'object' && data.entityBoxSizes !== null) {
-		for (const [path, fields] of Object.entries(data.entityBoxSizes)) {
-			if (typeof fields !== 'object' || fields === null) continue;
-			const sizes: Record<string, number> = {};
-			for (const [key, height] of Object.entries(fields)) {
-				if (typeof height === 'number' && height > 0) sizes[key] = height;
-			}
-			if (Object.keys(sizes).length > 0) base.entityBoxSizes[path] = sizes;
-		}
-	}
-	if (typeof data.graphManualX === 'object' && data.graphManualX !== null) {
-		for (const [root, entries] of Object.entries(data.graphManualX)) {
-			if (typeof entries !== 'object' || entries === null) continue;
-			const xs: Record<string, number> = {};
-			for (const [path, x] of Object.entries(entries)) {
-				if (typeof x === 'number' && Number.isFinite(x)) xs[path] = x;
-			}
-			if (Object.keys(xs).length > 0) base.graphManualX[root] = xs;
-		}
-	}
-	if (typeof data.graphManualY === 'object' && data.graphManualY !== null) {
-		for (const [root, entries] of Object.entries(data.graphManualY)) {
-			if (typeof entries !== 'object' || entries === null) continue;
-			const ys: Record<string, number> = {};
-			for (const [path, y] of Object.entries(entries)) {
-				if (typeof y === 'number' && Number.isFinite(y)) ys[path] = y;
-			}
-			if (Object.keys(ys).length > 0) base.graphManualY[root] = ys;
-		}
-	}
+	base.graphCameras = parseCameraMap(data.graphCameras);
+	base.mapCameras = parseCameraMap(data.mapCameras);
+	base.graphManualX = parseNumberMapSetting(data.graphManualX);
+	base.graphManualY = parseNumberMapSetting(data.graphManualY);
 	if (typeof data.graphPins === 'object' && data.graphPins !== null) {
 		for (const [root, entries] of Object.entries(data.graphPins)) {
-			if (typeof entries !== 'object' || entries === null) continue;
-			const pins: Record<string, { x: number; y: number }> = {};
-			for (const [path, p] of Object.entries(entries)) {
-				if (
-					typeof p === 'object' &&
-					p !== null &&
-					Number.isFinite((p as { x?: unknown }).x) &&
-					Number.isFinite((p as { y?: unknown }).y)
-				) {
-					pins[path] = { x: (p as { x: number }).x, y: (p as { y: number }).y };
-				}
-			}
+			const pins = parsePinsMap(entries);
 			if (Object.keys(pins).length > 0) base.graphPins[root] = pins;
 		}
 	}
@@ -411,19 +396,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 				if (typeof v !== 'object' || v === null) continue;
 				const o = v as Partial<SavedGraphView>;
 				if (typeof o.id !== 'string' || typeof o.name !== 'string') continue;
-				const pins: Record<string, { x: number; y: number }> = {};
-				if (o.pins && typeof o.pins === 'object') {
-					for (const [path, p] of Object.entries(o.pins)) {
-						if (
-							p &&
-							typeof p === 'object' &&
-							Number.isFinite((p as { x?: unknown }).x) &&
-							Number.isFinite((p as { y?: unknown }).y)
-						) {
-							pins[path] = { x: (p as { x: number }).x, y: (p as { y: number }).y };
-						}
-					}
-				}
+				const pins = parsePinsMap(o.pins);
 				views.push({
 					id: o.id,
 					name: o.name,
@@ -439,16 +412,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			if (views.length > 0) base.graphViews[root] = views;
 		}
 	}
-	if (typeof data.timelineManualOrder === 'object' && data.timelineManualOrder !== null) {
-		for (const [root, entries] of Object.entries(data.timelineManualOrder)) {
-			if (typeof entries !== 'object' || entries === null) continue;
-			const ranks: Record<string, number> = {};
-			for (const [path, rank] of Object.entries(entries)) {
-				if (typeof rank === 'number' && Number.isFinite(rank)) ranks[path] = rank;
-			}
-			if (Object.keys(ranks).length > 0) base.timelineManualOrder[root] = ranks;
-		}
-	}
+	base.timelineManualOrder = parseNumberMapSetting(data.timelineManualOrder);
 	// Region color is derived, never stored independently.
 	syncRegionColor(base);
 	return base;

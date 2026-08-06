@@ -319,7 +319,7 @@ export function MiniGraph({
 				className="loom-minigraph"
 				onPointerDown={onSvgDown}
 				onPointerMove={onSvgMove}
-			onPointerUp={onSvgUp}
+				onPointerUp={onSvgUp}
 				onDoubleClick={() => onCollapse?.()}
 			>
 				<g transform={`translate(${camera.tx},${camera.ty}) scale(${camera.k})`}>

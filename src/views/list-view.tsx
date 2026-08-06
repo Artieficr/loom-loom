@@ -720,6 +720,33 @@ function EntityList({
 			: [...ses.attendance, linkTargetOf(pc)];
 		writeFmOf(ses, (fm) => setLoomKey(fm, FM.attendance, next.map((n) => `[[${n}]]`)));
 	};
+	/** "Add an item" row — same shape on both a character's and a location's
+	 *  context menu (only the holder `r` differs): offers every ORIGINAL item
+	 *  (never a character-specific copy) `r` doesn't already hold. */
+	const addItemMenuItem = (menu: Menu, r: EntityRecord) =>
+		menu.addItem((i) =>
+			i
+				.setTitle('Add an item')
+				.setIcon(ENTITY_META.item.icon)
+				.onClick(() =>
+					new RecordSuggestModal(
+						plugin.app,
+						plugin.indexer
+							.getAll('item', project.root)
+							.filter((it) => it.itemOrigin === null)
+							.filter((it) => !r.items.some((lp) => plugin.indexer.resolve(lp, r.path)?.path === it.path))
+							.sort((a, b) => a.name.localeCompare(b.name)),
+						(it) => appendFmList(r, FM.items, `[[${linkTargetOf(it)}]]`),
+						'Pick the item…'
+					).open()
+				)
+		);
+	/** "Add a [beat]" row (Character/Location/Faction/Item context menus) —
+	 *  pins `r` into the picked event/scene's first note. Distinct from the
+	 *  anchor role's own "Add a [beat]" below, which creates a brand new one
+	 *  pre-linked to the anchor rather than picking an existing one. */
+	const addBeatMenuItem = (menu: Menu, r: EntityRecord) =>
+		menu.addItem((i) => i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r)));
 
 	// A scene/chapter IS its stretch of the script — deleting the note while
 	// leaving the writing behind would just resurrect it on the next parse, so
@@ -837,56 +864,14 @@ function EntityList({
 						).open()
 					)
 			);
-			menu.addItem((i) =>
-				i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r))
-			);
-			menu.addItem((i) =>
-				i
-					.setTitle('Add an item')
-					.setIcon(ENTITY_META.item.icon)
-					.onClick(() =>
-						new RecordSuggestModal(
-							plugin.app,
-							plugin.indexer
-								.getAll('item', project.root)
-								.filter((it) => it.itemOrigin === null)
-								.filter(
-									(it) =>
-										!r.items.some((lp) => plugin.indexer.resolve(lp, r.path)?.path === it.path)
-								)
-								.sort((a, b) => a.name.localeCompare(b.name)),
-							(it) => appendFmList(r, FM.items, `[[${linkTargetOf(it)}]]`),
-							'Pick the item…'
-						).open()
-					)
-			);
+			addBeatMenuItem(menu, r);
+			addItemMenuItem(menu, r);
 		}
 
 		if (r.type === 'location') {
 			menu.addSeparator();
-			menu.addItem((i) =>
-				i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r))
-			);
-			menu.addItem((i) =>
-				i
-					.setTitle('Add an item')
-					.setIcon(ENTITY_META.item.icon)
-					.onClick(() =>
-						new RecordSuggestModal(
-							plugin.app,
-							plugin.indexer
-								.getAll('item', project.root)
-								.filter((it) => it.itemOrigin === null)
-								.filter(
-									(it) =>
-										!r.items.some((lp) => plugin.indexer.resolve(lp, r.path)?.path === it.path)
-								)
-								.sort((a, b) => a.name.localeCompare(b.name)),
-							(it) => appendFmList(r, FM.items, `[[${linkTargetOf(it)}]]`),
-							'Pick the item…'
-						).open()
-					)
-			);
+			addBeatMenuItem(menu, r);
+			addItemMenuItem(menu, r);
 			menu.addItem((i) =>
 				i
 					.setTitle('Add sublocation')
@@ -954,16 +939,12 @@ function EntityList({
 						).open()
 					)
 			);
-			menu.addItem((i) =>
-				i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r))
-			);
+			addBeatMenuItem(menu, r);
 		}
 
 		if (r.type === 'item') {
 			menu.addSeparator();
-			menu.addItem((i) =>
-				i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r))
-			);
+			addBeatMenuItem(menu, r);
 			menu.addItem((i) =>
 				i
 					.setTitle('Add to character')
