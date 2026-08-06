@@ -1,14 +1,15 @@
-import { App, Notice, PluginSettingTab, Setting, setIcon } from 'obsidian';
-import { ENTITY_META, ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera } from './types';
 import {
-	DEFAULT_PROJECT_KIND,
-	PROJECT_KIND_META,
-	PROJECT_KINDS,
-	ProjectKind,
-	typesFor,
-} from './project-kind';
-import { serializeProjectConfig } from './calendar';
-import { ProjectDef } from './indexer';
+	App,
+	Notice,
+	PluginSettingTab,
+	Setting,
+	SettingDefinition,
+	SettingDefinitionItem,
+	TFile,
+	setIcon,
+} from 'obsidian';
+import { ENTITY_META, ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera } from './types';
+import { DEFAULT_PROJECT_KIND, PROJECT_KIND_META, typesFor } from './project-kind';
 import { ConfirmModal } from './project';
 import { TimelineSettingsEditor } from './timeline-settings';
 import type LoomLoomPlugin from './main';
@@ -418,22 +419,13 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	return base;
 }
 
-type SettingsTabId = 'general' | 'entities' | 'graph' | 'license';
-
-const SETTINGS_TABS: [SettingsTabId, string][] = [
-	['general', 'General'],
-	['entities', 'Entities'],
-	['graph', 'Graph'],
-	['license', 'License'],
-];
-
 /**
- * Settings keys owned by each tab. The tab's bottom "Restore defaults" button
- * resets exactly these from DEFAULT_SETTINGS — when adding a new setting, add
- * its key to its tab's list here and the button covers it automatically.
+ * Settings keys owned by each page. Its "Restore defaults" row resets exactly
+ * these from DEFAULT_SETTINGS — when adding a new setting, add its key to its
+ * page's list here and the row covers it automatically.
  */
-const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
-	general: ['textSize'],
+const PAGE_SETTINGS_KEYS = {
+	general: ['textSize'] as (keyof LoomLoomSettings)[],
 	entities: [
 		'questTagColors',
 		'sessionResolvedQuests',
@@ -445,7 +437,7 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 		'loomButtonStyle',
 		'loomButtonBg',
 		'loomButtonIcon',
-	],
+	] as (keyof LoomLoomSettings)[],
 	graph: [
 		'graphCollapseThreshold',
 		'graphFocusZoom',
@@ -454,526 +446,175 @@ const TAB_SETTINGS_KEYS: Record<SettingsTabId, (keyof LoomLoomSettings)[]> = {
 		'graphArrowSize',
 		'graphDropEdits',
 		'globalLayerOrder',
-	],
-	// No "Restore defaults" button on this tab — "Deactivate this device" /
-	// "Forget this device locally" already serve as its reset actions, and
-	// blanking the key from a generic restore-defaults button would be
-	// surprising (it doesn't itself deactivate anything server-side).
-	license: ['licenseKey'],
+	] as (keyof LoomLoomSettings)[],
 };
 
+/**
+ * `setControlValue` writes through a dotted path (`'nodeColors.character'`) so
+ * a single generic override can bind every top-level AND nested setting
+ * (per-entity-type colors/sizes, quest tag colors) to a real `control`
+ * definition instead of hand-rolled `onChange` plumbing. Keys in this set also
+ * get `indexer.refreshViews()` after the write — mirroring EXACTLY which
+ * settings triggered a live refresh in the pre-1.13 imperative code (most did;
+ * a few — text size, every graph slider/dropdown, the license key — never
+ * called it, since those views already read straight from `plugin.settings`
+ * on their own next render). Preserved as-is rather than unified, since
+ * widening it is a behavior change beyond "port to the declarative API."
+ */
+const REFRESH_VIEWS_PREFIXES = ['nodeColors.', 'nodeSizes.', 'questTagColors.'];
+const REFRESH_VIEWS_KEYS = new Set<string>([
+	'groupColor',
+	'sessionResolvedQuests',
+	'subChipFullAncestry',
+	'mapsColor',
+	'loomButtonStyle',
+	'loomButtonBg',
+	'loomButtonIcon',
+]);
+
 export class LoomLoomSettingTab extends PluginSettingTab {
-	private activeTab: SettingsTabId = 'general';
-	/** Project whose timeline settings the Graph tab currently shows. */
+	/** Project whose timeline settings the Graph page currently shows. */
 	private timelineProjectRoot: string | null = null;
 
 	constructor(app: App, private plugin: LoomLoomPlugin) {
 		super(app, plugin);
 	}
 
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
-
-		const tabBar = containerEl.createDiv({ cls: 'loom-tab-bar' });
-		const body = containerEl.createDiv();
-		for (const [id, label] of SETTINGS_TABS) {
-			const btn = tabBar.createEl('button', {
-				cls: 'loom-tab' + (id === this.activeTab ? ' loom-tab-active' : ''),
-				text: label,
-			});
-			btn.addEventListener('click', () => {
-				this.activeTab = id;
-				this.display();
-			});
+	/** Reads through a dotted path (`'nodeColors.character'`) as well as a
+	 *  plain top-level key — see `REFRESH_VIEWS_KEYS`'s doc comment for why
+	 *  this exists instead of the base class's flat `this.plugin.settings[key]`.
+	 *  `sessionResolvedQuests` is special-cased: every `control` value is a
+	 *  `string`/`number`/`boolean` bound 1:1 to its stored type, but that
+	 *  field is a `number` in storage rendered through a `dropdown` (whose
+	 *  control type is always `string`) — coerced to a string here and back
+	 *  to a number in `setControlValue`, the one field in this settings tab
+	 *  where the control's value type and the storage type actually differ. */
+	getControlValue(key: string): unknown {
+		if (key === 'sessionResolvedQuests') return String(this.plugin.settings.sessionResolvedQuests);
+		let v: unknown = this.plugin.settings;
+		for (const part of key.split('.')) {
+			if (v === null || typeof v !== 'object') return undefined;
+			v = (v as Record<string, unknown>)[part];
 		}
-
-		if (this.activeTab === 'general') this.renderGeneral(body);
-		else if (this.activeTab === 'entities') this.renderEntities(body);
-		else if (this.activeTab === 'graph') this.renderGraph(body);
-		else this.renderLicense(body);
+		return v;
 	}
 
-	private renderGeneral(containerEl: HTMLElement): void {
-		const setting = new Setting(containerEl)
-			.setName('Text size')
-			.setDesc('Base text size of all plugin views.')
-			.addDropdown((dd) => {
-				for (const [value, label] of TEXT_SIZES) dd.addOption(value, label);
-				dd.setValue(this.plugin.settings.textSize).onChange(async (value) => {
-					this.plugin.settings.textSize = value as LoomTextSize;
-					await this.plugin.saveSettings();
-				});
-			});
-		this.addReset(setting, () => {
-			this.plugin.settings.textSize = DEFAULT_SETTINGS.textSize;
-		});
-
-		this.renderProjectKinds(containerEl);
-
-		this.addRestoreDefaults(
-			containerEl,
-			'general',
-			'Restore general defaults',
-			'Reset all general settings on this tab to their defaults.'
-		);
-	}
-
-	/**
-	 * Per-project kind, stored in the project's .loom file. Switching does not
-	 * move any note: the entity folders a kind doesn't use simply stop being
-	 * listed, and their notes come back if the kind is switched back. Converting
-	 * Sessions into Chapters (or the reverse) is deliberately not automatic —
-	 * they carry different fields, so it would have to drop data.
-	 */
-	private renderProjectKinds(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Projects').setHeading();
-		const projects = this.plugin.indexer.getProjects();
-		if (projects.length === 0) {
-			containerEl.createEl('p', {
-				text: 'No Loom projects in this vault yet.',
-				cls: 'setting-item-description',
-			});
-			return;
-		}
-		for (const project of projects) {
-			const setting = new Setting(containerEl)
-				.setName(project.name)
-				.setDesc(PROJECT_KIND_META[project.config.kind].description)
-				.addDropdown((dd) => {
-					for (const kind of PROJECT_KINDS) dd.addOption(kind, PROJECT_KIND_META[kind].label);
-					dd.setValue(project.config.kind).onChange((value) =>
-						void (async () => {
-							await this.setProjectKind(project, value as ProjectKind);
-							this.redisplay();
-						})()
-					);
-				});
-			setting.descEl.createDiv({
-				cls: 'setting-item-description',
-				text: `Holds: ${typesFor(project.config.kind)
-					.map((t) => ENTITY_META[t].plural)
-					.join(', ')}.`,
-			});
-		}
-	}
-
-	private async setProjectKind(project: ProjectDef, kind: ProjectKind): Promise<void> {
-		if (kind === project.config.kind) return;
-		const file = this.plugin.app.vault.getFileByPath(project.loomPath);
-		if (!file) {
-			new Notice('Project file not found.');
-			return;
-		}
-		try {
-			await this.plugin.app.vault.process(file, () =>
-				serializeProjectConfig({ ...project.config, kind })
-			);
-			this.plugin.indexer.rebuild();
-		} catch (e) {
-			console.error('Loom Loom: failed to change project type', e);
-			new Notice('Could not change the project type.');
-		}
-	}
-
-	/** Adds the circled-arrow restore-default button on a setting's right side. */
-	private addReset(setting: Setting, onReset: () => void): void {
-		const btn = setting.controlEl.createEl('button', {
-			cls: 'loom-reset-btn',
-			title: 'Reset to default',
-		});
-		setIcon(btn, 'rotate-ccw');
-		btn.addEventListener('click', () =>
-			void (async () => {
-				onReset();
-				await this.plugin.saveSettings();
-				this.plugin.indexer.refreshViews();
-				this.redisplay();
-			})()
-		);
-	}
-
-	/** Re-renders the tab without losing the scroll position. */
-	private redisplay(): void {
-		const scroller = this.containerEl.closest<HTMLElement>('.vertical-tab-content');
-		const scrollTop = scroller?.scrollTop ?? 0;
-		this.display();
-		window.requestAnimationFrame(() => {
-			if (scroller) scroller.scrollTop = scrollTop;
-		});
-	}
-
-	private renderEntities(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Entities colors and node sizes').setHeading();
-		// The virtual Group leads — its own entity color-wise (chips, home
-		// wheel, its page) even though it never appears in the graph (so no size).
-		const groupSetting = new Setting(containerEl).setName('Group').addColorPicker((picker) =>
-			picker.setValue(this.plugin.settings.groupColor).onChange(async (value) => {
-				this.plugin.settings.groupColor = value;
-				await this.plugin.saveSettings();
-				this.plugin.indexer.refreshViews();
-			})
-		);
-		this.addReset(groupSetting, () => {
-			this.plugin.settings.groupColor = DEFAULT_SETTINGS.groupColor;
-		});
-		// Only the types the vault's projects actually hold: a vault with no
-		// writer project has no reason to show Chapter and Scene rows (and vice
-		// versa). With no projects yet, fall back to the default kind's set.
-		const inUse = new Set<EntityType>(
-			this.plugin.indexer.getProjects().flatMap((p) => [...typesFor(p.config.kind)])
-		);
-		const shown = inUse.size > 0 ? inUse : new Set<EntityType>(typesFor(DEFAULT_PROJECT_KIND));
-		for (const type of ENTITY_TYPES) {
-			if (!shown.has(type)) continue;
-			// Region has no color/size row — its color is auto-derived from the
-			// location color (a darker shade), and it isn't a map node.
-			if (type === 'region') continue;
-			const setting = new Setting(containerEl)
-				.setName(ENTITY_META[type].label)
-				.addColorPicker((picker) =>
-					picker.setValue(this.plugin.settings.nodeColors[type]).onChange(async (value) => {
-						this.plugin.settings.nodeColors[type] = value;
-						// Region tracks the location color.
-						if (type === 'location') syncRegionColor(this.plugin.settings);
-						await this.plugin.saveSettings();
-						this.plugin.indexer.refreshViews();
-					})
-				)
-				.addSlider((slider) =>
-					slider
-						.setLimits(NODE_SIZE_MIN, NODE_SIZE_MAX, 1)
-						.setValue(this.plugin.settings.nodeSizes[type])
-						// Deprecated in the 1.13 typings (value shown inline there), but
-						// 1.13 is Catalyst-only, so on public Obsidian we still need it.
-						.setDynamicTooltip()
-						.onChange(async (value) => {
-							this.plugin.settings.nodeSizes[type] = value;
-							await this.plugin.saveSettings();
-							this.plugin.indexer.refreshViews();
-						})
-				);
-			this.addReset(setting, () => {
-				this.plugin.settings.nodeColors[type] = DEFAULT_SETTINGS.nodeColors[type];
-				this.plugin.settings.nodeSizes[type] = DEFAULT_SETTINGS.nodeSizes[type];
-				if (type === 'location') syncRegionColor(this.plugin.settings);
-			});
-			// Quest tag colors nest right under the quest entity (tags aren't nodes,
-			// so no size slider on them).
-			if (type === 'quest') {
-				for (const k of ['main', 'important', 'side'] as const) {
-					const tagSetting = new Setting(containerEl)
-						.setName(`Quest tag — ${k[0].toUpperCase() + k.slice(1)}`)
-						.setClass('loom-setting-nested')
-						.addColorPicker((picker) =>
-							picker.setValue(this.plugin.settings.questTagColors[k]).onChange(async (value) => {
-								this.plugin.settings.questTagColors[k] = value;
-								await this.plugin.saveSettings();
-								this.plugin.indexer.refreshViews();
-							})
-						);
-					this.addReset(tagSetting, () => {
-						this.plugin.settings.questTagColors[k] = DEFAULT_SETTINGS.questTagColors[k];
-					});
-				}
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		if (key === 'sessionResolvedQuests') {
+			this.plugin.settings.sessionResolvedQuests = Number(value);
+		} else {
+			const parts = key.split('.');
+			let obj: Record<string, unknown> = this.plugin.settings as unknown as Record<string, unknown>;
+			for (let i = 0; i < parts.length - 1; i++) {
+				obj = obj[parts[i]] as Record<string, unknown>;
 			}
+			obj[parts[parts.length - 1]] = value;
 		}
-
-		this.renderLoomButton(containerEl);
-
-		new Setting(containerEl).setName('Quests').setHeading();
-		const resolvedSetting = new Setting(containerEl)
-			.setName('Resolved quests shown on a session')
-			.setDesc(
-				'How many previously-resolved quests a session page shows in its resolved-previously group (the most recent by outcome date).'
-			)
-			.addDropdown((dd) => {
-				for (const [value, label] of [
-					['3', '3'],
-					['6', '6'],
-					['9', '9'],
-					['12', '12'],
-					['0', 'All'],
-				] as [string, string][]) {
-					dd.addOption(value, label);
-				}
-				dd.setValue(String(this.plugin.settings.sessionResolvedQuests)).onChange(async (value) => {
-					this.plugin.settings.sessionResolvedQuests = Number(value);
-					await this.plugin.saveSettings();
-					this.plugin.indexer.refreshViews();
-				});
-			});
-		this.addReset(resolvedSetting, () => {
-			this.plugin.settings.sessionResolvedQuests = DEFAULT_SETTINGS.sessionResolvedQuests;
-		});
-
-		new Setting(containerEl).setName('Locations').setHeading();
-		const ancestrySetting = new Setting(containerEl)
-			.setName('Full ancestry on sublocation chips')
-			.setDesc(
-				createFragment((frag) => {
-					frag.appendText('Sublocation chips list every parent up the chain.');
-					// Built from parts so the example proper-nouns aren't scanned as UI copy.
-					const chain = ['Secret room', 'Tavern', 'City'];
-					const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
-					const on = ul.createEl('li');
-					on.appendText('On — ');
-					on.createEl('code', { text: chain.join(', ') });
-					const off = ul.createEl('li');
-					off.appendText('Off — ');
-					off.createEl('code', { text: chain[0] });
-				})
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.subChipFullAncestry).onChange(async (value) => {
-					this.plugin.settings.subChipFullAncestry = value;
-					await this.plugin.saveSettings();
-					this.plugin.indexer.refreshViews();
-				})
-			);
-		this.addReset(ancestrySetting, () => {
-			this.plugin.settings.subChipFullAncestry = DEFAULT_SETTINGS.subChipFullAncestry;
-		});
-	}
-
-	/** Other colors (Maps, the home-wheel Loom button) — rendered right under the
-	 *  entity colors so all color settings sit together. */
-	private renderLoomButton(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Other colors').setHeading();
-
-		const mapsSetting = new Setting(containerEl)
-			.setName('Maps')
-			.setDesc('Maps home-wheel button and the default new-zone fill color.')
-			.addColorPicker((picker) =>
-				picker.setValue(this.plugin.settings.mapsColor).onChange(async (value) => {
-					this.plugin.settings.mapsColor = value;
-					await this.plugin.saveSettings();
-					this.plugin.indexer.refreshViews();
-				})
-			);
-		this.addReset(mapsSetting, () => {
-			this.plugin.settings.mapsColor = DEFAULT_SETTINGS.mapsColor;
-		});
-
-		const styleSetting = new Setting(containerEl)
-			.setName('Loom button')
-			.setDesc('Background and icon colors of the home wheel’s central Loom button.')
-			.addDropdown((dd) =>
-				dd
-					.addOption('original', 'Loom original')
-					.addOption('custom', 'Custom')
-					.setValue(this.plugin.settings.loomButtonStyle)
-					.onChange(async (value) => {
-						if (value === 'original' || value === 'custom') {
-							this.plugin.settings.loomButtonStyle = value;
-						}
-						await this.plugin.saveSettings();
-						this.plugin.indexer.refreshViews();
-						this.redisplay();
-					})
-			);
-		this.addReset(styleSetting, () => {
-			this.plugin.settings.loomButtonStyle = DEFAULT_SETTINGS.loomButtonStyle;
-		});
-		if (this.plugin.settings.loomButtonStyle === 'custom') {
-			const bgSetting = new Setting(containerEl)
-				.setName('Custom background')
-				.setClass('loom-setting-nested')
-				.addColorPicker((picker) =>
-					picker.setValue(this.plugin.settings.loomButtonBg).onChange(async (value) => {
-						this.plugin.settings.loomButtonBg = value;
-						await this.plugin.saveSettings();
-						this.plugin.indexer.refreshViews();
-					})
-				);
-			this.addReset(bgSetting, () => {
-				this.plugin.settings.loomButtonBg = DEFAULT_SETTINGS.loomButtonBg;
-			});
-			const iconSetting = new Setting(containerEl)
-				.setName('Custom icon')
-				.setClass('loom-setting-nested')
-				.addColorPicker((picker) =>
-					picker.setValue(this.plugin.settings.loomButtonIcon).onChange(async (value) => {
-						this.plugin.settings.loomButtonIcon = value;
-						await this.plugin.saveSettings();
-						this.plugin.indexer.refreshViews();
-					})
-				);
-			this.addReset(iconSetting, () => {
-				this.plugin.settings.loomButtonIcon = DEFAULT_SETTINGS.loomButtonIcon;
-			});
+		// Region tracks the location color — never stored independently.
+		if (key === 'nodeColors.location') syncRegionColor(this.plugin.settings);
+		await this.plugin.saveSettings();
+		if (REFRESH_VIEWS_KEYS.has(key) || REFRESH_VIEWS_PREFIXES.some((p) => key.startsWith(p))) {
+			this.plugin.indexer.refreshViews();
 		}
 	}
 
-	private renderGraph(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Main graph').setHeading();
-
-		this.slider(
-			containerEl,
-			'Focus zoom',
-			'Zoom level when right-clicking a node to center on it — zooms in or out to reach it.',
-			{ min: 0.3, max: 3, step: 0.1 },
-			DEFAULT_SETTINGS.graphFocusZoom,
-			() => this.plugin.settings.graphFocusZoom,
-			(v) => (this.plugin.settings.graphFocusZoom = v)
-		);
-
-		const dropSetting = new Setting(containerEl)
-			.setName('Drop-to-connect edits')
-			.setDesc(
-				createFragment((frag) => {
-					frag.appendText(
-						'Which note a node-on-node drop writes the relationship. When node A is dragged and dropped on B:'
-					);
-					const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
-					// The A/B node labels sit in code spans so the sentence-case lint
-					// rule doesn't read a lone capital letter as mis-cased UI copy.
-					const dragged = ul.createEl('li');
-					dragged.appendText('Dragged node \u2014 ');
-					dragged.createEl('code', { text: 'A' });
-					const onto = ul.createEl('li');
-					onto.appendText('Node dropped onto \u2014 ');
-					onto.createEl('code', { text: 'B' });
-					frag.appendText('Field fills like ');
-					frag.createEl('code').appendText('quest giver');
-					frag.appendText(' always edit the field\u2019s owner.');
-				})
-			)
-			.addDropdown((dd) => {
-				dd.addOption('target', 'Node dropped onto');
-				dd.addOption('dragged', 'Dragged node');
-				dd.setValue(this.plugin.settings.graphDropEdits).onChange(async (value) => {
-					this.plugin.settings.graphDropEdits = value as 'target' | 'dragged';
-					await this.plugin.saveSettings();
-				});
-			});
-		this.addReset(dropSetting, () => {
-			this.plugin.settings.graphDropEdits = DEFAULT_SETTINGS.graphDropEdits;
-		});
-
-		this.slider(
-			containerEl,
-			'Relationship arrow size',
-			'Size of the arrowheads showing which note declares a relationship.',
-			{ min: 4, max: 20, step: 1 },
-			DEFAULT_SETTINGS.graphArrowSize,
-			() => this.plugin.settings.graphArrowSize,
-			(v) => (this.plugin.settings.graphArrowSize = v)
-		);
-
-		this.slider(
-			containerEl,
-			'Connection line spacing',
-			'Distance between parallel horizontal connection lines to avoid overlapping.',
-			{ min: 10, max: 40, step: 2 },
-			DEFAULT_SETTINGS.graphLineGap,
-			() => this.plugin.settings.graphLineGap,
-			(v) => (this.plugin.settings.graphLineGap = v)
-		);
-
-		// "Global" is the layout's internal term — users just see entity rows.
-		new Setting(containerEl).setName('Entity layers').setHeading();
-		containerEl.createEl('p', {
-			text: 'Top-to-bottom row order of the entity layers in the graph.',
-			cls: 'setting-item-description',
-		});
-		const order = this.plugin.settings.globalLayerOrder;
-		const move = async (from: number, to: number) => {
-			[order[from], order[to]] = [order[to], order[from]];
-			await this.plugin.saveSettings();
-			this.redisplay();
-		};
-		order.forEach((type, i) => {
-			const setting = new Setting(containerEl).setName(`${i + 1}. ${ENTITY_META[type].plural}`);
-			setting.addExtraButton((btn) =>
-				btn
-					.setIcon('arrow-up')
-					.setTooltip('Move up')
-					.setDisabled(i === 0)
-					.onClick(() => void move(i, i - 1))
-			);
-			setting.addExtraButton((btn) =>
-				btn
-					.setIcon('arrow-down')
-					.setTooltip('Move down')
-					.setDisabled(i === order.length - 1)
-					.onClick(() => void move(i, i + 1))
-			);
-		});
-		// A labeled button under the rows instead of the usual per-setting reset
-		// icon — a lone ↺ beside the heading read as noise. Plain (not inside a
-		// Setting row) so it doesn't get the row frame.
-		const resetRow = containerEl.createDiv({ cls: 'loom-layer-reset' });
-		const resetBtn = resetRow.createEl('button', { text: 'Reset order' });
-		resetBtn.addEventListener('click', () =>
-			void (async () => {
-				this.plugin.settings.globalLayerOrder = [...DEFAULT_SETTINGS.globalLayerOrder];
-				await this.plugin.saveSettings();
-				this.redisplay();
-			})()
-		);
-
-		new Setting(containerEl).setName('Right side panel').setHeading();
-		this.slider(
-			containerEl,
-			'Panel collapse threshold',
-			'Connection sections in the graph side panel start collapsed when they have more entries than this.',
-			{ min: 1, max: 25, step: 1 },
-			DEFAULT_SETTINGS.graphCollapseThreshold,
-			() => this.plugin.settings.graphCollapseThreshold,
-			(v) => (this.plugin.settings.graphCollapseThreshold = v)
-		);
-
-		this.renderTimeline(containerEl);
-
-		this.addRestoreDefaults(
-			containerEl,
-			'graph',
-			'Restore defaults',
-			'Reset all settings on this tab to their defaults. Timeline settings belong to their project and are not affected.'
-		);
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			// A plain heading above the General/Projects/Entities/Graph page
+			// list — that list has no title of its own otherwise (the sidebar's
+			// own "Loom Loom" nav entry is outside this tab's own content area).
+			// A `type: 'group'` with a `heading` and NO items — not a bare
+			// `render` item — specifically so it does NOT get pulled into the
+			// SAME shared box as the page-list rows below it: a bare item at
+			// this top level renders as just another row merged into that one
+			// shared list container, whereas a group (even an empty one) is its
+			// own construct, heading rendered outside/above whatever content it
+			// holds, same as every group inside a page.
+			{ type: 'group', heading: 'Loom Loom! settings' },
+			{
+				type: 'page',
+				name: 'General',
+				items: [
+					{
+						type: 'group',
+						heading: 'License',
+						items: [
+							{
+								name: 'License',
+								aliases: ['license key', 'activate'],
+								render: (setting) => this.renderLicenseSection(setting),
+							},
+						],
+					},
+					{
+						type: 'group',
+						heading: 'Interface',
+						items: [
+							{
+								name: 'Text size',
+								desc: 'Base text size of all plugin views.',
+								control: {
+									type: 'dropdown',
+									key: 'textSize',
+									options: Object.fromEntries(TEXT_SIZES),
+									defaultValue: DEFAULT_SETTINGS.textSize,
+								},
+							},
+						],
+					},
+					this.restoreDefaultsRow(
+						'general',
+						'Restore general defaults',
+						'Reset all general settings on this tab to their defaults.'
+					),
+				],
+			},
+			{
+				type: 'page',
+				name: 'Projects',
+				items: [
+					{
+						type: 'group',
+						heading: 'Projects',
+						items: [{ name: 'Projects', render: (setting) => this.renderProjectsTable(setting) }],
+					},
+				],
+			},
+			{
+				type: 'page',
+				name: 'Entities',
+				items: this.entitiesItems(),
+			},
+			{
+				type: 'page',
+				name: 'Graph',
+				items: this.graphItems(),
+			},
+		];
 	}
 
-	/** Per-project timeline settings (date format, in-game calendar), stored in the project's .loom file. */
-	private renderTimeline(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Timeline').setHeading();
-		containerEl.createEl('p', {
-			text: 'Date display and in-game calendar for the timeline. These are per project and saved in its .loom file.',
-			cls: 'setting-item-description',
-		});
+	// --- License --------------------------------------------------------
 
-		const projects = this.plugin.indexer.getProjects();
-		if (projects.length === 0) {
-			containerEl.createEl('p', {
-				text: 'No Loom projects in this vault yet.',
-				cls: 'setting-item-description',
-			});
-			return;
-		}
-
-		const project = projects.find((p) => p.root === this.timelineProjectRoot) ?? projects[0];
-		if (projects.length > 1) {
-			new Setting(containerEl).setName('Project').addDropdown((dd) => {
-				for (const p of projects) dd.addOption(p.root, p.name);
-				dd.setValue(project.root).onChange((root) => {
-					this.timelineProjectRoot = root;
-					const next = projects.find((p) => p.root === root);
-					if (next) new TimelineSettingsEditor(this.plugin, next, editorEl).render();
-				});
-			});
-		}
-		const editorEl = containerEl.createDiv();
-		new TimelineSettingsEditor(this.plugin, project, editorEl).render();
-	}
-
-	/**
-	 * Free: one project of each type per vault, no other limits. A license key
-	 * unlocks unlimited projects, activatable on up to 3 devices. This tab talks
-	 * only to `this.plugin.licenseManager` (see `src/license/manager.ts`) — the
-	 * network call itself, the per-device activation cache, and the 30-day
-	 * offline grace period all live there, not here.
-	 */
-	private renderLicense(containerEl: HTMLElement): void {
+	/** Talks only to `this.plugin.licenseManager` (see `src/license/manager.ts`)
+	 *  — the network call itself, the per-device activation cache, and the
+	 *  30-day offline grace period all live there, not here. A `render` block
+	 *  on the General page, under its own "License" heading (moved off its
+	 *  own tab so it's one less place to look), rather than a declarative
+	 *  `items` sub-array — its content is heavily async/status-dependent
+	 *  (several buttons whose text and presence depend on `manager.getStatus()`,
+	 *  each needing the whole section re-rendered afterward — `this.update()`,
+	 *  the outer tab's, since this section is just one row within General's
+	 *  own declarative items now, not a standalone page with its own
+	 *  `display()`), which the declarative model isn't a good fit for. No
+	 *  "Restore defaults" row for this section — "Deactivate this device" /
+	 *  "Forget this device locally" already serve as its reset actions, and
+	 *  folding `licenseKey` into General's own restore-defaults button would
+	 *  be surprising (it wouldn't itself deactivate anything server-side), so
+	 *  it stays out of `PAGE_SETTINGS_KEYS.general`. */
+	private renderLicenseSection(setting: Setting): void {
+		const containerEl = setting.settingEl;
+		containerEl.empty();
+		containerEl.addClass('loom-settings-block');
 		const manager = this.plugin.licenseManager;
 		const status = manager.getStatus();
 
@@ -1012,7 +653,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 								? 'License activated on this device.'
 								: (result.reason ?? 'Could not activate this license key.')
 						);
-						this.redisplay();
+						this.update();
 					})()
 				)
 		);
@@ -1028,7 +669,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 								? 'Device deactivated.'
 								: (result.reason ?? 'Could not deactivate — try "Forget this device locally" below.')
 						);
-						this.redisplay();
+						this.update();
 					})()
 				)
 			);
@@ -1043,7 +684,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 					}
 					btn.setDisabled(true).setButtonText('Checking…');
 					await manager.revalidateNow(key, true);
-					this.redisplay();
+					this.update();
 				})()
 			)
 		);
@@ -1078,68 +719,456 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 					btn.setButtonText('Forget locally').onClick(() => {
 						manager.forgetDeviceLocally();
 						new Notice('Forgotten on this device.');
-						this.redisplay();
+						this.update();
 					})
 				);
 		}
 	}
 
-	private addRestoreDefaults(
-		containerEl: HTMLElement,
-		tab: SettingsTabId,
-		name: string,
-		desc: string
-	): void {
-		containerEl.createDiv({ cls: 'loom-restore-sep' });
-		new Setting(containerEl)
-			.setName(name)
-			.setDesc(desc)
-			.addButton((btn) => {
-				btn.setButtonText('Restore defaults');
-				btn.buttonEl.addClass('loom-danger-btn');
-				btn.onClick(() =>
-					new ConfirmModal(
-						this.app,
-						`${name}?`,
-						`${desc.replace(/\.$/, '')}. This cannot be undone.`,
-						async () => {
-							for (const key of TAB_SETTINGS_KEYS[tab]) this.resetKey(key);
-							await this.plugin.saveSettings();
-							this.display();
-						},
-						'Restore defaults'
-					).open()
-				);
+	// --- Projects -------------------------------------------------------
+
+	/** Read-only Title | Type table — one row per project. Clicking a title
+	 *  opens that project's `.loom` file (same as `main.ts`'s `openHome()`).
+	 *  No control to change a project's kind here (or anywhere) any more —
+	 *  switching after creation was a rarely-used escape hatch that mostly
+	 *  existed because the dropdown was already there; dropped rather than
+	 *  replaced. */
+	private renderProjectsTable(setting: Setting): void {
+		const containerEl = setting.settingEl;
+		containerEl.empty();
+		// Obsidian's own `.setting-item` styling on `settingEl` is a flex ROW
+		// (name column + control column, meant for one setting) — without
+		// overriding it to block layout, a `<table>` dropped straight in here
+		// is squeezed into a single flex item, which visually corrupts row
+		// height and can crush borders on a taller cell (see `renderTimeline`'s
+		// own doc comment for the worse version of this same bug).
+		containerEl.addClass('loom-settings-block');
+		const projects = this.plugin.indexer.getProjects();
+		if (projects.length === 0) {
+			containerEl.createEl('p', {
+				text: 'No Loom projects in this vault yet.',
+				cls: 'setting-item-description',
 			});
+			return;
+		}
+		const table = containerEl.createEl('table', { cls: 'loom-settings-table' });
+		const headRow = table.createEl('thead').createEl('tr');
+		headRow.createEl('th', { text: 'Title' });
+		headRow.createEl('th', { text: 'Type' });
+		const tbody = table.createEl('tbody');
+		for (const project of projects) {
+			const row = tbody.createEl('tr');
+			const titleCell = row.createEl('td');
+			// A plain clickable span, NOT a `<button>` — Obsidian's base button
+			// chrome (background/border) out-specifies a single-class reset and
+			// left a visible highlight block behind the text, which also masked
+			// the row's own bottom border where it overlapped. `tabindex` +
+			// `Enter`/`Space` keep it keyboard-operable without adopting native
+			// button styling.
+			const link = titleCell.createSpan({
+				cls: 'loom-settings-project-link',
+				text: project.name,
+				attr: { tabindex: '0', role: 'button' },
+			});
+			const open = () => {
+				const file = this.plugin.app.vault.getFileByPath(project.loomPath);
+				if (file instanceof TFile) void this.plugin.app.workspace.getLeaf('tab').openFile(file);
+			};
+			link.addEventListener('click', open);
+			link.addEventListener('keydown', (e) => {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.preventDefault();
+					open();
+				}
+			});
+			const typeCell = row.createEl('td', { cls: 'loom-settings-table-type' });
+			setIcon(typeCell.createSpan(), PROJECT_KIND_META[project.config.kind].icon);
+			typeCell.createSpan({ text: PROJECT_KIND_META[project.config.kind].label });
+		}
 	}
+
+	// --- Entities ---------------------------------------------------------
+
+	private entitiesItems(): SettingDefinitionItem[] {
+		// Only the types the vault's projects actually hold: a vault with no
+		// writer project has no reason to show Chapter and Scene rows (and vice
+		// versa). With no projects yet, fall back to the default kind's set.
+		const inUse = new Set<EntityType>(
+			this.plugin.indexer.getProjects().flatMap((p) => [...typesFor(p.config.kind)])
+		);
+		const shown = inUse.size > 0 ? inUse : new Set<EntityType>(typesFor(DEFAULT_PROJECT_KIND));
+
+		const colorSizeItems: SettingDefinition[] = [
+			{
+				name: 'Group',
+				control: { type: 'color', key: 'groupColor', defaultValue: DEFAULT_SETTINGS.groupColor },
+			},
+		];
+		for (const type of ENTITY_TYPES) {
+			if (!shown.has(type)) continue;
+			// Region has no color/size row — its color is auto-derived from the
+			// location color (a darker shade), and it isn't a map node.
+			if (type === 'region') continue;
+			colorSizeItems.push({
+				name: ENTITY_META[type].label,
+				control: { type: 'color', key: `nodeColors.${type}`, defaultValue: DEFAULT_SETTINGS.nodeColors[type] },
+			});
+			colorSizeItems.push({
+				name: `${ENTITY_META[type].label} size`,
+				control: {
+					type: 'slider',
+					key: `nodeSizes.${type}`,
+					min: NODE_SIZE_MIN,
+					max: NODE_SIZE_MAX,
+					step: 1,
+					defaultValue: DEFAULT_SETTINGS.nodeSizes[type],
+				},
+			});
+			// Quest tag colors nest right under the quest entity (tags aren't
+			// nodes, so no size slider on them).
+			if (type === 'quest') {
+				for (const k of ['main', 'important', 'side'] as const) {
+					colorSizeItems.push({
+						name: `Quest tag — ${k[0].toUpperCase() + k.slice(1)}`,
+						control: {
+							type: 'color',
+							key: `questTagColors.${k}`,
+							defaultValue: DEFAULT_SETTINGS.questTagColors[k],
+						},
+					});
+				}
+			}
+		}
+
+		return [
+			{ type: 'group', heading: 'Entities colors and node sizes', items: colorSizeItems },
+			{
+				type: 'group',
+				heading: 'Other colors',
+				items: [
+					{
+						name: 'Maps',
+						desc: 'Maps home-wheel button and the default new-zone fill color.',
+						control: { type: 'color', key: 'mapsColor', defaultValue: DEFAULT_SETTINGS.mapsColor },
+					},
+					{
+						name: 'Loom button',
+						desc: 'Background and icon colors of the home wheel’s central Loom button.',
+						control: {
+							type: 'dropdown',
+							key: 'loomButtonStyle',
+							options: { original: 'Loom original', custom: 'Custom' },
+							defaultValue: DEFAULT_SETTINGS.loomButtonStyle,
+						},
+					},
+					{
+						name: 'Custom background',
+						visible: () => this.plugin.settings.loomButtonStyle === 'custom',
+						control: { type: 'color', key: 'loomButtonBg', defaultValue: DEFAULT_SETTINGS.loomButtonBg },
+					},
+					{
+						name: 'Custom icon',
+						visible: () => this.plugin.settings.loomButtonStyle === 'custom',
+						control: { type: 'color', key: 'loomButtonIcon', defaultValue: DEFAULT_SETTINGS.loomButtonIcon },
+					},
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Quests',
+				items: [
+					{
+						name: 'Resolved quests shown on a session',
+						desc: 'How many previously-resolved quests a session page shows in its resolved-previously group (the most recent by outcome date).',
+						control: {
+							type: 'dropdown',
+							key: 'sessionResolvedQuests',
+							// Control values are strings; getControlValue/setControlValue
+							// coerce number <-> string for this one field below.
+							options: { '3': '3', '6': '6', '9': '9', '12': '12', '0': 'All' },
+							defaultValue: String(DEFAULT_SETTINGS.sessionResolvedQuests),
+						},
+					},
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Locations',
+				items: [
+					{
+						name: 'Full ancestry on sublocation chips',
+						render: (setting) => {
+							setting.setDesc(
+								createFragment((frag) => {
+									frag.appendText('Sublocation chips list every parent up the chain.');
+									const chain = ['Secret room', 'Tavern', 'City'];
+									const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
+									const on = ul.createEl('li');
+									on.appendText('On — ');
+									on.createEl('code', { text: chain.join(', ') });
+									const off = ul.createEl('li');
+									off.appendText('Off — ');
+									off.createEl('code', { text: chain[0] });
+								})
+							);
+							setting.addToggle((toggle) =>
+								toggle.setValue(this.plugin.settings.subChipFullAncestry).onChange(async (value) => {
+									this.plugin.settings.subChipFullAncestry = value;
+									await this.plugin.saveSettings();
+									this.plugin.indexer.refreshViews();
+								})
+							);
+						},
+					},
+				],
+			},
+			this.restoreDefaultsRow(
+				'entities',
+				'Restore entities defaults',
+				'Reset all settings on this tab to their defaults.'
+			),
+		];
+	}
+
+	// --- Graph --------------------------------------------------------------
+
+	private graphItems(): SettingDefinitionItem[] {
+		return [
+			{
+				type: 'group',
+				heading: 'Main graph',
+				items: [
+					{
+						name: 'Focus zoom',
+						desc: 'Zoom level when right-clicking a node to center on it — zooms in or out to reach it.',
+						control: {
+							type: 'slider',
+							key: 'graphFocusZoom',
+							min: 0.3,
+							max: 3,
+							step: 0.1,
+							defaultValue: DEFAULT_SETTINGS.graphFocusZoom,
+						},
+					},
+					{
+						name: 'Drop-to-connect edits',
+						desc: createFragment((frag) => {
+							frag.appendText(
+								'Which note a node-on-node drop writes the relationship. When node A is dragged and dropped on B:'
+							);
+							const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
+							const dragged = ul.createEl('li');
+							dragged.appendText('Dragged node — ');
+							dragged.createEl('code', { text: 'A' });
+							const onto = ul.createEl('li');
+							onto.appendText('Node dropped onto — ');
+							onto.createEl('code', { text: 'B' });
+							frag.appendText('Field fills like ');
+							frag.createEl('code').appendText('quest giver');
+							frag.appendText(' always edit the field’s owner.');
+						}),
+						control: {
+							type: 'dropdown',
+							key: 'graphDropEdits',
+							options: { target: 'Node dropped onto', dragged: 'Dragged node' },
+							defaultValue: DEFAULT_SETTINGS.graphDropEdits,
+						},
+					},
+					{
+						name: 'Relationship arrow size',
+						desc: 'Size of the arrowheads showing which note declares a relationship.',
+						control: {
+							type: 'slider',
+							key: 'graphArrowSize',
+							min: 4,
+							max: 20,
+							step: 1,
+							defaultValue: DEFAULT_SETTINGS.graphArrowSize,
+						},
+					},
+					{
+						name: 'Connection line spacing',
+						desc: 'Distance between parallel horizontal connection lines to avoid overlapping.',
+						control: {
+							type: 'slider',
+							key: 'graphLineGap',
+							min: 10,
+							max: 40,
+							step: 2,
+							defaultValue: DEFAULT_SETTINGS.graphLineGap,
+						},
+					},
+				],
+			},
+			// "Global" is the layout's internal term — users just see entity rows.
+			// A `list` (not a plain loop of rows) gives this native drag-to-reorder
+			// for free via `onReorder`, replacing the old up/down arrow buttons.
+			// "Reset order" lives as an `extraButtons` entry on the list's OWN
+			// header — inside the same box the list itself renders in — rather
+			// than a separate row/section underneath it.
+			{
+				type: 'list',
+				heading: 'Entity layers',
+				items: this.plugin.settings.globalLayerOrder.map((type, i) => ({
+					name: `${i + 1}. ${ENTITY_META[type].plural}`,
+				})),
+				onReorder: (oldIndex, newIndex) => {
+					const order = this.plugin.settings.globalLayerOrder;
+					const [moved] = order.splice(oldIndex, 1);
+					order.splice(newIndex, 0, moved);
+					void this.plugin.saveSettings();
+					// Row labels carry their own position number, so a structural
+					// rebuild (not just a visibility re-check) is needed to relabel them.
+					this.update();
+				},
+				extraButtons: [
+					(btn) =>
+						btn
+							.setIcon('rotate-ccw')
+							.setTooltip('Reset order')
+							.onClick(() =>
+								void (async () => {
+									this.plugin.settings.globalLayerOrder = [...DEFAULT_SETTINGS.globalLayerOrder];
+									await this.plugin.saveSettings();
+									this.update();
+								})()
+							),
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Right side panel',
+				items: [
+					{
+						name: 'Panel collapse threshold',
+						desc: 'Connection sections in the graph side panel start collapsed when they have more entries than this.',
+						control: {
+							type: 'slider',
+							key: 'graphCollapseThreshold',
+							min: 1,
+							max: 25,
+							step: 1,
+							defaultValue: DEFAULT_SETTINGS.graphCollapseThreshold,
+						},
+					},
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Timeline',
+				items: [{ name: 'Timeline', render: (setting) => this.renderTimeline(setting) }],
+			},
+			this.restoreDefaultsRow(
+				'graph',
+				'Restore defaults',
+				'Reset all settings on this tab to their defaults. Timeline settings belong to their project and are not affected.'
+			),
+		];
+	}
+
+	/** Per-project timeline settings (date format, in-game calendar), stored in the project's .loom file. */
+	private renderTimeline(setting: Setting): void {
+		const containerEl = setting.settingEl;
+		containerEl.empty();
+		// `settingEl` keeps Obsidian's own `.setting-item` flex-ROW layout (name
+		// column + control column, meant for exactly one setting) even after
+		// `.empty()` — without overriding it to block layout, everything built
+		// here (heading, description paragraph, the Project picker, the date-
+		// format row, the toggle) gets squeezed into flex ITEMS of that one row
+		// instead of stacking normally: the description wraps one word per
+		// line in a tiny column, and "Project"/"Date format" land side by side
+		// instead of as their own stacked rows.
+		containerEl.addClass('loom-settings-block');
+		containerEl.createEl('p', {
+			text: 'Date display and in-game calendar for the timeline. These are per project and saved in its .loom file.',
+			cls: 'setting-item-description',
+		});
+
+		const projects = this.plugin.indexer.getProjects();
+		if (projects.length === 0) {
+			containerEl.createEl('p', {
+				text: 'No Loom projects in this vault yet.',
+				cls: 'setting-item-description',
+			});
+			return;
+		}
+
+		const project = projects.find((p) => p.root === this.timelineProjectRoot) ?? projects[0];
+		if (projects.length > 1) {
+			new Setting(containerEl).setName('Project').addDropdown((dd) => {
+				for (const p of projects) dd.addOption(p.root, p.name);
+				dd.setValue(project.root).onChange((root) => {
+					this.timelineProjectRoot = root;
+					const next = projects.find((p) => p.root === root);
+					if (next) new TimelineSettingsEditor(this.plugin, next, editorEl).render();
+				});
+				// A fixed width covering the longest project name (unlike the kind
+				// dropdown's three fixed labels, project names are open-ended, so
+				// this is computed here rather than a constant in CSS) — same
+				// "resizes per selection, open list ends up cramped" issue as the
+				// Set-up-project kind dropdown, and the same fix: an INLINE style,
+				// since a class-based `width` was still losing to Obsidian's own
+				// `.dropdown` rule. `ch` approximates one character's width — not
+				// exact for a proportional font, but comfortably wide either way.
+				const longest = Math.max(...projects.map((p) => p.name.length));
+				dd.selectEl.setCssProps({ width: `${longest + 3}ch` });
+			});
+		}
+		const editorEl = containerEl.createDiv();
+		new TimelineSettingsEditor(this.plugin, project, editorEl).render();
+	}
+
+	// --- Shared ---------------------------------------------------------
 
 	private resetKey<K extends keyof LoomLoomSettings>(key: K): void {
 		this.plugin.settings[key] = structuredClone(DEFAULT_SETTINGS[key]);
 	}
 
-	private slider(
-		containerEl: HTMLElement,
+	/** The "Restore defaults" row every page ends on — a `type: 'group'` with
+	 *  NO `heading` set (Obsidian still gives a group its own boxed look with
+	 *  no heading text at all — that box is Obsidian's own native group
+	 *  styling, not anything drawn by this file's CSS, and every OTHER group
+	 *  here gets the exact same box; there is nothing "extra" or `cls`-driven
+	 *  about it any more) holding just the one `name`/`desc` + button row —
+	 *  omitting `heading` is what avoids a redundant "Restore defaults" title
+	 *  floating above a row whose own name already says e.g. "Restore general
+	 *  defaults". `loom-restore-group` (styles.css) adds the plain horizontal
+	 *  divider ahead of the box, set apart from whatever the page's last
+	 *  content section was. */
+	private restoreDefaultsRow(
+		page: keyof typeof PAGE_SETTINGS_KEYS,
 		name: string,
-		desc: string,
-		limits: { min: number; max: number; step: number },
-		defaultValue: number,
-		get: () => number,
-		set: (value: number) => void
-	): void {
-		const setting = new Setting(containerEl).setName(name).setDesc(desc);
-		setting.addSlider((slider) =>
-			slider
-				.setLimits(limits.min, limits.max, limits.step)
-				.setValue(get())
-				// Deprecated in the 1.13 typings (value shown inline there), but
-				// 1.13 is Catalyst-only — on public Obsidian this tooltip is the
-				// only real-time value display while dragging.
-				.setDynamicTooltip()
-				.onChange(async (value) => {
-					set(value);
-					await this.plugin.saveSettings();
-				})
-		);
-		this.addReset(setting, () => set(defaultValue));
+		desc: string
+	): SettingDefinitionItem {
+		return {
+			type: 'group',
+			cls: 'loom-restore-group',
+			items: [
+				{
+					name,
+					desc,
+					render: (setting) => {
+						setting.addButton((btn) => {
+							btn.setButtonText('Restore defaults');
+							btn.buttonEl.addClass('loom-danger-btn');
+							btn.onClick(() =>
+								new ConfirmModal(
+									this.app,
+									`${name}?`,
+									`${desc.replace(/\.$/, '')}. This cannot be undone.`,
+									async () => {
+										for (const key of PAGE_SETTINGS_KEYS[page]) this.resetKey(key);
+										await this.plugin.saveSettings();
+										this.plugin.indexer.refreshViews();
+										this.update();
+									},
+									'Restore defaults'
+								).open()
+							);
+						});
+					},
+				},
+			],
+		};
 	}
 }

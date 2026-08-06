@@ -249,13 +249,10 @@ as the section above, plus one new distinction of its own:
    makes grandfathering free: there is no migration to write, because nothing about an
    existing project ever changes.
 
-**Open and unresolved, tracked in ROADMAP.md, not settled decisions:** whether
+**Open and unresolved, tracked in ROADMAP.md, not a settled decision:** whether
 Obsidian's community plugin directory permits paywalling in-app functionality itself
 (as opposed to paywalling a backend service the plugin calls, which is clearly fine) —
-needs resolving with Obsidian before any public pricing copy ships; and whether to bump
-`minAppVersion` past `1.7.2` to `1.8.7` for `loadLocalStorage`/`saveLocalStorage`; the
-plugin currently feature-detects and falls back to a session-only cache rather than
-requiring the bump.
+needs resolving with Obsidian before any public pricing copy ships.
 
 ## Calendar & date formats (src/calendar.ts)
 

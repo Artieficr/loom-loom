@@ -19,7 +19,8 @@ cached grace period). See CLAUDE.md's "Key architectural decisions" for the full
 
 - [x] Provider-agnostic `LicenseProvider` seam + types (`CachedLicenseState`, `LicenseStatus`) — `src/license/provider.ts`, `src/license/types.ts`
 - [x] 30-day offline grace period, pure + boundary-verified — `src/license/grace.ts`
-- [x] Per-device cache (device id + activation), `App.loadLocalStorage`/`saveLocalStorage` so it never syncs with the vault, feature-detected fallback for pre-1.8.7 Obsidian — `src/license/cache-store.ts`
+- [x] Per-device cache (device id + activation), `App.loadLocalStorage`/`saveLocalStorage` so it never syncs with the vault — `src/license/cache-store.ts`
+- [x] `minAppVersion` bumped to `1.13.0` (past this API's `@since 1.8.7`) once Obsidian 1.13 shipped publicly, so the pre-1.8.7 feature-detection/in-memory fallback this used to need is gone
 - [x] Free-tier gate (`canCreateProjectOfKind`) — `src/license/gating.ts`
 - [x] `LicenseManager` (activate/deactivate/revalidate, recheck throttle, offline "forget locally" fallback) — `src/license/manager.ts`
 - [x] `StubLicenseProvider` (in-memory, 3-device cap simulation, network-down toggle) — the active provider for now — `src/license/stub-provider.ts`
@@ -29,7 +30,6 @@ cached grace period). See CLAUDE.md's "Key architectural decisions" for the full
 - [ ] **Blocked on a Polar.sh account existing:** verify `PolarLicenseProvider`'s wire format against the live API (field-name casing is currently a documented guess), then flip `main.ts` from `StubLicenseProvider` to it — `src/license/polar-provider.ts`
 - [ ] Purchase/checkout link UI (not designed yet — out of scope until the provider is live)
 - [ ] **Unresolved, blocking any public pricing:** confirm with Obsidian whether the community plugin directory allows paywalling in-app functionality itself (vs. paywalling a backend service called from the plugin) — research during planning could not confirm either way
-- [ ] Decide whether to bump `minAppVersion` past `1.7.2` (to `1.8.7`, for `loadLocalStorage`/`saveLocalStorage`) or keep the current session-only fallback for older Obsidian indefinitely
 - [ ] README network-use disclosure once the real provider is live (the stub makes no real network calls, so the current disclosure already covers it, but it needs a fresh pass once `PolarLicenseProvider` is wired up)
 
 ## Entities
@@ -126,7 +126,7 @@ cached grace period). See CLAUDE.md's "Key architectural decisions" for the full
 - [x] Tag vocabulary per entity type, graph collapse threshold (with value label), graph node colors + per-type node sizes — `src/settings.ts`
 - [x] Entity layers section (user-facing name; internally still "global" layers): reorderable row list with a labeled "Reset order" button at the bottom right of the section (deliberate exception to the per-setting ↺ icon — a lone icon by the heading read as noise) — `src/settings.ts`
 - [x] Horizontal + vertical line spacing: distance between parallel graph edge lines (px, min/default 10, up to 40 each) — `lineGap`/`trunkGap` params of `computeGraphLayout`; vertical spacing is enforced by a trunk-separation pass (any two vertical trunks with overlapping y-spans get pushed `trunkGap` apart, re-clearing node collisions after each round) that also covers global-origin trunks hugging their node's side, which corridor fanning never spaced — `src/settings.ts`, `src/graph/layout.ts`, `src/views/graph-view.tsx`
-- [ ] Adopt the declarative settings API (`getSettingDefinitions`) once Obsidian 1.13 leaves Catalyst-only early access — the remaining lint warning; do not use 1.13-only APIs before then (minAppVersion stays 1.7.2)
+- [x] Adopted the declarative settings API (`getSettingDefinitions`) once Obsidian 1.13 shipped publicly (`minAppVersion` bumped to `1.13.0`) — `src/settings.ts`; see CLAUDE.md's file-map entry for the shape (five native `type: 'page'` entries, `getControlValue`/`setControlValue` overridden for dotted-path keys, License kept as a custom `SettingPage` subclass)
 
 ## Undo (Ctrl+Z)
 

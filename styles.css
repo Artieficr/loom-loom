@@ -1600,40 +1600,22 @@ span.loom-row-caret {
 	font-weight: var(--font-semibold);
 }
 
-/* "Reset order" under the entity-layer rows: right-aligned, no row frame. */
-.loom-layer-reset {
-	display: flex;
-	justify-content: flex-end;
-	padding-top: var(--size-4-2);
-}
-
-.loom-reset-btn {
-	background: none;
-	border: none;
-	box-shadow: none;
-	cursor: pointer;
-	color: var(--text-faint);
-	padding: 2px 4px;
-	margin-left: 4px;
-	border-radius: 4px;
-	display: inline-flex;
-	align-items: center;
-	flex-shrink: 0;
-}
-
-.loom-reset-btn:hover {
-	color: var(--text-muted);
-	background: var(--background-modifier-hover);
-}
-
-.loom-reset-btn svg {
-	width: 13px;
-	height: 13px;
-}
-
-.loom-restore-sep {
-	margin: 24px 0;
-	border-top: 1px solid var(--background-modifier-border);
+/* Obsidian's declarative settings API hands every `render`-based row a
+   `Setting` whose `settingEl` keeps the base `.setting-item` flex-ROW layout
+   (name column + control column, meant for exactly one control) — building
+   several unrelated pieces into it (a heading, a paragraph, several nested
+   Setting rows, a table) without overriding this squeezes them all into flex
+   ITEMS of that one row instead of stacking normally, corrupting wrapping and
+   row height. Every multi-part `render` block in settings.ts applies this to
+   its own `settingEl` first. `padding: 0` too — `.setting-item`'s own default
+   vertical padding otherwise left a dead gap above content built straight
+   into `settingEl` (worst on the Projects table, empty space between the
+   page's own top nav and the table itself) — each block already spaces its
+   own content correctly (a `.setHeading()` row, paragraphs, …), so the outer
+   row needs none of its own. */
+.loom-settings-block {
+	display: block;
+	padding: 0;
 }
 
 .loom-danger-btn {
@@ -1647,6 +1629,121 @@ span.loom-row-caret {
 .loom-danger-btn:hover {
 	background: #c62828;
 	color: #ffffff;
+}
+
+/* Plain divider ahead of the "Restore defaults" group on every settings
+   page (`restoreDefaultsRow` — a group with no `heading`, so Obsidian's own
+   native group box still appears, just untitled) — set apart from whatever
+   the page's last content section was, without drawing a box of its own
+   (the group already has Obsidian's native one). */
+.loom-restore-group {
+	margin-top: var(--size-4-8);
+	padding-top: var(--size-4-4);
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Projects settings tab — the only real `<table>` in this plugin, first one:
+   a plain read-only Title | Type list, no per-row interactivity beyond the
+   title link, so a `<table>` is simpler than the CSS-grid row primitive
+   used for interactive/draggable lists elsewhere (script-view.tsx's Outline). */
+.loom-settings-table {
+	width: 100%;
+	border-collapse: collapse;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	overflow: hidden;
+}
+
+.loom-settings-table th,
+.loom-settings-table td {
+	text-align: left;
+	padding: var(--size-4-2) var(--size-4-3);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.loom-settings-table tbody tr:last-child td {
+	border-bottom: none;
+}
+
+.loom-settings-table thead th {
+	text-transform: uppercase;
+	font-size: 0.75em;
+	color: var(--text-faint);
+	background: var(--background-secondary);
+}
+
+.loom-settings-project-link {
+	background: none;
+	border: none;
+	box-shadow: none;
+	padding: 0;
+	font: inherit;
+	cursor: var(--cursor-link);
+	color: var(--text-accent);
+}
+
+.loom-settings-project-link:hover {
+	text-decoration: underline;
+}
+
+.loom-settings-table-type {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
+.loom-settings-table-type svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+	flex-shrink: 0;
+}
+
+/* Project-kind icon in the "Set up project" modal's Project type row —
+   mirrors the Projects settings table's own Type column icon. */
+.loom-setup-kind-icon {
+	display: inline-flex;
+	align-items: center;
+	margin-right: var(--size-2-2);
+}
+
+.loom-setup-kind-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+/* The free-tier gate notice in "Set up project" — bold, three lines (what's
+   blocked, then how to unblock it, then where). */
+.loom-setup-warning {
+	font-weight: var(--font-bold);
+}
+
+/* "Create a project folder" / "Use existing folder" pills in "Set up
+   project" — full width, like a header bar, each half sharing it evenly
+   (the shared `.loom-seg`/`.loom-seg-btn` base is otherwise content-sized,
+   fine for a compact toggle like Script/Pages but not what a header-style
+   pair wants), with room below before the separator that follows. */
+.loom-setup-mode-pills {
+	width: 100%;
+	margin-bottom: var(--size-4-4);
+}
+
+.loom-setup-mode-pills .loom-seg-btn {
+	flex: 1 1 0;
+}
+
+/* Anchors "Set up project" to the top of the window instead of Obsidian's
+   default vertical centering (`align-items: center` on `.modal-container`,
+   the modal's own `containerEl`) — this modal's height changes noticeably
+   switching Create/Use, and centering made the box's own top edge jump up
+   and down on every switch since centering holds the MIDDLE fixed, not the
+   top. `!important` since the specificity of Obsidian's own base rule here
+   isn't something a plugin stylesheet can otherwise be sure to win. */
+.loom-setup-modal-container {
+	align-items: flex-start !important;
+}
+
+.loom-setup-modal-container .modal {
+	margin-top: 10vh;
 }
 
 /* ---- entity page ---- */
@@ -3847,18 +3944,6 @@ span.loom-row-caret {
 .loom-view button.loom-month-btn-on:hover {
 	background: var(--interactive-accent-hover);
 	color: var(--text-on-accent);
-}
-
-/* Nested settings rows (quest tag colors under Quest, custom Loom colors) —
-   indented with a vertical rail so they read as children of the row above. */
-.loom-setting-nested {
-	margin-left: var(--size-4-4);
-	padding-left: var(--size-4-4);
-	border-left: 2px solid var(--background-modifier-border);
-}
-
-.loom-setting-nested .setting-item-name {
-	color: var(--text-muted);
 }
 
 .loom-group-filter-actions {
