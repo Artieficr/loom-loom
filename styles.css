@@ -3906,6 +3906,18 @@ span.loom-row-caret {
 	margin-bottom: var(--size-4-2);
 }
 
+/* `TextInputModal`'s `multiline` mode (e.g. "Add an alternative wording") —
+   same grow-then-scroll treatment as `AltTextModal`'s own textareas
+   (loom-alt-modal-textarea/-add-textarea): JS drives the height up to this
+   cap via `scrollHeight`, then `overflow-y: auto` takes over instead of
+   growing the modal itself indefinitely. */
+.loom-modal-textarea {
+	resize: none;
+	max-height: 12em;
+	overflow-y: auto;
+	font-family: inherit;
+}
+
 /* ---- maps ---- */
 .loom-map-wrap {
 	position: relative;

@@ -81,7 +81,7 @@ import {
 	type NavNode,
 	type ScriptSearchMatch,
 } from './script-view';
-import { CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
+import { AltTextEntry, CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
 import { CommentPopover } from './annotation-popover';
 import {
 	moveSceneToSection,
@@ -385,6 +385,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			title: 'Add an alternative wording',
 			placeholder: selectedText,
 			cta: 'Add',
+			multiline: true,
 			onSubmit: (value) => {
 				if (!project) return;
 				void mutateScriptNotes(plugin.app, project, (notes) => {
@@ -503,6 +504,28 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  document — the Chapter and Scene sections each pass their OWN ref
 	 *  here (`chapterScriptEditorRef`/`sceneScriptEditorRef`), since only one
 	 *  of the two is ever mounted at a time. */
+	/** The CURRENT live text between an alt-text span's markers — read from
+	 *  whichever of `chapterDraft`/`sceneDraft` actually holds it (only one
+	 *  section is ever mounted, same "try both" pattern used elsewhere in
+	 *  this file), not the sidecar's own stored copy. Same reasoning and
+	 *  fix as script-view.tsx's own `liveAltSpanText`/`syncOutgoingAltOption`:
+	 *  the active option's wording is normally edited directly in the script,
+	 *  not through `AltTextModal`, and that edit needs somewhere to land
+	 *  before a swap moves away from it. */
+	const liveAltSpanText = (id: string): string | null => {
+		for (const draft of [chapterDraft, sceneDraft]) {
+			const span = findAnnotationSpans(draft).find((s) => s.kind === 'alt' && s.id === id);
+			if (span) return draft.slice(span.contentFrom, span.contentTo);
+		}
+		return null;
+	};
+	const syncOutgoingAltOption = (id: string, cur: AltTextEntry): AltTextEntry => {
+		const live = liveAltSpanText(id);
+		if (live === null || live === cur.options[cur.activeIndex]) return cur;
+		const options = cur.options.slice();
+		options[cur.activeIndex] = live;
+		return { ...cur, options };
+	};
 	/** Same "compute the next index INSIDE the fresh re-read" shape as
 	 *  script-view.tsx's own `handleCycleAlt` — a click landing before
 	 *  `scriptNotes` React state has caught up with a just-written change
@@ -511,8 +534,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const handleCycleAlt = (fieldRef: { current: FountainFieldHandle | null }, id: string) => {
 		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || cur.options.length === 0) return notes;
+			const cur0 = notes.altText[id];
+			if (!cur0 || cur0.options.length === 0) return notes;
+			const cur = syncOutgoingAltOption(id, cur0);
 			const nextIndex = (cur.activeIndex + 1) % cur.options.length;
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: nextIndex } } };
 		}).then((next) => {
@@ -529,8 +553,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const handleDraftAlt = (fieldRef: { current: FountainFieldHandle | null }, id: string, index: number) => {
 		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || index < 0 || index >= cur.options.length) return notes;
+			const cur0 = notes.altText[id];
+			if (!cur0 || index < 0 || index >= cur0.options.length) return notes;
+			const cur = syncOutgoingAltOption(id, cur0);
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: null } } };
 		}).then((next) => {
 			const cur = next.altText[id];
@@ -544,8 +569,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const handleAcceptAlt = (fieldRef: { current: FountainFieldHandle | null }, id: string, index: number) => {
 		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || index < 0 || index >= cur.options.length) return notes;
+			const cur0 = notes.altText[id];
+			if (!cur0 || index < 0 || index >= cur0.options.length) return notes;
+			const cur = syncOutgoingAltOption(id, cur0);
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: index } } };
 		}).then((next) => {
 			const cur = next.altText[id];
@@ -640,8 +666,15 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project) return;
 		const entry = scriptNotes.altText[id];
 		if (!entry) return;
+		// Patches the active row's DISPLAYED text with whatever's actually live
+		// in the document right now — same reasoning as script-view.tsx's own
+		// copy of this fix: `entry` is the sidecar's stored copy, which only
+		// catches up lazily on the next cycle/draft/accept swap, so opening
+		// the modal right after a hand-edit used to show stale wording for the
+		// active option until the next swap resynced it.
+		const { options } = syncOutgoingAltOption(id, entry);
 		new AltTextModal(plugin.app, {
-			options: entry.options,
+			options,
 			activeIndex: entry.activeIndex,
 			acceptedIndex: entry.acceptedIndex,
 			onDraft: (index) => handleDraftAlt(fieldRef, id, index),

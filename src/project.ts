@@ -380,7 +380,13 @@ export async function purgeEntityReferences(
 	}
 }
 
-/** One-line text prompt (rename, alias, date…). Enter or the CTA submits. */
+/** One-line text prompt (rename, alias, date…) by default — Enter or the CTA
+ *  submits. `multiline` swaps the `<input>` for an auto-growing `<textarea>`
+ *  (same technique as `AltTextModal`'s own "New alternative wording" field
+ *  below: grows with typing up to a CSS `max-height`, then scrolls) for a
+ *  caller whose answer can legitimately span more than one line — there,
+ *  Enter has to make a newline like any text field, not submit, so only the
+ *  CTA button does. */
 export class TextInputModal extends Modal {
 	private submitted = false;
 
@@ -391,6 +397,7 @@ export class TextInputModal extends Modal {
 			initial?: string;
 			placeholder?: string;
 			cta?: string;
+			multiline?: boolean;
 			onSubmit: (value: string) => void;
 			/** Called once, only if the modal closes WITHOUT ever submitting
 			 *  (the X button, Esc, or a click outside) — for a caller that
@@ -405,7 +412,12 @@ export class TextInputModal extends Modal {
 
 	onOpen(): void {
 		this.titleEl.setText(this.opts.title);
-		const input = this.contentEl.createEl('input', { type: 'text', cls: 'loom-modal-input' });
+		const input: HTMLInputElement | HTMLTextAreaElement = this.opts.multiline
+			? this.contentEl.createEl('textarea', {
+					cls: 'loom-modal-input loom-modal-textarea',
+					attr: { rows: 1 },
+				})
+			: this.contentEl.createEl('input', { type: 'text', cls: 'loom-modal-input' });
 		input.value = this.opts.initial ?? '';
 		if (this.opts.placeholder) input.placeholder = this.opts.placeholder;
 		const submit = () => {
@@ -415,9 +427,23 @@ export class TextInputModal extends Modal {
 			this.close();
 			this.opts.onSubmit(value);
 		};
-		input.addEventListener('keydown', (e) => {
-			if (e.key === 'Enter') submit();
-		});
+		if (this.opts.multiline) {
+			const autoGrow = () => {
+				input.setCssProps({ height: 'auto' });
+				input.style.height = `${input.scrollHeight}px`;
+			};
+			// Deferred a frame — the textarea isn't laid out yet (0 scrollHeight)
+			// synchronously right after `createEl` inserts it.
+			window.setTimeout(autoGrow, 0);
+			input.addEventListener('input', autoGrow);
+			// No Enter-submits binding here — a `<textarea>`'s Enter is a
+			// newline, full stop, exactly like `AltTextModal`'s own "New
+			// alternative wording" field, which has no keydown handler either.
+		} else {
+			input.addEventListener('keydown', (e) => {
+				if ((e as KeyboardEvent).key === 'Enter') submit();
+			});
+		}
 		new Setting(this.contentEl).addButton((b) =>
 			b
 				.setButtonText(this.opts.cta ?? 'Save')
