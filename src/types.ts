@@ -21,6 +21,7 @@ export const ENTITY_TYPES = [
 	'session',
 	'scene',
 	'act',
+	'chapter',
 ] as const;
 
 export type EntityType = (typeof ENTITY_TYPES)[number];
@@ -49,6 +50,7 @@ export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 	session: { label: 'Session', plural: 'Sessions', folder: 'Entities/Sessions', icon: 'book-open' },
 	scene: { label: 'Scene', plural: 'Scenes', folder: 'Entities/Scenes', icon: 'clapperboard' },
 	act: { label: 'Act', plural: 'Acts', folder: 'Entities/Acts', icon: 'book-open' },
+	chapter: { label: 'Chapter', plural: 'Chapters', folder: 'Entities/Chapters', icon: 'book-text' },
 };
 
 /** `ENTITY_META[type].label`/`.plural` are the English source strings — folder
@@ -88,6 +90,7 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 	session: [],
 	scene: [],
 	act: [],
+	chapter: [],
 };
 
 /** Characters tagged PC appear in session attendance and carry the alive flag. */
@@ -109,8 +112,10 @@ export const PC_GROUP_ICON = 'circle-star';
 
 /** Entity types that live on the timeline layers of the graph, across all
  *  kinds. A project only ever holds one pair (see `ANCHOR_TYPES`/`BEAT_TYPES`
- *  in project-kind.ts for the role split). */
-export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event', 'act', 'scene'];
+ *  in project-kind.ts for the role split) — Chapter (Writer/Prose) is the one
+ *  anchor with no beat counterpart; see `roleType`'s `EntityType | null`
+ *  return for the `'beat'` role. */
+export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event', 'act', 'scene', 'chapter'];
 /** Entity types that live on the fixed lower axis of the graph. */
 export const GLOBAL_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest'];
 
@@ -621,6 +626,19 @@ export function scriptLabel(): string {
 	return t('common.scriptLabel');
 }
 export const SCRIPT_ICON = 'file-text';
+
+/**
+ * Writer/Prose's own home-wheel entry, taking the same 12 o'clock slot the
+ * Script satellite takes in Writer/Script (the two sub-modes are mutually
+ * exclusive per project, so only one of them is ever offered). Unlike
+ * Script, "Book" is deliberately NOT a file or entity of its own — it's UI
+ * copy for "the project's chapters as a whole," opening the Chapter list —
+ * so there's no equivalent of `SCRIPT_EXTENSION`/`scriptFilePath` here.
+ */
+export function bookLabel(): string {
+	return t('common.bookLabel');
+}
+export const BOOK_ICON = 'book';
 
 /** Comments and alternative-text bodies, keyed by the hidden `[[loom-comment:…]]`/
  *  `[[loom-alt:…]]` marker ids embedded in the script — never in the script

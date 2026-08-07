@@ -26,6 +26,19 @@ export function isProjectKind(value: unknown): value is ProjectKind {
 	return typeof value === 'string' && (PROJECT_KINDS as readonly string[]).includes(value);
 }
 
+/** A Writer project's own sub-mode, picked at setup alongside `kind` and
+ *  never both at once in one project (a Fountain script and a prose Book
+ *  would need two coexisting anchor/beat chronologies in one project — see
+ *  `roleType`'s doc comment for why that's deliberately not supported).
+ *  Meaningless outside `kind === 'writer'`; every other kind ignores it. */
+export const WRITER_MODES = ['script', 'prose'] as const;
+export type WriterMode = (typeof WRITER_MODES)[number];
+export const DEFAULT_WRITER_MODE: WriterMode = 'script';
+
+export function isWriterMode(value: unknown): value is WriterMode {
+	return typeof value === 'string' && (WRITER_MODES as readonly string[]).includes(value);
+}
+
 export interface ProjectKindMeta {
 	label: string;
 	/** Lucide icon name. */
@@ -64,9 +77,16 @@ export function projectKindDescription(kind: ProjectKind): string {
 
 /**
  * The structural role a type plays in the chronological layout: the `anchor`
- * owns a column (Session / Act), the `beat` stacks beneath one
+ * owns a column (Session / Act / Chapter), the `beat` stacks beneath one
  * (Event / Scene). A type has exactly one role regardless of kind, so
  * record-only code can ask `roleOf(record.type)` without resolving a project.
+ *
+ * Writer/Prose is the one workflow with an anchor and NO beat type — a novel
+ * chapter has no smaller structural unit the way a scene sits under an act,
+ * matching the deliberately simpler Book/Chapter shape (vs. Script/Act/
+ * Scene/Branches). `roleType`'s `'beat'` case can therefore return `null`;
+ * every caller asking for a project's beat type has to handle that (see
+ * `columns.ts`, `list-view.tsx`, `timeline-strip.tsx`, `entity-view.tsx`).
  */
 export type TypeRole = 'anchor' | 'beat';
 
@@ -79,12 +99,22 @@ const ROLE_TYPES: Record<ProjectKind, Record<TypeRole, EntityType>> = {
 const TYPE_ROLES: Partial<Record<EntityType, TypeRole>> = {
 	session: 'anchor',
 	act: 'anchor',
+	chapter: 'anchor',
 	event: 'beat',
 	scene: 'beat',
 };
 
-/** The entity type playing `role` in this kind of project. */
-export function roleType(kind: ProjectKind, role: TypeRole): EntityType {
+/** The entity type playing `role` in this kind of project, or `null` for a
+ *  `'beat'` request against Writer/Prose (see this type's own doc comment).
+ *  `writerMode` only matters for `kind === 'writer'`; every other kind
+ *  ignores it. Overloaded so an `'anchor'` call — never null, for any
+ *  kind/sub-mode — doesn't force every anchor-type call site into
+ *  null-handling it will never actually need; only `'beat'` callers see the
+ *  `| null` in the return type. */
+export function roleType(kind: ProjectKind, role: 'anchor', writerMode?: WriterMode): EntityType;
+export function roleType(kind: ProjectKind, role: 'beat', writerMode?: WriterMode): EntityType | null;
+export function roleType(kind: ProjectKind, role: TypeRole, writerMode: WriterMode = DEFAULT_WRITER_MODE): EntityType | null {
+	if (kind === 'writer' && writerMode === 'prose') return role === 'anchor' ? 'chapter' : null;
 	return ROLE_TYPES[kind][role];
 }
 
@@ -109,14 +139,16 @@ const KIND_TYPES: Record<ProjectKind, readonly EntityType[]> = {
 	gm: ['character', 'location', 'region', 'faction', 'item', 'quest', 'event', 'session'],
 	writer: ['character', 'location', 'region', 'faction', 'item', 'quest', 'scene', 'act'],
 };
+const WRITER_PROSE_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest', 'chapter'];
 
-export function typesFor(kind: ProjectKind): readonly EntityType[] {
+export function typesFor(kind: ProjectKind, writerMode: WriterMode = DEFAULT_WRITER_MODE): readonly EntityType[] {
+	if (kind === 'writer' && writerMode === 'prose') return WRITER_PROSE_TYPES;
 	return KIND_TYPES[kind];
 }
 
 /** Whether `type` is part of this kind of project at all. */
-export function hasType(kind: ProjectKind, type: EntityType): boolean {
-	return KIND_TYPES[kind].includes(type);
+export function hasType(kind: ProjectKind, type: EntityType, writerMode: WriterMode = DEFAULT_WRITER_MODE): boolean {
+	return typesFor(kind, writerMode).includes(type);
 }
 
 /**
@@ -179,34 +211,49 @@ const KIND_FEATURES: Record<ProjectKind, KindFeatures> = {
 	},
 };
 
-export function featuresOf(kind: ProjectKind): KindFeatures {
-	return KIND_FEATURES[kind];
+/** `writerMode` only matters for `kind === 'writer'`: `script` reads `false`
+ *  for Prose (no `.fountain` file, no script UI) — every other flag is the
+ *  same for both Writer sub-modes. */
+export function featuresOf(kind: ProjectKind, writerMode: WriterMode = DEFAULT_WRITER_MODE): KindFeatures {
+	const base = KIND_FEATURES[kind];
+	if (kind === 'writer' && writerMode === 'prose') return { ...base, script: false };
+	return base;
 }
 
 /**
  * Convenience wrappers taking a project config directly. Typed structurally on
- * `{ kind }` so this module never has to import calendar.ts (which imports
- * this one). `undefined` falls back to the default kind, for the handful of
- * spots that render before a project has resolved.
+ * `{ kind, writerMode? }` so this module never has to import calendar.ts
+ * (which imports this one). `undefined` falls back to the default kind, for
+ * the handful of spots that render before a project has resolved.
  */
-type KindHolder = { kind: ProjectKind } | undefined;
+type KindHolder = { kind: ProjectKind; writerMode?: WriterMode } | undefined;
 
 function kindOf(config: KindHolder): ProjectKind {
 	return config?.kind ?? DEFAULT_PROJECT_KIND;
 }
 
+function writerModeOf(config: KindHolder): WriterMode {
+	return config?.writerMode ?? DEFAULT_WRITER_MODE;
+}
+
 export function projectTypes(config: KindHolder): readonly EntityType[] {
-	return typesFor(kindOf(config));
+	return typesFor(kindOf(config), writerModeOf(config));
 }
 
 export function projectHasType(config: KindHolder, type: EntityType): boolean {
-	return hasType(kindOf(config), type);
+	return hasType(kindOf(config), type, writerModeOf(config));
 }
 
-export function projectRoleType(config: KindHolder, role: TypeRole): EntityType {
-	return roleType(kindOf(config), role);
+export function projectRoleType(config: KindHolder, role: 'anchor'): EntityType;
+export function projectRoleType(config: KindHolder, role: 'beat'): EntityType | null;
+export function projectRoleType(config: KindHolder, role: TypeRole): EntityType | null {
+	// Branches on a literal so each call below matches one specific `roleType`
+	// overload — `role` itself is only a `TypeRole` union here, which
+	// wouldn't match either overload directly.
+	if (role === 'anchor') return roleType(kindOf(config), 'anchor', writerModeOf(config));
+	return roleType(kindOf(config), 'beat', writerModeOf(config));
 }
 
 export function features(config: KindHolder): KindFeatures {
-	return featuresOf(kindOf(config));
+	return featuresOf(kindOf(config), writerModeOf(config));
 }

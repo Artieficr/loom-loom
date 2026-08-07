@@ -51,6 +51,11 @@ export default class LoomLoomPlugin extends Plugin {
 		await this.loadSettings();
 		this.applyTextSize();
 		this.applyLocale();
+		this.applyThemeTextColoring();
+		// Obsidian's own event for "the active theme/snippets changed" — without
+		// this, switching themes while "Follow theme text coloring" is already
+		// on would leave the measured colors stale until the next settings save.
+		this.registerEvent(this.app.workspace.on('css-change', () => this.applyThemeTextColoring()));
 
 		this.licenseManager = new LicenseManager(this.app, new PolarLicenseProvider(POLAR_ORGANIZATION_ID));
 
@@ -144,6 +149,12 @@ export default class LoomLoomPlugin extends Plugin {
 		);
 
 		this.app.workspace.onLayoutReady(() => {
+			// Re-measure once the workspace (and, in practice, the active
+			// theme's stylesheet) has actually finished loading — the same
+			// call fired earlier, inline in `onload()`, can run before theme
+			// CSS is fully applied, which left the measured colors wrong
+			// until the user happened to toggle the setting off and on again.
+			this.applyThemeTextColoring();
 			this.registerTimestampPropertyTypes();
 			void this.migrateLegacyProject().then(async () => {
 				await this.indexer.rebuildNow();
@@ -366,12 +377,81 @@ export default class LoomLoomPlugin extends Plugin {
 		await this.saveData(this.settings);
 		this.applyTextSize();
 		this.applyLocale();
+		this.applyThemeTextColoring();
 	}
 
 	/** Reflects the text-size setting as a body class the stylesheet keys off. */
 	applyTextSize(): void {
 		document.body.classList.toggle('loom-text-compact', this.settings.textSize === 'compact');
 		document.body.classList.toggle('loom-text-large', this.settings.textSize === 'large');
+	}
+
+	/** Reflects the "Follow theme text coloring" setting as a body class, AND
+	 *  (unlike `applyTextSize`) also measures what the active theme actually
+	 *  renders headings/bold/italic as, since there's no reliable way to read
+	 *  this from CSS variables alone — confirmed live: many themes color
+	 *  `h1`-`h6`/`strong`/`em` directly on those selectors rather than
+	 *  exposing a reusable `--h1-color`-style custom property, so `var(--h1-color, …)`
+	 *  silently fell through to the fallback for a theme that never set it.
+	 *  The only genuinely universal read is asking the browser what color it
+	 *  actually computed for a real themed element — `measureThemeTextColors`
+	 *  does that by rendering throwaway probe elements and reading
+	 *  `getComputedStyle`, then this stores each result as our OWN CSS custom
+	 *  property (`--loom-measured-h1` etc.) on `document.body`, which
+	 *  `styles.css`'s opt-in rules read with the same `--text-accent`
+	 *  fallback as before for anything the probe couldn't resolve. */
+	applyThemeTextColoring(): void {
+		document.body.classList.toggle('loom-follow-theme-color', this.settings.followThemeTextColoring);
+		if (this.settings.followThemeTextColoring) this.measureThemeTextColors();
+	}
+
+	/** Renders one throwaway probe element per level/mark inside a hidden
+	 *  `.markdown-rendered` container (the class most themes key their
+	 *  heading/emphasis color rules off), reads each one's REAL computed
+	 *  color, stores it as a `--loom-measured-*` custom property on
+	 *  `document.body`, then removes the probe. Not a persistent DOM
+	 *  fixture — cheap enough (a handful of elements, one layout pass) to
+	 *  just redo on every call (`applyThemeTextColoring`, itself called on
+	 *  load, on every settings save, and on Obsidian's own `css-change`
+	 *  event) rather than trying to cache and invalidate. */
+	private measureThemeTextColors(): void {
+		// Obsidian's Live Preview (where notes are actually edited, the same
+		// context this plugin's own CM6 editors sit in) renders a heading as a
+		// plain `<span class="cm-header cm-header-N">` inside a
+		// `.cm-line.HyperMD-header.HyperMD-header-N` — never a semantic
+		// `<h1>`-`<h6>` tag, confirmed directly against a real note's DOM.
+		// Emphasis follows the identical span-plus-class convention
+		// (`cm-strong`/`cm-em`), not `<strong>`/`<em>`. Mounted under
+		// `workspace.containerEl` (the real app root Obsidian itself renders
+		// every leaf inside), not a bare `document.body` child — a theme
+		// whose colors resolve through several layers of custom properties
+		// (confirmed live: one theme's compiled `light-dark()` output) can
+		// depend on that exact ancestry to resolve the same way a real note
+		// does, not just on `body`'s own theme-mode class.
+		const probe = this.app.workspace.containerEl.createDiv({
+			cls: 'markdown-source-view mod-cm6 cm-editor cm-s-obsidian',
+			attr: { style: 'position:fixed; top:-9999px; left:-9999px; visibility:hidden; pointer-events:none;' },
+		});
+		const content = probe.createDiv({ cls: 'cm-content' });
+		const measure = (el: HTMLElement) => getComputedStyle(el).color;
+		// `'X'`, not `'x'` — invisible to the user either way (the probe is
+		// off-screen and removed immediately), but the Obsidian lint ruleset's
+		// sentence-case check flags any lowercase `createEl(..., { text })` as
+		// if it were real UI copy, with no way to mark a string as exempt.
+		const headingLine = (level: number): HTMLElement =>
+			content.createDiv({ cls: `cm-line HyperMD-header HyperMD-header-${level}` });
+		const targets: [string, HTMLElement][] = [
+			['h1', headingLine(1).createSpan({ cls: 'cm-header cm-header-1', text: 'X' })],
+			['h2', headingLine(2).createSpan({ cls: 'cm-header cm-header-2', text: 'X' })],
+			['h3', headingLine(3).createSpan({ cls: 'cm-header cm-header-3', text: 'X' })],
+			['h4', headingLine(4).createSpan({ cls: 'cm-header cm-header-4', text: 'X' })],
+			['bold', content.createSpan({ cls: 'cm-strong', text: 'X' })],
+			['italic', content.createSpan({ cls: 'cm-em', text: 'X' })],
+		];
+		for (const [key, el] of targets) {
+			document.body.style.setProperty(`--loom-measured-${key}`, measure(el));
+		}
+		probe.remove();
 	}
 
 	/** Resolves 'auto' against Obsidian's own display language (falling back
@@ -383,6 +463,6 @@ export default class LoomLoomPlugin extends Plugin {
 	}
 
 	onunload(): void {
-		document.body.classList.remove('loom-text-compact', 'loom-text-large');
+		document.body.classList.remove('loom-text-compact', 'loom-text-large', 'loom-follow-theme-color');
 	}
 }

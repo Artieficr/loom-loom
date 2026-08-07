@@ -738,7 +738,14 @@ export const FountainField = forwardRef(function FountainField(
 			const entries: { from: number; to: number; deco: Decoration }[] = [];
 
 			for (const element of parsed.elements) {
-				const cls = ELEMENT_CLASS[element.type];
+				// Sections get a level modifier class too (`-level-1/2/3`) so
+				// "Follow theme text coloring" can map each depth to the
+				// matching `--h1-color`/`--h2-color`/`--h3-color` the active
+				// theme defines, instead of one flat color for every depth.
+				const cls =
+					element.type === 'section'
+						? `${ELEMENT_CLASS[element.type]} loom-fountain-section-level-${element.level ?? 1}`
+						: ELEMENT_CLASS[element.type];
 				const span = element.type === 'dialogue' ? element.text.split('\n').length : 1;
 				for (let i = 0; i < span; i++) {
 					const lineNo = element.line + i + 1; // CM6 lines are 1-based

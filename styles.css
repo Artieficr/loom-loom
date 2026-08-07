@@ -1858,11 +1858,12 @@ span.loom-row-caret {
 	font-weight: var(--font-bold);
 }
 
-/* "Create a project folder" / "Use existing folder" pills in "Set up
-   project" — full width, like a header bar, each half sharing it evenly
-   (the shared `.loom-seg`/`.loom-seg-btn` base is otherwise content-sized,
-   fine for a compact toggle like Script/Pages but not what a header-style
-   pair wants), with room below before the separator that follows. */
+/* "Create a project folder" / "Use existing folder" pills, and Writer's own
+   Script/Prose pick, in "Set up project" — full width, like a header bar,
+   each half sharing it evenly (the shared `.loom-seg`/`.loom-seg-btn` base
+   is otherwise content-sized, fine for a compact toggle like the Script
+   view's own Script/Pages but not what a header-style pair wants), with
+   room below before the separator/next field that follows. */
 .loom-setup-mode-pills {
 	width: 100%;
 	margin-bottom: var(--size-4-4);
@@ -5676,7 +5677,9 @@ span.loom-row-caret {
 .loom-fountain-field .cm-line.loom-fountain-scene-heading {
 	font-weight: 700;
 	text-transform: uppercase;
-	color: var(--text-accent);
+	/* Plain by default — see the `.loom-follow-theme-color` rule further down
+	   for why this doesn't just read `var(--text-accent)` directly. */
+	color: var(--text-normal);
 	/* `padding-top`, deliberately NOT `margin-top` — CM6 measures each line's
 	   own height via `getBoundingClientRect()`, which by spec excludes
 	   margin. A margin here is real on screen but invisible to CM6's internal
@@ -5718,7 +5721,8 @@ span.loom-row-caret {
 
 .loom-fountain-field .cm-line.loom-fountain-section {
 	font-weight: 700;
-	color: var(--text-accent);
+	/* Plain by default — see the `.loom-follow-theme-color` rule further down. */
+	color: var(--text-normal);
 }
 
 .loom-fountain-field .cm-line.loom-fountain-synopsis {
@@ -5774,6 +5778,95 @@ span.loom-row-caret {
 
 .loom-fountain-field .loom-fountain-underline {
 	text-decoration: underline;
+}
+
+/* Settings → General → Interface → "Follow theme text coloring" (default
+   OFF — every rule above/below this point that this selector list touches
+   is plain by default instead). Toggled as a body class in `main.ts`'s
+   `applyThemeTextColoring()`, same live-refresh mechanism `loom-text-compact`/
+   `loom-text-large` already use for text size — a pure CSS switch, so an
+   already-mounted Script editor picks up the change instantly, no reload.
+   **Reads `--loom-measured-*`, not a guessed Obsidian variable name** —
+   confirmed live that not every theme exposes a reusable `--h1-color`-style
+   custom property (many color `h1`/`strong`/`em` directly on those
+   selectors instead), so `var(--h1-color, …)` silently fell through to the
+   fallback for such a theme. `main.ts`'s `measureThemeTextColors()` instead
+   renders real probe elements and reads their ACTUAL computed color via
+   `getComputedStyle`, storing each as `--loom-measured-h1` etc. on
+   `document.body` — genuinely universal regardless of how the theme
+   implements its own coloring. `--text-accent` is only the fallback for
+   when even that measurement comes back empty. No Obsidian-standard
+   variable exists for underline specifically (it isn't a CommonMark
+   emphasis type, so there's no native element to probe), so that one
+   chains straight to `--text-accent`. */
+body.loom-follow-theme-color .loom-fountain-field .cm-line.loom-fountain-section-level-1 {
+	color: var(--loom-measured-h1, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-fountain-field .cm-line.loom-fountain-section-level-2 {
+	color: var(--loom-measured-h2, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-fountain-field .cm-line.loom-fountain-section-level-3 {
+	color: var(--loom-measured-h3, var(--text-accent));
+}
+/* Scene headings (`INT. HOUSE - DAY`) are Fountain-specific, one level
+   "deeper" than a chapter/subsection — the measured H4 is the closest fit,
+   still with an accent fallback for a theme with no distinct H4 color. */
+body.loom-follow-theme-color .loom-fountain-field .cm-line.loom-fountain-scene-heading {
+	color: var(--loom-measured-h4, var(--text-accent));
+}
+
+body.loom-follow-theme-color .loom-fountain-field .loom-fountain-bold,
+body.loom-follow-theme-color .loom-fountain-field .loom-fountain-bold-italic {
+	color: var(--loom-measured-bold, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-fountain-field .loom-fountain-italic {
+	color: var(--loom-measured-italic, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-fountain-field .loom-fountain-underline {
+	color: var(--text-accent);
+}
+
+body.loom-follow-theme-color .loom-view .loom-screenplay strong {
+	color: var(--loom-measured-bold, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-view .loom-screenplay em {
+	color: var(--loom-measured-italic, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-view .loom-screenplay u {
+	color: var(--text-accent);
+}
+
+/* The setting row's own live example ("# H1 Heading, Bold, Italic,
+   Underline") — same plain-by-default split as the real editors above, and
+   the SAME measured-color mapping when the setting is on, so the preview
+   honestly demonstrates what the toggle will actually do rather than a
+   simplified stand-in. */
+.loom-setting-color-preview {
+	margin-top: var(--size-4-1);
+}
+
+.loom-setting-color-preview-heading {
+	font-weight: 700;
+}
+
+.loom-setting-color-preview strong,
+.loom-setting-color-preview em,
+.loom-setting-color-preview u,
+.loom-setting-color-preview-heading {
+	color: var(--text-normal);
+}
+
+body.loom-follow-theme-color .loom-setting-color-preview-heading {
+	color: var(--loom-measured-h1, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-setting-color-preview strong {
+	color: var(--loom-measured-bold, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-setting-color-preview em {
+	color: var(--loom-measured-italic, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-setting-color-preview u {
+	color: var(--text-accent);
 }
 
 /* Orphan prevention (fountain.ts `findOrphanPairs`) — a short glue word
@@ -5846,6 +5939,19 @@ span.loom-row-caret {
 
 .loom-view .loom-screenplay mark {
 	background: #ffe58a;
+	color: inherit;
+}
+
+/* `renderInline` (fountain.ts) emits literal `<strong>`/`<em>`/`<u>` HTML for
+   the Pages preview — unlike the live editor's own `.loom-fountain-bold`
+   etc. decoration classes, plain HTML tags have no plugin styling of their
+   own by default and silently pick up whatever the active Obsidian theme
+   does to bare `<strong>`/`<em>`, which several themes color with their
+   accent hue. Plain by default, same as the live editor; see the
+   `.loom-follow-theme-color` rule further down for the opt-in override. */
+.loom-view .loom-screenplay strong,
+.loom-view .loom-screenplay em,
+.loom-view .loom-screenplay u {
 	color: inherit;
 }
 
