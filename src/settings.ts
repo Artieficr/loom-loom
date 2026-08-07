@@ -163,10 +163,10 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	nodeColors: {
 		session: '#7c5cff',
 		event: '#e08e45',
-		// Writer projects hold Chapters/Scenes where player and GM ones hold
+		// Writer projects hold Acts/Scenes where player and GM ones hold
 		// Sessions/Events — same structural role, so they start from the same
 		// colors and can be tuned apart.
-		chapter: '#7c5cff',
+		act: '#7c5cff',
 		scene: '#e08e45',
 		character: '#58b478',
 		location: '#4aa3d8',
@@ -180,7 +180,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	nodeSizes: {
 		session: 26,
 		event: 20,
-		chapter: 26,
+		act: 26,
 		scene: 20,
 		character: 17,
 		location: 17,
@@ -935,7 +935,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 
 	private entitiesItems(): SettingDefinitionItem[] {
 		// Only the types the vault's projects actually hold: a vault with no
-		// writer project has no reason to show Chapter and Scene rows (and vice
+		// writer project has no reason to show Act and Scene rows (and vice
 		// versa). With no projects yet, fall back to the default kind's set.
 		const inUse = new Set<EntityType>(
 			this.plugin.indexer.getProjects().flatMap((p) => [...typesFor(p.config.kind)])

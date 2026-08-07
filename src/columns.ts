@@ -4,7 +4,7 @@ import { features, projectRoleType } from './project-kind';
 
 /**
  * One column of the chronological layout: an anchor (a Session in a player/GM
- * project, a Chapter in a writer one — or a stray beat connected to no anchor)
+ * project, an Act in a writer one — or a stray beat connected to no anchor)
  * owning the column, with its connected beats (Events / Scenes) stacked
  * beneath. Both the timeline view and the graph view derive horizontal
  * ordering from this, so the two stay consistent by construction. Membership
@@ -26,7 +26,7 @@ function bySortKey(a: EntityRecord, b: EntityRecord): number {
 	return ka === kb ? a.name.localeCompare(b.name) : ka - kb;
 }
 
-/** Anchors that aren't dated (chapters) order by their manual `loomSeq` stamp,
+/** Anchors that aren't dated (acts) order by their manual `loomSeq` stamp,
  *  falling back to creation order so an unstamped one still lands sensibly. */
 function bySequence(a: EntityRecord, b: EntityRecord): number {
 	const ka = a.seq ?? a.created;

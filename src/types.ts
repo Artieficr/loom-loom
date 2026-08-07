@@ -1,9 +1,9 @@
 /**
  * Every entity type the plugin knows. A given project only shows the subset its
  * kind declares (`typesFor` in project-kind.ts) — Session/Event are the
- * player + GM chronology, Chapter/Scene the writer one. They're separate types
+ * player + GM chronology, Act/Scene the writer one. They're separate types
  * rather than one renamed pair because they carry genuinely different fields
- * (a session has a date and attendance; a chapter has an order and a display
+ * (a session has a date and attendance; an act has an order and a display
  * title), but they play the same structural *roles*, so the shared layout,
  * timeline and page code addresses them through `roleType`/`roleOf` and never
  * by name.
@@ -20,7 +20,7 @@ export const ENTITY_TYPES = [
 	'event',
 	'session',
 	'scene',
-	'chapter',
+	'act',
 ] as const;
 
 export type EntityType = (typeof ENTITY_TYPES)[number];
@@ -48,7 +48,7 @@ export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 	event: { label: 'Event', plural: 'Events', folder: 'Entities/Events', icon: 'calendar-days' },
 	session: { label: 'Session', plural: 'Sessions', folder: 'Entities/Sessions', icon: 'book-open' },
 	scene: { label: 'Scene', plural: 'Scenes', folder: 'Entities/Scenes', icon: 'clapperboard' },
-	chapter: { label: 'Chapter', plural: 'Chapters', folder: 'Entities/Chapters', icon: 'book-open' },
+	act: { label: 'Act', plural: 'Acts', folder: 'Entities/Acts', icon: 'book-open' },
 };
 
 /** `ENTITY_META[type].label`/`.plural` are the English source strings — folder
@@ -66,8 +66,8 @@ export function entityPlural(type: EntityType): string {
  *  Russian (and most gendered languages) needs "New" itself declined to agree
  *  with the noun's gender ("Новый персонаж" masc. / "Новая сессия" fem. /
  *  "Новое событие" neut.) — a single template combining an invariant "New" with
- *  a runtime-provided label can't do that. Scene/Chapter already have their own
- *  dedicated `newSceneTitle`/`newChapterTitle` keys for the same reason and are
+ *  a runtime-provided label can't do that. Scene/Act already have their own
+ *  dedicated `newSceneTitle`/`newActTitle` keys for the same reason and are
  *  untouched by this — this covers every OTHER type. */
 export function newEntityTitle(type: EntityType): string {
 	return t(`entityType.${type}.newTitle`);
@@ -87,7 +87,7 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 	event: [],
 	session: [],
 	scene: [],
-	chapter: [],
+	act: [],
 };
 
 /** Characters tagged PC appear in session attendance and carry the alive flag. */
@@ -110,7 +110,7 @@ export const PC_GROUP_ICON = 'circle-star';
 /** Entity types that live on the timeline layers of the graph, across all
  *  kinds. A project only ever holds one pair (see `ANCHOR_TYPES`/`BEAT_TYPES`
  *  in project-kind.ts for the role split). */
-export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event', 'chapter', 'scene'];
+export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event', 'act', 'scene'];
 /** Entity types that live on the fixed lower axis of the graph. */
 export const GLOBAL_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest'];
 
@@ -179,9 +179,9 @@ export const FM = {
 	/** GM projects, characters: preplanned lines / speech-style examples for an
 	 *  NPC, one entry per line. Free-form text, no links resolved. */
 	npcLines: 'loomNpcLines',
-	/** Writer projects, chapters: the title as it should appear in the exported
-	 *  script. Fountain sections (`# Chapter`) are navigation-only and never
-	 *  export, so an exported act/chapter title has to be emitted separately as
+	/** Writer projects, acts: the title as it should appear in the exported
+	 *  script. Fountain sections (`# Act`) are navigation-only and never
+	 *  export, so an exported act/act title has to be emitted separately as
 	 *  centered bold (`>**ACT ONE**<`); this field is what goes inside it. */
 	displayTitle: 'loomDisplayTitle',
 	/** Scenes only: the `[[loom:<id>]]` marker in the script's scene heading —
@@ -213,20 +213,20 @@ export const FM = {
 	 *  already covers that one) — a place merely mentioned or referenced,
 	 *  not where the scene is set. Visible, so they connect in the graph. */
 	sceneMentionedLocations: 'loomSceneMentionedLocations',
-	/** Scenes only: link to the Chapter this scene belongs to — derived from the
+	/** Scenes only: link to the Act this scene belongs to — derived from the
 	 *  `#` section enclosing it in the script. A scene's writing lives inside its
-	 *  chapter's stretch of the script, so a chapterless scene has nowhere to be
-	 *  stored. Visible, and it is what makes the scene stack under its chapter in
+	 *  act's stretch of the script, so an actless scene has nowhere to be
+	 *  stored. Visible, and it is what makes the scene stack under its act in
 	 *  the graph and timeline (`buildColumns` takes any connection to an anchor). */
-	sceneChapter: 'loomSceneChapter',
+	sceneAct: 'loomSceneAct',
 	/** Scenes only: the RAW loom id (not a link — there's no Branch note to
 	 *  link to) of the branch-tagged section (`= branch: <id>`) this scene
 	 *  sits under, or '' when it isn't in a branch. */
 	sceneBranch: 'loomSceneBranch',
-	/** Chapters only: the `[[loom:<id>]]` marker on the script's `#` section
+	/** Acts only: the `[[loom:<id>]]` marker on the script's `#` section
 	 *  line. Same job as a scene's — it survives a rename or a move, where
 	 *  matching the section text would not. */
-	chapterId: 'loomChapterId',
+	actId: 'loomActId',
 	/** Timeline definition files. */
 	timelineTypes: 'loomTypes',
 	/** Loom-managed creation timestamp (ISO 8601). Authoritative over the
@@ -425,7 +425,7 @@ export interface EntityRecord {
 	objectives: QuestObjective[];
 	/** Manual order stamp (events + quests). Null = never reordered; callers
 	 *  fall back to `created` so unstamped entries stay chronological.
-	 *  Chapters order by this instead of by a date (`anchorOrder: 'sequence'`). */
+	 *  Acts order by this instead of by a date (`anchorOrder: 'sequence'`). */
 	seq: number | null;
 	/** Beat entities in a GM project: planning state, '' when none. */
 	eventKind: EventKind | '';
@@ -433,8 +433,8 @@ export interface EntityRecord {
 	happened: boolean;
 	/** Characters in a GM project: preplanned lines / speech-style examples. */
 	npcLines: string[];
-	/** Chapters: title as it should appear in the exported script; '' falls back
-	 *  to the chapter's own name. */
+	/** Acts: title as it should appear in the exported script; '' falls back
+	 *  to the act's own name. */
 	displayTitle: string;
 	/** Scenes: the `[[loom:<id>]]` marker tying this note to its scene heading in
 	 *  the script; '' for a scene note not (yet) backed by one. */
@@ -460,13 +460,13 @@ export interface EntityRecord {
 	 *  that aren't the scene's own heading location (`sceneLocation`). Visible
 	 *  links, so they connect in the graph. */
 	sceneMentionedLocations: string[];
-	/** Scenes: linkpath of the owning Chapter, or ''. */
-	sceneChapter: string;
+	/** Scenes: linkpath of the owning Act, or ''. */
+	sceneAct: string;
 	/** Scenes: the raw loom id (not a linkpath) of the branch-tagged section
 	 *  this scene sits under, or '' when it isn't in a branch. */
 	sceneBranch: string;
-	/** Chapters: the `[[loom:<id>]]` marker on their script section line. */
-	chapterId: string;
+	/** Acts: the `[[loom:<id>]]` marker on their script section line. */
+	actId: string;
 	created: number;
 	modified: number;
 }
@@ -516,9 +516,9 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		sceneFactions: [],
 		sceneItems: [],
 		sceneMentionedLocations: [],
-		sceneChapter: '',
+		sceneAct: '',
 		sceneBranch: '',
-		chapterId: '',
+		actId: '',
 		created: 0,
 		modified: 0,
 	};
@@ -612,7 +612,7 @@ export const MAPS_IMAGES_FOLDER = `${MAPS_FOLDER}/Images`;
  * syntax **is** `[[…]]`, so Obsidian would index every non-exporting script
  * note as a wikilink; and an own extension round-trips byte-for-byte with
  * external Fountain apps (Better Fountain, Highland, Fade In), which is what
- * makes "Open in external app" honest. Scenes and chapters are parsed out of
+ * makes "Open in external app" honest. Scenes and acts are parsed out of
  * it into their own entity notes — see `src/fountain.ts` for the parser and
  * `src/views/script-view.tsx`/`fountain-field.tsx` for the editor.
  */
@@ -624,7 +624,7 @@ export const SCRIPT_ICON = 'file-text';
 
 /** Comments and alternative-text bodies, keyed by the hidden `[[loom-comment:…]]`/
  *  `[[loom-alt:…]]` marker ids embedded in the script — never in the script
- *  itself (it has no frontmatter to hold them) and never on a Scene/Chapter
+ *  itself (it has no frontmatter to hold them) and never on a Scene/Act
  *  note (a marked range can span a scene boundary or predate any note).
  *  Sits under `Entities/` beside the type folders, same reasoning as Maps. */
 export const SCRIPT_NOTES_FOLDER = 'Entities/Script Notes';

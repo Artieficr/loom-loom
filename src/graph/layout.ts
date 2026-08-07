@@ -6,7 +6,7 @@ import { EdgeRoute, LANE_EPSILON, RoutedEdge } from './routing';
 import { roleOf } from '../project-kind';
 
 /** Which row a node sits in. `anchor` = the column-owning row (Sessions /
- *  Chapters), `beat` = the row stacked beneath it (Events / Scenes),
+ *  Acts), `beat` = the row stacked beneath it (Events / Scenes),
  *  `global` = the fixed lower layers. Structural, not an entity type. */
 export type NodeKind = 'anchor' | 'beat' | 'global';
 

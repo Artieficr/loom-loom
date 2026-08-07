@@ -192,7 +192,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 	const plugin = navigator.plugin;
 	const indexer = plugin.indexer;
 	const version = useIndexVersion(indexer);
-	// Sessions/Events here, Chapters/Scenes in a writer project — the strip
+	// Sessions/Events here, Acts/Scenes in a writer project — the strip
 	// itself is the same either way.
 	const anchorType = projectRoleType(project.config, 'anchor');
 	const beatType = projectRoleType(project.config, 'beat');

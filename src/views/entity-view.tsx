@@ -72,10 +72,10 @@ import { useIndexVersion } from './hooks';
 import {
 	PagesPreviewBody,
 	buildNavTree,
-	chapterScriptText,
+	actScriptText,
 	deleteScriptEntity,
 	editScriptAndSync,
-	pushChapterTitles,
+	pushActTitles,
 	renderNavTreeItem,
 	sceneScriptText,
 	useScriptText,
@@ -90,7 +90,7 @@ import {
 	moveSceneBefore,
 	reorderScenesInSection,
 	renameSectionTitle,
-	replaceChapterBody,
+	replaceActBody,
 	replaceSceneBody,
 	joinLocationSub,
 	setSceneHeadingParts,
@@ -328,9 +328,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const scriptText = useScriptText(plugin, project);
 	/** Comment bodies + alt-text option lists — same project-level sidecar
 	 *  the main Script view reads/writes, kept live the same way. Unused by
-	 *  every entity type but Scene/Chapter, same as `scriptText` above. */
+	 *  every entity type but Scene/Act, same as `scriptText` above. */
 	const scriptNotes = useScriptNotes(plugin, project);
-	/** Which comment's popover is open (Scene and Chapter pages share this
+	/** Which comment's popover is open (Scene and Act pages share this
 	 *  one piece of state — a page is only ever one or the other, never
 	 *  both, so there's no risk of them fighting over it). */
 	const [openComment, setOpenComment] = useState<{ id: string; rect: DOMRect } | null>(null);
@@ -340,14 +340,14 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  `handleCloseComment` below checks this instead of trusting
 	 *  `scriptNotes` alone at close time. */
 	const commentsWithNewEntryRef = useRef<Set<string>>(new Set());
-	/** A marker id the current Chapter/Scene search match points at — same
+	/** A marker id the current Act/Scene search match points at — same
 	 *  role as the main Script view's own `highlightedAnnotationId`. */
 	const [highlightedAnnotationId, setHighlightedAnnotationId] = useState<string | null>(null);
 	/** Comment/alt-text handlers — identical logic to the main Script view's
 	 *  own (script-view.tsx's `Script` component), just guarded on `project`
 	 *  being resolved here rather than gated behind an early return. Shared
-	 *  by both the Chapter and Scene Script sections below. */
-	/** `wrapRef`/`pagesRefArg` are whichever of the Chapter/Scene section's own
+	 *  by both the Act and Scene Script sections below. */
+	/** `wrapRef`/`pagesRefArg` are whichever of the Act/Scene section's own
 	 *  wrapper refs is currently mounted — same "take the caller's own ref as
 	 *  a parameter" pattern as `handleCycleAlt`/`handleOpenAltMenu` below,
 	 *  since this one handler is shared by both and only one is ever live.
@@ -380,7 +380,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  at one option is exactly the "nothing left to alternate between" case
 	 *  `handleDeleteAltOption` already strips back to plain text for, so
 	 *  backing out here does the same. `onCreateAlt` (unlike the alt-text
-	 *  action handlers above) is wired directly to BOTH the Chapter's and
+	 *  action handlers above) is wired directly to BOTH the Act's and
 	 *  the Scene's own `FountainField` with no fieldRef parameter — since
 	 *  only one is ever mounted, trying both refs (same "chain of ??"
 	 *  pattern `handleDeleteCommentEntry` already uses) reaches whichever
@@ -410,15 +410,15 @@ function EntityPage({ view }: { view: EntityView }) {
 					const { [id]: _dropped, ...rest } = notes.altText;
 					return { ...notes, altText: rest };
 				}).then(() => {
-					chapterScriptEditorRef.current?.removeAnnotationMarkers(id);
+					actScriptEditorRef.current?.removeAnnotationMarkers(id);
 					sceneScriptEditorRef.current?.removeAnnotationMarkers(id);
-					commitFieldEdit(chapterScriptEditorRef);
+					commitFieldEdit(actScriptEditorRef);
 					commitFieldEdit(sceneScriptEditorRef);
 				});
 			},
 		}).open();
 	};
-	/** Persists whatever `fieldRef` (the Chapter/Scene section's own live CM6
+	/** Persists whatever `fieldRef` (the Act/Scene section's own live CM6
 	 *  instance) currently holds — same reasoning as script-view.tsx's own
 	 *  `commitFieldEdit`: alt-text cycling/drafting/accepting/deleting, all
 	 *  reachable from a gutter/margin icon or `AltTextModal`, apply their
@@ -426,17 +426,17 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  on it, so the normal write-on-blur path never fires and the change
 	 *  would otherwise sit in the live document only, lost on reload. Reads
 	 *  the fresh EXCERPT text off the ref (`getValue`), then writes it back
-	 *  into the FULL script via `replaceChapterBody`/`replaceSceneBody` —
+	 *  into the FULL script via `replaceActBody`/`replaceSceneBody` —
 	 *  `record.type` alone (not a fieldRef identity check) decides which,
-	 *  since a page is only ever one or the other and `chapterId`/`sceneId`
+	 *  since a page is only ever one or the other and `actId`/`sceneId`
 	 *  are plain always-present fields on `EntityRecord`, not narrowed by a
 	 *  discriminated union. */
 	const commitFieldEdit = (fieldRef: { current: FountainFieldHandle | null }) => {
 		if (!project || !record) return;
 		const fresh = fieldRef.current?.getValue();
 		if (fresh === undefined) return;
-		if (record.type === 'chapter') {
-			void editScriptAndSync(plugin, project, (raw) => replaceChapterBody(raw, record.chapterId, fresh));
+		if (record.type === 'act') {
+			void editScriptAndSync(plugin, project, (raw) => replaceActBody(raw, record.actId, fresh));
 		} else if (record.type === 'scene') {
 			void editScriptAndSync(plugin, project, (raw) => replaceSceneBody(raw, record.sceneId, fresh));
 		}
@@ -450,7 +450,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  would otherwise sit in the document forever as a permanently-empty
 	 *  gutter icon. Checks BOTH `scriptNotes` (an existing comment, reopened)
 	 *  and `commentsWithNewEntryRef` (a reply just added this session, ahead
-	 *  of the sidecar's own async round trip). Tries both the Chapter's and
+	 *  of the sidecar's own async round trip). Tries both the Act's and
 	 *  Scene's own field ref, same "chain of ??" pattern as
 	 *  `handleCreateAlt`'s cancel, since only one is ever actually mounted. */
 	const handleCloseComment = () => {
@@ -459,9 +459,9 @@ function EntityPage({ view }: { view: EntityView }) {
 			!commentsWithNewEntryRef.current.has(openComment.id) &&
 			!scriptNotes.comments[openComment.id]
 		) {
-			chapterScriptEditorRef.current?.removeAnnotationMarkers(openComment.id);
+			actScriptEditorRef.current?.removeAnnotationMarkers(openComment.id);
 			sceneScriptEditorRef.current?.removeAnnotationMarkers(openComment.id);
-			commitFieldEdit(chapterScriptEditorRef);
+			commitFieldEdit(actScriptEditorRef);
 			commitFieldEdit(sceneScriptEditorRef);
 		}
 		setOpenComment(null);
@@ -493,7 +493,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** Same reasoning as script-view.tsx's own `handleDeleteCommentEntry` — an
 	 *  empty thread also has to strip the marker pair from the document, or
 	 *  an orphaned marker with no sidecar data behind it keeps rendering as a
-	 *  live span. This page's `CommentPopover` is shared by the Chapter and
+	 *  live span. This page's `CommentPopover` is shared by the Act and
 	 *  Scene sections with no per-call record of which one opened it, so
 	 *  (mirroring `handleCreateComment` above's own "chain of ??" pattern)
 	 *  this just tries both refs — whichever section isn't currently mounted
@@ -511,9 +511,9 @@ function EntityPage({ view }: { view: EntityView }) {
 			return { ...notes, comments: { ...notes.comments, [id]: next } };
 		}).then((next) => {
 			if (!next.comments[id]) {
-				chapterScriptEditorRef.current?.removeAnnotationMarkers(id);
+				actScriptEditorRef.current?.removeAnnotationMarkers(id);
 				sceneScriptEditorRef.current?.removeAnnotationMarkers(id);
-				commitFieldEdit(chapterScriptEditorRef);
+				commitFieldEdit(actScriptEditorRef);
 				commitFieldEdit(sceneScriptEditorRef);
 				setOpenComment((prev) => (prev && prev.id === id ? null : prev));
 			}
@@ -535,11 +535,11 @@ function EntityPage({ view }: { view: EntityView }) {
 		});
 	};
 	/** `fieldRef` is whichever `FountainFieldHandle` currently owns the live
-	 *  document — the Chapter and Scene sections each pass their OWN ref
-	 *  here (`chapterScriptEditorRef`/`sceneScriptEditorRef`), since only one
+	 *  document — the Act and Scene sections each pass their OWN ref
+	 *  here (`actScriptEditorRef`/`sceneScriptEditorRef`), since only one
 	 *  of the two is ever mounted at a time. */
 	/** The CURRENT live text between an alt-text span's markers — read from
-	 *  whichever of `chapterDraft`/`sceneDraft` actually holds it (only one
+	 *  whichever of `actDraft`/`sceneDraft` actually holds it (only one
 	 *  section is ever mounted, same "try both" pattern used elsewhere in
 	 *  this file), not the sidecar's own stored copy. Same reasoning and
 	 *  fix as script-view.tsx's own `liveAltSpanText`/`syncOutgoingAltOption`:
@@ -547,7 +547,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  not through `AltTextModal`, and that edit needs somewhere to land
 	 *  before a swap moves away from it. */
 	const liveAltSpanText = (id: string): string | null => {
-		for (const draft of [chapterDraft, sceneDraft]) {
+		for (const draft of [actDraft, sceneDraft]) {
 			const span = findAnnotationSpans(draft).find((s) => s.kind === 'alt' && s.id === id);
 			if (span) return draft.slice(span.contentFrom, span.contentTo);
 		}
@@ -692,7 +692,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	};
 	/** Right-click: opens `AltTextModal` (project.ts — a real closeable
 	 *  window, same as script-view.tsx's own) instead of the old truncating
-	 *  `Menu`. `fieldRef` is whichever of the Chapter/Scene section's own
+	 *  `Menu`. `fieldRef` is whichever of the Act/Scene section's own
 	 *  `FountainFieldHandle` is currently mounted — closed over directly by
 	 *  the modal's callbacks, since the modal is a one-shot imperative
 	 *  dialog with no need to remember it across a React re-render. */
@@ -770,42 +770,42 @@ function EntityPage({ view }: { view: EntityView }) {
 			return Number.isFinite(n) && n >= 0 ? n : null;
 		})()
 	);
-	/** Draft of the chapter's script body (its `#` line through every scene
-	 *  under it) — same shape as `sceneBody`, for the Chapter page's own
+	/** Draft of the act's script body (its `#` line through every scene
+	 *  under it) — same shape as `sceneBody`, for the Act page's own
 	 *  Script section. */
-	const [chapterBody, setChapterBody] = useState<string | null>(null);
+	const [actBody, setActBody] = useState<string | null>(null);
 	/** Same per-note pane memory as `sceneScriptMode` above, own key since a
-	 *  Chapter note's excerpt is its own separate surface too. */
-	const [chapterScriptMode, setChapterScriptMode] = useState<'script' | 'pages' | 'outline'>(() => {
-		const saved = record ? window.localStorage.getItem(`loom-chapter-script-mode:${record.path}`) : null;
+	 *  Act note's excerpt is its own separate surface too. */
+	const [actScriptMode, setActScriptMode] = useState<'script' | 'pages' | 'outline'>(() => {
+		const saved = record ? window.localStorage.getItem(`loom-act-script-mode:${record.path}`) : null;
 		return saved === 'pages' || saved === 'outline' ? saved : 'script';
 	});
-	const [chapterScriptQuery, setChapterScriptQuery] = useState('');
-	const [chapterScriptMatchIndex, setChapterScriptMatchIndex] = useState(0);
-	const chapterScriptEditorRef = useRef<FountainFieldHandle | null>(null);
-	/** Same as `sceneScriptEditorWrapRef`, for the Chapter page's own Script
+	const [actScriptQuery, setActScriptQuery] = useState('');
+	const [actScriptMatchIndex, setActScriptMatchIndex] = useState(0);
+	const actScriptEditorRef = useRef<FountainFieldHandle | null>(null);
+	/** Same as `sceneScriptEditorWrapRef`, for the Act page's own Script
 	 *  section. */
-	const chapterScriptEditorWrapRef = useRef<HTMLDivElement | null>(null);
-	const chapterScriptPagesRef = useRef<HTMLDivElement | null>(null);
-	/** Same as `sceneScriptTabsRef`, for the Chapter page's own Script section. */
-	const chapterScriptTabsRef = useRef<HTMLDivElement | null>(null);
+	const actScriptEditorWrapRef = useRef<HTMLDivElement | null>(null);
+	const actScriptPagesRef = useRef<HTMLDivElement | null>(null);
+	/** Same as `sceneScriptTabsRef`, for the Act page's own Script section. */
+	const actScriptTabsRef = useRef<HTMLDivElement | null>(null);
 	/** Same idea as `pendingSceneScrollLineRef` above, own key since a
-	 *  Chapter note's excerpt is its own separate surface too. */
-	const pendingChapterScrollLineRef = useRef<number | null>(
+	 *  Act note's excerpt is its own separate surface too. */
+	const pendingActScrollLineRef = useRef<number | null>(
 		(() => {
 			if (!record) return null;
-			const saved = window.localStorage.getItem(`loom-chapter-script-line:${record.path}`);
+			const saved = window.localStorage.getItem(`loom-act-script-line:${record.path}`);
 			const n = saved ? Number(saved) : NaN;
 			return Number.isFinite(n) && n >= 0 ? n : null;
 		})()
 	);
 	/** `openComment.rect` is a one-time snapshot — without this, scrolling
-	 *  the Scene/Chapter Script section left the popover floating in the same
+	 *  the Scene/Act Script section left the popover floating in the same
 	 *  screen spot while the commented text scrolled out from under it. Same
 	 *  live-tracking approach as the main Script view's own copy of this
 	 *  effect (script-view.tsx): re-measure the icon's rect on every scroll
 	 *  and follow it, closing if the icon can no longer be found. Only one of
-	 *  the Scene/Chapter sections is ever mounted at a time, so trying all
+	 *  the Scene/Act sections is ever mounted at a time, so trying all
 	 *  four wrap/pages refs is safe — exactly the "chain of ??" pattern
 	 *  `handleCreateComment` above already uses. */
 	useEffect(() => {
@@ -814,8 +814,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		const containers = [
 			sceneScriptEditorWrapRef.current,
 			sceneScriptPagesRef.current,
-			chapterScriptEditorWrapRef.current,
-			chapterScriptPagesRef.current,
+			actScriptEditorWrapRef.current,
+			actScriptPagesRef.current,
 		].filter((c): c is HTMLDivElement => c !== null);
 		const track = () => {
 			let icon: Element | null = null;
@@ -851,12 +851,12 @@ function EntityPage({ view }: { view: EntityView }) {
 		return () => document.removeEventListener('scroll', track, true);
 	}, [openComment?.id]);
 	/** Same collapsible nav panel as the main Script view, scoped to just this
-	 *  scene's/chapter's own bounded tree — rendered INSIDE the editor box
+	 *  scene's/act's own bounded tree — rendered INSIDE the editor box
 	 *  (`.loom-script-nav-sticky-inset` in styles.css), not stacked above it,
 	 *  so it lives in the box's own spare left margin instead of colliding
 	 *  with the scene-heading caption. */
 	const [sceneNavOpen, setSceneNavOpen] = useState(false);
-	const [chapterNavOpen, setChapterNavOpen] = useState(false);
+	const [actNavOpen, setActNavOpen] = useState(false);
 	const writeFm = useFrontmatterWriter(plugin, file);
 
 	useEffect(() => {
@@ -871,15 +871,15 @@ function EntityPage({ view }: { view: EntityView }) {
 	}, [sceneNavOpen]);
 
 	useEffect(() => {
-		if (!chapterNavOpen) return;
+		if (!actNavOpen) return;
 		const onDown = (e: MouseEvent) => {
 			const el = e.target as HTMLElement | null;
 			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle')) return;
-			setChapterNavOpen(false);
+			setActNavOpen(false);
 		};
 		document.addEventListener('mousedown', onDown);
 		return () => document.removeEventListener('mousedown', onDown);
-	}, [chapterNavOpen]);
+	}, [actNavOpen]);
 
 	// `scriptText` is in the dependency list for the same reason the main
 	// Script view's identical effect needs `text`: on the initial-open restore
@@ -900,16 +900,16 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	// Same `scriptText` dependency, same reason as the scene effect above.
 	useEffect(() => {
-		if (chapterScriptMode !== 'script') return;
-		const line = pendingChapterScrollLineRef.current;
+		if (actScriptMode !== 'script') return;
+		const line = pendingActScrollLineRef.current;
 		if (line === null) return;
-		const field = chapterScriptEditorRef.current;
+		const field = actScriptEditorRef.current;
 		if (!field) return;
-		pendingChapterScrollLineRef.current = null;
+		pendingActScrollLineRef.current = null;
 		field.scrollToLine(line);
-	}, [chapterScriptMode, scriptText]);
+	}, [actScriptMode, scriptText]);
 
-	/** Same idea as `pendingSceneScrollLineRef`/`pendingChapterScrollLineRef`
+	/** Same idea as `pendingSceneScrollLineRef`/`pendingActScrollLineRef`
 	 *  just above, for the Comments/Alternatives browser panels' own "jump to
 	 *  this text" action (script-view.tsx's own copy of this pattern) — needs
 	 *  a real SELECTION, not just a scroll position, and can be triggered
@@ -922,16 +922,16 @@ function EntityPage({ view }: { view: EntityView }) {
 		pendingSceneSelectRangeRef.current = null;
 		sceneScriptEditorRef.current?.selectRange(range.from, range.to);
 	}, [sceneScriptMode]);
-	const pendingChapterSelectRangeRef = useRef<{ from: number; to: number } | null>(null);
+	const pendingActSelectRangeRef = useRef<{ from: number; to: number } | null>(null);
 	useEffect(() => {
-		if (chapterScriptMode !== 'script') return;
-		const range = pendingChapterSelectRangeRef.current;
+		if (actScriptMode !== 'script') return;
+		const range = pendingActSelectRangeRef.current;
 		if (!range) return;
-		pendingChapterSelectRangeRef.current = null;
-		chapterScriptEditorRef.current?.selectRange(range.from, range.to);
-	}, [chapterScriptMode]);
+		pendingActSelectRangeRef.current = null;
+		actScriptEditorRef.current?.selectRange(range.from, range.to);
+	}, [actScriptMode]);
 
-	// Persists the Scene/Chapter pane memory above — separate from the read,
+	// Persists the Scene/Act pane memory above — separate from the read,
 	// which only needs to happen once (the lazy `useState` initializers),
 	// while these need to re-fire on every later switch.
 	useEffect(() => {
@@ -940,11 +940,11 @@ function EntityPage({ view }: { view: EntityView }) {
 	}, [record?.path, sceneScriptMode]);
 	useEffect(() => {
 		if (!record) return;
-		window.localStorage.setItem(`loom-chapter-script-mode:${record.path}`, chapterScriptMode);
-	}, [record?.path, chapterScriptMode]);
+		window.localStorage.setItem(`loom-act-script-mode:${record.path}`, actScriptMode);
+	}, [record?.path, actScriptMode]);
 
 	/** Comments/Alternatives browser panels — same overlaid side-panel slot as
-	 *  the nav toggle, one independent pair per Chapter/Scene section (only
+	 *  the nav toggle, one independent pair per Act/Scene section (only
 	 *  one of the two sections is ever mounted at a time, but each keeps its
 	 *  own state rather than sharing script-view.tsx's single `openSidePanel`,
 	 *  since nothing here forces the two sections' panels to be mutually
@@ -956,12 +956,12 @@ function EntityPage({ view }: { view: EntityView }) {
 		setSceneCommentsPanelOpen(panel === 'comments');
 		setSceneAltPanelOpen(panel === 'alt');
 	};
-	const [chapterCommentsPanelOpen, setChapterCommentsPanelOpen] = useState(false);
-	const [chapterAltPanelOpen, setChapterAltPanelOpen] = useState(false);
-	const openChapterSidePanel = (panel: 'nav' | 'comments' | 'alt' | null) => {
-		setChapterNavOpen(panel === 'nav');
-		setChapterCommentsPanelOpen(panel === 'comments');
-		setChapterAltPanelOpen(panel === 'alt');
+	const [actCommentsPanelOpen, setActCommentsPanelOpen] = useState(false);
+	const [actAltPanelOpen, setActAltPanelOpen] = useState(false);
+	const openActSidePanel = (panel: 'nav' | 'comments' | 'alt' | null) => {
+		setActNavOpen(panel === 'nav');
+		setActCommentsPanelOpen(panel === 'comments');
+		setActAltPanelOpen(panel === 'alt');
 	};
 	useEffect(() => {
 		if (!sceneCommentsPanelOpen && !sceneAltPanelOpen) return;
@@ -974,15 +974,15 @@ function EntityPage({ view }: { view: EntityView }) {
 		return () => document.removeEventListener('mousedown', onDown);
 	}, [sceneCommentsPanelOpen, sceneAltPanelOpen]);
 	useEffect(() => {
-		if (!chapterCommentsPanelOpen && !chapterAltPanelOpen) return;
+		if (!actCommentsPanelOpen && !actAltPanelOpen) return;
 		const onDown = (e: MouseEvent) => {
 			const el = e.target as HTMLElement | null;
 			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle, .loom-script-side-toggles')) return;
-			openChapterSidePanel(null);
+			openActSidePanel(null);
 		};
 		document.addEventListener('mousedown', onDown);
 		return () => document.removeEventListener('mousedown', onDown);
-	}, [chapterCommentsPanelOpen, chapterAltPanelOpen]);
+	}, [actCommentsPanelOpen, actAltPanelOpen]);
 
 	/** Label a record is searched/shown by in free-text draft inputs: the
 	 *  display name — for sessions, their formatted date (their file name is
@@ -998,13 +998,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [description, setDescription] = useState(record?.description ?? '');
 	const [reward, setReward] = useState(record?.reward ?? '');
 	const [date, setDate] = useState(record?.date?.raw ?? '');
-	/** Chapters: the title emitted into the exported script. */
+	/** Acts: the title emitted into the exported script. */
 	const [displayTitle, setDisplayTitle] = useState(record?.displayTitle ?? '');
-	/** Scenes: step 2 of "move to another chapter" — the chapter picked in step
+	/** Scenes: step 2 of "move to another act" — the act picked in step
 	 *  1, whose scene list is then shown for drag placement. Null = step 1
-	 *  (just the chapter picker). */
-	const [moveTargetChapter, setMoveTargetChapter] = useState<EntityRecord | null>(null);
-	/** Step 2's pending drop position among the target chapter's scenes (index
+	 *  (just the act picker). */
+	const [moveTargetAct, setMoveTargetAct] = useState<EntityRecord | null>(null);
+	/** Step 2's pending drop position among the target act's scenes (index
 	 *  into its sibling list, 0 = the very top) — dragging only updates this;
 	 *  nothing actually moves until "Move the scene" commits it. */
 	const [movePlaceAt, setMovePlaceAt] = useState(0);
@@ -1227,7 +1227,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	}
 
 	// The page shell is role-based: `isSession` means "this is the project's
-	// chronological anchor" (a Session, or a Chapter in a writer project), and
+	// chronological anchor" (a Session, or an Act in a writer project), and
 	// the parts that really are session-only (dates, attendance) gate on the
 	// kind's features instead.
 	const anchorType = projectRoleType(project?.config, 'anchor');
@@ -1239,9 +1239,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const scriptMode = kindFeatures.script;
 	/** Named by the script rather than here — see the Name field. */
 	const scriptNamed =
-		scriptMode && (record.type === 'chapter' ? record.chapterId !== '' : record.sceneId !== '');
-	const sceneChapterRecord =
-		record.sceneChapter !== '' ? plugin.indexer.resolve(record.sceneChapter, record.path) : null;
+		scriptMode && (record.type === 'act' ? record.actId !== '' : record.sceneId !== '');
+	const sceneActRecord =
+		record.sceneAct !== '' ? plugin.indexer.resolve(record.sceneAct, record.path) : null;
 	/** Script-recognized cast — `loomSceneCast`, derived from the script's own
 	 *  character cues by `syncScenes`, shown read-only (editing a scene's cast
 	 *  means writing the dialogue that names them, not this list). */
@@ -1308,7 +1308,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	// above now is: a branch section needs `buildNavTree` to see the scene
 	// item first to group under its decision-point identifier.
 	const sceneOutlineTree = sceneExcerptParsed ? sceneOwnTree(sceneExcerptParsed, 0, Infinity) : null;
-	/** A branch/section's own page range, same idea as `chapterScenePageRange`
+	/** A branch/section's own page range, same idea as `actScenePageRange`
 	 *  — its block is `[section.line, nextSectionAtLevel)`, at whatever level
 	 *  it's nested to, since a branch can sit at any depth. */
 	const sceneOutlinePageRange = (node: NavNode): string => {
@@ -1346,51 +1346,51 @@ function EntityPage({ view }: { view: EntityView }) {
 		const first = sceneBodyPages[idx][0];
 		return first ? first.line - sceneBodyLineOffset : 0;
 	};
-	/** Chapter page's own Script section — same shape as the Scene page's
+	/** Act page's own Script section — same shape as the Scene page's
 	 *  `sceneExcerpt`/`sceneDraft`/`sceneBodyPages`, but spanning every scene
-	 *  under this chapter rather than one heading's worth. The `#` section
+	 *  under this act rather than one heading's worth. The `#` section
 	 *  line is stripped from the editable body the same way a scene's heading
-	 *  is — the Chapter page's own Title field is where that line's text is
+	 *  is — the Act page's own Title field is where that line's text is
 	 *  actually edited, so the Script section doesn't show a rival copy. */
-	const chapterExcerpt = record.type === 'chapter' ? chapterScriptText(scriptText, record.chapterId) : null;
-	/** This chapter's own nav panel — every scene/branch/sub-section between
+	const actExcerpt = record.type === 'act' ? actScriptText(scriptText, record.actId) : null;
+	/** This act's own nav panel — every scene/branch/sub-section between
 	 *  its `#` line and the next top-level one, same `buildNavTree` bounded
 	 *  call the Scene page's mini nav uses. */
-	const chapterNavSection =
-		record.type === 'chapter' && scriptParsed
-			? (scriptParsed.sections.find((s) => s.level === 1 && s.loomId === record.chapterId) ?? null)
+	const actNavSection =
+		record.type === 'act' && scriptParsed
+			? (scriptParsed.sections.find((s) => s.level === 1 && s.loomId === record.actId) ?? null)
 			: null;
-	const chapterNavTree =
-		scriptParsed && chapterNavSection
+	const actNavTree =
+		scriptParsed && actNavSection
 			? buildNavTree(
 					scriptParsed,
-					chapterNavSection.line + 1,
-					nextTopSectionLine(scriptParsed, chapterNavSection.line) ?? Infinity
+					actNavSection.line + 1,
+					nextTopSectionLine(scriptParsed, actNavSection.line) ?? Infinity
 				)
 			: null;
-	const chapterBodyOf = (excerpt: string) => excerpt.split('\n').slice(1).join('\n').trim();
-	const chapterDraft = chapterBody ?? (chapterExcerpt === null ? '' : chapterBodyOf(chapterExcerpt));
-	const chapterBodyPages = chapterExcerpt !== null ? pdfPages(parseFountain(chapterExcerpt)) : [];
-	const chapterBodyLineOffset = (() => {
-		if (chapterExcerpt === null) return 0;
-		const afterHeading = chapterExcerpt.split('\n').slice(1);
+	const actBodyOf = (excerpt: string) => excerpt.split('\n').slice(1).join('\n').trim();
+	const actDraft = actBody ?? (actExcerpt === null ? '' : actBodyOf(actExcerpt));
+	const actBodyPages = actExcerpt !== null ? pdfPages(parseFountain(actExcerpt)) : [];
+	const actBodyLineOffset = (() => {
+		if (actExcerpt === null) return 0;
+		const afterHeading = actExcerpt.split('\n').slice(1);
 		let blanks = 0;
 		while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
 		return 1 + blanks;
 	})();
 	/** Re-parsed straight from the excerpt (its own line numbers, not the whole
 	 *  script's), so a scene's page range can be read the same way the main
-	 *  Script view's Outline reads `scenePages` — `chapterScenes[i]` and
-	 *  `chapterExcerptParsed.scenes[i]` line up 1:1 in document order, same
+	 *  Script view's Outline reads `scenePages` — `actScenes[i]` and
+	 *  `actExcerptParsed.scenes[i]` line up 1:1 in document order, same
 	 *  `seq`-sorted order `syncScenes` already guarantees between the two. */
-	const chapterExcerptParsed = chapterExcerpt !== null ? parseFountain(chapterExcerpt) : null;
-	const chapterScenePageRange = (index: number): string => {
-		if (!chapterExcerptParsed) return '—';
-		const scene = chapterExcerptParsed.scenes[index];
+	const actExcerptParsed = actExcerpt !== null ? parseFountain(actExcerpt) : null;
+	const actScenePageRange = (index: number): string => {
+		if (!actExcerptParsed) return '—';
+		const scene = actExcerptParsed.scenes[index];
 		if (!scene) return '—';
-		const end = sceneEndLine(chapterExcerptParsed, scene);
+		const end = sceneEndLine(actExcerptParsed, scene);
 		const hits: number[] = [];
-		chapterBodyPages.forEach((els, i) => {
+		actBodyPages.forEach((els, i) => {
 			if (els.some((el) => el.line >= scene.line && el.line < end)) hits.push(i + 1);
 		});
 		if (hits.length === 0) return '—';
@@ -1398,26 +1398,26 @@ function EntityPage({ view }: { view: EntityView }) {
 		const last = hits[hits.length - 1];
 		return first === last ? String(first) : `${first}–${last}`;
 	};
-	const chapterPageOfLine = (bodyLine: number) => {
-		const line = bodyLine + chapterBodyLineOffset;
-		for (let i = 0; i < chapterBodyPages.length; i++) {
-			if (chapterBodyPages[i].some((el) => line >= el.line && line < el.line + sceneElementSpan(el))) return i + 1;
+	const actPageOfLine = (bodyLine: number) => {
+		const line = bodyLine + actBodyLineOffset;
+		for (let i = 0; i < actBodyPages.length; i++) {
+			if (actBodyPages[i].some((el) => line >= el.line && line < el.line + sceneElementSpan(el))) return i + 1;
 		}
-		for (let i = 0; i < chapterBodyPages.length; i++) {
-			if (chapterBodyPages[i].some((el) => el.line > line)) return i + 1;
+		for (let i = 0; i < actBodyPages.length; i++) {
+			if (actBodyPages[i].some((el) => el.line > line)) return i + 1;
 		}
-		return Math.max(1, chapterBodyPages.length);
+		return Math.max(1, actBodyPages.length);
 	};
-	const chapterLineOfPage = (page: number) => {
+	const actLineOfPage = (page: number) => {
 		const idx = page - 1;
-		if (idx < 0 || idx >= chapterBodyPages.length) return 0;
-		const first = chapterBodyPages[idx][0];
-		return first ? first.line - chapterBodyLineOffset : 0;
+		if (idx < 0 || idx >= actBodyPages.length) return 0;
+		const first = actBodyPages[idx][0];
+		return first ? first.line - actBodyLineOffset : 0;
 	};
-	/** Chapter pages: the scenes pointing at this chapter, in script order. */
-	const chapterScenes = plugin.indexer
+	/** Act pages: the scenes pointing at this act, in script order. */
+	const actScenes = plugin.indexer
 		.getAll('scene', record.project)
-		.filter((sc) => sc.sceneChapter !== '' && plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === record.path)
+		.filter((sc) => sc.sceneAct !== '' && plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === record.path)
 		.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
 	const isSession = roleOf(record.type) === 'anchor';
 	const isBeat = roleOf(record.type) === 'beat';
@@ -1427,7 +1427,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	const targetRecords = project ? plugin.indexer.getAll(undefined, project.root) : [];
 
 	// This anchor's chronological number: its 1-based position among all the
-	// project's anchors — sessions ordered by date, chapters by their manual
+	// project's anchors — sessions ordered by date, acts by their manual
 	// sequence. Computed live (never stored), so it self-corrects when one is
 	// deleted or reordered. Ties fall back to creation time, then path.
 	const anchorKey = (r: EntityRecord) =>
@@ -1497,16 +1497,16 @@ function EntityPage({ view }: { view: EntityView }) {
 		await plugin.app.fileManager.renameFile(file, newPath);
 	};
 
-	/** Chapter page's Title field: writes straight into the script's `#`
+	/** Act page's Title field: writes straight into the script's `#`
 	 *  section line — the note itself is updated by the sync that follows,
 	 *  not directly here, so the script stays the one place that authors it. */
-	const commitChapterTitle = async () => {
+	const commitActTitle = async () => {
 		const entered = name.trim();
-		if (entered === '' || entered === record.name || !project || record.type !== 'chapter') {
+		if (entered === '' || entered === record.name || !project || record.type !== 'act') {
 			setName(record.name);
 			return;
 		}
-		await editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, record.chapterId, entered));
+		await editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, record.actId, entered));
 	};
 
 	// Aliases live in Obsidian's native `aliases` frontmatter — that's what
@@ -1558,7 +1558,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		// A section never exports, so the title has to reach the script as its
 		// own centered-bold line — otherwise editing this field changed nothing
 		// anyone would ever see in the output.
-		if (project) void pushChapterTitles(plugin, project);
+		if (project) void pushActTitles(plugin, project);
 	};
 
 	/** Scene page: INT./EXT. and time-of-day are plain script-heading text —
@@ -2018,7 +2018,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		.slice()
 		.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
 	// A quest resolves against whatever unit play/writing actually happens in:
-	// Sessions in a Player/GM project, Scenes in a Writer one (chapters have no
+	// Sessions in a Player/GM project, Scenes in a Writer one (acts have no
 	// date or single sitting of their own — the scene is where a quest is
 	// actually received or completed). `questAnchorRole` is what a resolved
 	// link must be to count as valid.
@@ -2959,10 +2959,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	 * The Scene page's own Outline: this scene's branch structure
 	 * (`sceneOutlineTree`, bounded to just this scene's line span and
 	 * numbered against `sceneExcerptParsed` so `sceneOutlinePageRange` lines
-	 * up), rendered with the SAME row shape the Script view's and Chapter
+	 * up), rendered with the SAME row shape the Script view's and Act
 	 * page's own Outlines use (`.loom-script-scene-row` grip/caret placeholder
 	 * + num placeholder + title + dashed leader + page-range count, each row
-	 * wrapped in a `.loom-script-outline-chapter`-shaped box so children hang
+	 * wrapped in a `.loom-script-outline-act`-shaped box so children hang
 	 * off the shared `.loom-script-outline-scenes` nesting rail) rather than
 	 * the read-only nav panel's plain `loom-script-nav-branchpoint` labels.
 	 * Only a `branchPoint`'s own children — the branches sharing that ONE
@@ -2981,14 +2981,14 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (item.kind === 'section') {
 			const hasChildren = item.node.items.length > 0;
 			return (
-				<div key={`sec-${item.node.line}`} className="loom-script-outline-chapter">
+				<div key={`sec-${item.node.line}`} className="loom-script-outline-act">
 					<div className="loom-script-scene-row">
 						<span className="loom-subloc-grip-static" aria-hidden="true" />
 						<span className="loom-row-caret" aria-hidden="true" />
 						<span className="loom-scene-row-num" aria-hidden="true" />
 						<span className="loom-script-scene-head">{item.node.title}</span>
 						<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-						<span className="loom-script-chapter-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(item.node) })}</span>
+						<span className="loom-script-act-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(item.node) })}</span>
 					</div>
 					{hasChildren ? (
 						<div className="loom-script-outline-scenes">
@@ -3003,7 +3003,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			(x): x is Extract<NavItem, { kind: 'section' }> => x.kind === 'section'
 		);
 		return (
-			<div key={`bp-${item.id}`} className="loom-script-outline-chapter">
+			<div key={`bp-${item.id}`} className="loom-script-outline-act">
 				<div className="loom-script-scene-row">
 					<span className="loom-subloc-grip-static" aria-hidden="true" />
 					<span className="loom-row-caret" aria-hidden="true" />
@@ -3012,7 +3012,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						<Icon name="git-branch" fallback="split" /> {item.id}
 					</span>
 					<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-					<span className="loom-script-chapter-count">
+					<span className="loom-script-act-count">
 						{tn('view.entity.script.branchCount', branches.length)}
 					</span>
 				</div>
@@ -3031,8 +3031,8 @@ function EntityPage({ view }: { view: EntityView }) {
 								key={b.node.loomId ?? b.node.line}
 								className={
 									grabbed
-										? 'loom-script-outline-chapter loom-subloc-row-slide loom-subloc-row-dragging'
-										: 'loom-script-outline-chapter loom-subloc-row-slide'
+										? 'loom-script-outline-act loom-subloc-row-slide loom-subloc-row-dragging'
+										: 'loom-script-outline-act loom-subloc-row-slide'
 								}
 								style={seqRowStyle(group, i)}
 								data-seq-row=""
@@ -3052,7 +3052,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									<span className="loom-scene-row-num">{i + 1}</span>
 									<span className="loom-script-scene-head">{b.node.title}</span>
 									<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-									<span className="loom-script-chapter-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(b.node) })}</span>
+									<span className="loom-script-act-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(b.node) })}</span>
 								</div>
 								{hasChildren ? (
 									<div className="loom-script-outline-scenes">
@@ -3261,17 +3261,17 @@ function EntityPage({ view }: { view: EntityView }) {
 	// Writer projects: quests resolve against Scenes (script order, `seq`),
 	// same as Sessions resolve against dates elsewhere. A quest's own
 	// `questReceived`/`questOutcomeSession` is always a leaf (Scene or
-	// Session, never a Chapter), so `anchorPositionKey` only needs the two
-	// leaf cases; a Chapter page's OWN position is the special case, since
-	// "as of this chapter" means "as of its last scene" (`chapterScenes` is
+	// Session, never an Act), so `anchorPositionKey` only needs the two
+	// leaf cases; an Act page's OWN position is the special case, since
+	// "as of this act" means "as of its last scene" (`actScenes` is
 	// already sorted ascending by `seq`).
 	const anchorPositionKey = (r: EntityRecord): number | null =>
 		scriptMode ? r.seq ?? r.created : (r.date?.sortKey ?? null);
 	const showsQuestSection = (isSession || record.type === 'scene') && project;
-	const lastChapterScene = chapterScenes.length > 0 ? chapterScenes[chapterScenes.length - 1] : null;
+	const lastActScene = actScenes.length > 0 ? actScenes[actScenes.length - 1] : null;
 	const asOf = scriptMode
-		? record.type === 'chapter'
-			? (lastChapterScene?.seq ?? lastChapterScene?.created ?? record.seq ?? record.created)
+		? record.type === 'act'
+			? (lastActScene?.seq ?? lastActScene?.created ?? record.seq ?? record.created)
 			: (record.seq ?? record.created)
 		: (record.date?.sortKey ?? Number.MAX_SAFE_INTEGER);
 	const sessionQuests = (showsQuestSection ? plugin.indexer.getAll('quest', project.root) : [])
@@ -3286,11 +3286,11 @@ function EntityPage({ view }: { view: EntityView }) {
 			const outKey = out ? anchorPositionKey(out) : null;
 			const finished = q.questOutcome !== '' && outKey !== null && outKey <= asOf;
 			// Three buckets: still active as of this session/scene, resolved on
-			// THIS page (a Chapter counts any of its own scenes too), or resolved
+			// THIS page (an Act counts any of its own scenes too), or resolved
 			// on an earlier one ("Resolved previously").
 			const resolvedHere =
-				record.type === 'chapter'
-					? out !== null && chapterScenes.some((sc) => sc.path === out.path)
+				record.type === 'act'
+					? out !== null && actScenes.some((sc) => sc.path === out.path)
 					: out?.path === record.path;
 			const state = !finished ? 'active' : resolvedHere ? 'resolvedThis' : 'resolvedPrev';
 			return { quest: q, state };
@@ -3298,13 +3298,13 @@ function EntityPage({ view }: { view: EntityView }) {
 		.filter((e): e is { quest: EntityRecord; state: string } => e !== null)
 		// Manual order (drag-reorderable), then chronological for the unstamped.
 		.sort((a, b) => (a.quest.seq ?? a.quest.created) - (b.quest.seq ?? b.quest.created));
-	// Scene/Chapter pages hide the whole Quests block when nothing resolves
+	// Scene/Act pages hide the whole Quests block when nothing resolves
 	// against them yet — Session pages keep showing it empty (a session's
 	// quest involvement is worth surfacing as an invitation to add one; a
-	// scene/chapter's isn't, since most of them will never touch a quest).
+	// scene/act's isn't, since most of them will never touch a quest).
 	const questSectionVisible =
 		showsQuestSection &&
-		((record.type !== 'scene' && record.type !== 'chapter') || sessionQuests.length > 0);
+		((record.type !== 'scene' && record.type !== 'act') || sessionQuests.length > 0);
 
 	// PC life state: unticking Alive reveals the death-session picker.
 	// Gated on the kind: a writer project's cast has no party to be away from,
@@ -4396,14 +4396,14 @@ function EntityPage({ view }: { view: EntityView }) {
 						new ConfirmModal(
 							plugin.app,
 							t('view.list.deleteConfirmTitle', { name: recordLabel(record, project) }),
-							// A scene/chapter IS its stretch of the script — deleting the
+							// A scene/act IS its stretch of the script — deleting the
 							// note while leaving the writing behind would just resurrect it
-							// on the next parse, so the two go together. Deleting a chapter
+							// on the next parse, so the two go together. Deleting an act
 							// also takes its scenes' notes with it (their headings live in
-							// the chapter's own script block, which is about to go too).
+							// the act's own script block, which is about to go too).
 							scriptNamed
-								? record.type === 'chapter'
-									? t('view.list.deleteMessageChapter')
+								? record.type === 'act'
+									? t('view.list.deleteMessageAct')
 									: t('view.list.deleteMessageScene')
 								: t('view.list.deleteMessageGeneral'),
 							() => {
@@ -4460,25 +4460,25 @@ function EntityPage({ view }: { view: EntityView }) {
 				<div className="loom-field">
 					<div className="loom-name-alias-row">
 						<label className="loom-name-col">
-							{/* Chapters (and scenes, on their own modular heading editor)
+							{/* Acts (and scenes, on their own modular heading editor)
 							    are named by the script — their `#` section / scene
 							    heading is the source of truth. That's about not
 							    authoring a RIVAL copy of the text, not about the field
-							    being read-only: a Chapter page edit here writes straight
+							    being read-only: an Act page edit here writes straight
 							    into the script's `#` line (`renameSectionTitle`), and the
 							    sync round-trips it back into this same field — modularly
 							    editable everywhere, same as the rest of the plugin.
 							    Labeled "Title" rather than "Name" when it's script-owned,
-							    since that's what pairs with the chapter's editable
+							    since that's what pairs with the act's editable
 							    "Display title" below. */}
 							<span className="loom-field-label">{scriptNamed ? t('view.entity.common.titleLabel') : t('view.entity.common.nameLabel')}</span>
 							<input
 								type="text"
 								value={name}
 								onChange={(e) => setName(e.target.value)}
-								onBlur={() => void (record.type === 'chapter' ? commitChapterTitle() : commitName())}
+								onBlur={() => void (record.type === 'act' ? commitActTitle() : commitName())}
 								onKeyDown={(e) => {
-									if (e.key === 'Enter') void (record.type === 'chapter' ? commitChapterTitle() : commitName());
+									if (e.key === 'Enter') void (record.type === 'act' ? commitActTitle() : commitName());
 								}}
 							/>
 						</label>
@@ -4703,7 +4703,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : null}
 
 			{/* A writer project's Scene has no date of its own — its position in
-			    the story is the script order (`seq`), same as a Chapter's. */}
+			    the story is the script order (`seq`), same as an Act's. */}
 			{isBeat && record.type !== 'scene' ? (
 				<label className="loom-field">
 					<span className="loom-field-label">{t('project.createEntity.date')}</span>
@@ -4739,17 +4739,17 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{record.type === 'chapter' ? (
+			{record.type === 'act' ? (
 				<label className="loom-field">
 					<span className="loom-field-label loom-field-label-row">
 						{t('view.entity.common.titleLabel')}
 						{sessionNumber > 0 ? (
-							<span className="loom-session-number">{t('view.entity.common.chapterNumber', { n: sessionNumber })}</span>
+							<span className="loom-session-number">{t('view.entity.common.actNumber', { n: sessionNumber })}</span>
 						) : null}
 					</span>
 					{/* The script's `# section` line — editing it writes straight into
 					    the script (`renameSectionTitle`); the note's own name/file are
-					    then reflected back by the sync that follows. Chapters don't
+					    then reflected back by the sync that follows. Acts don't
 					    render the generic Name field above (they take the `isSession`
 					    branch of the page shell), so this is the ONLY place the title
 					    is exposed and edited. */}
@@ -4757,15 +4757,15 @@ function EntityPage({ view }: { view: EntityView }) {
 						type="text"
 						value={name}
 						onChange={(e) => setName(e.target.value)}
-						onBlur={() => void commitChapterTitle()}
+						onBlur={() => void commitActTitle()}
 						onKeyDown={(e) => {
-							if (e.key === 'Enter') void commitChapterTitle();
+							if (e.key === 'Enter') void commitActTitle();
 						}}
 					/>
 				</label>
 			) : null}
 
-			{record.type === 'chapter' ? (
+			{record.type === 'act' ? (
 				<label className="loom-field">
 					<span className="loom-field-label">{t('project.createEntity.displayTitle.name')}</span>
 					<input
@@ -4781,13 +4781,13 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{/* Chapters are otherwise `isSession`-shaped (the anchor role) and so
+			{/* Acts are otherwise `isSession`-shaped (the anchor role) and so
 			    skip the generic body section below — but with Description gone
-			    from the Scene/Chapter pages, a Chapter needs this as its one
+			    from the Scene/Act pages, an Act needs this as its one
 			    remaining freeform field, same as every Scene already has it.
 			    Placed right after the title fields rather than down with the
 			    rest of the page. */}
-			{record.type === 'chapter' ? (
+			{record.type === 'act' ? (
 				<div className="loom-field loom-field-body">
 					<span className="loom-field-label">{t('project.notes')}</span>
 					<MarkdownField
@@ -5156,8 +5156,8 @@ function EntityPage({ view }: { view: EntityView }) {
 						</details>
 					) : null}
 				</div>
-			) : record.type === 'scene' || record.type === 'chapter' ? (
-				// The script IS the writing — a scene/chapter's own blurb field
+			) : record.type === 'scene' || record.type === 'act' ? (
+				// The script IS the writing — a scene/act's own blurb field
 				// is redundant with it, so this page shows only the freeform
 				// Notes section below instead.
 				null
@@ -5243,50 +5243,50 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{record.type === 'chapter' && scriptMode && project ? (
+			{record.type === 'act' && scriptMode && project ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">{t('common.scriptLabel')}</span>
-					{chapterExcerpt !== null
+					{actExcerpt !== null
 						? (() => {
 								// Same box-local placement as the Scene page's own panel —
 								// lives inside the editor box's left margin via a sticky
 								// wrapper scoped to the box's own scroll, not the page's.
-								const chapterNavPanel =
-									chapterNavTree && chapterNavTree.items.length > 0 ? (
+								const actNavPanel =
+									actNavTree && actNavTree.items.length > 0 ? (
 										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 											<button
 												className="loom-script-nav-toggle"
-												aria-label={chapterNavOpen ? t('view.entity.script.hideNavigation') : t('view.entity.script.showNavigation')}
-												onClick={() => openChapterSidePanel(chapterNavOpen ? null : 'nav')}
+												aria-label={actNavOpen ? t('view.entity.script.hideNavigation') : t('view.entity.script.showNavigation')}
+												onClick={() => openActSidePanel(actNavOpen ? null : 'nav')}
 											>
-												<Icon name={chapterNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
+												<Icon name={actNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
 											</button>
-											{chapterNavOpen ? (
+											{actNavOpen ? (
 												<aside className="loom-script-nav">
 													<div className="loom-script-nav-head">
 														{t('view.entity.script.navigate')}
 														<button
 															className="loom-rel-filter"
 															aria-label={t('view.entity.script.hideNavigation')}
-															onClick={() => setChapterNavOpen(false)}
+															onClick={() => setActNavOpen(false)}
 														>
 															<Icon name="chevron-left" />
 														</button>
 													</div>
-													{chapterNavTree.items.map((item) =>
+													{actNavTree.items.map((item) =>
 														renderNavTreeItem(item, 1, (line) => {
 															// `line` is an ABSOLUTE line in the whole script (from
 															// `buildNavTree`) — first back out to a line relative to
-															// this chapter's own excerpt (which starts at the
-															// chapter's own `#` line), then to one relative to
-															// `chapterDraft` (the heading-stripped body). Missing the
+															// this act's own excerpt (which starts at the
+															// act's own `#` line), then to one relative to
+															// `actDraft` (the heading-stripped body). Missing the
 															// first subtraction was why every click landed at the
-															// very end of the chapter (`bodyLine` came out far past
+															// very end of the act (`bodyLine` came out far past
 															// the excerpt's real length, and both branches below just
 															// clamp to their last position when that happens).
 															const bodyLine =
-																line - (chapterNavSection?.line ?? 0) - chapterBodyLineOffset;
-															if (chapterScriptMode === 'pages') {
+																line - (actNavSection?.line ?? 0) - actBodyLineOffset;
+															if (actScriptMode === 'pages') {
 																// Jumping to the PAGE's own top isn't precise enough —
 																// a page can run much taller than the visible box, so
 																// the target line could still sit far below the fold
@@ -5298,10 +5298,10 @@ function EntityPage({ view }: { view: EntityView }) {
 																// IT. Not `scrollIntoView` — see the search-match jump
 																// above for why (cascades through every scrollable
 																// ancestor, including the whole entity page).
-																const excerptLine = bodyLine + chapterBodyLineOffset;
-																const flatEls = chapterBodyPages.flat();
+																const excerptLine = bodyLine + actBodyLineOffset;
+																const flatEls = actBodyPages.flat();
 																const target = flatEls.find((e) => e.line >= excerptLine) ?? flatEls[flatEls.length - 1];
-																const container = chapterScriptPagesRef.current;
+																const container = actScriptPagesRef.current;
 																const targetEl = target
 																	? container?.querySelector(`[data-line="${target.line}"]`)
 																	: null;
@@ -5314,58 +5314,58 @@ function EntityPage({ view }: { view: EntityView }) {
 																return;
 															}
 															const offset =
-																chapterDraft.split('\n').slice(0, bodyLine).join('\n').length +
+																actDraft.split('\n').slice(0, bodyLine).join('\n').length +
 																(bodyLine > 0 ? 1 : 0);
-															chapterScriptEditorRef.current?.selectRange(offset, offset);
+															actScriptEditorRef.current?.selectRange(offset, offset);
 														})
 													)}
 												</aside>
 											) : null}
 										</div>
 									) : null;
-								const chapterAnnotationSpans = findAnnotationSpans(chapterExcerpt);
-								const chapterMatches: ScriptSearchMatch[] = [];
-								if (chapterScriptQuery.trim() !== '') {
-									const needle = chapterScriptQuery.toLowerCase();
-									const hay = chapterDraft.toLowerCase();
+								const actAnnotationSpans = findAnnotationSpans(actExcerpt);
+								const actMatches: ScriptSearchMatch[] = [];
+								if (actScriptQuery.trim() !== '') {
+									const needle = actScriptQuery.toLowerCase();
+									const hay = actDraft.toLowerCase();
 									for (
 										let at = hay.indexOf(needle);
 										at !== -1;
 										at = hay.indexOf(needle, at + needle.length)
 									) {
-										chapterMatches.push({ kind: 'text', offset: at });
+										actMatches.push({ kind: 'text', offset: at });
 									}
 									for (const [id, entries] of Object.entries(scriptNotes.comments)) {
-										if (entries.some((e) => e.text.toLowerCase().includes(needle))) chapterMatches.push({ kind: 'comment', id });
+										if (entries.some((e) => e.text.toLowerCase().includes(needle))) actMatches.push({ kind: 'comment', id });
 									}
 									for (const [id, entry] of Object.entries(scriptNotes.altText)) {
 										entry.options.forEach((opt, optionIndex) => {
-											if (opt.toLowerCase().includes(needle)) chapterMatches.push({ kind: 'altOption', id, optionIndex });
+											if (opt.toLowerCase().includes(needle)) actMatches.push({ kind: 'altOption', id, optionIndex });
 										});
 									}
 									const posOf = (m: ScriptSearchMatch) =>
-										m.kind === 'text' ? m.offset : (chapterAnnotationSpans.find((s) => s.id === m.id)?.from ?? Infinity);
-									chapterMatches.sort((a, b) => posOf(a) - posOf(b));
+										m.kind === 'text' ? m.offset : (actAnnotationSpans.find((s) => s.id === m.id)?.from ?? Infinity);
+									actMatches.sort((a, b) => posOf(a) - posOf(b));
 								}
-								const gotoChapterMatch = (index: number) => {
-									if (chapterMatches.length === 0) return;
+								const gotoActMatch = (index: number) => {
+									if (actMatches.length === 0) return;
 									const next =
-										((index % chapterMatches.length) + chapterMatches.length) % chapterMatches.length;
-									setChapterScriptMatchIndex(next);
-									const m = chapterMatches[next];
+										((index % actMatches.length) + actMatches.length) % actMatches.length;
+									setActScriptMatchIndex(next);
+									const m = actMatches[next];
 									if (m.kind === 'text') {
 										setOpenComment(null);
 										setHighlightedAnnotationId(null);
-										if (chapterScriptMode === 'script') {
-											chapterScriptEditorRef.current?.selectRange(m.offset, m.offset + chapterScriptQuery.length);
+										if (actScriptMode === 'script') {
+											actScriptEditorRef.current?.selectRange(m.offset, m.offset + actScriptQuery.length);
 										} else {
 											// Only TEXT matches render as a `<mark>` — the Nth one in
 											// DOM order is the Nth TEXT match strictly, not the Nth
 											// match overall (comment/alt matches interleaved before it
 											// in document order don't produce a mark at all).
-											const textIndex = chapterMatches.slice(0, next).filter((x) => x.kind === 'text').length;
+											const textIndex = actMatches.slice(0, next).filter((x) => x.kind === 'text').length;
 											window.requestAnimationFrame(() => {
-												const container = chapterScriptPagesRef.current;
+												const container = actScriptPagesRef.current;
 												const mark = container?.querySelectorAll('mark')[textIndex];
 												if (!container || !mark) return;
 												const containerRect = container.getBoundingClientRect();
@@ -5380,14 +5380,14 @@ function EntityPage({ view }: { view: EntityView }) {
 										}
 										return;
 									}
-									const span = chapterAnnotationSpans.find((s) => s.id === m.id);
+									const span = actAnnotationSpans.find((s) => s.id === m.id);
 									if (!span) return;
 									setHighlightedAnnotationId(m.kind === 'altOption' ? m.id : null);
-									if (chapterScriptMode === 'script') {
-										chapterScriptEditorRef.current?.selectRange(span.contentFrom, span.contentFrom);
+									if (actScriptMode === 'script') {
+										actScriptEditorRef.current?.selectRange(span.contentFrom, span.contentFrom);
 										if (m.kind === 'comment') {
 											window.requestAnimationFrame(() => {
-												const icon = chapterScriptEditorWrapRef.current?.querySelector(
+												const icon = actScriptEditorWrapRef.current?.querySelector(
 													`[data-loom-annotation-id="${m.id}"]`
 												);
 												if (icon instanceof HTMLElement) handleOpenComment(m.id, icon.getBoundingClientRect());
@@ -5395,7 +5395,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										}
 									} else {
 										window.requestAnimationFrame(() => {
-											const container = chapterScriptPagesRef.current;
+											const container = actScriptPagesRef.current;
 											const icon = container?.querySelector(`[data-loom-annotation-id="${m.id}"]`);
 											if (!container || !(icon instanceof HTMLElement)) return;
 											scrollIntoContainer(container, icon, 'smooth');
@@ -5403,8 +5403,8 @@ function EntityPage({ view }: { view: EntityView }) {
 										});
 									}
 								};
-								const currentChapterPage = (): number => {
-									const container = chapterScriptPagesRef.current;
+								const currentActPage = (): number => {
+									const container = actScriptPagesRef.current;
 									if (!container) return 1;
 									const top = container.getBoundingClientRect().top;
 									const threshold = top + container.clientHeight / 3;
@@ -5418,33 +5418,33 @@ function EntityPage({ view }: { view: EntityView }) {
 								 *  list, not a reading position to preserve — mirroring the
 								 *  main Script view's own `switchMode`. Only Script↔Pages
 								 *  stash/restore a scroll line. */
-								const switchChapterMode = (next: 'script' | 'pages' | 'outline') => {
-									if (next === chapterScriptMode) return;
+								const switchActMode = (next: 'script' | 'pages' | 'outline') => {
+									if (next === actScriptMode) return;
 									if (next === 'pages') {
 										const topLine =
-											chapterScriptMode === 'script' ? chapterScriptEditorRef.current?.getTopLine() : undefined;
-										setChapterScriptMode('pages');
+											actScriptMode === 'script' ? actScriptEditorRef.current?.getTopLine() : undefined;
+										setActScriptMode('pages');
 										if (topLine !== undefined) {
-											const target = chapterPageOfLine(topLine);
+											const target = actPageOfLine(topLine);
 											window.requestAnimationFrame(() => {
-												const container = chapterScriptPagesRef.current;
+												const container = actScriptPagesRef.current;
 												const el = container?.querySelector(`[data-page="${target}"]`);
 												if (container && el instanceof HTMLElement) {
 													scrollIntoContainer(container, el, 'instant');
 												}
 											});
 										}
-									} else if (next === 'script' && chapterScriptMode === 'pages') {
-										pendingChapterScrollLineRef.current = chapterLineOfPage(currentChapterPage());
-										setChapterScriptMode('script');
+									} else if (next === 'script' && actScriptMode === 'pages') {
+										pendingActScrollLineRef.current = actLineOfPage(currentActPage());
+										setActScriptMode('script');
 									} else {
-										setChapterScriptMode(next);
+										setActScriptMode(next);
 									}
 								};
 								/** Comments/Alternatives browser panels, scoped to just this
-								 *  chapter's own excerpt — `findAnnotationSpans(chapterDraft)`
-								 *  rather than the whole script, since `chapterDraft` (heading
-								 *  stripped) is the EXACT text `chapterScriptEditorRef`'s CM6
+								 *  act's own excerpt — `findAnnotationSpans(actDraft)`
+								 *  rather than the whole script, since `actDraft` (heading
+								 *  stripped) is the EXACT text `actScriptEditorRef`'s CM6
 								 *  instance holds, so a span's offsets already line up with
 								 *  `selectRange` with no line-math conversion needed (unlike
 								 *  the nav tree above, which is built from the whole document
@@ -5452,38 +5452,38 @@ function EntityPage({ view }: { view: EntityView }) {
 								 *  ones). Marker ids are globally unique regardless of which
 								 *  slice of the script they're scanned from, so `scriptNotes`
 								 *  lookups by id still resolve correctly. */
-								const chapterAnnotationSpansAll = findAnnotationSpans(chapterDraft);
-								const chapterUnresolvedCommentSpans = chapterAnnotationSpansAll
+								const actAnnotationSpansAll = findAnnotationSpans(actDraft);
+								const actUnresolvedCommentSpans = actAnnotationSpansAll
 									.filter((s) => s.kind === 'comment')
 									.map((s) => ({
 										span: s,
 										unresolvedEntries: (scriptNotes.comments[s.id] ?? []).filter((e) => !e.resolved),
 									}))
 									.filter((x) => x.unresolvedEntries.length > 0);
-								const chapterUndecidedAltSpans = chapterAnnotationSpansAll.filter(
+								const actUndecidedAltSpans = actAnnotationSpansAll.filter(
 									(s) => s.kind === 'alt' && (scriptNotes.altText[s.id]?.acceptedIndex ?? null) === null
 								);
-								const chapterExcerptOf = (span: AnnotationSpan): string => {
-									const raw = chapterDraft.slice(span.contentFrom, span.contentTo).replace(/\s+/g, ' ').trim();
+								const actExcerptOf = (span: AnnotationSpan): string => {
+									const raw = actDraft.slice(span.contentFrom, span.contentTo).replace(/\s+/g, ' ').trim();
 									return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
 								};
-								const jumpToChapterAnnotation = (span: AnnotationSpan) => {
-									openChapterSidePanel(null);
-									if (chapterScriptMode === 'script') {
-										chapterScriptEditorRef.current?.selectRange(span.contentFrom, span.contentTo);
+								const jumpToActAnnotation = (span: AnnotationSpan) => {
+									openActSidePanel(null);
+									if (actScriptMode === 'script') {
+										actScriptEditorRef.current?.selectRange(span.contentFrom, span.contentTo);
 									} else {
-										pendingChapterSelectRangeRef.current = { from: span.contentFrom, to: span.contentTo };
-										switchChapterMode('script');
+										pendingActSelectRangeRef.current = { from: span.contentFrom, to: span.contentTo };
+										switchActMode('script');
 									}
 								};
-								// Same box-local sticky slot as `chapterNavPanel` above, just
+								// Same box-local sticky slot as `actNavPanel` above, just
 								// rendered only while open (no permanent toggle button of its
 								// own inside the slot -- the toolbar's standalone icon buttons
 								// are that toggle). Only one of nav/comments/alt is ever open
-								// at a time (`openChapterSidePanel`), so these never actually
+								// at a time (`openActSidePanel`), so these never actually
 								// stack visibly even though all three can be present in the
 								// tree.
-								const chapterCommentsAside = chapterCommentsPanelOpen ? (
+								const actCommentsAside = actCommentsPanelOpen ? (
 									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 										<aside className="loom-script-nav">
 											<div className="loom-script-nav-head">
@@ -5491,28 +5491,28 @@ function EntityPage({ view }: { view: EntityView }) {
 												<button
 													className="loom-rel-filter"
 													aria-label={t('view.entity.script.hideComments')}
-													onClick={() => setChapterCommentsPanelOpen(false)}
+													onClick={() => setActCommentsPanelOpen(false)}
 												>
 													<Icon name="chevron-left" />
 												</button>
 											</div>
-											{chapterUnresolvedCommentSpans.length === 0 ? (
+											{actUnresolvedCommentSpans.length === 0 ? (
 												<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
 											) : (
-												chapterUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
+												actUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
 													<div key={span.id} className="loom-script-comments-panel-group">
 														<button
-															className="loom-script-nav-chapter loom-script-comments-panel-excerpt"
-															onClick={() => jumpToChapterAnnotation(span)}
+															className="loom-script-nav-act loom-script-comments-panel-excerpt"
+															onClick={() => jumpToActAnnotation(span)}
 														>
-															{chapterExcerptOf(span)}
+															{actExcerptOf(span)}
 														</button>
 														<div className="loom-script-comments-panel-nested">
 															{unresolvedEntries.map((entry) => (
 																<button
 																	key={entry.id + entry.createdAt}
 																	className="loom-script-comments-panel-reply"
-																	onClick={() => jumpToChapterAnnotation(span)}
+																	onClick={() => jumpToActAnnotation(span)}
 																>
 																	{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
 																</button>
@@ -5524,7 +5524,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										</aside>
 									</div>
 								) : null;
-								const chapterAltAside = chapterAltPanelOpen ? (
+								const actAltAside = actAltPanelOpen ? (
 									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 										<aside className="loom-script-nav">
 											<div className="loom-script-nav-head">
@@ -5532,21 +5532,21 @@ function EntityPage({ view }: { view: EntityView }) {
 												<button
 													className="loom-rel-filter"
 													aria-label={t('view.entity.script.hideAlternatives')}
-													onClick={() => setChapterAltPanelOpen(false)}
+													onClick={() => setActAltPanelOpen(false)}
 												>
 													<Icon name="chevron-left" />
 												</button>
 											</div>
-											{chapterUndecidedAltSpans.length === 0 ? (
+											{actUndecidedAltSpans.length === 0 ? (
 												<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
 											) : (
-												chapterUndecidedAltSpans.map((span) => (
+												actUndecidedAltSpans.map((span) => (
 													<button
 														key={span.id}
-														className="loom-script-nav-chapter loom-script-comments-panel-excerpt"
-														onClick={() => jumpToChapterAnnotation(span)}
+														className="loom-script-nav-act loom-script-comments-panel-excerpt"
+														onClick={() => jumpToActAnnotation(span)}
 													>
-														{chapterExcerptOf(span)}
+														{actExcerptOf(span)}
 													</button>
 												))
 											)}
@@ -5564,29 +5564,29 @@ function EntityPage({ view }: { view: EntityView }) {
 								 *  Pages, so the browser clamped the resulting out-of-range
 								 *  scroll position back up the page once the content shrank,
 								 *  landing well above the tabs instead of on them. */
-								const clickChapterTab = (next: 'script' | 'pages' | 'outline') => {
-									switchChapterMode(next);
+								const clickActTab = (next: 'script' | 'pages' | 'outline') => {
+									switchActMode(next);
 									window.requestAnimationFrame(() => {
-										chapterScriptTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+										actScriptTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 									});
 								};
 								return (
 									<>
-										<div className="loom-script-tabs" ref={chapterScriptTabsRef}>
+										<div className="loom-script-tabs" ref={actScriptTabsRef}>
 											<div className="loom-seg">
 												<button
 													className={
-														chapterScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+														actScriptMode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
 													}
-													onClick={() => clickChapterTab('script')}
+													onClick={() => clickActTab('script')}
 												>
 													{t('common.scriptLabel')}
 												</button>
 												<button
 													className={
-														chapterScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
+														actScriptMode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'
 													}
-													onClick={() => clickChapterTab('pages')}
+													onClick={() => clickActTab('pages')}
 												>
 													{t('view.entity.script.pagesPreview')}
 												</button>
@@ -5594,17 +5594,17 @@ function EntityPage({ view }: { view: EntityView }) {
 											<div className="loom-script-side-toggles">
 												<button
 													className={
-														chapterCommentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
+														actCommentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
 													}
-													aria-label={chapterCommentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
-													onClick={() => openChapterSidePanel(chapterCommentsPanelOpen ? null : 'comments')}
+													aria-label={actCommentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
+													onClick={() => openActSidePanel(actCommentsPanelOpen ? null : 'comments')}
 												>
 													<Icon name="message-square" />
 												</button>
 												<button
-													className={chapterAltPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-													aria-label={chapterAltPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
-													onClick={() => openChapterSidePanel(chapterAltPanelOpen ? null : 'alt')}
+													className={actAltPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+													aria-label={actAltPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
+													onClick={() => openActSidePanel(actAltPanelOpen ? null : 'alt')}
 												>
 													<Icon name="repeat" fallback="arrow-right-left" />
 												</button>
@@ -5612,46 +5612,46 @@ function EntityPage({ view }: { view: EntityView }) {
 											<div className="loom-shell-spacer" />
 											{/* Deliberately NOT part of the Script/Pages pill — same
 											    reasoning as the main Script view's own standalone
-											    Outline button (`.loom-script-chapters-btn`). */}
+											    Outline button (`.loom-script-acts-btn`). */}
 											<button
 												className={
-													chapterScriptMode === 'outline'
-														? 'loom-script-chapters-btn loom-seg-on'
-														: 'loom-script-chapters-btn'
+													actScriptMode === 'outline'
+														? 'loom-script-acts-btn loom-seg-on'
+														: 'loom-script-acts-btn'
 												}
-												onClick={() => clickChapterTab('outline')}
+												onClick={() => clickActTab('outline')}
 											>
 												{t('view.entity.script.outline')}
 											</button>
 										</div>
 										<div className="loom-script-toolbar">
-											{chapterScriptMode !== 'outline' ? (
+											{actScriptMode !== 'outline' ? (
 												<>
 											<div className="loom-search-wrap">
 												<input
 													className="loom-script-search"
 													type="search"
-													placeholder={t('view.entity.script.searchThisChapter')}
-													value={chapterScriptQuery}
+													placeholder={t('view.entity.script.searchThisAct')}
+													value={actScriptQuery}
 													onChange={(e) => {
-														setChapterScriptQuery(e.target.value);
-														setChapterScriptMatchIndex(0);
+														setActScriptQuery(e.target.value);
+														setActScriptMatchIndex(0);
 													}}
 													onKeyDown={(e) => {
 														if (e.key !== 'Enter') return;
 														e.preventDefault();
-														gotoChapterMatch(
-															e.shiftKey ? chapterScriptMatchIndex - 1 : chapterScriptMatchIndex + 1
+														gotoActMatch(
+															e.shiftKey ? actScriptMatchIndex - 1 : actScriptMatchIndex + 1
 														);
 													}}
 												/>
-												{chapterScriptQuery !== '' ? (
+												{actScriptQuery !== '' ? (
 													<button
 														className="loom-chip-remove loom-search-clear"
 														aria-label={t('view.entity.script.clearSearch')}
 														onClick={() => {
-															setChapterScriptQuery('');
-															setChapterScriptMatchIndex(0);
+															setActScriptQuery('');
+															setActScriptMatchIndex(0);
 														}}
 													>
 														✕
@@ -5661,62 +5661,62 @@ function EntityPage({ view }: { view: EntityView }) {
 											<button
 												className="loom-rel-filter"
 												aria-label={t('view.entity.script.previousMatch')}
-												disabled={chapterMatches.length === 0}
-												onClick={() => gotoChapterMatch(chapterScriptMatchIndex - 1)}
+												disabled={actMatches.length === 0}
+												onClick={() => gotoActMatch(actScriptMatchIndex - 1)}
 											>
 												<Icon name="chevron-up" />
 											</button>
 											<button
 												className="loom-rel-filter"
 												aria-label={t('view.entity.script.nextMatch')}
-												disabled={chapterMatches.length === 0}
-												onClick={() => gotoChapterMatch(chapterScriptMatchIndex + 1)}
+												disabled={actMatches.length === 0}
+												onClick={() => gotoActMatch(actScriptMatchIndex + 1)}
 											>
 												<Icon name="chevron-down" />
 											</button>
 											<span className="loom-script-stat">
-												{chapterScriptQuery.trim() === ''
+												{actScriptQuery.trim() === ''
 													? ''
-													: chapterMatches.length === 0
+													: actMatches.length === 0
 														? t('view.entity.script.noMatches')
-														: t('view.entity.script.matchCount', { current: (chapterScriptMatchIndex % chapterMatches.length) + 1, total: chapterMatches.length })}
+														: t('view.entity.script.matchCount', { current: (actScriptMatchIndex % actMatches.length) + 1, total: actMatches.length })}
 											</span>
 											</>
 											) : null}
 											<div className="loom-shell-spacer" />
-											{chapterScriptMode !== 'pages' ? (
+											{actScriptMode !== 'pages' ? (
 												<button
 													className="loom-rel-add"
 													onClick={() => {
 														if (!project) return;
-														new CreateEntityModal(plugin, 'scene', project, { defaultChapter: record }).open();
+														new CreateEntityModal(plugin, 'scene', project, { defaultAct: record }).open();
 													}}
 												>
 													{t('view.entity.script.newSceneAction')}
 												</button>
 											) : null}
 										</div>
-										{chapterScriptMode === 'script' ? (
-											<div className="loom-scene-script" ref={chapterScriptEditorWrapRef}>
-												{chapterNavPanel}
-												{chapterCommentsAside}
-												{chapterAltAside}
+										{actScriptMode === 'script' ? (
+											<div className="loom-scene-script" ref={actScriptEditorWrapRef}>
+												{actNavPanel}
+												{actCommentsAside}
+												{actAltAside}
 												<FountainField
-													ref={chapterScriptEditorRef}
-													value={chapterDraft}
-													onChange={setChapterBody}
+													ref={actScriptEditorRef}
+													value={actDraft}
+													onChange={setActBody}
 													onBlur={() => {
 														// Scroll-position memory, ahead of the unrelated
 														// no-op-on-unchanged-draft guard below — the editor
 														// position is worth saving even when nothing was typed.
-														const top = chapterScriptEditorRef.current?.getTopLine();
+														const top = actScriptEditorRef.current?.getTopLine();
 														if (top !== undefined) {
-															window.localStorage.setItem(`loom-chapter-script-line:${record.path}`, String(top));
+															window.localStorage.setItem(`loom-act-script-line:${record.path}`, String(top));
 														}
-														if (!project || chapterDraft === chapterBodyOf(chapterExcerpt)) return;
+														if (!project || actDraft === actBodyOf(actExcerpt)) return;
 														void editScriptAndSync(plugin, project, (raw) =>
-															replaceChapterBody(raw, record.chapterId, chapterDraft)
-														).then(() => setChapterBody(null));
+															replaceActBody(raw, record.actId, actDraft)
+														).then(() => setActBody(null));
 													}}
 													characters={scriptParsed?.characters ?? []}
 													locations={scriptParsed?.locations ?? []}
@@ -5736,53 +5736,53 @@ function EntityPage({ view }: { view: EntityView }) {
 														const loc = plugin.indexer.resolve(sc.sceneLocation, sc.path);
 														if (loc) view.openEntity(loc.path);
 													}}
-													onOpenChapter={() => view.openEntity(record.path)}
+													onOpenAct={() => view.openEntity(record.path)}
 													onOpenEntity={(path) => view.openEntity(path)}
 													comments={scriptNotes.comments}
 													altText={scriptNotes.altText}
 													onCreateComment={(id, text) =>
-														handleCreateComment(chapterScriptEditorWrapRef, chapterScriptPagesRef, id, text)
+														handleCreateComment(actScriptEditorWrapRef, actScriptPagesRef, id, text)
 													}
 													onCreateAlt={handleCreateAlt}
 													onOpenComment={handleOpenComment}
-													onCycleAlt={(id) => handleCycleAlt(chapterScriptEditorRef, id)}
-													onOpenAltMenu={(id) => handleOpenAltMenu(chapterScriptEditorRef, id)}
+													onCycleAlt={(id) => handleCycleAlt(actScriptEditorRef, id)}
+													onOpenAltMenu={(id) => handleOpenAltMenu(actScriptEditorRef, id)}
 													highlightedAnnotationId={highlightedAnnotationId}
 												/>
 											</div>
-										) : chapterScriptMode === 'pages' ? (
-											<div className="loom-screenplay loom-scene-pages" ref={chapterScriptPagesRef}>
-												{chapterNavPanel}
-												{chapterCommentsAside}
-												{chapterAltAside}
+										) : actScriptMode === 'pages' ? (
+											<div className="loom-screenplay loom-scene-pages" ref={actScriptPagesRef}>
+												{actNavPanel}
+												{actCommentsAside}
+												{actAltAside}
 												<PagesPreviewBody
-													pages={chapterBodyPages}
+													pages={actBodyPages}
 													startPageNumber={null}
-													query={chapterScriptQuery}
-													rawText={chapterExcerpt}
+													query={actScriptQuery}
+													rawText={actExcerpt}
 													comments={scriptNotes.comments}
 													altText={scriptNotes.altText}
 													onOpenComment={handleOpenComment}
-													onCycleAlt={(id) => handleCycleAlt(chapterScriptEditorRef, id)}
-													onOpenAltMenu={(id) => handleOpenAltMenu(chapterScriptEditorRef, id)}
+													onCycleAlt={(id) => handleCycleAlt(actScriptEditorRef, id)}
+													onOpenAltMenu={(id) => handleOpenAltMenu(actScriptEditorRef, id)}
 													highlightedAnnotationId={highlightedAnnotationId}
 												/>
 											</div>
 										) : (
 											<div
 												className={
-													seqDrag?.group === 'chapter-scenes'
+													seqDrag?.group === 'act-scenes'
 														? 'loom-subloc-list loom-subloc-dragging loom-script-outline'
 														: 'loom-subloc-list loom-script-outline'
 												}
 											>
-												{chapterScenes.length === 0 ? (
+												{actScenes.length === 0 ? (
 													<div className="loom-attendance-empty">
 														{t('view.entity.script.noScenesYetPre')}<code># {record.name}</code>{t('view.entity.script.noScenesYetPost')}
 													</div>
 												) : (
-													chapterScenes.map((sc, i) => {
-														const grabbed = seqDrag?.group === 'chapter-scenes' && seqDrag.from === i;
+													actScenes.map((sc, i) => {
+														const grabbed = seqDrag?.group === 'act-scenes' && seqDrag.from === i;
 														return (
 															<div
 																key={sc.path}
@@ -5791,25 +5791,25 @@ function EntityPage({ view }: { view: EntityView }) {
 																		? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
 																		: 'loom-script-scene-row loom-subloc-row-slide'
 																}
-																style={seqRowStyle('chapter-scenes', i)}
+																style={seqRowStyle('act-scenes', i)}
 																data-seq-row=""
 															>
-																{seqGrip('chapter-scenes', i, chapterScenes, (reordered) => {
+																{seqGrip('act-scenes', i, actScenes, (reordered) => {
 																	if (!project) return;
 																	void editScriptAndSync(plugin, project, (raw) =>
 																		reorderScenesInSection(
 																			raw,
-																			record.chapterId,
+																			record.actId,
 																			reordered.map((r) => r.sceneId)
 																		)
 																	);
 																})}
 																<span className="loom-scene-row-num">{i + 1}</span>
 																<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
-																	{chapterExcerptParsed?.scenes[i]?.heading ?? sc.name}
+																	{actExcerptParsed?.scenes[i]?.heading ?? sc.name}
 																</button>
 																<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-																<span className="loom-script-chapter-count">{t('view.entity.script.pageAbbrev', { range: chapterScenePageRange(i) })}</span>
+																<span className="loom-script-act-count">{t('view.entity.script.pageAbbrev', { range: actScenePageRange(i) })}</span>
 															</div>
 														);
 													})
@@ -5820,7 +5820,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								);
 							})()
 						: (
-							<div className="loom-attendance-empty">{t('view.entity.script.chapterNotInScript')}</div>
+							<div className="loom-attendance-empty">{t('view.entity.script.actNotInScript')}</div>
 						)}
 				</div>
 			) : null}
@@ -6150,7 +6150,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			{/* Character: Items sit directly under the Faction(s) section. */}
 			{record.type === 'character' ? itemsSection : null}
 
-			{/* Chapters render this same section right after Display title
+			{/* Acts render this same section right after Display title
 			    instead (up near the Title fields) — see below. */}
 			{!isSession ? (
 <div className="loom-field loom-field-body">
@@ -6174,12 +6174,12 @@ function EntityPage({ view }: { view: EntityView }) {
 			{isBeat && scriptMode ? (
 				<>
 					{/* Mandatory, and re-assignable. Moving is two steps, since a
-					    single dropdown pick can't say WHERE in the target chapter
-					    the scene should land: (1) pick the chapter, (2) drag the
-					    scene into position among that chapter's existing scenes.
+					    single dropdown pick can't say WHERE in the target act
+					    the scene should land: (1) pick the act, (2) drag the
+					    scene into position among that act's existing scenes.
 					    Either step physically moves the writing in the script, so
-					    the note's chapter link and the script can never drift
-					    apart — a chapter link edited any other way would just be
+					    the note's act link and the script can never drift
+					    apart — an act link edited any other way would just be
 					    undone by the next sync. Cast sits alongside it as a
 					    read-only side column — it's `loomSceneCast`, derived from
 					    the script's own character cues, never edited here. */}
@@ -6191,55 +6191,55 @@ function EntityPage({ view }: { view: EntityView }) {
 								sceneMentionedLocationRecords.length +
 								sceneItemRecords.length ===
 							0
-								? 'loom-scene-chapter-grid loom-scene-chapter-grid-solo'
-								: 'loom-scene-chapter-grid'
+								? 'loom-scene-act-grid loom-scene-act-grid-solo'
+								: 'loom-scene-act-grid'
 						}
 					>
-					<div className="loom-scene-chapter-left">
+					<div className="loom-scene-act-left">
 						<span className="loom-field-label">{entityLabel(anchorType)}</span>
 						<div className="loom-tag-row">
-							{sceneChapterRecord ? (
+							{sceneActRecord ? (
 								<EntityChip
 									plugin={plugin}
-									record={sceneChapterRecord}
-									onOpen={() => view.openEntity(sceneChapterRecord.path)}
+									record={sceneActRecord}
+									onOpen={() => view.openEntity(sceneActRecord.path)}
 								/>
 							) : null}
-							{moveTargetChapter ? null : (
+							{moveTargetAct ? null : (
 								<SearchableSelect
 									placeholder={
-										sceneChapterRecord
+										sceneActRecord
 											? t('view.entity.scene.moveToAnother', { anchor: anchorLabel })
 											: t('project.createEntity.pickAnchor', { anchor: anchorLabel })
 									}
 									options={plugin.indexer
 										.getAll(anchorType, record.project)
-										.filter((c) => c.path !== sceneChapterRecord?.path)
+										.filter((c) => c.path !== sceneActRecord?.path)
 										.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
 										.map((c) => ({ value: c.path, label: c.name }))}
 									onPick={(path) => {
 										const target = plugin.indexer.get(path);
 										if (!target) return;
-										setMoveTargetChapter(target);
+										setMoveTargetAct(target);
 										setMovePlaceAt(0);
 									}}
 								/>
 							)}
 						</div>
-						{sceneChapterRecord || moveTargetChapter ? null : (
+						{sceneActRecord || moveTargetAct ? null : (
 							<span className="loom-field-hint">
 								{t('view.entity.scene.everySceneBelongsHint')}
 							</span>
 						)}
-						{moveTargetChapter && project
+						{moveTargetAct && project
 							? (() => {
 									const siblings = plugin.indexer
 										.getAll('scene', record.project)
 										.filter(
 											(sc) =>
 												sc.path !== record.path &&
-												sc.sceneChapter !== '' &&
-												plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === moveTargetChapter.path
+												sc.sceneAct !== '' &&
+												plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === moveTargetAct.path
 										)
 										.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
 									const placeAt = Math.max(0, Math.min(siblings.length, movePlaceAt));
@@ -6251,9 +6251,9 @@ function EntityPage({ view }: { view: EntityView }) {
 										void editScriptAndSync(plugin, project, (raw) =>
 											nextSibling
 												? moveSceneBefore(raw, record.sceneId, nextSibling.sceneId)
-												: moveSceneToSection(raw, record.sceneId, moveTargetChapter.chapterId)
+												: moveSceneToSection(raw, record.sceneId, moveTargetAct.actId)
 										).then(() => {
-											setMoveTargetChapter(null);
+											setMoveTargetAct(null);
 											setMovePlaceAt(0);
 										});
 									};
@@ -6261,8 +6261,8 @@ function EntityPage({ view }: { view: EntityView }) {
 										<>
 											<div className="loom-field-hint">
 												{siblings.length === 0
-													? t('view.entity.scene.chapterHasNoScenesYet', { name: moveTargetChapter.name })
-													: t('view.entity.scene.dragIntoPositionHint', { name: moveTargetChapter.name })}
+													? t('view.entity.scene.actHasNoScenesYet', { name: moveTargetAct.name })
+													: t('view.entity.scene.dragIntoPositionHint', { name: moveTargetAct.name })}
 											</div>
 											{siblings.length > 0 ? (
 												<div
@@ -6317,7 +6317,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												<button
 													className="loom-rel-filter"
 													onClick={() => {
-														setMoveTargetChapter(null);
+														setMoveTargetAct(null);
 														setMovePlaceAt(0);
 													}}
 												>
@@ -6334,7 +6334,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						sceneMentionedLocationRecords.length +
 						sceneItemRecords.length ===
 					0 ? null : (
-						<div className="loom-scene-chapter-right">
+						<div className="loom-scene-act-right">
 							<span className="loom-field-label">{t('view.entity.scene.entitiesInScene')}</span>
 							{(
 								[
@@ -6486,7 +6486,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									 *  the same issue); leaving Script stashes a line for the
 									 *  effect above to apply once `FountainField` remounts. */
 									/** Outline is a plain swap either direction, same reasoning
-									 *  as the Chapter panel's own `switchChapterMode`. */
+									 *  as the Act panel's own `switchActMode`. */
 									const switchSceneMode = (next: 'script' | 'pages' | 'outline') => {
 										if (next === sceneScriptMode) return;
 										if (next === 'pages') {
@@ -6510,7 +6510,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											setSceneScriptMode(next);
 										}
 									};
-									/** Same reasoning as the Chapter panel's own copy of this —
+									/** Same reasoning as the Act panel's own copy of this —
 									 *  `findAnnotationSpans(sceneDraft)`, not `sceneExcerpt`, since
 									 *  `sceneDraft` (heading stripped) is the EXACT text
 									 *  `sceneScriptEditorRef`'s CM6 instance holds, so a span's
@@ -6558,7 +6558,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													sceneUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
 														<div key={span.id} className="loom-script-comments-panel-group">
 															<button
-																className="loom-script-nav-chapter loom-script-comments-panel-excerpt"
+																className="loom-script-nav-act loom-script-comments-panel-excerpt"
 																onClick={() => jumpToSceneAnnotation(span)}
 															>
 																{sceneExcerptOf(span)}
@@ -6599,7 +6599,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													sceneUndecidedAltSpans.map((span) => (
 														<button
 															key={span.id}
-															className="loom-script-nav-chapter loom-script-comments-panel-excerpt"
+															className="loom-script-nav-act loom-script-comments-panel-excerpt"
 															onClick={() => jumpToSceneAnnotation(span)}
 														>
 															{sceneExcerptOf(span)}
@@ -6609,7 +6609,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											</aside>
 										</div>
 									) : null;
-									/** Same as the Chapter panel's `clickChapterTab` (switch first,
+									/** Same as the Act panel's `clickActTab` (switch first,
 									 *  scroll on the next frame — see its comment for why). */
 									const clickSceneTab = (next: 'script' | 'pages' | 'outline') => {
 										switchSceneMode(next);
@@ -6654,7 +6654,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														</div>
 														{sceneNavTree.items.map((item) =>
 															renderNavTreeItem(item, 1, (line) => {
-																// Same fix as the Chapter panel's callback: back out the
+																// Same fix as the Act panel's callback: back out the
 																// scene's own start line before the body offset, or
 																// every click lands at the end of the scene.
 																const bodyLine =
@@ -6662,7 +6662,7 @@ function EntityPage({ view }: { view: EntityView }) {
 																if (sceneScriptMode === 'pages') {
 																	// Scroll straight to the target's own rendered element
 																	// (`data-line`), not just the page it's on — see the
-																	// Chapter panel's identical callback for why (a page can
+																	// Act panel's identical callback for why (a page can
 																	// run much taller than the box, and `scrollIntoView`
 																	// cascades through every scrollable ancestor).
 																	const excerptLine = bodyLine + sceneBodyLineOffset;
@@ -6750,8 +6750,8 @@ function EntityPage({ view }: { view: EntityView }) {
 												<button
 													className={
 														sceneScriptMode === 'outline'
-															? 'loom-script-chapters-btn loom-seg-on'
-															: 'loom-script-chapters-btn'
+															? 'loom-script-acts-btn loom-seg-on'
+															: 'loom-script-acts-btn'
 													}
 													onClick={() => clickSceneTab('outline')}
 												>
@@ -6827,7 +6827,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														onChange={setSceneBody}
 														onBlur={() => {
 															// Scroll-position memory — see the identical comment
-															// on the Chapter page's own Script section above.
+															// on the Act page's own Script section above.
 															const top = sceneScriptEditorRef.current?.getTopLine();
 															if (top !== undefined) {
 																window.localStorage.setItem(`loom-scene-script-line:${record.path}`, String(top));
@@ -6850,8 +6850,8 @@ function EntityPage({ view }: { view: EntityView }) {
 														onOpenLocation={() => {
 															if (initialSceneLocation) view.openEntity(initialSceneLocation.path);
 														}}
-														onOpenChapter={() => {
-															if (sceneChapterRecord) view.openEntity(sceneChapterRecord.path);
+														onOpenAct={() => {
+															if (sceneActRecord) view.openEntity(sceneActRecord.path);
 														}}
 														onOpenEntity={(path) => view.openEntity(path)}
 														comments={scriptNotes.comments}

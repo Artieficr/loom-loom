@@ -55,7 +55,7 @@ import { fmLoomValue, setLoomKey } from './fm';
 import { canCreateProjectOfKind } from './license/gating';
 import { LocaleKey, t } from './i18n';
 import {
-	appendChapter,
+	appendAct,
 	appendScene,
 	applyDisplayTitles,
 	joinLocationSub,
@@ -68,7 +68,7 @@ import {
 import type LoomLoomPlugin from './main';
 
 /** Folders scaffolded for a new project: only the entity types its kind
- *  actually holds, so a writer project gets Chapters/Scenes and a player one
+ *  actually holds, so a writer project gets Acts/Scenes and a player one
  *  Sessions/Events rather than both. Types added to a kind later are covered
  *  by `createEntity`, which ensures its folder on the way in. */
 function projectSubfolders(kind: ProjectKind): string[] {
@@ -270,9 +270,9 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	if (type === 'character') lines.push(`${FM.alive}: true`);
 	if (type === 'event' || type === 'session') lines.push(`${FM.date}: ${yamlQuote(fields.date)}`);
 	if (type === 'session') lines.push(`${FM.attendance}: []`);
-	// Chapters aren't dated — they carry a manual order (stamped on the first
+	// Acts aren't dated — they carry a manual order (stamped on the first
 	// reorder) and the title that goes into the exported script.
-	if (type === 'chapter') lines.push(`${FM.displayTitle}: ""`);
+	if (type === 'act') lines.push(`${FM.displayTitle}: ""`);
 	if (type === 'quest') {
 		const link = (name?: string) => (name && name !== '' ? yamlQuote(`[[${name}]]`) : '""');
 		const givers = (fields.questGivers ?? []).filter((n) => n !== '');
@@ -1066,18 +1066,18 @@ async function editScriptFile(
 	return next;
 }
 
-/** Sentinel path for the "+ New chapter" pinned entry in the Scene creation
- *  modal's chapter picker — never a real file, same trick as the virtual
+/** Sentinel path for the "+ New act" pinned entry in the Scene creation
+ *  modal's act picker — never a real file, same trick as the virtual
  *  Group faction (`PC_GROUP_VALUE`). */
-const NEW_CHAPTER_SENTINEL = 'loom:new-chapter';
-function newChapterStub(projectRoot: string): EntityRecord {
-	return { ...pcGroupStub(projectRoot), path: NEW_CHAPTER_SENTINEL, name: t('project.newChapterStub'), type: 'chapter' };
+const NEW_ACT_SENTINEL = 'loom:new-act';
+function newActStub(projectRoot: string): EntityRecord {
+	return { ...pcGroupStub(projectRoot), path: NEW_ACT_SENTINEL, name: t('project.newActStub'), type: 'act' };
 }
 
 /** Matches the file's own frontmatter block — same regex as `FRONTMATTER_RE`
  *  in views/common.tsx, duplicated for the same reason `editScriptFile` is:
  *  common.tsx is a view, and views already import FROM this module. Used to
- *  write a newly-created Scene/Chapter's Notes as the note's raw body. */
+ *  write a newly-created Scene/Act's Notes as the note's raw body. */
 const FM_BLOCK_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
 async function writeNotesBody(plugin: LoomLoomPlugin, file: TFile, notes: string): Promise<void> {
 	const trimmed = notes.trim();
@@ -1171,16 +1171,16 @@ export interface CreateEntityOptions {
 	defaultGroup?: string[];
 	/** Prefills the Name field (e.g. "+ Create …" from a [[link completion). */
 	initialName?: string;
-	/** Chapters only: called with a full stand-in record instead of opening the
-	 *  new page or firing `onCreated` — the Scene modal's "+ New chapter" nested
-	 *  pick uses this so it can hand the created chapter straight to its own
-	 *  chapter picker instead of navigating away mid-scene-creation. */
-	onChapterCreated?: (record: EntityRecord) => void;
-	/** Scenes only: pre-picks the Chapter field — the Chapter page's own
+	/** Acts only: called with a full stand-in record instead of opening the
+	 *  new page or firing `onCreated` — the Scene modal's "+ New act" nested
+	 *  pick uses this so it can hand the created act straight to its own
+	 *  act picker instead of navigating away mid-scene-creation. */
+	onActCreated?: (record: EntityRecord) => void;
+	/** Scenes only: pre-picks the Act field — the Act page's own
 	 *  "+ New scene" button uses this so a scene added from there lands in
-	 *  THIS chapter without making the user pick it again. Still changeable;
+	 *  THIS act without making the user pick it again. Still changeable;
 	 *  just a starting pick, not a lock. */
-	defaultChapter?: EntityRecord;
+	defaultAct?: EntityRecord;
 }
 
 export class CreateEntityModal extends Modal {
@@ -1280,7 +1280,7 @@ export class CreateEntityModal extends Modal {
 	}
 
 	onOpen(): void {
-		// Scene and Chapter are script-backed structural types — their writing
+		// Scene and Act are script-backed structural types — their writing
 		// lives in the .fountain file, not in note fields the way every other
 		// type works, so they get their own dedicated layout entirely instead
 		// of falling through the generic fields below.
@@ -1288,8 +1288,8 @@ export class CreateEntityModal extends Modal {
 			this.renderSceneModal();
 			return;
 		}
-		if (this.type === 'chapter') {
-			this.renderChapterModal();
+		if (this.type === 'act') {
+			this.renderActModal();
 			return;
 		}
 		this.setTitle(
@@ -1455,8 +1455,8 @@ export class CreateEntityModal extends Modal {
 				const sessions = this.plugin.indexer
 					.getAll(projectRoleType(this.project.config, 'anchor'), this.project.root)
 					.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
-				// A scene MUST have a chapter — that's where its writing lives, so
-				// a chapterless scene has nowhere to belong. An event may be a
+				// A scene MUST have an act — that's where its writing lives, so
+				// an actless scene has nowhere to belong. An event may be a
 				// session-less lore event, so there the pick stays optional.
 				const anchorType = projectRoleType(this.project.config, 'anchor');
 				const sessionSetting = new Setting(this.contentEl)
@@ -1987,7 +1987,7 @@ export class CreateEntityModal extends Modal {
 
 	/**
 	 * Whether this entity cannot be created without an anchor. A Scene's writing
-	 * lives inside its Chapter's section of the script, so a chapterless scene
+	 * lives inside its Act's section of the script, so an actless scene
 	 * has nowhere to be stored; an Event, by contrast, may legitimately be a
 	 * session-less lore event.
 	 */
@@ -2119,9 +2119,9 @@ export class CreateEntityModal extends Modal {
 	/**
 	 * Scene creation: a heading row (INT./EXT., Location, Sublocation, Time —
 	 * the same four parts the Scene page's own modular heading editor writes),
-	 * a Chapter picker (mandatory — a scene with no chapter has nowhere to live
+	 * an Act picker (mandatory — a scene with no act has nowhere to live
 	 * in the script), and a Notes field. Submitting inserts the scene into the
-	 * script under the chosen chapter and stamps the note's fields directly
+	 * script under the chosen act and stamps the note's fields directly
 	 * (mirroring what `syncScenes` would do on its next pass) rather than
 	 * waiting for that pass, so the new page can be opened immediately.
 	 */
@@ -2134,11 +2134,11 @@ export class CreateEntityModal extends Modal {
 		let mainLoc = '';
 		let subLoc = '';
 		let timeOfDay = '';
-		let pickedChapter: EntityRecord | null = this.options.defaultChapter ?? null;
+		let pickedAct: EntityRecord | null = this.options.defaultAct ?? null;
 		let sceneAppendToEnd = true;
 		let notes = '';
 		// Reassigned once the position picker is built further down — declared
-		// (and callable) up front so the Chapter picker's earlier pick/clear
+		// (and callable) up front so the Act picker's earlier pick/clear
 		// callbacks can refresh it without caring about source order.
 		let refreshSceneOrderItems: () => void = () => {};
 
@@ -2199,57 +2199,57 @@ export class CreateEntityModal extends Modal {
 			text.setPlaceholder(t('project.createEntity.timePlaceholder')).onChange((v) => (timeOfDay = v));
 		});
 
-		const chapterType = projectRoleType(this.project.config, 'anchor');
-		const chapterSetting = new Setting(this.contentEl)
-			.setName(entityLabel(chapterType))
-			.setDesc(t('project.createEntity.chapterDesc', { anchor: entityLabel(chapterType).toLowerCase() }));
-		const chapterEl = chapterSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
-		const refreshChapter = () => {
-			chapterEl.empty();
-			if (pickedChapter) {
-				this.renderChip(chapterEl, pickedChapter, pickedChapter.name, () => {
-					pickedChapter = null;
-					refreshChapter();
+		const actType = projectRoleType(this.project.config, 'anchor');
+		const actSetting = new Setting(this.contentEl)
+			.setName(entityLabel(actType))
+			.setDesc(t('project.createEntity.actDesc', { anchor: entityLabel(actType).toLowerCase() }));
+		const actEl = actSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
+		const refreshAct = () => {
+			actEl.empty();
+			if (pickedAct) {
+				this.renderChip(actEl, pickedAct, pickedAct.name, () => {
+					pickedAct = null;
+					refreshAct();
 					refreshSceneOrderItems();
 				});
 				return;
 			}
-			const input = chapterEl.createEl('input', {
+			const input = actEl.createEl('input', {
 				type: 'text',
-				attr: { placeholder: t('project.createEntity.pickAnchor', { anchor: entityLabel(chapterType).toLowerCase() }) },
+				attr: { placeholder: t('project.createEntity.pickAnchor', { anchor: entityLabel(actType).toLowerCase() }) },
 			});
 			new RecordInputSuggest(
 				this.app,
 				input,
 				() => [
-					newChapterStub(this.project.root),
+					newActStub(this.project.root),
 					...this.plugin.indexer
-						.getAll('chapter', this.project.root)
+						.getAll('act', this.project.root)
 						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created)),
 				],
 				(r) => {
-					if (r.path === NEW_CHAPTER_SENTINEL) {
-						new CreateEntityModal(this.plugin, 'chapter', this.project, {
-							onChapterCreated: (record) => {
-								pickedChapter = record;
-								refreshChapter();
+					if (r.path === NEW_ACT_SENTINEL) {
+						new CreateEntityModal(this.plugin, 'act', this.project, {
+							onActCreated: (record) => {
+								pickedAct = record;
+								refreshAct();
 								refreshSceneOrderItems();
 							},
 						}).open();
 						return;
 					}
-					pickedChapter = r;
-					refreshChapter();
+					pickedAct = r;
+					refreshAct();
 					refreshSceneOrderItems();
 				},
 				(r) => r.name
 			);
 		};
-		refreshChapter();
+		refreshAct();
 
 		new Setting(this.contentEl)
-			.setName(t('project.createEntity.appendToEndChapter.name'))
-			.setDesc(t('project.createEntity.appendToEndChapter.desc'))
+			.setName(t('project.createEntity.appendToEndAct.name'))
+			.setDesc(t('project.createEntity.appendToEndAct.desc'))
 			.addToggle((tg) =>
 				tg.setValue(true).onChange((v) => {
 					sceneAppendToEnd = v;
@@ -2262,17 +2262,17 @@ export class CreateEntityModal extends Modal {
 		const sceneOrderPicker = this.buildOrderPicker(sceneOrderWrap);
 		sceneOrderPicker.setPhantomLabel(t('project.createEntity.newSceneTitle'));
 		refreshSceneOrderItems = () => {
-			const chapterScenes = pickedChapter
+			const actScenes = pickedAct
 				? this.plugin.indexer
 						.getAll('scene', this.project.root)
 						.filter(
 							(sc) =>
-								sc.sceneChapter !== '' &&
-								this.plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === pickedChapter?.path
+								sc.sceneAct !== '' &&
+								this.plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === pickedAct?.path
 						)
 						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
 				: [];
-			sceneOrderPicker.setItems(chapterScenes.map((sc) => sc.name));
+			sceneOrderPicker.setItems(actScenes.map((sc) => sc.name));
 		};
 		refreshSceneOrderItems();
 
@@ -2291,7 +2291,7 @@ export class CreateEntityModal extends Modal {
 						mainLoc,
 						subLoc,
 						timeOfDay,
-						pickedChapter,
+						pickedAct,
 						sceneAppendToEnd,
 						insertIndex: sceneOrderPicker.getIndex(),
 						notes,
@@ -2305,7 +2305,7 @@ export class CreateEntityModal extends Modal {
 		mainLoc: string;
 		subLoc: string;
 		timeOfDay: string;
-		pickedChapter: EntityRecord | null;
+		pickedAct: EntityRecord | null;
 		sceneAppendToEnd: boolean;
 		insertIndex: number;
 		notes: string;
@@ -2315,7 +2315,7 @@ export class CreateEntityModal extends Modal {
 			new Notice(t('project.createEntity.locationRequired'));
 			return;
 		}
-		if (!fields.pickedChapter) {
+		if (!fields.pickedAct) {
 			new Notice(
 				t('project.createEntity.anchorRequiredNotice', {
 					anchor: entityLabel(projectRoleType(this.project.config, 'anchor')),
@@ -2323,18 +2323,18 @@ export class CreateEntityModal extends Modal {
 			);
 			return;
 		}
-		const chapter = fields.pickedChapter;
+		const act = fields.pickedAct;
 		// Read before the script write below — same query the modal's own
 		// position picker used to build its list, so the index it returned
 		// lines up with this order.
 		const existingSceneIds =
-			chapter.chapterId !== ''
+			act.actId !== ''
 				? this.plugin.indexer
 						.getAll('scene', this.project.root)
 						.filter(
 							(sc) =>
-								sc.sceneChapter !== '' &&
-								this.plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === chapter.path
+								sc.sceneAct !== '' &&
+								this.plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === act.path
 						)
 						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
 						.map((sc) => sc.sceneId)
@@ -2347,13 +2347,13 @@ export class CreateEntityModal extends Modal {
 			const created = parsed.scenes[parsed.scenes.length - 1];
 			newId = created?.loomId ?? null;
 			if (!newId) return t;
-			if (chapter.chapterId !== '') {
-				t = moveSceneToSection(t, newId, chapter.chapterId) ?? t;
+			if (act.actId !== '') {
+				t = moveSceneToSection(t, newId, act.actId) ?? t;
 				if (!fields.sceneAppendToEnd) {
 					const order = [...existingSceneIds];
 					const clamped = Math.max(0, Math.min(fields.insertIndex, order.length));
 					order.splice(clamped, 0, newId);
-					t = reorderScenesInSection(t, chapter.chapterId, order) ?? t;
+					t = reorderScenesInSection(t, act.actId, order) ?? t;
 				}
 			}
 			t =
@@ -2389,7 +2389,7 @@ export class CreateEntityModal extends Modal {
 				setLoomKey(fm, FM.sceneIntExt, scene.intExt);
 				setLoomKey(fm, FM.sceneTime, scene.timeOfDay);
 				setLoomKey(fm, FM.sceneLocation, location ? `[[${linkTargetOf(location)}]]` : '');
-				setLoomKey(fm, FM.sceneChapter, `[[${linkTargetOf(chapter)}]]`);
+				setLoomKey(fm, FM.sceneAct, `[[${linkTargetOf(act)}]]`);
 				setLoomKey(fm, FM.sceneBranch, scene.branchLoomId ?? '');
 				setLoomKey(fm, FM.seq, scene.index);
 			});
@@ -2461,7 +2461,7 @@ export class CreateEntityModal extends Modal {
 
 	/**
 	 * Builds the "where does the new one land" position picker shared by the
-	 * Scene and Chapter creation modals: existing items render ONCE as static,
+	 * Scene and Act creation modals: existing items render ONCE as static,
 	 * non-draggable rows in normal document flow (their own order never
 	 * changes); the new/unsaved item is the ONE draggable row, taken out of
 	 * flow (absolute) so the statics never reflow around it, starting at slot 0
@@ -2470,8 +2470,8 @@ export class CreateEntityModal extends Modal {
 	 * grabbed row rides the raw cursor delta with no transition, static rows
 	 * slide a whole slot with one via `transform`, same "slide to reorder" feel
 	 * as the Sublocation/Outline drag lists elsewhere in the app.
-	 * `setItems` lets the Scene modal rebuild the list when its Chapter pick
-	 * changes (a different chapter means a different set of existing scenes to
+	 * `setItems` lets the Scene modal rebuild the list when its Act pick
+	 * changes (a different act means a different set of existing scenes to
 	 * drag among); `setPhantomLabel` keeps the dragged row's own text in sync
 	 * with whatever the modal's own name field currently reads.
 	 */
@@ -2549,26 +2549,26 @@ export class CreateEntityModal extends Modal {
 	}
 
 	/**
-	 * Chapter creation: Title (the script's `#` line) and Display title (the
+	 * Act creation: Title (the script's `#` line) and Display title (the
 	 * centered-bold `>**…**<` marker under it), where to insert it — append to
 	 * the end (default) or drag it to a specific spot among the existing
-	 * chapters — and a Notes field.
+	 * acts — and a Notes field.
 	 */
-	private renderChapterModal(): void {
-		this.setTitle(t('project.createEntity.newChapterTitle'));
+	private renderActModal(): void {
+		this.setTitle(t('project.createEntity.newActTitle'));
 		let title = '';
 		let displayTitle = '';
 		let appendToEnd = true;
 		let notes = '';
-		const existingChapters = this.plugin.indexer
-			.getAll('chapter', this.project.root)
+		const existingActs = this.plugin.indexer
+			.getAll('act', this.project.root)
 			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
 
 		let displayTitleInput: TextComponent | null = null;
 		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
 			text.onChange((v) => {
 				title = v;
-				orderPicker.setPhantomLabel(v.trim() === '' ? t('project.createEntity.newChapterTitle') : v.trim());
+				orderPicker.setPhantomLabel(v.trim() === '' ? t('project.createEntity.newActTitle') : v.trim());
 				// Mirrors what an empty Display title will actually resolve to
 				// (`applyDisplayTitles` falls back to the Title) rather than a
 				// generic hint.
@@ -2595,8 +2595,8 @@ export class CreateEntityModal extends Modal {
 			);
 		const orderWrap = this.contentEl.createDiv({ cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden' });
 		const orderPicker = this.buildOrderPicker(orderWrap);
-		orderPicker.setPhantomLabel(t('project.createEntity.newChapterTitle'));
-		orderPicker.setItems(existingChapters.map((c) => c.name));
+		orderPicker.setPhantomLabel(t('project.createEntity.newActTitle'));
+		orderPicker.setItems(existingActs.map((c) => c.name));
 
 		const notesSetting = new Setting(this.contentEl)
 			.setName(t('project.notes'))
@@ -2608,24 +2608,24 @@ export class CreateEntityModal extends Modal {
 				.setButtonText(t('project.createEntity.createButton'))
 				.setCta()
 				.onClick(() =>
-					void this.submitChapter({
+					void this.submitAct({
 						title,
 						displayTitle,
 						appendToEnd,
 						insertIndex: orderPicker.getIndex(),
-						existingChapters,
+						existingActs,
 						notes,
 					})
 				)
 		);
 	}
 
-	private async submitChapter(fields: {
+	private async submitAct(fields: {
 		title: string;
 		displayTitle: string;
 		appendToEnd: boolean;
 		insertIndex: number;
-		existingChapters: EntityRecord[];
+		existingActs: EntityRecord[];
 		notes: string;
 	}): Promise<void> {
 		const title = fields.title.trim();
@@ -2637,13 +2637,13 @@ export class CreateEntityModal extends Modal {
 
 		let newId: string | null = null;
 		const nextText = await editScriptFile(this.plugin, this.project, (raw) => {
-			let t = appendChapter(raw, title);
+			let t = appendAct(raw, title);
 			const parsed = parseFountain(t);
 			const last = [...parsed.sections].reverse().find((sec) => sec.level === 1 && sec.loomId !== null);
 			newId = last?.loomId ?? null;
 			if (!newId) return t;
 			if (!fields.appendToEnd) {
-				const order = fields.existingChapters.map((c) => c.chapterId);
+				const order = fields.existingActs.map((c) => c.actId);
 				const clamped = Math.max(0, Math.min(fields.insertIndex, order.length));
 				order.splice(clamped, 0, newId);
 				t = reorderTopSections(t, order) ?? t;
@@ -2652,7 +2652,7 @@ export class CreateEntityModal extends Modal {
 			return t;
 		});
 		if (nextText === null || !newId) {
-			new Notice(t('project.createEntity.chapterWriteFailed'));
+			new Notice(t('project.createEntity.actWriteFailed'));
 			return;
 		}
 		const sections = parseFountain(nextText)
@@ -2661,14 +2661,14 @@ export class CreateEntityModal extends Modal {
 		const seq = sections.findIndex((sec) => sec.loomId === newId) + 1;
 
 		try {
-			const created = await createEntity(this.plugin, this.project, 'chapter', {
+			const created = await createEntity(this.plugin, this.project, 'act', {
 				name: title,
 				tag: '',
 				date: '',
 				description: '',
 			});
 			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, FM.chapterId, newId);
+				setLoomKey(fm, FM.actId, newId);
 				setLoomKey(fm, FM.seq, seq);
 				if (displayTitle !== '') setLoomKey(fm, FM.displayTitle, displayTitle);
 			});
@@ -2677,25 +2677,25 @@ export class CreateEntityModal extends Modal {
 				...pcGroupStub(this.project.root),
 				path: created.path,
 				name: title,
-				type: 'chapter',
-				chapterId: newId,
+				type: 'act',
+				actId: newId,
 				seq,
 				displayTitle,
 			};
 			this.close();
-			if (this.options.onChapterCreated) {
-				this.options.onChapterCreated(record);
+			if (this.options.onActCreated) {
+				this.options.onActCreated(record);
 			} else if (this.options.onCreated) {
 				this.options.onCreated(created);
 			} else {
 				const origin: EntityOrigin = {
 					type: VIEW_LIST,
-					state: { project: this.project.root, entityType: 'chapter' },
+					state: { project: this.project.root, entityType: 'act' },
 				};
 				this.plugin.openEntityFile(created.path, origin);
 			}
 		} catch (e) {
-			console.error('Loom Loom: failed to create the chapter', e);
+			console.error('Loom Loom: failed to create the act', e);
 			new Notice(t('project.createEntity.createNoteFailed'));
 		}
 	}

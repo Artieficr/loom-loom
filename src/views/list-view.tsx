@@ -60,7 +60,7 @@ import {
 } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
 import { deleteScriptEntity, useScriptText } from './script-view';
-import { liveChapterIds, liveSceneIds, parseFountain } from '../fountain';
+import { liveActIds, liveSceneIds, parseFountain } from '../fountain';
 
 type SortMode = 'name' | 'created' | 'modified' | 'date' | 'order' | 'appearance';
 
@@ -123,7 +123,7 @@ function compare(
 			return ka === kb ? a.name.localeCompare(b.name) : ka - kb;
 		}
 		case 'order': {
-			// Script order for chapters and scenes: `loomSeq` is stamped from the
+			// Script order for acts and scenes: `loomSeq` is stamped from the
 			// script itself, so this reads the story front to back.
 			const ka = a.seq ?? a.created;
 			const kb = b.seq ?? b.created;
@@ -161,16 +161,16 @@ function EntityList({
 	const project = resolveProject(plugin.indexer, projectRoot);
 	const dated = type === 'event' || type === 'session';
 	const role = roleOf(type);
-	// Scenes share the 'beat' role with Events, but a Chapter (role 'anchor')
+	// Scenes share the 'beat' role with Events, but an Act (role 'anchor')
 	// still wants the same Involved/Location filters aggregated across its own
 	// scenes — so filterability is keyed off `type`, not just `role`. Kept
 	// separate from `hasScriptFilter` below (a materially different set of
 	// types) so switching to, say, the Characters list can't leave a stale
 	// Involved/Location pick from the Scenes list silently filtering it.
-	const hasInvolvedLocationFilter = role === 'beat' || type === 'chapter';
+	const hasInvolvedLocationFilter = role === 'beat' || type === 'act';
 	/** Every type whose "connection to the actual story" is meaningfully
 	 *  script-derived gets the "Not in the script" filter/highlight — Scenes
-	 *  and Chapters check their OWN script presence (`notInScript`); the rest
+	 *  and Acts check their OWN script presence (`notInScript`); the rest
 	 *  check the project-wide `connectivity` graph below. Quests and Maps are
 	 *  deliberately excluded — quests track their own resolution lifecycle,
 	 *  and maps are a separate workflow entirely. Meaningless outside a
@@ -181,17 +181,17 @@ function EntityList({
 	const hasScriptFilter =
 		features(project?.config).script &&
 		(type === 'scene' ||
-			type === 'chapter' ||
+			type === 'act' ||
 			type === 'character' ||
 			type === 'location' ||
 			type === 'faction' ||
 			type === 'item');
 	const filterable = hasInvolvedLocationFilter || hasScriptFilter;
-	// Chapters and scenes carry a script order rather than a date, and a story
+	// Acts and scenes carry a script order rather than a date, and a story
 	// reads front to back — where a campaign log wants the latest session on
-	// top, a script wants chapter one. So they default to script order, oldest
+	// top, a script wants act one. So they default to script order, oldest
 	// first, and everything else keeps its existing default.
-	const scripted = type === 'chapter' || type === 'scene';
+	const scripted = type === 'act' || type === 'scene';
 	const [query, setQuery] = useState('');
 	const [sort, setSort] = useState<SortMode>(
 		type === 'session' ? 'date' : scripted ? 'order' : 'name'
@@ -203,11 +203,11 @@ function EntityList({
 	const [questStatus, setQuestStatus] = useState('');
 	/** Quests only: rows or the session-page-style card grid. */
 	const [questView, setQuestView] = useState<'list' | 'cards'>('list');
-	/** Events/Scenes/Chapters only: the involved-entity filter (AND semantics
+	/** Events/Scenes/Acts only: the involved-entity filter (AND semantics
 	 *  across every picked entity) and the single location filter. */
 	const [eventInvolvedFilter, setEventInvolvedFilter] = useState<readonly string[]>([]);
 	const [eventLocation, setEventLocation] = useState<string | null>(null);
-	/** Scenes/Chapters only: isolate notes no longer backed by a heading/
+	/** Scenes/Acts only: isolate notes no longer backed by a heading/
 	 *  section in the script (see `notInScript` below). */
 	const [scriptFilter, setScriptFilter] = useState(false);
 	/** Folded behind a filter icon in the toolbar, opening on top (like the
@@ -245,29 +245,29 @@ function EntityList({
 		return map;
 	}, [type, scriptTextForSort]);
 	// Same gating as the character-appearance read above, for the Scenes/
-	// Chapters lists' own "Not in the script" filter and row highlighting —
+	// Acts lists' own "Not in the script" filter and row highlighting —
 	// a note whose heading was rewritten or deleted directly in the script
-	// text (rather than through the Scene/Chapter page's own fields, which
+	// text (rather than through the Scene/Act page's own fields, which
 	// keep the same `[[loom:id]]` across a rename) loses its script backing
 	// and never gets cleaned up automatically (`syncScenes` is additive-only).
 	const scriptTextForOrphans = useScriptText(
 		plugin,
-		type === 'scene' || type === 'chapter' ? project : null
+		type === 'scene' || type === 'act' ? project : null
 	);
 	const liveScriptIds = useMemo(() => {
-		if ((type !== 'scene' && type !== 'chapter') || scriptTextForOrphans === null) return null;
+		if ((type !== 'scene' && type !== 'act') || scriptTextForOrphans === null) return null;
 		const parsed = parseFountain(scriptTextForOrphans);
-		return type === 'scene' ? liveSceneIds(parsed) : liveChapterIds(parsed);
+		return type === 'scene' ? liveSceneIds(parsed) : liveActIds(parsed);
 	}, [type, scriptTextForOrphans]);
-	/** A Scene/Chapter note no longer backed by a heading/section in the
-	 *  script — either never synced one (`sceneId`/`chapterId` empty) or its
+	/** A Scene/Act note no longer backed by a heading/section in the
+	 *  script — either never synced one (`sceneId`/`actId` empty) or its
 	 *  id fell out of the current parse. `null` (script not loaded yet, or
 	 *  wrong entity type) never counts as an orphan — only a definite miss
 	 *  does, so this can't flash every row red before the script finishes
 	 *  loading. */
 	const notInScript = (r: EntityRecord): boolean => {
 		if (!liveScriptIds) return false;
-		const id = r.type === 'scene' ? r.sceneId : r.type === 'chapter' ? r.chapterId : '';
+		const id = r.type === 'scene' ? r.sceneId : r.type === 'act' ? r.actId : '';
 		return id === '' || !liveScriptIds.has(id);
 	};
 	/** Project-wide "is this entity actually connected to the story" graph
@@ -288,7 +288,7 @@ function EntityList({
 	 *    character OR a connected location.
 	 *  Only computed when actually viewing one of these lists. */
 	const connectivity = useMemo(() => {
-		if (!project || !hasScriptFilter || type === 'scene' || type === 'chapter') return null;
+		if (!project || !hasScriptFilter || type === 'scene' || type === 'act') return null;
 		const resolve = (lp: string, from: string) => plugin.indexer.resolve(lp, from);
 
 		const connectedCharacters = new Set<string>();
@@ -369,10 +369,10 @@ function EntityList({
 		return { connectedCharacters, connectedLocations, connectedFactions, connectedItems };
 	}, [plugin.indexer, version, project, type, hasScriptFilter]);
 	/** Unified "should this row be flagged as disconnected from the story"
-	 *  check — Scenes/Chapters via their own script presence, everything
+	 *  check — Scenes/Acts via their own script presence, everything
 	 *  else via the `connectivity` graph above. */
 	const isOrphan = (r: EntityRecord): boolean => {
-		if (r.type === 'scene' || r.type === 'chapter') return notInScript(r);
+		if (r.type === 'scene' || r.type === 'act') return notInScript(r);
 		if (!connectivity) return false;
 		if (r.type === 'character') return !connectivity.connectedCharacters.has(r.path);
 		if (r.type === 'location') return !connectivity.connectedLocations.has(r.path);
@@ -382,7 +382,7 @@ function EntityList({
 	};
 	const vocab = ENTITY_TAGS[type];
 	// The project's own chronology: Sessions/Events in a player or GM project,
-	// Chapters/Scenes in a writer one. The menus and pickers below address
+	// Acts/Scenes in a writer one. The menus and pickers below address
 	// these rather than naming a type.
 	const anchorType = projectRoleType(project?.config, 'anchor');
 	const beatType = projectRoleType(project?.config, 'beat');
@@ -409,21 +409,21 @@ function EntityList({
 	// no such field — "who/where is in it" is entirely script-derived
 	// (`sceneCast`/`sceneFactions`/`sceneItems`/`sceneMentionedLocations`,
 	// `sceneLocation`), so this branches on `r.type` rather than sharing one
-	// shape. A Chapter has neither field of its own — it aggregates across
-	// every scene that points at it via `sceneChapter`.
+	// shape. An Act has neither field of its own — it aggregates across
+	// every scene that points at it via `sceneAct`.
 	const eventHasInvolved = (r: EntityRecord, path: string): boolean => {
 		if (r.type === 'scene') {
 			return [...r.sceneCast, ...r.sceneFactions, ...r.sceneItems, ...r.sceneMentionedLocations].some(
 				(lp) => plugin.indexer.resolve(lp, r.path)?.path === path
 			);
 		}
-		if (r.type === 'chapter') {
+		if (r.type === 'act') {
 			return plugin.indexer
 				.getAll('scene', r.project)
 				.some(
 					(sc) =>
-						sc.sceneChapter !== '' &&
-						plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === r.path &&
+						sc.sceneAct !== '' &&
+						plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === r.path &&
 						eventHasInvolved(sc, path)
 				);
 		}
@@ -437,13 +437,13 @@ function EntityList({
 			const loc = plugin.indexer.resolve(r.sceneLocation, r.path);
 			return loc?.type === 'location' && locDescendsFrom(loc, path);
 		}
-		if (r.type === 'chapter') {
+		if (r.type === 'act') {
 			return plugin.indexer
 				.getAll('scene', r.project)
 				.some(
 					(sc) =>
-						sc.sceneChapter !== '' &&
-						plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path === r.path &&
+						sc.sceneAct !== '' &&
+						plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === r.path &&
 						eventAtLocation(sc, path)
 				);
 		}
@@ -503,7 +503,7 @@ function EntityList({
 		characterAppearance,
 	]);
 
-	/** Scene/Chapter counter: each one's position in canonical SCRIPT order
+	/** Scene/Act counter: each one's position in canonical SCRIPT order
 	 *  (ascending, ignoring whatever sort/direction is currently on screen) —
 	 *  a fixed property of the entity, not "which row happens to be drawn
 	 *  first". Without this, reversing the sort direction just recounted
@@ -517,9 +517,9 @@ function EntityList({
 	 *  every number after it past what the script itself actually contains.
 	 *  An orphan's row simply shows no number (`scriptOrder.get` misses). */
 	const scriptOrder = useMemo(() => {
-		if (type !== 'scene' && type !== 'chapter') return new Map<string, number>();
+		if (type !== 'scene' && type !== 'act') return new Map<string, number>();
 		const canonical = [...records]
-			.filter((r) => !liveScriptIds || liveScriptIds.has(r.type === 'scene' ? r.sceneId : r.chapterId))
+			.filter((r) => !liveScriptIds || liveScriptIds.has(r.type === 'scene' ? r.sceneId : r.actId))
 			.sort((a, b) => compare(a, b, 'order'));
 		return new Map(canonical.map((r, i) => [r.path, i + 1]));
 	}, [records, type, liveScriptIds]);
@@ -760,16 +760,16 @@ function EntityList({
 	const addBeatMenuItem = (menu: Menu, r: EntityRecord) =>
 		menu.addItem((i) => i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r)));
 
-	// A scene/chapter IS its stretch of the script — deleting the note while
+	// A scene/act IS its stretch of the script — deleting the note while
 	// leaving the writing behind would just resurrect it on the next parse, so
-	// the two go together; deleting a chapter also takes its scenes' notes
+	// the two go together; deleting an act also takes its scenes' notes
 	// with it (`deleteScriptEntity`, script-view.tsx).
 	const scriptBacked = (r: EntityRecord): boolean =>
-		(r.type === 'chapter' && r.chapterId !== '') || (r.type === 'scene' && r.sceneId !== '');
+		(r.type === 'act' && r.actId !== '') || (r.type === 'scene' && r.sceneId !== '');
 	const deleteMessage = (r: EntityRecord): string =>
 		scriptBacked(r)
-			? r.type === 'chapter'
-				? t('view.list.deleteMessageChapter')
+			? r.type === 'act'
+				? t('view.list.deleteMessageAct')
 				: t('view.list.deleteMessageScene')
 			: t('view.list.deleteMessageGeneral');
 	const deleteRow = (r: EntityRecord): void => {
@@ -1327,13 +1327,13 @@ function EntityList({
 		r.sceneCast
 			.map((lp) => plugin.indexer.resolve(lp, r.path))
 			.filter((c): c is EntityRecord => c != null);
-	/** A chapter's cast: the union of every scene's cast under it, in
-	 *  first-seen order — chapters don't carry their own cast field, this
-	 *  reads it straight off the scenes that point at them via `sceneChapter`. */
-	const chapterCastOf = (r: EntityRecord): EntityRecord[] => {
+	/** An act's cast: the union of every scene's cast under it, in
+	 *  first-seen order — acts don't carry their own cast field, this
+	 *  reads it straight off the scenes that point at them via `sceneAct`. */
+	const actCastOf = (r: EntityRecord): EntityRecord[] => {
 		const seen = new Map<string, EntityRecord>();
 		for (const sc of plugin.indexer.getAll('scene', r.project)) {
-			if (sc.sceneChapter === '' || plugin.indexer.resolve(sc.sceneChapter, sc.path)?.path !== r.path) continue;
+			if (sc.sceneAct === '' || plugin.indexer.resolve(sc.sceneAct, sc.path)?.path !== r.path) continue;
 			for (const c of sceneCastOf(sc)) seen.set(c.path, c);
 		}
 		return [...seen.values()];
@@ -1342,7 +1342,7 @@ function EntityList({
 	const row = (r: EntityRecord, depth: number) => {
 		const hasChildren = nested && (childrenOf.get(r.path)?.length ?? 0) > 0;
 		const isUnspecRegion = r.path === UNSPEC_REGION;
-		const cast = r.type === 'scene' ? sceneCastOf(r) : r.type === 'chapter' ? chapterCastOf(r) : [];
+		const cast = r.type === 'scene' ? sceneCastOf(r) : r.type === 'act' ? actCastOf(r) : [];
 		return (
 			<div
 				key={r.path}
@@ -1375,7 +1375,7 @@ function EntityList({
 						<span className="loom-row-caret" aria-hidden="true" />
 					)
 				) : null}
-				{r.type === 'scene' || r.type === 'chapter' ? (
+				{r.type === 'scene' || r.type === 'act' ? (
 					<span className="loom-scene-row-num">{scriptOrder.get(r.path)}</span>
 				) : null}
 				{/* Always reserved (even blank) so the title's start position
@@ -1387,7 +1387,7 @@ function EntityList({
 				) : null}
 				{cast.length > 0 ? (
 					// Stops a chip click from bubbling into the row's own onClick,
-					// which would open THIS scene/chapter instead of the character.
+					// which would open THIS scene/act instead of the character.
 					<div className="loom-row-cast" onClick={(e) => e.stopPropagation()}>
 						{cast.map((c) => (
 							<EntityChip key={c.path} plugin={plugin} record={c} onOpen={() => view.openEntity(c.path)} />
