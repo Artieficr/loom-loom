@@ -45,8 +45,9 @@
 		"createEntity": {
 			"tagLabel": "Метка",
 			"newSublocationTitle": "Новая подлокация",
-			"nameLabel": "Имя",
-			"namePlaceholderSearchable": "Поиск или новое имя: {noun}",
+			"nameLabel": "Название",
+			"characterNameLabel": "Имя",
+			"namePlaceholderSearchable": "Поиск или новое название: {noun}",
 			"namePlaceholderNew": "Название: {label}",
 			"questGiver": "Квестодатель",
 			"addQuestGiver": "Добавить квестодателя…",
@@ -96,6 +97,10 @@
 			"appendToEndScript": {
 				"name": "Добавить в конец сценария",
 				"desc": "Отключите, чтобы выбрать место среди существующих глав."
+			},
+			"appendToEndBook": {
+				"name": "Добавить в конец книги",
+				"desc": "Отключите, чтобы выбрать место среди существующих актов."
 			},
 			"titleRequired": "Укажите заголовок.",
 			"chapterWriteFailed": "Не удалось записать главу в сценарий.",
@@ -261,7 +266,8 @@
 				"removeFromNote": "Убрать из этой заметки",
 				"back": "Назад",
 				"titleLabel": "Заголовок",
-				"nameLabel": "Имя",
+				"nameLabel": "Название",
+				"characterNameLabel": "Имя",
 				"aliases": "Псевдонимы",
 				"removeAlias": "Удалить псевдоним",
 				"sessionNumber": "Сессия {n}",

@@ -83,6 +83,14 @@ import {
 	type NavNode,
 	type ScriptSearchMatch,
 } from './script-view';
+import { editBookAndSync, useBookText } from './book-view';
+import {
+	chapterBookText,
+	moveBookChapterToAct,
+	renameBookActTitle,
+	renameBookChapterTitle,
+	replaceBookChapterBody,
+} from '../prose';
 import { AltTextEntry, CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
 import { CommentPopover } from './annotation-popover';
 import {
@@ -326,6 +334,12 @@ function EntityPage({ view }: { view: EntityView }) {
 	// hook, so it can't sit behind the early returns below) and unused by every
 	// other entity type.
 	const scriptText = useScriptText(plugin, project);
+	/** The project's Book, for a Chapter/Act page's Editor section — same
+	 *  role `scriptText` plays for Script mode, unused by every other
+	 *  entity type. */
+	const bookText = useBookText(plugin, project);
+	const [chapterEditorMode, setChapterEditorMode] = useState<'editor' | 'preview'>('editor');
+	const [chapterSearchQuery, setChapterSearchQuery] = useState('');
 	/** Comment bodies + alt-text option lists — same project-level sidecar
 	 *  the main Script view reads/writes, kept live the same way. Unused by
 	 *  every entity type but Scene/Act, same as `scriptText` above. */
@@ -1231,15 +1245,18 @@ function EntityPage({ view }: { view: EntityView }) {
 	// the parts that really are session-only (dates, attendance) gate on the
 	// kind's features instead.
 	const anchorType = projectRoleType(project?.config, 'anchor');
-	// Writer/Prose has no beat type at all (a Chapter has no smaller unit
-	// beneath it) — every beat-hub/"Add a [beat]" section below is skipped
-	// entirely when this is null, not just its label.
 	const beatType = projectRoleType(project?.config, 'beat');
 	const anchorLabel = entityLabel(anchorType).toLowerCase();
-	const beatLabel = beatType !== null ? entityLabel(beatType).toLowerCase() : '';
+	const beatLabel = entityLabel(beatType).toLowerCase();
 	const kindFeatures = features(project?.config);
-	/** Writer projects: the writing lives in the script, not in note fields. */
+	/** Writer/Script: the writing lives in the script, not in note fields. */
 	const scriptMode = kindFeatures.script;
+	/** Writer/Prose: the writing lives in the Book, not in note fields. */
+	const bookMode = kindFeatures.book;
+	/** Writer, either sub-mode — both resolve quests against their beat type
+	 *  (Scene/Chapter) rather than directly against the anchor (Act), unlike
+	 *  Player/GM (Session). See `questAnchorRole` below. */
+	const isWriterProject = kindFeatures.script || kindFeatures.book;
 	/** True for BOTH Writer sub-modes (Script's Acts and Prose's Chapters are
 	 *  both manually ordered, `loomSeq`, not dated) — distinct from
 	 *  `scriptMode`, which is Script-only. Chronology math (quest resolution
@@ -1252,6 +1269,17 @@ function EntityPage({ view }: { view: EntityView }) {
 		scriptMode && (record.type === 'act' ? record.actId !== '' : record.sceneId !== '');
 	const sceneActRecord =
 		record.sceneAct !== '' ? plugin.indexer.resolve(record.sceneAct, record.path) : null;
+	const chapterActRecord =
+		record.type === 'chapter' && record.chapterAct !== ''
+			? plugin.indexer.resolve(record.chapterAct, record.path)
+			: null;
+	/** This chapter's own stretch of the Book — heading-stripped, mirrors
+	 *  `sceneExcerpt`. Null while the Book/heading doesn't exist yet (an
+	 *  orphan, or before the first sync has run). */
+	const chapterExcerpt =
+		record.type === 'chapter' && bookText !== null && record.chapterId !== ''
+			? chapterBookText(bookText, record.chapterId)
+			: null;
 	/** Script-recognized cast — `loomSceneCast`, derived from the script's own
 	 *  character cues by `syncScenes`, shown read-only (editing a scene's cast
 	 *  means writing the dialogue that names them, not this list). */
@@ -1485,6 +1513,13 @@ function EntityPage({ view }: { view: EntityView }) {
 			setName(record.name);
 			return;
 		}
+		// A Chapter's title is Book-owned once a Book exists, same reasoning as
+		// an Act's — write the `##` heading and let `syncActsChapters` rename
+		// the note, rather than racing a direct frontmatter rename against it.
+		if (record.type === 'chapter' && bookMode) {
+			await editBookAndSync(plugin, project, (raw) => renameBookChapterTitle(raw, record.chapterId, entered));
+			return;
+		}
 		await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 			setLoomKey(fm, FM.name, entered);
 			const aliases: unknown[] = Array.isArray(fm.aliases)
@@ -1514,6 +1549,10 @@ function EntityPage({ view }: { view: EntityView }) {
 		const entered = name.trim();
 		if (entered === '' || entered === record.name || !project || record.type !== 'act') {
 			setName(record.name);
+			return;
+		}
+		if (bookMode) {
+			await editBookAndSync(plugin, project, (raw) => renameBookActTitle(raw, record.actId, entered));
 			return;
 		}
 		await editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, record.actId, entered));
@@ -2027,20 +2066,14 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sessionsByDate = sessions
 		.slice()
 		.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
-	// A quest resolves against whatever unit play/writing actually happens in:
-	// Sessions in a Player/GM project, Scenes in a Writer/Script one, Chapters
-	// directly in a Writer/Prose one (acts have no date or single sitting of
-	// their own — the scene is where a quest is actually received or
-	// completed; a Writer/Prose project has no scene-equivalent at all, so it
-	// falls to the `!scriptMode` branch same as a Session does).
-	// `questAnchorRole` is what a resolved link must be to count as valid.
-	// `beatType` is only ever null when `scriptMode` is already false (a
-	// Writer/Prose project has neither a script nor a beat type), so this
-	// ternary can never actually produce `null` — the `?? anchorType`
-	// satisfies the type checker for that impossible case without masking a
-	// real one.
-	const questAnchorType = scriptMode ? (beatType ?? anchorType) : anchorType;
-	const questAnchorRole = scriptMode ? 'beat' : 'anchor';
+	// A quest resolves against whatever unit play/writing actually happens
+	// in: Sessions in a Player/GM project (acts/chapters have no date or
+	// single sitting of their own) — but a Scene in Writer/Script or a
+	// Chapter in Writer/Prose, both of which resolve against their beat
+	// type rather than the anchor, unlike Player/GM. `questAnchorRole` is
+	// what a resolved link must be to count as valid.
+	const questAnchorType = isWriterProject ? beatType : anchorType;
+	const questAnchorRole = isWriterProject ? 'beat' : 'anchor';
 	const questAnchorsSorted = (project ? plugin.indexer.getAll(questAnchorType, project.root) : [])
 		.slice()
 		.sort((a, b) =>
@@ -2445,7 +2478,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		record.type === 'location' ||
 		record.type === 'region' ||
 		record.type === 'quest';
-	const pageEventEntries: LocNoteEntry[] = showsEvents && beatType !== null
+	const pageEventEntries: LocNoteEntry[] = showsEvents
 		? plugin.indexer
 				.getAll(beatType, record.project)
 				.flatMap((owner) =>
@@ -3275,20 +3308,17 @@ function EntityPage({ view }: { view: EntityView }) {
 				new Notice(t('view.entity.common.renameFailed'));
 			});
 	};
-	// Writer/Script projects: quests resolve against Scenes (script order,
-	// `seq`); Writer/Prose ones resolve directly against Chapters (`seq`
-	// too — a Chapter has no date). A quest's own `questReceived`/
-	// `questOutcomeSession` is always a leaf in Script mode (a Scene, never
-	// an Act) but the anchor itself in every other mode (Session, or
-	// Chapter) — `anchorPositionKey` covers all of those non-Act cases
-	// uniformly by keying on `seqOrdered`, not `scriptMode`, since Prose is
-	// sequence-ordered too but has no beat type to be a "leaf" of; an Act
-	// page's OWN position is the one special case, since "as of this act"
-	// means "as of its last scene" (`actScenes` is already sorted ascending
-	// by `seq`).
+	// Writer/Script projects: quests resolve against Scenes (`seq`);
+	// Writer/Prose ones resolve against Chapters (`seq` too — neither has a
+	// date). A quest's own `questReceived`/`questOutcomeSession` is always
+	// the beat type in a Writer project (Scene or Chapter, never the Act) —
+	// `anchorPositionKey` covers that leaf case, plus Session's own anchor
+	// case for Player/GM, uniformly by keying on `seqOrdered`; an Act page's
+	// OWN position is the one special case, since "as of this act" means "as
+	// of its last scene" (`actScenes` is already sorted ascending by `seq`).
 	const anchorPositionKey = (r: EntityRecord): number | null =>
 		seqOrdered ? r.seq ?? r.created : (r.date?.sortKey ?? null);
-	const showsQuestSection = (isSession || record.type === 'scene') && project;
+	const showsQuestSection = (isSession || record.type === 'scene' || record.type === 'chapter') && project;
 	const lastActScene = actScenes.length > 0 ? actScenes[actScenes.length - 1] : null;
 	const asOf = seqOrdered
 		? record.type === 'act'
@@ -4240,10 +4270,9 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	// Events hub — rendered near the top on most entity pages, but pushed below
 	// the location-only sections (Factions/Items/Sublocations) on a location
-	// page. Nothing to show at all in a Writer/Prose project — there's no
-	// beat-type entity (Chapter has none) to hold an event/session note on.
+	// page.
 	const eventsSection =
-		showsEvents && project && beatType !== null ? (
+		showsEvents && project ? (
 			<div className="loom-field loom-field-sep">
 				<span className="loom-field-label">{entityPlural(beatType)}</span>
 				<div className="loom-hub-add-row">
@@ -4495,8 +4524,19 @@ function EntityPage({ view }: { view: EntityView }) {
 							    editable everywhere, same as the rest of the plugin.
 							    Labeled "Title" rather than "Name" when it's script-owned,
 							    since that's what pairs with the act's editable
-							    "Display title" below. */}
-							<span className="loom-field-label">{scriptNamed ? t('view.entity.common.titleLabel') : t('view.entity.common.nameLabel')}</span>
+							    "Display title" below. A Character's own name gets a
+							    dedicated label ("Имя" in Russian) — the generic Name
+							    label ("Название") is grammatically a thing's name, not
+							    a person's. */}
+							<span className="loom-field-label">
+								{scriptNamed
+									? t('view.entity.common.titleLabel')
+									: t(
+											record.type === 'character'
+												? 'view.entity.common.characterNameLabel'
+												: 'view.entity.common.nameLabel'
+										)}
+							</span>
 							<input
 								type="text"
 								value={name}
@@ -4727,9 +4767,10 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{/* A writer project's Scene has no date of its own — its position in
-			    the story is the script order (`seq`), same as an Act's. */}
-			{isBeat && record.type !== 'scene' ? (
+			{/* A writer project's Scene/Chapter has no date of its own — its
+			    position in the story is the script/book order (`seq`), same as
+			    an Act's. */}
+			{isBeat && record.type !== 'scene' && record.type !== 'chapter' ? (
 				<label className="loom-field">
 					<span className="loom-field-label">{t('project.createEntity.date')}</span>
 					<input
@@ -4790,7 +4831,10 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{record.type === 'act' ? (
+			{/* Display title is a printed-page concept (the exported PDF's
+			    centered-bold marker) — meaningless with no script to print,
+			    so Prose Acts don't get this field at all. */}
+			{record.type === 'act' && scriptMode ? (
 				<label className="loom-field">
 					<span className="loom-field-label">{t('project.createEntity.displayTitle.name')}</span>
 					<input
@@ -4813,54 +4857,6 @@ function EntityPage({ view }: { view: EntityView }) {
 			    Placed right after the title fields rather than down with the
 			    rest of the page. */}
 			{record.type === 'act' ? (
-				<div className="loom-field loom-field-body">
-					<span className="loom-field-label">{t('project.notes')}</span>
-					<MarkdownField
-						app={plugin.app}
-						value={body ?? ''}
-						names={linkNames}
-						onOpenLink={openLinkTarget}
-						onCreateEntity={createLinkEntity}
-						onChange={(v) => {
-							setBody(v);
-							saveBody(v);
-						}}
-					/>
-				</div>
-			) : null}
-
-			{/* Chapter (Writer/Prose): unlike Act, there's no script to be named
-			    by — a Chapter's title is a normal editable field, same shape as
-			    the generic Name field every non-anchor type gets (which `isSession`
-			    excludes Chapter from, same as Act/Session), just without the
-			    alias row those get (Act doesn't have one either today). */}
-			{record.type === 'chapter' ? (
-				<label className="loom-field">
-					<span className="loom-field-label loom-field-label-row">
-						{t('view.entity.common.nameLabel')}
-						{sessionNumber > 0 ? (
-							<span className="loom-session-number">{t('view.entity.common.chapterNumber', { n: sessionNumber })}</span>
-						) : null}
-					</span>
-					<input
-						type="text"
-						value={name}
-						onChange={(e) => setName(e.target.value)}
-						onBlur={() => void commitName()}
-						onKeyDown={(e) => {
-							if (e.key === 'Enter') void commitName();
-						}}
-					/>
-				</label>
-			) : null}
-
-			{/* The prose text itself — same body/saveBody mechanism as every other
-			    entity type's Notes field, same placement rationale as Act's above
-			    (right after the title, not down with the rest of the page).
-			    `MarkdownField` is a placeholder here — swapped for the richer
-			    `ProseField` once it exists (bold/italic/underline/strikethrough/
-			    alignment/page-break, still the exact same body/saveBody wiring). */}
-			{record.type === 'chapter' ? (
 				<div className="loom-field loom-field-body">
 					<span className="loom-field-label">{t('project.notes')}</span>
 					<MarkdownField
@@ -5898,7 +5894,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{isSession && !scriptMode && project && beatType !== null ? (
+			{isSession && !scriptMode && project ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">{entityPlural(beatType)}</span>
 					{/* Creation first, as always. The modal's Name field searches
@@ -6977,6 +6973,111 @@ function EntityPage({ view }: { view: EntityView }) {
 							)}
 					</div>
 				</>
+			) : isBeat && bookMode && record.type === 'chapter' ? (
+				<div className="loom-field loom-field-sep">
+					<div className="loom-scene-act-left">
+						<span className="loom-field-label">{entityLabel(anchorType)}</span>
+						<div className="loom-tag-row">
+							{chapterActRecord ? (
+								<EntityChip
+									plugin={plugin}
+									record={chapterActRecord}
+									onOpen={() => view.openEntity(chapterActRecord.path)}
+								/>
+							) : null}
+						</div>
+						{project ? (
+							<SearchableSelect
+								placeholder={
+									chapterActRecord
+										? t('view.entity.scene.moveToAnother', { anchor: anchorLabel })
+										: t('project.createEntity.pickAnchor', { anchor: anchorLabel })
+								}
+								options={plugin.indexer
+									.getAll('act', record.project)
+									.filter((a) => a.path !== chapterActRecord?.path)
+									.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+									.map((a) => ({ value: a.path, label: a.name }))}
+								onPick={(path) => {
+									const target = plugin.indexer.get(path);
+									if (!target || target.actId === '') return;
+									void editBookAndSync(plugin, project, (raw) =>
+										moveBookChapterToAct(raw, record.chapterId, target.actId)
+									);
+								}}
+							/>
+						) : null}
+					</div>
+					<div className="loom-script-tabs">
+						<div className="loom-seg">
+							<button
+								className={chapterEditorMode === 'editor' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
+								onClick={() => setChapterEditorMode('editor')}
+							>
+								{t('view.entity.script.editorLabel')}
+							</button>
+							<button
+								className={chapterEditorMode === 'preview' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
+								onClick={() => setChapterEditorMode('preview')}
+							>
+								{t('view.entity.script.pagesPreview')}
+							</button>
+						</div>
+						<div className="loom-script-side-toggles">
+							{/* Comments/alternative-text aren't wired to the Book yet — the
+							    icons are present so the toolbar's final shape is already in
+							    place, lighting up once that follow-up pass lands. */}
+							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseComments')}>
+								<Icon name="message-square" />
+							</button>
+							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseAlternatives')}>
+								<Icon name="repeat" fallback="arrow-right-left" />
+							</button>
+						</div>
+					</div>
+					<input
+						type="text"
+						className="loom-script-search"
+						placeholder={t('project.common.searchPlaceholder')}
+						value={chapterSearchQuery}
+						onChange={(e) => setChapterSearchQuery(e.target.value)}
+						onKeyDown={(e) => {
+							if (e.key === 'Enter') {
+							// `window.find` is a real, long-standing Chromium/Gecko API
+							// (Obsidian runs on Electron/Chromium) with no DOM lib typing.
+							(window as unknown as { find?: (s: string) => boolean }).find?.(chapterSearchQuery);
+						}
+						}}
+					/>
+					{chapterExcerpt !== null ? (
+						chapterEditorMode === 'editor' ? (
+							<MarkdownField
+								app={plugin.app}
+								value={chapterExcerpt}
+								names={linkNames}
+								onOpenLink={openLinkTarget}
+								onCreateEntity={createLinkEntity}
+								onChange={(v) => {
+									if (!project) return;
+									void editBookAndSync(plugin, project, (raw) =>
+										replaceBookChapterBody(raw, record.chapterId, v)
+									);
+								}}
+							/>
+						) : (
+							<MarkdownField
+								app={plugin.app}
+								value={chapterExcerpt}
+								names={linkNames}
+								onOpenLink={openLinkTarget}
+								readOnly
+								onChange={() => {}}
+							/>
+						)
+					) : (
+						<div className="loom-attendance-empty">{t('view.entity.script.sceneNotInScript')}</div>
+					)}
+				</div>
 			) : isBeat ? (
 				<div className="loom-field loom-field-sep">
 					{sessionNotes.length > 0 ? (

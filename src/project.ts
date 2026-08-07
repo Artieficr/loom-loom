@@ -114,10 +114,7 @@ export async function scaffoldProject(
 	}
 	const anchorType = roleType(kind, 'anchor', writerMode);
 	const beatType = roleType(kind, 'beat', writerMode);
-	// Writer/Prose has an anchor (Chapter) and no beat type at all — see
-	// project-kind.ts's `TypeRole` doc comment — so the timeline only ever
-	// lists one type there, not the usual [anchor, beat] pair.
-	const timelineTypes = [anchorType, beatType].filter((t): t is EntityType => t !== null);
+	const timelineTypes = [anchorType, beatType];
 	const timelinePath = root + '/' + TIMELINES_FOLDER + '/Main timeline.md';
 	if (!app.vault.getFileByPath(timelinePath)) {
 		await app.vault.create(
@@ -1188,10 +1185,10 @@ export interface CreateEntityOptions {
 	 *  pick uses this so it can hand the created act straight to its own
 	 *  act picker instead of navigating away mid-scene-creation. */
 	onActCreated?: (record: EntityRecord) => void;
-	/** Scenes only: pre-picks the Act field — the Act page's own
-	 *  "+ New scene" button uses this so a scene added from there lands in
-	 *  THIS act without making the user pick it again. Still changeable;
-	 *  just a starting pick, not a lock. */
+	/** Scenes/Chapters only: pre-picks the Act field — the Act page's own
+	 *  "+ New scene"/"+ New chapter" button uses this so a scene/chapter
+	 *  added from there lands in THIS act without making the user pick it
+	 *  again. Still changeable; just a starting pick, not a lock. */
 	defaultAct?: EntityRecord;
 }
 
@@ -1292,16 +1289,22 @@ export class CreateEntityModal extends Modal {
 	}
 
 	onOpen(): void {
-		// Scene and Act are script-backed structural types — their writing
-		// lives in the .fountain file, not in note fields the way every other
-		// type works, so they get their own dedicated layout entirely instead
-		// of falling through the generic fields below.
+		// Scene, Act and Chapter are structural beat/anchor types with no
+		// generic Name/Involved/Locations/Date/Description shape — Scene and
+		// Act are script-backed (their writing lives in the .fountain file,
+		// not note fields); Chapter is book-backed the same way once the Book
+		// parser exists. All three get their own dedicated layout instead of
+		// falling through the generic fields below.
 		if (this.type === 'scene') {
 			this.renderSceneModal();
 			return;
 		}
 		if (this.type === 'act') {
 			this.renderActModal();
+			return;
+		}
+		if (this.type === 'chapter') {
+			this.renderChapterModal();
 			return;
 		}
 		this.setTitle(
@@ -1319,7 +1322,15 @@ export class CreateEntityModal extends Modal {
 				this.options.noteSession !== undefined;
 			const noun = entityLabel(this.type).toLowerCase();
 			const article = /^[aeiou]/.test(noun) ? 'an' : 'a';
-			new Setting(this.contentEl).setName(t('project.createEntity.nameLabel')).addText((text) => {
+			new Setting(this.contentEl)
+				.setName(
+					t(
+						this.type === 'character'
+							? 'project.createEntity.characterNameLabel'
+							: 'project.createEntity.nameLabel'
+					)
+				)
+				.addText((text) => {
 				text
 					.setPlaceholder(
 						searchable
@@ -2564,9 +2575,16 @@ export class CreateEntityModal extends Modal {
 	 * Act creation: Title (the script's `#` line) and Display title (the
 	 * centered-bold `>**…**<` marker under it), where to insert it — append to
 	 * the end (default) or drag it to a specific spot among the existing
-	 * acts — and a Notes field.
+	 * acts — and a Notes field. Script mode only — Prose has no script to
+	 * write a `#` line or display-title marker into, so it gets its own
+	 * simpler `renderProseActModal`/`submitProseAct` pair instead, stamping
+	 * frontmatter directly the same way `submitChapter` does.
 	 */
 	private renderActModal(): void {
+		if (this.project.config.writerMode === 'prose') {
+			this.renderProseActModal();
+			return;
+		}
 		this.setTitle(t('project.createEntity.newActTitle'));
 		let title = '';
 		let displayTitle = '';
@@ -2708,6 +2726,331 @@ export class CreateEntityModal extends Modal {
 			}
 		} catch (e) {
 			console.error('Loom Loom: failed to create the act', e);
+			new Notice(t('project.createEntity.createNoteFailed'));
+		}
+	}
+
+	/**
+	 * Act creation (Writer/Prose): just Title, an Append-to-the-end-of-the-book
+	 * toggle (same `buildOrderPicker` reorder-when-off UI Script's own Act
+	 * modal uses), and Notes — no Display title (that marker only matters for
+	 * the printed/exported Fountain page) and no script write, since there's
+	 * no Book file to write into yet. Stamps `loomSeq` directly, restamping
+	 * later siblings, the same "no script to splice yet" pattern
+	 * `submitChapter` uses.
+	 */
+	private renderProseActModal(): void {
+		this.setTitle(t('project.createEntity.newActTitle'));
+		let title = '';
+		let appendToEnd = true;
+		let notes = '';
+		const existingActs = this.plugin.indexer
+			.getAll('act', this.project.root)
+			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+
+		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
+			text.onChange((v) => {
+				title = v;
+				orderPicker.setPhantomLabel(v.trim() === '' ? t('project.createEntity.newActTitle') : v.trim());
+			});
+			window.setTimeout(() => text.inputEl.focus());
+		});
+
+		new Setting(this.contentEl)
+			.setName(t('project.createEntity.appendToEndBook.name'))
+			.setDesc(t('project.createEntity.appendToEndBook.desc'))
+			.addToggle((tg) =>
+				tg.setValue(true).onChange((v) => {
+					appendToEnd = v;
+					orderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
+				})
+			);
+		const orderWrap = this.contentEl.createDiv({ cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden' });
+		const orderPicker = this.buildOrderPicker(orderWrap);
+		orderPicker.setPhantomLabel(t('project.createEntity.newActTitle'));
+		orderPicker.setItems(existingActs.map((c) => c.name));
+
+		const notesSetting = new Setting(this.contentEl)
+			.setName(t('project.notes'))
+			.addTextArea((text) => text.onChange((v) => (notes = v.trim())));
+		notesSetting.setClass('loom-modal-wide');
+
+		new Setting(this.contentEl).addButton((btn) =>
+			btn
+				.setButtonText(t('project.createEntity.createButton'))
+				.setCta()
+				.onClick(() =>
+					void this.submitProseAct({
+						title,
+						appendToEnd,
+						insertIndex: orderPicker.getIndex(),
+						existingActs,
+						notes,
+					})
+				)
+		);
+	}
+
+	private async submitProseAct(fields: {
+		title: string;
+		appendToEnd: boolean;
+		insertIndex: number;
+		existingActs: EntityRecord[];
+		notes: string;
+	}): Promise<void> {
+		const title = fields.title.trim();
+		if (title === '') {
+			new Notice(t('project.createEntity.titleRequired'));
+			return;
+		}
+		const insertAt = fields.appendToEnd
+			? fields.existingActs.length
+			: Math.max(0, Math.min(fields.insertIndex, fields.existingActs.length));
+		const seq = insertAt + 1;
+		// Siblings from the insertion point on shift down one slot — same idea
+		// `submitChapter` applies, directly on frontmatter since there's no
+		// script to splice for an act in Prose mode.
+		for (let i = insertAt; i < fields.existingActs.length; i++) {
+			const sibling = fields.existingActs[i];
+			const file = this.plugin.app.vault.getFileByPath(sibling.path);
+			if (!file) continue;
+			await this.plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.seq, i + 2);
+			});
+		}
+
+		try {
+			const created = await createEntity(this.plugin, this.project, 'act', {
+				name: title,
+				tag: '',
+				date: '',
+				description: '',
+			});
+			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.seq, seq);
+			});
+			await writeNotesBody(this.plugin, created, fields.notes);
+			const record: EntityRecord = {
+				...pcGroupStub(this.project.root),
+				path: created.path,
+				name: title,
+				type: 'act',
+				seq,
+			};
+			this.close();
+			if (this.options.onActCreated) {
+				this.options.onActCreated(record);
+			} else if (this.options.onCreated) {
+				this.options.onCreated(created);
+			} else {
+				const origin: EntityOrigin = {
+					type: VIEW_LIST,
+					state: { project: this.project.root, entityType: 'act' },
+				};
+				this.plugin.openEntityFile(created.path, origin);
+			}
+		} catch (e) {
+			console.error('Loom Loom: failed to create the act', e);
+			new Notice(t('project.createEntity.createNoteFailed'));
+		}
+	}
+
+	/**
+	 * Chapter creation (Writer/Prose): Title, a mandatory Act picker (same
+	 * search-with-"+ New act" widget the Scene modal's own Act picker uses),
+	 * where to insert it — append to the end (default) or drag it to a
+	 * specific spot among the picked act's existing chapters, same
+	 * `buildOrderPicker` the Act modal uses — and a Notes field. No Involved/
+	 * Locations/Date/Description fields: once the Book parser exists those
+	 * derive from `@[...]`-style mentions in the chapter's own text, the same
+	 * way a Scene's cast/factions/items/mentioned-locations already do from
+	 * the script — not something to hand-pick at creation time. Currently
+	 * stamps `chapterAct`/`loomSeq` directly (no Book file to write into
+	 * yet — see ROADMAP's Prose-support entry); the reorder-on-creation math
+	 * below restamps sibling chapters' `loomSeq` directly for the same
+	 * reason, rather than splicing a script the way `submitScene`/`submitAct`
+	 * do.
+	 */
+	private renderChapterModal(): void {
+		this.setTitle(newEntityTitle('chapter'));
+		let name = '';
+		let pickedAct: EntityRecord | null = this.options.defaultAct ?? null;
+		let chapterAppendToEnd = true;
+		let notes = '';
+		// Reassigned once the position picker is built further down — same
+		// forward-declaration reason `refreshSceneOrderItems` has in the Scene
+		// modal (the Act picker's pick/clear callbacks need to refresh it).
+		let refreshChapterOrderItems: () => void = () => {};
+
+		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
+			text.onChange((v) => {
+				name = v;
+				chapterOrderPicker.setPhantomLabel(v.trim() === '' ? newEntityTitle('chapter') : v.trim());
+			});
+			window.setTimeout(() => text.inputEl.focus());
+		});
+
+		const actType = projectRoleType(this.project.config, 'anchor');
+		const actSetting = new Setting(this.contentEl)
+			.setName(entityLabel(actType))
+			.setDesc(t('project.createEntity.chapterActDesc', { anchor: entityLabel(actType).toLowerCase() }));
+		const actEl = actSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
+		const refreshAct = () => {
+			actEl.empty();
+			if (pickedAct) {
+				this.renderChip(actEl, pickedAct, pickedAct.name, () => {
+					pickedAct = null;
+					refreshAct();
+					refreshChapterOrderItems();
+				});
+				return;
+			}
+			const input = actEl.createEl('input', {
+				type: 'text',
+				attr: { placeholder: t('project.createEntity.pickAnchor', { anchor: entityLabel(actType).toLowerCase() }) },
+			});
+			new RecordInputSuggest(
+				this.app,
+				input,
+				() => [
+					newActStub(this.project.root),
+					...this.plugin.indexer
+						.getAll('act', this.project.root)
+						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created)),
+				],
+				(r) => {
+					if (r.path === NEW_ACT_SENTINEL) {
+						new CreateEntityModal(this.plugin, 'act', this.project, {
+							onActCreated: (record) => {
+								pickedAct = record;
+								refreshAct();
+								refreshChapterOrderItems();
+							},
+						}).open();
+						return;
+					}
+					pickedAct = r;
+					refreshAct();
+					refreshChapterOrderItems();
+				},
+				(r) => r.name
+			);
+		};
+		refreshAct();
+
+		new Setting(this.contentEl)
+			.setName(t('project.createEntity.appendToEndActChapter.name'))
+			.setDesc(t('project.createEntity.appendToEndActChapter.desc'))
+			.addToggle((tg) =>
+				tg.setValue(true).onChange((v) => {
+					chapterAppendToEnd = v;
+					chapterOrderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
+				})
+			);
+		const chapterOrderWrap = this.contentEl.createDiv({
+			cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden',
+		});
+		const chapterOrderPicker = this.buildOrderPicker(chapterOrderWrap);
+		chapterOrderPicker.setPhantomLabel(newEntityTitle('chapter'));
+		refreshChapterOrderItems = () => {
+			const actChapters = pickedAct
+				? this.plugin.indexer
+						.getAll('chapter', this.project.root)
+						.filter((ch) => ch.chapterAct !== '' && this.plugin.indexer.resolve(ch.chapterAct, ch.path)?.path === pickedAct?.path)
+						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+				: [];
+			chapterOrderPicker.setItems(actChapters.map((ch) => ch.name));
+		};
+		refreshChapterOrderItems();
+
+		const notesSetting = new Setting(this.contentEl)
+			.setName(t('project.notes'))
+			.addTextArea((text) => text.onChange((v) => (notes = v.trim())));
+		notesSetting.setClass('loom-modal-wide');
+
+		new Setting(this.contentEl).addButton((btn) =>
+			btn
+				.setButtonText(t('project.createEntity.createButton'))
+				.setCta()
+				.onClick(() =>
+					void this.submitChapter({
+						name,
+						pickedAct,
+						chapterAppendToEnd,
+						insertIndex: chapterOrderPicker.getIndex(),
+						notes,
+					})
+				)
+		);
+	}
+
+	private async submitChapter(fields: {
+		name: string;
+		pickedAct: EntityRecord | null;
+		chapterAppendToEnd: boolean;
+		insertIndex: number;
+		notes: string;
+	}): Promise<void> {
+		const name = fields.name.trim();
+		if (name === '') {
+			new Notice(t('project.createEntity.titleRequired'));
+			return;
+		}
+		if (!fields.pickedAct) {
+			new Notice(
+				t('project.createEntity.anchorRequiredNotice', {
+					anchor: entityLabel(projectRoleType(this.project.config, 'anchor')),
+				})
+			);
+			return;
+		}
+		const act = fields.pickedAct;
+		const existingChapters = this.plugin.indexer
+			.getAll('chapter', this.project.root)
+			.filter((ch) => ch.chapterAct !== '' && this.plugin.indexer.resolve(ch.chapterAct, ch.path)?.path === act.path)
+			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+
+		const insertAt = fields.chapterAppendToEnd
+			? existingChapters.length
+			: Math.max(0, Math.min(fields.insertIndex, existingChapters.length));
+		const seq = insertAt + 1;
+		// Siblings from the insertion point on shift down one slot — same
+		// "restamp everything after the gap" idea `reorderScenesInSection`
+		// applies to a script, just directly on frontmatter here since
+		// there's no script to splice for a chapter yet.
+		for (let i = insertAt; i < existingChapters.length; i++) {
+			const sibling = existingChapters[i];
+			const file = this.plugin.app.vault.getFileByPath(sibling.path);
+			if (!file) continue;
+			await this.plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.seq, i + 2);
+			});
+		}
+
+		try {
+			const created = await createEntity(this.plugin, this.project, 'chapter', {
+				name,
+				tag: '',
+				date: '',
+				description: '',
+			});
+			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.chapterAct, `[[${linkTargetOf(act)}]]`);
+				setLoomKey(fm, FM.seq, seq);
+			});
+			await writeNotesBody(this.plugin, created, fields.notes);
+			this.close();
+			if (this.options.onCreated) {
+				this.options.onCreated(created);
+			} else {
+				const origin: EntityOrigin = {
+					type: VIEW_LIST,
+					state: { project: this.project.root, entityType: 'chapter' },
+				};
+				this.plugin.openEntityFile(created.path, origin);
+			}
+		} catch (e) {
+			console.error('Loom Loom: failed to create the chapter', e);
 			new Notice(t('project.createEntity.createNoteFailed'));
 		}
 	}

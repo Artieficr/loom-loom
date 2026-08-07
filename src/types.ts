@@ -232,6 +232,17 @@ export const FM = {
 	 *  line. Same job as a scene's — it survives a rename or a move, where
 	 *  matching the section text would not. */
 	actId: 'loomActId',
+	/** Chapters only: link to the Act this chapter belongs to — the
+	 *  Writer/Prose analogue of `sceneAct`. Visible, so a chapter stacks
+	 *  under its act in the graph and timeline, same mechanism. Currently
+	 *  stamped directly at creation (no Book file to derive it from yet —
+	 *  see ROADMAP's Prose-support entry); once the Book parser exists this
+	 *  becomes derived the same way `sceneAct` is. */
+	chapterAct: 'loomChapterAct',
+	/** Chapters only: the `[[loom:<id>]]` marker on the Book file's `##`
+	 *  section line — the Writer/Prose analogue of `sceneId`. Ties this note
+	 *  to its slice of the Book file, surviving a rename/reorder. */
+	chapterId: 'loomChapterId',
 	/** Timeline definition files. */
 	timelineTypes: 'loomTypes',
 	/** Loom-managed creation timestamp (ISO 8601). Authoritative over the
@@ -472,6 +483,10 @@ export interface EntityRecord {
 	sceneBranch: string;
 	/** Acts: the `[[loom:<id>]]` marker on their script section line. */
 	actId: string;
+	/** Chapters: linkpath of the owning Act, or ''. */
+	chapterAct: string;
+	/** Chapters: the `[[loom:<id>]]` marker on their Book section line. */
+	chapterId: string;
 	created: number;
 	modified: number;
 }
@@ -524,6 +539,8 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		sceneAct: '',
 		sceneBranch: '',
 		actId: '',
+		chapterAct: '',
+		chapterId: '',
 		created: 0,
 		modified: 0,
 	};
@@ -598,6 +615,7 @@ export const VIEW_ENTITY = 'loom-loom-entity';
 export const VIEW_GROUP = 'loom-loom-group';
 export const VIEW_MAP = 'loom-loom-map';
 export const VIEW_SCRIPT = 'loom-loom-script';
+export const VIEW_PROSE = 'loom-loom-prose';
 
 /** Maps: a spatial drawing canvas where zones (polygons) are associated with
  *  locations. Lucide icon + the folders maps/images live under. Maps sit under
@@ -628,13 +646,18 @@ export function scriptLabel(): string {
 export const SCRIPT_ICON = 'file-text';
 
 /**
- * Writer/Prose's own home-wheel entry, taking the same 12 o'clock slot the
- * Script satellite takes in Writer/Script (the two sub-modes are mutually
- * exclusive per project, so only one of them is ever offered). Unlike
- * Script, "Book" is deliberately NOT a file or entity of its own — it's UI
- * copy for "the project's chapters as a whole," opening the Chapter list —
- * so there's no equivalent of `SCRIPT_EXTENSION`/`scriptFilePath` here.
+ * Writer/Prose: the Book lives in its own file at the project root
+ * (`<Project>.loomprose`), the prose analogue of `SCRIPT_EXTENSION` — same
+ * reasoning as Fountain: it carries hidden `[[loom:<id>]]` section markers
+ * that would otherwise pollute Obsidian's wikilink index if this were a
+ * plain `.md` note. Acts and Chapters are parsed out of it into their own
+ * entity notes — see `src/prose.ts` for the parser and
+ * `src/views/book-view.tsx`/`prose-field.tsx` for the editor. Takes the same
+ * 12 o'clock home-wheel slot the Script satellite takes in Writer/Script —
+ * the two sub-modes are mutually exclusive per project, so only one is ever
+ * offered.
  */
+export const BOOK_EXTENSION = 'loomprose';
 export function bookLabel(): string {
 	return t('common.bookLabel');
 }
