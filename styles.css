@@ -6220,6 +6220,7 @@ div.loom-scene-script {
 	opacity: 0.35;
 	cursor: ew-resize;
 	touch-action: none;
+	pointer-events: auto;
 	z-index: var(--layer-menu);
 }
 

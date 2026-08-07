@@ -334,6 +334,12 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  one piece of state — a page is only ever one or the other, never
 	 *  both, so there's no risk of them fighting over it). */
 	const [openComment, setOpenComment] = useState<{ id: string; rect: DOMRect } | null>(null);
+	/** Marker ids that have had a reply added THIS session — same reasoning
+	 *  as script-view.tsx's own copy: `scriptNotes` only catches up once the
+	 *  sidecar's `vault.modify` + file-watch round trip completes, so
+	 *  `handleCloseComment` below checks this instead of trusting
+	 *  `scriptNotes` alone at close time. */
+	const commentsWithNewEntryRef = useRef<Set<string>>(new Set());
 	/** A marker id the current Chapter/Scene search match points at — same
 	 *  role as the main Script view's own `highlightedAnnotationId`. */
 	const [highlightedAnnotationId, setHighlightedAnnotationId] = useState<string | null>(null);
@@ -436,6 +442,30 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 	};
 	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
+
+	/** Closing the popover with nothing ever added to the thread abandons the
+	 *  whole comment creation — same reasoning as `handleCreateAlt`'s own
+	 *  cancel above: a freshly inserted marker pair backed by no
+	 *  `comments[id]` entry (only `handleAddCommentReply` ever creates one)
+	 *  would otherwise sit in the document forever as a permanently-empty
+	 *  gutter icon. Checks BOTH `scriptNotes` (an existing comment, reopened)
+	 *  and `commentsWithNewEntryRef` (a reply just added this session, ahead
+	 *  of the sidecar's own async round trip). Tries both the Chapter's and
+	 *  Scene's own field ref, same "chain of ??" pattern as
+	 *  `handleCreateAlt`'s cancel, since only one is ever actually mounted. */
+	const handleCloseComment = () => {
+		if (
+			openComment &&
+			!commentsWithNewEntryRef.current.has(openComment.id) &&
+			!scriptNotes.comments[openComment.id]
+		) {
+			chapterScriptEditorRef.current?.removeAnnotationMarkers(openComment.id);
+			sceneScriptEditorRef.current?.removeAnnotationMarkers(openComment.id);
+			commitFieldEdit(chapterScriptEditorRef);
+			commitFieldEdit(sceneScriptEditorRef);
+		}
+		setOpenComment(null);
+	};
 	/** Saves an EDIT to one reply's text — same reasoning as script-view.tsx's
 	 *  own `handleSaveCommentEntry`. */
 	const handleSaveCommentEntry = (id: string, index: number, text: string) => {
@@ -7257,8 +7287,11 @@ function EntityPage({ view }: { view: EntityView }) {
 					onSaveEntry={(index, text) => handleSaveCommentEntry(openComment.id, index, text)}
 					onToggleResolvedEntry={(index) => handleToggleCommentResolved(openComment.id, index)}
 					onDeleteEntry={(index) => handleDeleteCommentEntry(openComment.id, index)}
-					onAddEntry={(text) => handleAddCommentReply(openComment.id, text)}
-					onClose={() => setOpenComment(null)}
+					onAddEntry={(text) => {
+						commentsWithNewEntryRef.current.add(openComment.id);
+						handleAddCommentReply(openComment.id, text);
+					}}
+					onClose={handleCloseComment}
 				/>
 			) : null}
 		</div>
