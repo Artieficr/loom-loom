@@ -6,7 +6,7 @@
  * can't drift); this file carries everything else — comment text, resolved
  * state, an alt-text's full option list and which one is currently active.
  *
- * Not on Scene/Chapter note frontmatter: `syncScenes` fully recomputes and
+ * Not on Scene/Act note frontmatter: `syncScenes` fully recomputes and
  * overwrites its own frontmatter fields on every sync (not safe for
  * user-authored data), a marked range can span a scene boundary or exist
  * before any scene note is created, and `processFrontMatter` rewrites the
@@ -134,7 +134,7 @@ function parseScriptNotesFile(text: string): ScriptNotesFile {
 //
 // Unlike Maps (realistically one open view per project) this file can be
 // mutated from three independently-mounted editors at once — the main Script
-// view, a Scene page, and a Chapter page can all be open together. A queue
+// view, a Scene page, and an Act page can all be open together. A queue
 // keyed by the sidecar's own vault path serializes overlapping calls (so two
 // near-simultaneous actions from the SAME view can't interleave their own
 // read/write pair), and every call re-reads the file with `vault.read` (never

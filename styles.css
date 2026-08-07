@@ -371,9 +371,9 @@ span.loom-row-caret {
 	background: var(--background-modifier-hover);
 }
 
-/* An entity no longer connected to the actual story: a Scene/Chapter whose
+/* An entity no longer connected to the actual story: a Scene/Act whose
    heading/section was rewritten or deleted directly in the script text
-   (rather than through the Scene/Chapter page's own fields), or a Character/
+   (rather than through the Scene/Act page's own fields), or a Character/
    Location/Faction/Item the `connectivity` graph can't reach from anything
    the script actually uses — `syncScenes` never auto-deletes, so this is the
    only passive signal that it's become debris. `color-mix` against the row's
@@ -419,7 +419,7 @@ span.loom-row-caret {
 	white-space: nowrap;
 }
 
-/* Scene/Chapter list rows: the script-recognized cast, right after the name.
+/* Scene/Act list rows: the script-recognized cast, right after the name.
    Wraps rather than forcing the row wider — a scene with a large cast grows
    the row's height instead of pushing the delete button off-screen. */
 .loom-row-cast {
@@ -2245,7 +2245,7 @@ span.loom-row-caret {
 	align-items: center;
 }
 
-/* Position picker (Chapter and Scene creation modals): the "where does it
+/* Position picker (Act and Scene creation modals): the "where does it
    land" list — existing items as static rows, the new (unsaved) one as the
    single draggable row among them. */
 .loom-modal-order-wrap {
@@ -2267,7 +2267,7 @@ span.loom-row-caret {
 /* Fixed height (matches the `SLOT` constant in project.ts exactly) so the
    drag math never has to measure the DOM mid-gesture — a static row slides a
    whole slot via `transform`, transitioned smoothly; the dragged (new
-   chapter) row rides the raw cursor delta with no transition. */
+   act) row rides the raw cursor delta with no transition. */
 .loom-modal-order-row {
 	box-sizing: border-box;
 	display: flex;
@@ -2885,16 +2885,16 @@ span.loom-row-caret {
 	gap: var(--size-4-3);
 }
 
-/* Scene page's chapter section: chapter management on the left (as it always
+/* Scene page's act section: act management on the left (as it always
    was), the script-derived cast as a lighter side column on the right —
    same flex + vertical-separator shape as the quest page's grid. */
-.loom-scene-chapter-grid {
+.loom-scene-act-grid {
 	display: flex;
 	align-items: stretch;
 	gap: var(--size-4-4);
 }
 
-.loom-scene-chapter-left {
+.loom-scene-act-left {
 	flex: 1 1 60%;
 	min-width: 0;
 	/* Plain divs, not `.loom-field` — without their own gap, the label/chip
@@ -2905,7 +2905,7 @@ span.loom-row-caret {
 	gap: var(--size-2-2);
 }
 
-.loom-scene-chapter-right {
+.loom-scene-act-right {
 	flex: 1 1 40%;
 	min-width: 0;
 	display: flex;
@@ -2918,7 +2918,7 @@ span.loom-row-caret {
 /* No entities recognized in the scene at all: the right column isn't
    rendered, and the left one takes the full width instead of leaving 40%
    reserved for nothing. */
-.loom-scene-chapter-grid-solo .loom-scene-chapter-left {
+.loom-scene-act-grid-solo .loom-scene-act-left {
 	flex: 1 1 100%;
 }
 
@@ -5091,7 +5091,7 @@ span.loom-row-caret {
 	z-index: 5;
 }
 
-/* The Scene/Chapter page's own copy of this panel lives INSIDE the editor
+/* The Scene/Act page's own copy of this panel lives INSIDE the editor
    box (its left margin has the spare room) rather than stacked above the
    Script/Pages tabs, where it collided with the scene-heading caption right
    below it. Nesting inside `.loom-scene-script`/`.loom-scene-pages` (both
@@ -5141,7 +5141,7 @@ span.loom-row-caret {
 	   clips any descendant that visually extends past its bounds, sticky or
 	   not, so a panel taller than the box just got cut off with no way to
 	   scroll the rest into view. 60vh sits safely under the main Script
-	   view's editor box (capped at 70vh) and the Scene/Chapter boxes (a
+	   view's editor box (capped at 70vh) and the Scene/Act boxes (a
 	   fixed 210mm, taller than 60vh on any real screen), so this panel's OWN
 	   scrollbar below always has room to engage before the box's does. */
 	max-height: 60vh;
@@ -5164,8 +5164,8 @@ span.loom-row-caret {
 	padding: 0.2em 0 0.4em;
 }
 
-/* Chapters are jump targets, not labels — the script has a `# Chapter` line. */
-.loom-view button.loom-script-nav-chapter {
+/* Acts are jump targets, not labels — the script has a `# Act` line. */
+.loom-view button.loom-script-nav-act {
 	display: block;
 	width: 100%;
 	background: none;
@@ -5183,19 +5183,19 @@ span.loom-row-caret {
 	white-space: nowrap;
 }
 
-.loom-view button.loom-script-nav-chapter:hover {
+.loom-view button.loom-script-nav-act:hover {
 	background: var(--background-modifier-hover);
 }
 
-.loom-view button.loom-script-nav-chapter:disabled {
+.loom-view button.loom-script-nav-act:disabled {
 	color: var(--text-faint);
 	cursor: default;
 	background: none;
 }
 
-/* A nested `##`/`###` section under a chapter — same jump-target button,
-   lighter weight so it reads as a sub-level rather than another chapter. */
-.loom-view button.loom-script-nav-chapter.loom-script-nav-sub {
+/* A nested `##`/`###` section under an act — same jump-target button,
+   lighter weight so it reads as a sub-level rather than another act. */
+.loom-view button.loom-script-nav-act.loom-script-nav-sub {
 	font-weight: 500;
 	font-size: 0.92em;
 	color: var(--text-muted);
@@ -5206,7 +5206,7 @@ span.loom-row-caret {
    sub-level button and the same even step-in as every other nesting level,
    tinted and un-bolded so a narrative choice point still reads differently
    from a plain organizational sub-heading without needing extra distance. */
-.loom-view button.loom-script-nav-chapter.loom-script-nav-branch {
+.loom-view button.loom-script-nav-act.loom-script-nav-branch {
 	color: var(--text-accent);
 	font-weight: 400;
 }
@@ -5229,10 +5229,10 @@ span.loom-row-caret {
 	color: var(--text-faint);
 }
 
-/* Indents everything under a chapter/section one step — scenes, branches,
+/* Indents everything under an act/section one step — scenes, branches,
    and any further-nested sections all recurse into their own
    `.loom-script-nav-children` for the SAME additional indent, so every
-   level of the hierarchy — chapter → scene → branch → sub-branch — steps in
+   level of the hierarchy — act → scene → branch → sub-branch — steps in
    by an even amount and the rails read as evenly spaced. `margin-left` is
    the branch level's own original step (previously a `.loom-script-nav-
    children-branch`-only override) — raised here for every level rather
@@ -5252,8 +5252,8 @@ span.loom-row-caret {
 }
 
 /* Comments/Alternatives browser panels (script-view.tsx) — reuse
-   `.loom-script-nav-chapter`'s jump-target button look for each excerpt row,
-   single-line ellipsis like the chapter list (not wrapped) so the panel's
+   `.loom-script-nav-act`'s jump-target button look for each excerpt row,
+   single-line ellipsis like the act list (not wrapped) so the panel's
    own width never grows to fit a long passage. */
 .loom-view button.loom-script-comments-panel-excerpt {
 	font-weight: 500;
@@ -5293,7 +5293,7 @@ span.loom-row-caret {
 }
 
 /* Scene entries: number in a fixed gutter so titles line up. `button` type
-   selector (like `.loom-script-nav-chapter` above) so this beats Obsidian's
+   selector (like `.loom-script-nav-act` above) so this beats Obsidian's
    own default button styling on specificity — a bare class-only rule lost
    that fight and appeared centered instead of left-aligned. */
 .loom-view button.loom-script-nav-scene {
@@ -5359,7 +5359,7 @@ span.loom-row-caret {
    of the Script/Pages pill (that pair is one toggle over the same document;
    this swaps in a management list instead) — same pill look, but with its
    own full border radius since it isn't connected to a sibling. */
-.loom-view .loom-script-chapters-btn {
+.loom-view .loom-script-acts-btn {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);
 	background: var(--background-primary);
@@ -5369,23 +5369,23 @@ span.loom-row-caret {
 	height: auto;
 }
 
-.loom-view .loom-script-chapters-btn.loom-seg-on {
+.loom-view .loom-script-acts-btn.loom-seg-on {
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
 }
 
-.loom-view .loom-script-chapters-btn:hover:not(.loom-seg-on) {
+.loom-view .loom-script-acts-btn:hover:not(.loom-seg-on) {
 	background: var(--background-modifier-hover);
 	border-color: var(--background-modifier-border-hover);
 }
 
-.loom-view .loom-script-chapters-btn.loom-seg-on:hover {
+.loom-view .loom-script-acts-btn.loom-seg-on:hover {
 	background: var(--interactive-accent-hover);
 }
 
 /* One page tall and scrolling inside itself, same limit as the raw editor
    (.loom-script-editor) and the Pages preview (.loom-screenplay) — a script
-   with dozens of chapters previously had nothing to stop the outline from
+   with dozens of acts previously had nothing to stop the outline from
    just running on past the bottom of the view and overlapping whatever
    followed it. */
 .loom-view .loom-script-outline {
@@ -5398,13 +5398,13 @@ span.loom-row-caret {
 	margin-bottom: 0.5em;
 }
 
-.loom-view .loom-script-outline-chapter {
+.loom-view .loom-script-outline-act {
 	width: 100%;
 }
 
-/* A page break's Outline row — same row shape as a chapter's, but it never
+/* A page break's Outline row — same row shape as an act's, but it never
    has children (no caret, no nested list) so the wrapper is just a plain
-   width-100% box, matching the chapter wrapper's own sizing for consistent
+   width-100% box, matching the act wrapper's own sizing for consistent
    drag behavior. */
 .loom-view .loom-script-outline-pagebreak {
 	width: 100%;
@@ -5424,7 +5424,7 @@ span.loom-row-caret {
 	width: 100%;
 }
 
-/* Column headings, styled like a table header sitting over the chapter
+/* Column headings, styled like a table header sitting over the act
    rows below (same row shape, so its cells land on the real columns). The
    expand/collapse-all toggle lives IN this row (the caret's own slot) —
    there's no separate row above it any more. */
@@ -5439,7 +5439,7 @@ span.loom-row-caret {
 }
 
 .loom-view .loom-script-outline-headrow .loom-script-scene-head,
-.loom-view .loom-script-outline-headrow .loom-script-chapter-count {
+.loom-view .loom-script-outline-headrow .loom-script-act-count {
 	color: inherit;
 	font-size: inherit;
 }
@@ -5448,10 +5448,10 @@ span.loom-row-caret {
 	color: inherit;
 }
 
-/* A chapter's scenes hang off a vertical nesting rail beneath it, the same
+/* An act's scenes hang off a vertical nesting rail beneath it, the same
    device the entity-page Events hub uses (`.loom-event-nest`) — the rail
-   starts flush with the chapter row above rather than floating a gap above
-   itself, and its horizontal position is pinned to the chapter row's own
+   starts flush with the act row above rather than floating a gap above
+   itself, and its horizontal position is pinned to the act row's own
    caret (grip width + row gap + half the caret's own width), so it visibly
    continues down from the arrow that opens it rather than landing under an
    unrelated column. Scene rows themselves indent past that same point (grip
@@ -5473,8 +5473,8 @@ span.loom-row-caret {
 	background: var(--background-modifier-border);
 }
 
-/* Highlights the chapter a dragged scene is currently hovering over, when
-   that's a DIFFERENT chapter than the one it started in — dropping here
+/* Highlights the act a dragged scene is currently hovering over, when
+   that's a DIFFERENT act than the one it started in — dropping here
    moves the scene there instead of just reordering it in place. */
 .loom-view .loom-script-outline-drop-target > .loom-script-scene-row {
 	background: var(--background-modifier-hover);
@@ -5493,7 +5493,7 @@ span.loom-row-caret {
 
 /* Fixed width, not sized to its own text — otherwise a longer "N scenes"
    count shifts its own left edge (and so its start position) row to row. */
-.loom-view .loom-script-outline .loom-script-chapter-count {
+.loom-view .loom-script-outline .loom-script-act-count {
 	flex: 0 0 6em;
 	text-align: right;
 	color: var(--text-muted);
@@ -5743,14 +5743,14 @@ span.loom-row-caret {
 
 .loom-fountain-field .loom-fountain-char-link,
 .loom-fountain-field .loom-fountain-scene-link,
-.loom-fountain-field .loom-fountain-chapter-link,
+.loom-fountain-field .loom-fountain-act-link,
 .loom-fountain-field .loom-fountain-entity-link {
 	cursor: var(--cursor-link);
 }
 
 .loom-fountain-field .loom-fountain-char-link:hover,
 .loom-fountain-field .loom-fountain-scene-link:hover,
-.loom-fountain-field .loom-fountain-chapter-link:hover,
+.loom-fountain-field .loom-fountain-act-link:hover,
 .loom-fountain-field .loom-fountain-entity-link:hover {
 	text-decoration: underline;
 }
@@ -5945,7 +5945,7 @@ span.loom-row-caret {
 	overflow-x: auto;
 }
 
-/* Chapter/Location page scene rows: fixed-width number + INT./EXT. columns
+/* Act/Location page scene rows: fixed-width number + INT./EXT. columns
    (own classes, not the outline's `.loom-script-scene-num` — that one relies
    on an external grid-template it doesn't have here) so a row never shifts
    depending on how many digits its number has, and INT./EXT. sits in its
@@ -6306,7 +6306,7 @@ div.loom-scene-script {
    button rule is scoped under a class too (`.theme-light button` /
    `.theme-dark button`), which otherwise out-specifies a single-class
    selector regardless of source order, the same fight CLAUDE.md already
-   documents for `.loom-script-nav-chapter` elsewhere in this codebase. */
+   documents for `.loom-script-nav-act` elsewhere in this codebase. */
 button.loom-comment-popover-icon-btn {
 	display: inline-flex;
 	align-items: center;

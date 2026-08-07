@@ -7,7 +7,7 @@ import { t } from './i18n';
  * and switchable afterwards.
  *
  * The rule this module exists to enforce: **a kind is a config layer over the
- * shared data model, never a fork.** Chapters and Scenes are their own entity
+ * shared data model, never a fork.** Acts and Scenes are their own entity
  * types (they carry genuinely different fields from Sessions and Events), but
  * the shared machinery — chronological columns, graph layout, timeline strip,
  * list/entity page shells — never names a type literally. It asks for the
@@ -48,7 +48,7 @@ export const PROJECT_KIND_META: Record<ProjectKind, ProjectKindMeta> = {
 	writer: {
 		label: 'Writer',
 		icon: 'feather',
-		description: 'Writing a story or screenplay: chapters and scenes, with a Fountain script.',
+		description: 'Writing a story or screenplay: acts and scenes, with a Fountain script.',
 	},
 };
 
@@ -64,7 +64,7 @@ export function projectKindDescription(kind: ProjectKind): string {
 
 /**
  * The structural role a type plays in the chronological layout: the `anchor`
- * owns a column (Session / Chapter), the `beat` stacks beneath one
+ * owns a column (Session / Act), the `beat` stacks beneath one
  * (Event / Scene). A type has exactly one role regardless of kind, so
  * record-only code can ask `roleOf(record.type)` without resolving a project.
  */
@@ -73,12 +73,12 @@ export type TypeRole = 'anchor' | 'beat';
 const ROLE_TYPES: Record<ProjectKind, Record<TypeRole, EntityType>> = {
 	player: { anchor: 'session', beat: 'event' },
 	gm: { anchor: 'session', beat: 'event' },
-	writer: { anchor: 'chapter', beat: 'scene' },
+	writer: { anchor: 'act', beat: 'scene' },
 };
 
 const TYPE_ROLES: Partial<Record<EntityType, TypeRole>> = {
 	session: 'anchor',
-	chapter: 'anchor',
+	act: 'anchor',
 	event: 'beat',
 	scene: 'beat',
 };
@@ -107,7 +107,7 @@ export const BEAT_TYPES: readonly EntityType[] = ENTITY_TYPES.filter((t) => TYPE
 const KIND_TYPES: Record<ProjectKind, readonly EntityType[]> = {
 	player: ['character', 'location', 'region', 'faction', 'item', 'quest', 'event', 'session'],
 	gm: ['character', 'location', 'region', 'faction', 'item', 'quest', 'event', 'session'],
-	writer: ['character', 'location', 'region', 'faction', 'item', 'quest', 'scene', 'chapter'],
+	writer: ['character', 'location', 'region', 'faction', 'item', 'quest', 'scene', 'act'],
 };
 
 export function typesFor(kind: ProjectKind): readonly EntityType[] {
@@ -145,7 +145,7 @@ export interface KindFeatures {
 	 *  Placeholder; the flag gates future script UI. */
 	script: boolean;
 	/** Anchors are ordered by their date (sessions happen on a day) or by their
-	 *  manual sequence (chapters are ordered, not dated). */
+	 *  manual sequence (acts are ordered, not dated). */
 	anchorOrder: 'date' | 'sequence';
 }
 

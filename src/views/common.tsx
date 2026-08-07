@@ -357,7 +357,7 @@ export function SearchableSelect({
 
 /**
  * User-facing label of a record. Dated anchors (Sessions) display their date —
- * their file name is managed and never exposed inside the plugin. Chapters are
+ * their file name is managed and never exposed inside the plugin. Acts are
  * named, so they fall through to the name like everything else.
  */
 export function recordLabel(record: EntityRecord, project: ProjectDef | null): string {
@@ -669,7 +669,7 @@ export function noProjectMessage(): ReactNode {
 /**
  * Scrolls `target` into view within `container` ONLY — never `Element.
  * scrollIntoView`, which cascades through every scrollable ancestor by
- * default. A small self-scrolling box (a Scene/Chapter Script section's own
+ * default. A small self-scrolling box (a Scene/Act Script section's own
  * preview, the main Script view's Pages scroller) nested inside the page's
  * own much bigger outer scroll would otherwise drag that outer scroll along
  * too on every jump — a search next/previous match, a nav click — which

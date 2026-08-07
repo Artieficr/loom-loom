@@ -44,7 +44,7 @@ import { EntityType, entityLabel } from '../types';
  * computed from `parseFountain` and painted as CM6 line decorations.
  *
  * The one thing genuinely HIDDEN (not just styled) is the `[[loom:<id>]]`
- * scene/chapter identity marker — it's not user content, and showing it
+ * scene/act identity marker — it's not user content, and showing it
  * would just be noise on every heading.
  */
 
@@ -349,7 +349,7 @@ export const FountainField = forwardRef(function FountainField(
 		entityOptions,
 		onOpenCharacter,
 		onOpenLocation,
-		onOpenChapter,
+		onOpenAct,
 		onOpenEntity,
 		comments,
 		altText,
@@ -383,9 +383,9 @@ export const FountainField = forwardRef(function FountainField(
 		 *  so the caller can resolve it to the Scene note's own location
 		 *  (sublocation-aware), rather than the raw heading text. */
 		onOpenLocation?: (sceneLoomId: string) => void;
-		/** A `#` chapter heading was clicked — passed the section's own
+		/** A `#` act heading was clicked — passed the section's own
 		 *  `[[loom:…]]` id (only ever present on level-1 sections). */
-		onOpenChapter?: (chapterLoomId: string) => void;
+		onOpenAct?: (actLoomId: string) => void;
 		/** An `@[...]` inline entity link was clicked — passed the resolved
 		 *  entity's file path. */
 		onOpenEntity?: (path: string) => void;
@@ -432,7 +432,7 @@ export const FountainField = forwardRef(function FountainField(
 	const entityOptionsRef = useRef(entityOptions ?? []);
 	const onOpenCharacterRef = useRef(onOpenCharacter);
 	const onOpenLocationRef = useRef(onOpenLocation);
-	const onOpenChapterRef = useRef(onOpenChapter);
+	const onOpenActRef = useRef(onOpenAct);
 	const onOpenEntityRef = useRef(onOpenEntity);
 	const commentsRef = useRef(comments ?? {});
 	const altTextRef = useRef(altText ?? {});
@@ -449,7 +449,7 @@ export const FountainField = forwardRef(function FountainField(
 	entityOptionsRef.current = entityOptions ?? [];
 	onOpenCharacterRef.current = onOpenCharacter;
 	onOpenLocationRef.current = onOpenLocation;
-	onOpenChapterRef.current = onOpenChapter;
+	onOpenActRef.current = onOpenAct;
 	onOpenEntityRef.current = onOpenEntity;
 	commentsRef.current = comments ?? {};
 	altTextRef.current = altText ?? {};
@@ -796,16 +796,16 @@ export const FountainField = forwardRef(function FountainField(
 					});
 				}
 
-				// Only level-1 sections are Chapters — a nested `##`/`###`
-				// carries no chapter identity to open.
-				if (element.type === 'section' && (element.level ?? 1) === 1 && loomId && onOpenChapterRef.current) {
+				// Only level-1 sections are Acts — a nested `##`/`###`
+				// carries no act identity to open.
+				if (element.type === 'section' && (element.level ?? 1) === 1 && loomId && onOpenActRef.current) {
 					const docLine = view.state.doc.line(element.line + 1);
 					entries.push({
 						from: docLine.from,
 						to: docLine.to,
 						deco: Decoration.mark({
-							class: 'loom-fountain-chapter-link',
-							attributes: { 'data-loom-fountain-chapter': loomId, title: 'Ctrl/Cmd+click to open this chapter' },
+							class: 'loom-fountain-act-link',
+							attributes: { 'data-loom-fountain-act': loomId, title: 'Ctrl/Cmd+click to open this act' },
 						}),
 					});
 				}
@@ -1057,7 +1057,7 @@ export const FountainField = forwardRef(function FountainField(
 			// Ctrl/Cmd-gated, unlike markdown-field.tsx's plain-click wikilinks —
 			// there, the rendered link is only ever a SHORT span with ordinary
 			// editable text around it on the same line, so clicking just past it
-			// still places a cursor normally. A character cue or a chapter's `#`
+			// still places a cursor normally. A character cue or an act's `#`
 			// line is marked end-to-end (see the comment below on why it can't be
 			// carved down to just the name), so a plain click ANYWHERE on that
 			// line's actual text had no way to fall through to the default
@@ -1080,10 +1080,10 @@ export const FountainField = forwardRef(function FountainField(
 				onOpenLocationRef.current(scene.dataset.loomFountainScene);
 				return true;
 			}
-			const chapter = target?.closest('[data-loom-fountain-chapter]');
-			if (chapter instanceof HTMLElement && chapter.dataset.loomFountainChapter && onOpenChapterRef.current) {
+			const act = target?.closest('[data-loom-fountain-act]');
+			if (act instanceof HTMLElement && act.dataset.loomFountainAct && onOpenActRef.current) {
 				event.preventDefault();
-				onOpenChapterRef.current(chapter.dataset.loomFountainChapter);
+				onOpenActRef.current(act.dataset.loomFountainAct);
 				return true;
 			}
 			const entity = target?.closest('[data-loom-fountain-entity]');
@@ -1272,7 +1272,7 @@ export const FountainField = forwardRef(function FountainField(
 						// on an empty cue-eligible line meant the NEXT arrow press got
 						// eaten navigating the popup instead of moving the cursor,
 						// which read as arrow keys randomly skipping lines near
-						// chapter/scene boundaries (where a doubled blank line is
+						// act/scene boundaries (where a doubled blank line is
 						// common). Only an actual click should pop it open
 						// unprompted; typing (`docChanged`) still does too.
 						if (

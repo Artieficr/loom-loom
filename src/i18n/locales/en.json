@@ -41,7 +41,7 @@
 			"title": "Add \"{item}\" to {plural}",
 			"pickAtLeastOne": "Pick at least one {label}."
 		},
-		"newChapterStub": "+ New chapter",
+		"newActStub": "+ New act",
 		"createEntity": {
 			"tagLabel": "Tag",
 			"newSublocationTitle": "New sublocation",
@@ -78,16 +78,16 @@
 			"sceneHeadingLabel": "Scene heading",
 			"sublocationOptional": "Sublocation (optional)",
 			"timePlaceholder": "Time",
-			"chapterDesc": "Which {anchor} this scene belongs to.",
-			"appendToEndChapter": {
-				"name": "Append to the end of the chapter",
-				"desc": "Turn off to choose where among the chapter's existing scenes this one lands."
+			"actDesc": "Which {anchor} this scene belongs to.",
+			"appendToEndAct": {
+				"name": "Append to the end of the act",
+				"desc": "Turn off to choose where among the act's existing scenes this one lands."
 			},
 			"locationRequired": "Location is required.",
 			"sceneWriteFailed": "Could not write the scene into the script.",
 			"sceneCreateFailed": "Could not create the scene.",
 			"untitledScene": "Untitled scene",
-			"newChapterTitle": "New chapter",
+			"newActTitle": "New act",
 			"titleLabel": "Title",
 			"displayTitle": {
 				"name": "Display title",
@@ -95,10 +95,10 @@
 			},
 			"appendToEndScript": {
 				"name": "Append to the end of the script",
-				"desc": "Turn off to choose where among the existing chapters this one lands."
+				"desc": "Turn off to choose where among the existing acts this one lands."
 			},
 			"titleRequired": "Title is required.",
-			"chapterWriteFailed": "Could not write the chapter into the script.",
+			"actWriteFailed": "Could not write the act into the script.",
 			"locationEllipsis": "Location…",
 			"dateFormatDesc": "Year-month-day format.",
 			"dateFormatPlaceholder": "Year-month-day",
@@ -177,7 +177,7 @@
 			"addDate": "Add a date",
 			"addItem": "Add an item",
 			"pickItem": "Pick the item…",
-			"deleteMessageChapter": "The note is moved to the trash, this chapter is removed from the script, and its scenes' notes are trashed too.",
+			"deleteMessageAct": "The note is moved to the trash, this act is removed from the script, and its scenes' notes are trashed too.",
 			"deleteMessageScene": "The note is moved to the trash, and this scene is removed from the script.",
 			"deleteMessageGeneral": "The note is moved to the trash.",
 			"rename": "Rename",
@@ -265,7 +265,7 @@
 				"aliases": "Aliases",
 				"removeAlias": "Remove alias",
 				"sessionNumber": "Session {n}",
-				"chapterNumber": "Chapter {n}",
+				"actNumber": "Act {n}",
 				"todayLink": "@today",
 				"attendance": "Attendance",
 				"noPcCharacters": "No PC characters in this project yet.",
@@ -299,8 +299,8 @@
 				"deleteSublocationDetail": "Clearing this field removes the sublocation's own note, not just this scene's heading. The note is moved to the trash.",
 				"headingLabel": "Scene heading",
 				"moveToAnother": "Move to another {anchor}…",
-				"everySceneBelongsHint": "Every scene belongs to a chapter — that's where its writing lives in the script.",
-				"chapterHasNoScenesYet": "\"{name}\" has no scenes yet — this will be its first.",
+				"everySceneBelongsHint": "Every scene belongs to an act — that's where its writing lives in the script.",
+				"actHasNoScenesYet": "\"{name}\" has no scenes yet — this will be its first.",
 				"dragIntoPositionHint": "Drag this scene into position among \"{name}\"'s scenes, then confirm.",
 				"moveTheScene": "Move the scene",
 				"entitiesInScene": "Entities in the scene"
@@ -397,7 +397,7 @@
 				"browseComments": "Browse comments",
 				"browseAlternatives": "Browse undecided alternatives",
 				"outline": "Outline",
-				"searchThisChapter": "Search this chapter…",
+				"searchThisAct": "Search this act…",
 				"searchThisScene": "Search this scene…",
 				"clearSearch": "Clear search",
 				"previousMatch": "Previous match",
@@ -407,7 +407,7 @@
 				"newSceneAction": "+ New scene",
 				"noScenesYetPre": "No scenes yet — a heading under this ",
 				"noScenesYetPost": " section in the script creates them.",
-				"chapterNotInScript": "This chapter isn't in the script yet.",
+				"actNotInScript": "This act isn't in the script yet.",
 				"noBranchStructurePre": "No branch structure in this scene yet — a nested heading tagged with",
 				"noBranchStructurePost": " right beneath it creates one.",
 				"sceneNotInScript": "This scene isn't in the script yet."
@@ -633,17 +633,17 @@
 			"ofCount": "of {count}",
 			"newPageBreakAction": "+ New page breaker",
 			"pageBreakLabel": "Page break",
-			"outlineNoChaptersPre": "No chapters yet — a ",
-			"outlineNoChaptersPost": " line starts one.",
+			"outlineNoActsPre": "No acts yet — a ",
+			"outlineNoActsPost": " line starts one.",
 			"expandScenesAria": "Expand scenes",
 			"collapseScenesAria": "Collapse scenes",
 			"outlineLinksHeading": "Outline links ({count})",
 			"outlineNoScenesPre": "No scenes yet — a heading like ",
 			"outlineNoScenesPost": " starts one.",
-			"scenesWithoutChapter": "Scenes without a chapter",
-			"scenesWithoutChapterHintPre": "A scene belongs to the ",
-			"scenesWithoutChapterHintMid": " section it sits under — that is its chapter, and where its writing lives. Add a ",
-			"scenesWithoutChapterHintPost": " line above these.",
+			"scenesWithoutAct": "Scenes without an act",
+			"scenesWithoutActHintPre": "A scene belongs to the ",
+			"scenesWithoutActHintMid": " section it sits under — that is its act, and where its writing lives. Add a ",
+			"scenesWithoutActHintPost": " line above these.",
 			"scenesNoLongerInScript": "Scenes no longer in the script",
 			"scenesNoLongerHint": "Their headings are gone from the script. Nothing is deleted automatically — open one to keep or remove it.",
 			"creditDefault": "Written by",
@@ -674,9 +674,9 @@
 			"scenesReattached_one": "{count} scene note re-attaches to the imported scenes.",
 			"scenesReattached_other": "{count} scene notes re-attach to the imported scenes.",
 			"noScenesReattached": "No existing scene notes could be re-attached.",
-			"chaptersReattached_one": "{count} chapter note re-attaches to the imported chapters.",
-			"chaptersReattached_other": "{count} chapter notes re-attach to the imported chapters.",
-			"noChaptersReattached": "No existing chapter notes could be re-attached.",
+			"actsReattached_one": "{count} act note re-attaches to the imported acts.",
+			"actsReattached_other": "{count} act notes re-attach to the imported acts.",
+			"noActsReattached": "No existing act notes could be re-attached.",
 			"orphanNote": "Anything left without a match stays as an orphan — nothing is deleted.",
 			"replaceScriptCta": "Replace script",
 			"importedNotice_one": "Imported {count} scene from \"{name}\".",
@@ -780,10 +780,10 @@
 			"plural": "Scenes",
 			"newTitle": "New Scene"
 		},
-		"chapter": {
-			"label": "Chapter",
-			"plural": "Chapters",
-			"newTitle": "New Chapter"
+		"act": {
+			"label": "Act",
+			"plural": "Acts",
+			"newTitle": "New Act"
 		}
 	},
 	"projectKind": {
@@ -797,7 +797,7 @@
 		},
 		"writer": {
 			"label": "Writer",
-			"description": "Writing a story or screenplay: chapters and scenes, with a Fountain script."
+			"description": "Writing a story or screenplay: acts and scenes, with a Fountain script."
 		}
 	},
 	"settings": {

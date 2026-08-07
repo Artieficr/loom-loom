@@ -885,9 +885,9 @@ export class LoomIndexer extends Component {
 			sceneFactions: parseLinkList(fmLoom(fm, FM.sceneFactions)),
 			sceneItems: parseLinkList(fmLoom(fm, FM.sceneItems)),
 			sceneMentionedLocations: parseLinkList(fmLoom(fm, FM.sceneMentionedLocations)),
-			sceneChapter: fmLinkpath(fm, FM.sceneChapter) ?? '',
+			sceneAct: fmLinkpath(fm, FM.sceneAct) ?? '',
 			sceneBranch: fmString(fm, FM.sceneBranch),
-			chapterId: fmString(fm, FM.chapterId),
+			actId: fmString(fm, FM.actId),
 			// Loom-managed timestamps win over the filesystem stats (cloud-sync can
 			// overwrite ctime/mtime with the sync time); stats are the fallback for
 			// notes not yet stamped.

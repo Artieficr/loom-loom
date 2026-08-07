@@ -191,7 +191,7 @@ export function cleanAnnotationMarkers(text: string): { text: string; changed: b
 }
 
 /** Marker ids currently backed by a COMPLETE pair — the annotation
- *  equivalent of `liveSceneIds`/`liveChapterIds` further down, feeding the
+ *  equivalent of `liveSceneIds`/`liveActIds` further down, feeding the
  *  sidecar-pruning GC pass in script-view.tsx's `runCommit`/
  *  `editScriptAndSync`. */
 export function liveAnnotationIds(text: string): Set<string> {
@@ -661,7 +661,7 @@ export interface ParsedScene extends SceneHeadingParts {
 	line: number;
 	/** 0-based line after the scene's last line (exclusive). */
 	endLine: number;
-	/** Enclosing section titles, outermost first — the chapters a scene sits in. */
+	/** Enclosing section titles, outermost first — the acts a scene sits in. */
 	sectionPath: string[];
 	/** 1-based page the scene starts on. Derived, never stored. */
 	firstPage: number;
@@ -683,7 +683,7 @@ export interface ParsedSection {
 	text: string;
 	line: number;
 	/** Hidden `[[loom:…]]` marker, like a scene heading's — what ties a top-level
-	 *  section to its Chapter note across a rename or a move. */
+	 *  section to its Act note across a rename or a move. */
 	loomId: string | null;
 	/** The branch group this section belongs to, from a `= branch: <id>`
 	 *  synopsis line directly beneath its heading (no blank line) — an
@@ -694,17 +694,17 @@ export interface ParsedSection {
 }
 
 /**
- * A page break (`===`) recognized as sitting BETWEEN two top-level chapters —
+ * A page break (`===`) recognized as sitting BETWEEN two top-level acts —
  * see the derivation in `parseFountain` for the exact rule. A page break
- * anywhere else (mid-scene, between two scenes in the same chapter, right
- * after a chapter heading before its own first scene) is plain content and
+ * anywhere else (mid-scene, between two scenes in the same act, right
+ * after an act heading before its own first scene) is plain content and
  * never appears here.
  */
 export interface ParsedPageBreak {
 	line: number;
 	/** Hidden `[[loom:…]]` marker, like a scene/section heading's — assigned
 	 *  additively by `ensureSceneIds` once recognized, same lifecycle a scene
-	 *  or chapter id has. */
+	 *  or act id has. */
 	loomId: string | null;
 }
 
@@ -715,7 +715,7 @@ export interface ParsedScript {
 	elements: FountainElement[];
 	scenes: ParsedScene[];
 	sections: ParsedSection[];
-	/** Chapter-boundary page breaks — see `ParsedPageBreak`. */
+	/** Act-boundary page breaks — see `ParsedPageBreak`. */
 	pageBreaks: ParsedPageBreak[];
 	/** Distinct character cues across the script, alphabetical. */
 	characters: string[];
@@ -778,14 +778,14 @@ export function parseFountain(text: string): ParsedScript {
 		}
 
 		// Page break: three or more `=`, optionally carrying a hidden loom id
-		// (only ones recognized as sitting BETWEEN chapters ever get one — see
+		// (only ones recognized as sitting BETWEEN acts ever get one — see
 		// the `pageBreaks` derivation below). Checked before synopsis, `=`.
 		if (/^={3,}$/.test(cls.replace(LOOM_ID_RE_G, '').trim())) {
 			elements.push({ type: 'page-break', text: '', line: i, loomId: readLoomId(rawLine) });
 			i++;
 			continue;
 		}
-		// Section — structural only, never exported. This is why a chapter that
+		// Section — structural only, never exported. This is why an act that
 		// must appear in the PDF also needs a centered-bold title.
 		if (cls.startsWith('#')) {
 			const level = /^#+/.exec(cls)?.[0].length ?? 1;
@@ -999,12 +999,12 @@ export function parseFountain(text: string): ParsedScript {
 		a.localeCompare(b)
 	);
 
-	// A page break counts as sitting BETWEEN chapters — and is promoted to its
+	// A page break counts as sitting BETWEEN acts — and is promoted to its
 	// own Outline entry — only when the next NON-page-break element (blanks
 	// are already skipped everywhere in `elements`; several page breaks in a
 	// row are skipped too, so a whole run is judged as one unit) is a
-	// top-level chapter heading, or there simply isn't one (end of file).
-	// Anywhere else — between two scenes, mid-scene, right after a chapter
+	// top-level act heading, or there simply isn't one (end of file).
+	// Anywhere else — between two scenes, mid-scene, right after an act
 	// heading before its own first scene — it's plain content and stays
 	// exactly where it was typed.
 	const pageBreaks: ParsedPageBreak[] = [];
@@ -1031,7 +1031,7 @@ export function parseFountain(text: string): ParsedScript {
 }
 
 /**
- * Gives every scene heading, chapter-tracking section, and chapter-boundary
+ * Gives every scene heading, act-tracking section, and act-boundary
  * page break a `[[loom:…]]` id, returning the rewritten text.
  *
  * This is the one write that has to happen before scenes can be mirrored into
@@ -1040,7 +1040,7 @@ export function parseFountain(text: string): ParsedScript {
  * operation is idempotent and safe to run on every load.
  */
 /** Every loom id currently in use anywhere in the script — scenes, sections
- *  (chapters and branch-tagged sub-sections), and chapter-boundary page
+ *  (acts and branch-tagged sub-sections), and act-boundary page
  *  breaks all share one `[[loom:…]]` namespace, so any op that's about to
  *  hand out a fresh id has to check against all three first. */
 function allLoomIds(parsed: ParsedScript): Set<string> {
@@ -1064,13 +1064,13 @@ function freshSceneId(seen: Set<string>): string {
 
 export function ensureSceneIds(text: string): { text: string; changed: boolean } {
 	const parsed = parseFountain(text);
-	// Top-level sections are chapters, and they need a stable identity for the
+	// Top-level sections are acts, and they need a stable identity for the
 	// same reason scenes do: a renamed-and-moved heading must not detach its
-	// note. Nested sections are ordinary structure inside a chapter EXCEPT a
+	// note. Nested sections are ordinary structure inside an act EXCEPT a
 	// branch-tagged one (`= branch: <id>` right beneath it) — that's a Scene's
 	// own `loomSceneBranch` target, so it needs the same stable identity at
 	// whatever depth it sits. A page break only ever gets one once `parseFountain`
-	// has already recognized it as sitting BETWEEN chapters (`pageBreaks`) — one
+	// has already recognized it as sitting BETWEEN acts (`pageBreaks`) — one
 	// typed inside a scene is plain content and is never touched here, which is
 	// what keeps it from vanishing out of that scene's own text into the Outline.
 	const missing: number[] = [
@@ -1093,10 +1093,10 @@ export function ensureSceneIds(text: string): { text: string; changed: boolean }
 }
 
 /**
- * Writes each chapter's display title into the script as a centered-bold line
+ * Writes each act's display title into the script as a centered-bold line
  * under its section.
  *
- * Fountain sections never export, so a chapter title that has to appear in the
+ * Fountain sections never export, so an act title that has to appear in the
  * PDF must be emitted separately — `>**ACT ONE**<` is the convention. That
  * makes the note's `loomDisplayTitle` the source of truth for this one line,
  * and this function is what keeps the script matching it. Passing '' removes
@@ -1145,7 +1145,7 @@ export function applyDisplayTitles(
  * <id>`) so an exported screenplay shows a visual separator between branches
  * instead of every branch's content running together with no indication a
  * choice point even exists — Fountain sections never export, same reasoning
- * as `applyDisplayTitles` for chapters, but auto-derived from the section's
+ * as `applyDisplayTitles` for acts, but auto-derived from the section's
  * own title text rather than a note field (a branch has no backing note).
  * Kept in sync on every call, so renaming `## Branch A` to `## Branch A:
  * Fight` updates the printed line too.
@@ -1190,9 +1190,9 @@ export function liveSceneIds(parsed: ParsedScript): Set<string> {
 	return new Set(parsed.scenes.map((s) => s.loomId).filter((id): id is string => id !== null));
 }
 
-/** Chapter (top-level section) loom ids currently backed by a `#` line —
- *  the Chapter equivalent of `liveSceneIds`. */
-export function liveChapterIds(parsed: ParsedScript): Set<string> {
+/** Act (top-level section) loom ids currently backed by a `#` line —
+ *  the Act equivalent of `liveSceneIds`. */
+export function liveActIds(parsed: ParsedScript): Set<string> {
 	return new Set(
 		parsed.sections.filter((s) => s.level === 1 && s.loomId !== null).map((s) => s.loomId as string)
 	);
@@ -1210,7 +1210,7 @@ export function pageRangeLabel(scene: ParsedScene): string {
 /**
  * Elements grouped into pages, for anything that displays the script the way it
  * will print. Sections and synopses are dropped — they're structural and never
- * reach the page, which is exactly why a chapter title that must appear in the
+ * reach the page, which is exactly why an act title that must appear in the
  * output has to be written separately as centered bold.
  */
 export function paginate(parsed: ParsedScript): FountainElement[][] {
@@ -1384,11 +1384,11 @@ export function reattachSceneIds(
 }
 
 /**
- * Re-attaches an incoming script's top-level sections (chapters) to the ids
+ * Re-attaches an incoming script's top-level sections (acts) to the ids
  * they had before — the same recovery heuristic as `reattachSceneIds`, and for
  * the same reason: an export → edit elsewhere → import round trip strips every
  * `[[loom:…]]` marker, sections included. Without this, every reimport created
- * brand-new Chapter notes and orphaned the old ones, which is what silently
+ * brand-new Act notes and orphaned the old ones, which is what silently
  * dropped their display titles.
  *
  * Matching is conservative, same as scenes: an incoming section claims an old
@@ -1396,7 +1396,7 @@ export function reattachSceneIds(
  */
 export function reattachSectionIds(
 	incoming: string,
-	/** Existing chapters' ids keyed in script order: `{ id, title }`. */
+	/** Existing acts' ids keyed in script order: `{ id, title }`. */
 	known: { id: string; title: string }[]
 ): { text: string; matched: number } {
 	const parsed = parseFountain(incoming);
@@ -1441,17 +1441,17 @@ export function replaceSceneBody(text: string, sceneId: string, body: string): s
 }
 
 /**
- * Replaces a chapter's body — everything after its `#` section line, scene
+ * Replaces an act's body — everything after its `#` section line, scene
  * headings included — leaving the section line (and its hidden id) untouched.
  *
- * Mirrors `replaceSceneBody`, but for the Chapter page's own Script section:
- * a chapter's excerpt spans every scene under it, not one heading's worth, so
+ * Mirrors `replaceSceneBody`, but for the Act page's own Script section:
+ * an act's excerpt spans every scene under it, not one heading's worth, so
  * the whole span between this section and the next top-level one is the
  * editable body.
  */
-export function replaceChapterBody(text: string, chapterId: string, body: string): string | null {
+export function replaceActBody(text: string, actId: string, body: string): string | null {
 	const parsed = parseFountain(text);
-	const section = parsed.sections.find((sec) => sec.level === 1 && sec.loomId === chapterId);
+	const section = parsed.sections.find((sec) => sec.level === 1 && sec.loomId === actId);
 	if (!section) return null;
 	const lines = text.split(/\r?\n/);
 	const endLine = nextTopSectionLine(parsed, section.line) ?? lines.length;
@@ -1470,13 +1470,13 @@ export function removeScene(text: string, sceneId: string): string | null {
 	return lines.join('\n');
 }
 
-/** Removes a chapter — its `#` section line and everything beneath it (every
+/** Removes an act — its `#` section line and everything beneath it (every
  *  scene it holds included) — from the script entirely. Mirrors `removeScene`
- *  one level up, bounded the same way `replaceChapterBody`/`nextTopSectionLine`
- *  are so it can never reach into the next chapter. */
-export function removeChapter(text: string, chapterId: string): string | null {
+ *  one level up, bounded the same way `replaceActBody`/`nextTopSectionLine`
+ *  are so it can never reach into the next act. */
+export function removeAct(text: string, actId: string): string | null {
 	const parsed = parseFountain(text);
-	const section = parsed.sections.find((sec) => sec.level === 1 && sec.loomId === chapterId);
+	const section = parsed.sections.find((sec) => sec.level === 1 && sec.loomId === actId);
 	if (!section) return null;
 	const lines = text.split(/\r?\n/);
 	const endLine = nextTopSectionLine(parsed, section.line) ?? lines.length;
@@ -1484,7 +1484,7 @@ export function removeChapter(text: string, chapterId: string): string | null {
 	return lines.join('\n');
 }
 
-/** Removes a chapter-boundary page break — its one line, plus a following
+/** Removes an act-boundary page break — its one line, plus a following
  *  blank line if there is one (mirrors the same tidy-up `applyDisplayTitles`
  *  does removing its own centered-title line) — from the script entirely. */
 export function removePageBreak(text: string, id: string): string | null {
@@ -1498,15 +1498,15 @@ export function removePageBreak(text: string, id: string): string | null {
 
 /**
  * The line where a top-level section's content ends: the next top-level
- * section's own line, OR a qualifying chapter-boundary page break's line —
+ * section's own line, OR a qualifying act-boundary page break's line —
  * whichever comes first — or `null` when neither follows (the caller
  * substitutes the file's line count). A structural edit bounded to ONE
- * chapter must cap here rather than trusting a scene's `endLine` (the parser
+ * act must cap here rather than trusting a scene's `endLine` (the parser
  * extends the LAST scene's `endLine` to whatever scene heading comes next in
- * the WHOLE file, chapter boundary or not) — shared by every op that needs
- * "don't reach into the next chapter". Stopping at a page break too is what
- * keeps one from being swept into the PRECEDING chapter's own content (its
- * own scenes, the Chapter page's Script section, …) the moment it's typed —
+ * the WHOLE file, act boundary or not) — shared by every op that needs
+ * "don't reach into the next act". Stopping at a page break too is what
+ * keeps one from being swept into the PRECEDING act's own content (its
+ * own scenes, the Act page's Script section, …) the moment it's typed —
  * see `ParsedPageBreak`.
  */
 export function nextTopSectionLine(parsed: ParsedScript, afterLine: number): number | null {
@@ -1522,7 +1522,7 @@ export function nextTopSectionLine(parsed: ParsedScript, afterLine: number): num
  * level is <= this one's (a sibling, or a shallower ancestor-level section),
  * or `null` when nothing like that follows (the caller substitutes EOF).
  * `nextTopSectionLine` is this same question hardcoded to level 1 (plus a
- * chapter-boundary page break, which only ever applies there); this is the
+ * act-boundary page break, which only ever applies there); this is the
  * general form, for bounding a branch section's own block regardless of how
  * deep it's nested.
  */
@@ -1536,9 +1536,9 @@ export function nextSectionAtLevel(parsed: ParsedScript, afterLine: number, leve
 /**
  * Where a scene's own content actually ends — its raw `endLine`, capped at
  * the next top-level boundary (`nextTopSectionLine`). `ParsedScene.endLine`
- * extends to whatever scene heading comes next in the WHOLE file, chapter
- * boundary or not, so trusting it directly for the LAST scene in a chapter
- * sweeps in everything up to the next chapter's own first scene — its
+ * extends to whatever scene heading comes next in the WHOLE file, act
+ * boundary or not, so trusting it directly for the LAST scene in an act
+ * sweeps in everything up to the next act's own first scene — its
  * heading, display title, any page break sitting between them, all of it.
  * Every op that reads, removes, or moves a scene's own span goes through
  * this instead.
@@ -1562,8 +1562,8 @@ function trimTrailingBlankLines(block: string[]): string[] {
 }
 
 /**
- * Moves a scene under a different chapter: its whole block is lifted out and
- * re-inserted at the end of the target section, so re-assigning a chapter on
+ * Moves a scene under a different act: its whole block is lifted out and
+ * re-inserted at the end of the target section, so re-assigning an act on
  * the Scene page actually moves the writing in the script.
  */
 export function moveSceneToSection(text: string, sceneId: string, sectionId: string): string | null {
@@ -1630,11 +1630,11 @@ export function setSceneHeadingParts(
  * Moves a scene's block to sit immediately before another scene, wherever
  * that scene is.
  *
- * Reordering within one chapter (drag-and-drop on the Chapter page) and
- * moving to a specific spot in a DIFFERENT chapter (the Scene page's two-step
- * "pick a chapter, then place it" move) are the same operation: relocate the
+ * Reordering within one act (drag-and-drop on the Act page) and
+ * moving to a specific spot in a DIFFERENT act (the Scene page's two-step
+ * "pick an act, then place it" move) are the same operation: relocate the
  * text, and the scene inherits whichever section it now physically sits
- * under — there is no separate "which chapter" field to also update.
+ * under — there is no separate "which act" field to also update.
  */
 export function moveSceneBefore(text: string, sceneId: string, beforeSceneId: string): string | null {
 	const parsed = parseFountain(text);
@@ -1656,8 +1656,8 @@ export function moveSceneBefore(text: string, sceneId: string, beforeSceneId: st
 }
 
 /**
- * Reorders every scene within one chapter (top-level section) to match
- * `orderedSceneIds` exactly, in one pass — the Chapter page's drag-to-reorder
+ * Reorders every scene within one act (top-level section) to match
+ * `orderedSceneIds` exactly, in one pass — the Act page's drag-to-reorder
  * uses this (rather than one `moveSceneBefore` call) because a big jump (the
  * last scene dragged to the front) is one atomic rewrite instead of an
  * "insert before this computed sibling" reasoned from a single moved scene,
@@ -1667,9 +1667,9 @@ export function moveSceneBefore(text: string, sceneId: string, beforeSceneId: st
  * (heading + everything up to the next scene) is captured BEFORE the removal,
  * so nested content between scenes travels with the scene it follows — the
  * removal/reinsertion is bounded to the section (the next top-level `#`, or
- * the file end), never reaching into a following chapter, since the LAST
+ * the file end), never reaching into a following act, since the LAST
  * scene in a section has its raw `endLine` extended by the parser to
- * whatever scene-heading comes next in the whole file, chapter boundary or
+ * whatever scene-heading comes next in the whole file, act boundary or
  * not.
  */
 export function reorderScenesInSection(
@@ -1755,30 +1755,30 @@ export function reorderBranchGroup(text: string, groupId: string, orderedSection
 	return lines.join('\n');
 }
 
-/** One entry in the top-level document sequence — a chapter (its whole
- *  block, scenes included) or a page break sitting between two chapters —
+/** One entry in the top-level document sequence — an act (its whole
+ *  block, scenes included) or a page break sitting between two acts —
  *  in document order. What `reorderTopLevelEntries`/`reorderTopSections`
  *  reorder. */
 export interface TopLevelEntry {
-	kind: 'chapter' | 'page-break';
+	kind: 'act' | 'page-break';
 	id: string;
 }
 
-/** The current top-level sequence — chapters and chapter-boundary page
+/** The current top-level sequence — acts and act-boundary page
  *  breaks — in document order. */
 export function topLevelEntries(parsed: ParsedScript): TopLevelEntry[] {
-	const chapters = parsed.sections
+	const acts = parsed.sections
 		.filter((sec): sec is ParsedSection & { loomId: string } => sec.level === 1 && sec.loomId !== null)
-		.map((sec) => ({ kind: 'chapter' as const, id: sec.loomId, line: sec.line }));
+		.map((sec) => ({ kind: 'act' as const, id: sec.loomId, line: sec.line }));
 	const breaks = parsed.pageBreaks
 		.filter((pb): pb is ParsedPageBreak & { loomId: string } => pb.loomId !== null)
 		.map((pb) => ({ kind: 'page-break' as const, id: pb.loomId, line: pb.line }));
-	return [...chapters, ...breaks].sort((a, b) => a.line - b.line).map(({ kind, id }) => ({ kind, id }));
+	return [...acts, ...breaks].sort((a, b) => a.line - b.line).map(({ kind, id }) => ({ kind, id }));
 }
 
 /**
  * Shared splice-rebuild behind `reorderTopSections`/`reorderTopLevelEntries`:
- * captures every top-level entry's block UP FRONT (a chapter through
+ * captures every top-level entry's block UP FRONT (an act through
  * `nextTopSectionLine` — scenes and nested structure included — a page break
  * just its own single line), removes the WHOLE span from the first entry
  * through the last in ONE bounded splice, then reinserts every block in
@@ -1796,7 +1796,7 @@ function rebuildTopLevel(text: string, parsed: ParsedScript, order: string[]): s
 
 	const blockEnd = (id: string): number => {
 		const line = lineOf.get(id) as number;
-		return kindOf.get(id) === 'chapter' ? (nextTopSectionLine(parsed, line) ?? lines.length) : line + 1;
+		return kindOf.get(id) === 'act' ? (nextTopSectionLine(parsed, line) ?? lines.length) : line + 1;
 	};
 
 	const sorted = entries.slice().sort((a, b) => (lineOf.get(a.id) as number) - (lineOf.get(b.id) as number));
@@ -1823,30 +1823,30 @@ function rebuildTopLevel(text: string, parsed: ParsedScript, order: string[]): s
 }
 
 /**
- * Reorders the ENTIRE top-level sequence — chapters (their whole block,
+ * Reorders the ENTIRE top-level sequence — acts (their whole block,
  * scenes included) and the page breaks sitting between them — to `order`
  * exactly, in one pass. The Script view's own Outline uses this: dragging
  * there always works over the FULL mixed list, so `order` already says
- * exactly where every entry, chapter or page break, lands.
+ * exactly where every entry, act or page break, lands.
  */
 export function reorderTopLevelEntries(text: string, order: string[]): string | null {
 	return rebuildTopLevel(text, parseFountain(text), order);
 }
 
 /**
- * Reorders every top-level section (chapter) in the whole script to match
- * `orderedSectionIds` exactly, in one pass — the Chapter creation modal's own
+ * Reorders every top-level section (act) in the whole script to match
+ * `orderedSectionIds` exactly, in one pass — the Act creation modal's own
  * position picker uses this, mirroring `reorderScenesInSection` one level up:
- * a chapter's ENTIRE block (its `#` line through everything up to the next
+ * an act's ENTIRE block (its `#` line through everything up to the next
  * top-level entry, scenes and nested structure included) travels as one unit
  * rather than being reasoned about scene by scene.
  *
  * Unlike `reorderTopLevelEntries`, this NEVER drops or strands an existing
  * page break, which is what makes it safe for a caller that only has an
- * opinion about chapters: every page break stays attached to whichever
- * chapter immediately follows it in the CURRENT document (a page break's
- * whole point is "start the NEXT chapter on a fresh page", so that's what it
- * keeps doing as chapters move around it); one with nothing after it
+ * opinion about acts: every page break stays attached to whichever
+ * act immediately follows it in the CURRENT document (a page break's
+ * whole point is "start the NEXT act on a fresh page", so that's what it
+ * keeps doing as acts move around it); one with nothing after it
  * (trailing) stays at the very end.
  *
  * Only sections already carrying a loom id are touched — `ensureSceneIds`
@@ -1857,10 +1857,10 @@ export function reorderTopLevelEntries(text: string, order: string[]): string | 
 export function reorderTopSections(text: string, orderedSectionIds: string[]): string | null {
 	const parsed = parseFountain(text);
 	const entries = topLevelEntries(parsed);
-	const chapterIds = entries.filter((e) => e.kind === 'chapter').map((e) => e.id);
-	if (chapterIds.length === 0) return null;
+	const actIds = entries.filter((e) => e.kind === 'act').map((e) => e.id);
+	if (actIds.length === 0) return null;
 
-	// Which page breaks immediately precede which chapter, in the CURRENT
+	// Which page breaks immediately precede which act, in the CURRENT
 	// (pre-reorder) document — one with nothing after it attaches to `null`,
 	// the very end.
 	const attachedBefore = new Map<string, string[]>();
@@ -1877,11 +1877,11 @@ export function reorderTopSections(text: string, orderedSectionIds: string[]): s
 	}
 	const trailing = pending;
 
-	const chapterOrder = [
-		...orderedSectionIds.filter((id) => chapterIds.includes(id)),
-		...chapterIds.filter((id) => !orderedSectionIds.includes(id)),
+	const actOrder = [
+		...orderedSectionIds.filter((id) => actIds.includes(id)),
+		...actIds.filter((id) => !orderedSectionIds.includes(id)),
 	];
-	const fullOrder = [...chapterOrder.flatMap((id) => [...(attachedBefore.get(id) ?? []), id]), ...trailing];
+	const fullOrder = [...actOrder.flatMap((id) => [...(attachedBefore.get(id) ?? []), id]), ...trailing];
 
 	return rebuildTopLevel(text, parsed, fullOrder);
 }
@@ -1892,7 +1892,7 @@ export function reorderTopSections(text: string, orderedSectionIds: string[]): s
  *
  * Production numbers are traditionally LOCKED in screenwriting (hence 12A,
  * 12B on a real set) precisely so they don't move — but this app's reorder
- * actions (chapter drag reorder, move to another chapter, or simply typing a
+ * actions (act drag reorder, move to another act, or simply typing a
  * new scene above an already-numbered one) physically relocate a scene's
  * whole block, number included, which would otherwise leave a stale number
  * sitting on the wrong scene. If NO scene is numbered at all, this is a
@@ -1920,10 +1920,10 @@ export function renumberScenes(text: string): string {
 }
 
 /**
- * Renames a top-level section's (chapter's) title — the text of its `#` line
+ * Renames a top-level section's (act's) title — the text of its `#` line
  * — leaving its level, nesting and hidden loom id untouched.
  *
- * The Chapter page's Title field writes through this: chapters are otherwise
+ * The Act page's Title field writes through this: acts are otherwise
  * "named by the script" (the note reads the section, never the other way),
  * but that direction of truth is about not authoring a RIVAL copy of the
  * text, not about the field being read-only — same relationship the Scene
@@ -1940,18 +1940,18 @@ export function renameSectionTitle(text: string, sectionId: string, newTitle: st
 }
 
 /**
- * Appends a new, empty top-level chapter to the end of the script, with its
+ * Appends a new, empty top-level act to the end of the script, with its
  * `[[loom:…]]` id already attached.
  *
- * The Script view's Chapters panel "+ New chapter" button uses this rather
- * than creating a bare Chapter note the way the generic entity-creation
- * modal would — a Chapter note with nothing backing it in the script is an
- * orphan the moment it's made (see `liveChapterIds`), so this gives the
+ * The Script view's Acts panel "+ New act" button uses this rather
+ * than creating a bare Act note the way the generic entity-creation
+ * modal would — an Act note with nothing backing it in the script is an
+ * orphan the moment it's made (see `liveActIds`), so this gives the
  * script itself the new section first; `syncScenes` then creates the note
- * FROM that section on the next commit, the same path a `# Chapter` line
+ * FROM that section on the next commit, the same path a `# Act` line
  * typed by hand takes.
  */
-export function appendChapter(text: string, title: string): string {
+export function appendAct(text: string, title: string): string {
 	const parsed = parseFountain(text);
 	const id = freshSceneId(allLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
@@ -1959,11 +1959,11 @@ export function appendChapter(text: string, title: string): string {
 }
 
 /**
- * Appends a new, empty chapter-boundary page break to the very end of the
+ * Appends a new, empty act-boundary page break to the very end of the
  * script, with its `[[loom:…]]` id already attached — the Outline panel's
- * "+ New page breaker" button uses this (mirrors `appendChapter`). Landing
- * after the last chapter means nothing follows it yet, which is exactly what
- * makes it immediately qualify as a chapter-boundary break (see the
+ * "+ New page breaker" button uses this (mirrors `appendAct`). Landing
+ * after the last act means nothing follows it yet, which is exactly what
+ * makes it immediately qualify as an act-boundary break (see the
  * `pageBreaks` derivation in `parseFountain`) and show up in the Outline
  * right away, draggable to wherever it's actually meant to sit.
  */
@@ -1978,11 +1978,11 @@ export function appendPageBreak(text: string): string {
  * Appends a new, empty scene to the very end of the script, with its
  * `[[loom:…]]` id already attached — the Outline panel's "+ New scene"
  * button uses this. Appending at the true end (rather than needing a target
- * chapter) lands it in whichever chapter is LAST, the same way typing a new
- * heading at the bottom of the file would — a chapter's own content is
+ * act) lands it in whichever act is LAST, the same way typing a new
+ * heading at the bottom of the file would — an act's own content is
  * simply "everything up to the next `#` line or EOF" (see
  * `nextTopSectionLine`), so there's nothing extra to wire up. With no
- * chapter at all yet, it lands as a chapterless scene, same as typing one in
+ * act at all yet, it lands as an actless scene, same as typing one in
  * by hand.
  */
 export function appendScene(text: string, location: string): string {
