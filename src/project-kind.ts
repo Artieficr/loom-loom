@@ -77,16 +77,16 @@ export function projectKindDescription(kind: ProjectKind): string {
 
 /**
  * The structural role a type plays in the chronological layout: the `anchor`
- * owns a column (Session / Act / Chapter), the `beat` stacks beneath one
- * (Event / Scene). A type has exactly one role regardless of kind, so
- * record-only code can ask `roleOf(record.type)` without resolving a project.
- *
- * Writer/Prose is the one workflow with an anchor and NO beat type — a novel
- * chapter has no smaller structural unit the way a scene sits under an act,
- * matching the deliberately simpler Book/Chapter shape (vs. Script/Act/
- * Scene/Branches). `roleType`'s `'beat'` case can therefore return `null`;
- * every caller asking for a project's beat type has to handle that (see
- * `columns.ts`, `list-view.tsx`, `timeline-strip.tsx`, `entity-view.tsx`).
+ * owns a column (Session / Act), the `beat` stacks beneath one (Event /
+ * Scene / Chapter). A type has exactly one role regardless of kind, so
+ * record-only code can ask `roleOf(record.type)` without resolving a
+ * project. Writer/Prose reuses the SAME anchor (`act`) Writer/Script uses —
+ * a project is always exclusively one Writer sub-mode or the other, never
+ * both, so there's no ambiguity within one project — with `chapter`
+ * substituting for `scene` as the beat. Both Writer sub-modes are the
+ * two-tier Act(anchor)/beat shape every other kind already has; neither
+ * needs a third structural tier for "Book" (see `docs/ARCHITECTURE.md`/
+ * `ROADMAP.md` for why Book itself isn't a chronology-layer entity).
  */
 export type TypeRole = 'anchor' | 'beat';
 
@@ -95,26 +95,20 @@ const ROLE_TYPES: Record<ProjectKind, Record<TypeRole, EntityType>> = {
 	gm: { anchor: 'session', beat: 'event' },
 	writer: { anchor: 'act', beat: 'scene' },
 };
+const WRITER_PROSE_ROLE_TYPES: Record<TypeRole, EntityType> = { anchor: 'act', beat: 'chapter' };
 
 const TYPE_ROLES: Partial<Record<EntityType, TypeRole>> = {
 	session: 'anchor',
 	act: 'anchor',
-	chapter: 'anchor',
 	event: 'beat',
 	scene: 'beat',
+	chapter: 'beat',
 };
 
-/** The entity type playing `role` in this kind of project, or `null` for a
- *  `'beat'` request against Writer/Prose (see this type's own doc comment).
- *  `writerMode` only matters for `kind === 'writer'`; every other kind
- *  ignores it. Overloaded so an `'anchor'` call — never null, for any
- *  kind/sub-mode — doesn't force every anchor-type call site into
- *  null-handling it will never actually need; only `'beat'` callers see the
- *  `| null` in the return type. */
-export function roleType(kind: ProjectKind, role: 'anchor', writerMode?: WriterMode): EntityType;
-export function roleType(kind: ProjectKind, role: 'beat', writerMode?: WriterMode): EntityType | null;
-export function roleType(kind: ProjectKind, role: TypeRole, writerMode: WriterMode = DEFAULT_WRITER_MODE): EntityType | null {
-	if (kind === 'writer' && writerMode === 'prose') return role === 'anchor' ? 'chapter' : null;
+/** The entity type playing `role` in this kind of project. `writerMode` only
+ *  matters for `kind === 'writer'`; every other kind ignores it. */
+export function roleType(kind: ProjectKind, role: TypeRole, writerMode: WriterMode = DEFAULT_WRITER_MODE): EntityType {
+	if (kind === 'writer' && writerMode === 'prose') return WRITER_PROSE_ROLE_TYPES[role];
 	return ROLE_TYPES[kind][role];
 }
 
@@ -139,7 +133,7 @@ const KIND_TYPES: Record<ProjectKind, readonly EntityType[]> = {
 	gm: ['character', 'location', 'region', 'faction', 'item', 'quest', 'event', 'session'],
 	writer: ['character', 'location', 'region', 'faction', 'item', 'quest', 'scene', 'act'],
 };
-const WRITER_PROSE_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest', 'chapter'];
+const WRITER_PROSE_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest', 'chapter', 'act'];
 
 export function typesFor(kind: ProjectKind, writerMode: WriterMode = DEFAULT_WRITER_MODE): readonly EntityType[] {
 	if (kind === 'writer' && writerMode === 'prose') return WRITER_PROSE_TYPES;
@@ -173,9 +167,15 @@ export interface KindFeatures {
 	/** GM: preplanned NPC lines / speech-style examples on character pages.
 	 *  Placeholder; the field is read, the UI isn't built. */
 	npcLines: boolean;
-	/** Writer: the project's Fountain script and everything parsed out of it.
-	 *  Placeholder; the flag gates future script UI. */
+	/** Writer/Script: the project's Fountain script and everything parsed out
+	 *  of it. Writer/Prose has its own separate project-root file (the
+	 *  Book, see `book` below) instead — the two are mutually exclusive, so
+	 *  this is never true alongside `book`. */
 	script: boolean;
+	/** Writer/Prose: the project's Book file and everything parsed out of it
+	 *  — the prose-grammar analogue of `script` above. Mutually exclusive
+	 *  with it (never both true in one project). */
+	book: boolean;
 	/** Anchors are ordered by their date (sessions happen on a day) or by their
 	 *  manual sequence (acts are ordered, not dated). */
 	anchorOrder: 'date' | 'sequence';
@@ -189,6 +189,7 @@ const KIND_FEATURES: Record<ProjectKind, KindFeatures> = {
 		eventPlanning: false,
 		npcLines: false,
 		script: false,
+		book: false,
 		anchorOrder: 'date',
 	},
 	gm: {
@@ -198,6 +199,7 @@ const KIND_FEATURES: Record<ProjectKind, KindFeatures> = {
 		eventPlanning: true,
 		npcLines: true,
 		script: false,
+		book: false,
 		anchorOrder: 'date',
 	},
 	writer: {
@@ -207,16 +209,17 @@ const KIND_FEATURES: Record<ProjectKind, KindFeatures> = {
 		eventPlanning: false,
 		npcLines: false,
 		script: true,
+		book: false,
 		anchorOrder: 'sequence',
 	},
 };
 
-/** `writerMode` only matters for `kind === 'writer'`: `script` reads `false`
- *  for Prose (no `.fountain` file, no script UI) — every other flag is the
- *  same for both Writer sub-modes. */
+/** `writerMode` only matters for `kind === 'writer'`: Prose flips `script`
+ *  off and `book` on (no `.fountain` file/UI, a Book file/UI instead) —
+ *  every other flag is the same for both Writer sub-modes. */
 export function featuresOf(kind: ProjectKind, writerMode: WriterMode = DEFAULT_WRITER_MODE): KindFeatures {
 	const base = KIND_FEATURES[kind];
-	if (kind === 'writer' && writerMode === 'prose') return { ...base, script: false };
+	if (kind === 'writer' && writerMode === 'prose') return { ...base, script: false, book: true };
 	return base;
 }
 
@@ -244,14 +247,8 @@ export function projectHasType(config: KindHolder, type: EntityType): boolean {
 	return hasType(kindOf(config), type, writerModeOf(config));
 }
 
-export function projectRoleType(config: KindHolder, role: 'anchor'): EntityType;
-export function projectRoleType(config: KindHolder, role: 'beat'): EntityType | null;
-export function projectRoleType(config: KindHolder, role: TypeRole): EntityType | null {
-	// Branches on a literal so each call below matches one specific `roleType`
-	// overload — `role` itself is only a `TypeRole` union here, which
-	// wouldn't match either overload directly.
-	if (role === 'anchor') return roleType(kindOf(config), 'anchor', writerModeOf(config));
-	return roleType(kindOf(config), 'beat', writerModeOf(config));
+export function projectRoleType(config: KindHolder, role: TypeRole): EntityType {
+	return roleType(kindOf(config), role, writerModeOf(config));
 }
 
 export function features(config: KindHolder): KindFeatures {

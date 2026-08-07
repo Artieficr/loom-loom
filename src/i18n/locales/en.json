@@ -46,6 +46,7 @@
 			"tagLabel": "Tag",
 			"newSublocationTitle": "New sublocation",
 			"nameLabel": "Name",
+			"characterNameLabel": "Name",
 			"namePlaceholderSearchable": "Search or name {article} {noun}",
 			"namePlaceholderNew": "{label} name",
 			"questGiver": "Quest giver",
@@ -83,6 +84,11 @@
 				"name": "Append to the end of the act",
 				"desc": "Turn off to choose where among the act's existing scenes this one lands."
 			},
+			"chapterActDesc": "Which {anchor} this chapter belongs to.",
+			"appendToEndActChapter": {
+				"name": "Append to the end of the act",
+				"desc": "Turn off to choose where among the act's existing chapters this one lands."
+			},
 			"locationRequired": "Location is required.",
 			"sceneWriteFailed": "Could not write the scene into the script.",
 			"sceneCreateFailed": "Could not create the scene.",
@@ -95,6 +101,10 @@
 			},
 			"appendToEndScript": {
 				"name": "Append to the end of the script",
+				"desc": "Turn off to choose where among the existing acts this one lands."
+			},
+			"appendToEndBook": {
+				"name": "Append to the end of the book",
 				"desc": "Turn off to choose where among the existing acts this one lands."
 			},
 			"titleRequired": "Title is required.",
@@ -265,6 +275,7 @@
 				"back": "Back",
 				"titleLabel": "Title",
 				"nameLabel": "Name",
+				"characterNameLabel": "Name",
 				"aliases": "Aliases",
 				"removeAlias": "Remove alias",
 				"sessionNumber": "Session {n}",
@@ -397,6 +408,7 @@
 				"unfinalizedAlternatives": "Unfinalized alternatives",
 				"hideAlternatives": "Hide alternatives",
 				"everyAlternativeAccepted": "Every alternative has been accepted.",
+				"editorLabel": "Editor",
 				"pagesPreview": "Pages preview",
 				"browseComments": "Browse comments",
 				"browseAlternatives": "Browse undecided alternatives",

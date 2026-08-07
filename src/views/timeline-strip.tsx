@@ -195,12 +195,9 @@ export const TimelineStrip = memo(function TimelineStrip({
 	// Sessions/Events here, Acts/Scenes in a writer project — the strip
 	// itself is the same either way.
 	const anchorType = projectRoleType(project.config, 'anchor');
-	// Writer/Prose has no beat type at all (a Chapter has no smaller unit
-	// beneath it) — every beat-creation affordance below is skipped entirely
-	// when this is null, not just its label.
 	const beatType = projectRoleType(project.config, 'beat');
 	const anchorLabel = entityLabel(anchorType).toLowerCase();
-	const beatLabel = beatType !== null ? entityLabel(beatType).toLowerCase() : '';
+	const beatLabel = entityLabel(beatType).toLowerCase();
 	const [tooltip, setTooltip] = useState<TooltipState | null>(null);
 	const [open, setOpenState] = useState(nodateOpen);
 	const setOpen = (v: boolean) => {
@@ -698,10 +695,8 @@ export const TimelineStrip = memo(function TimelineStrip({
 
 		// Session node → new event pinned there. Detection is the bubble itself,
 		// not the column dropzone (which extends over the empty area below the
-		// events, where a right-click should offer creation instead). Nothing to
-		// offer at all when the project has no beat type (Writer/Prose).
+		// events, where a right-click should offer creation instead).
 		if (bubble && roleOf(bubble.type) === 'anchor') {
-			if (beatType === null) return;
 			menu.addItem((item) =>
 				item
 					.setTitle(
@@ -720,8 +715,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 		}
 
 		// Empty space (including the area below a session's events): create a
-		// session or a session-less event — the latter only when the project
-		// actually has a beat type.
+		// session or a session-less event.
 		menu.addItem((item) =>
 			item
 				.setTitle(newEntityTitle(anchorType))
@@ -730,16 +724,14 @@ export const TimelineStrip = memo(function TimelineStrip({
 					new CreateEntityModal(plugin, anchorType, project, { onCreated: () => {} }).open()
 				)
 		);
-		if (beatType !== null) {
-			menu.addItem((item) =>
-				item
-					.setTitle(newEntityTitle(beatType))
-					.setIcon(ENTITY_META[beatType].icon)
-					.onClick(() =>
-						new CreateEntityModal(plugin, beatType, project, { onCreated: () => {} }).open()
-					)
-			);
-		}
+		menu.addItem((item) =>
+			item
+				.setTitle(newEntityTitle(beatType))
+				.setIcon(ENTITY_META[beatType].icon)
+				.onClick(() =>
+					new CreateEntityModal(plugin, beatType, project, { onCreated: () => {} }).open()
+				)
+		);
 		menu.showAtMouseEvent(e.nativeEvent);
 	};
 

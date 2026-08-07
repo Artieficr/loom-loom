@@ -385,12 +385,9 @@ function EntityList({
 	// Acts/Scenes in a writer one. The menus and pickers below address
 	// these rather than naming a type.
 	const anchorType = projectRoleType(project?.config, 'anchor');
-	// Writer/Prose has no beat type at all (a Chapter has no smaller unit
-	// beneath it) — every "Add a [beat]" affordance below is skipped entirely
-	// when this is null, not just its label.
 	const beatType = projectRoleType(project?.config, 'beat');
 	const anchorLabel = entityLabel(anchorType).toLowerCase();
-	const beatLabel = beatType !== null ? entityLabel(beatType).toLowerCase() : '';
+	const beatLabel = entityLabel(beatType).toLowerCase();
 	const addBeatTitle = t('view.list.addBeatTitle', {
 		article: /^[aeiou]/.test(beatLabel) ? 'an' : 'a',
 		beat: beatLabel,
@@ -668,7 +665,6 @@ function EntityList({
 		});
 	};
 	const pickEventFor = (r: EntityRecord) => {
-		if (beatType === null) return; // only ever invoked via addBeatMenuItem, itself guarded
 		const already = (ev: EntityRecord) =>
 			r.type === 'location' ? eventAtLocation(ev, r.path) : eventHasInvolved(ev, r.path);
 		new RecordSuggestModal(
@@ -761,10 +757,8 @@ function EntityList({
 	 *  pins `r` into the picked event/scene's first note. Distinct from the
 	 *  anchor role's own "Add a [beat]" below, which creates a brand new one
 	 *  pre-linked to the anchor rather than picking an existing one. */
-	const addBeatMenuItem = (menu: Menu, r: EntityRecord) => {
-		if (beatType === null) return;
+	const addBeatMenuItem = (menu: Menu, r: EntityRecord) =>
 		menu.addItem((i) => i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r)));
-	};
 
 	// A scene/act IS its stretch of the script — deleting the note while
 	// leaving the writing behind would just resurrect it on the next parse, so
@@ -1087,19 +1081,17 @@ function EntityList({
 				);
 			}
 			menu.addSeparator();
-			if (beatType !== null) {
-				menu.addItem((i) =>
-					i
-						.setTitle(addBeatTitle)
-						.setIcon(ENTITY_META[beatType].icon)
-						.onClick(() =>
-							new CreateEntityModal(plugin, beatType, project, {
-								noteSession: r,
-								onCreated: () => {},
-							}).open()
-						)
-				);
-			}
+			menu.addItem((i) =>
+				i
+					.setTitle(addBeatTitle)
+					.setIcon(ENTITY_META[beatType].icon)
+					.onClick(() =>
+						new CreateEntityModal(plugin, beatType, project, {
+							noteSession: r,
+							onCreated: () => {},
+						}).open()
+					)
+			);
 			menu.addItem((i) =>
 				i
 					.setTitle(t('view.list.addQuest'))
