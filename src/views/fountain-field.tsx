@@ -181,42 +181,60 @@ function scanEntityLinks(
  * to its own ancestor-walking implementation.
  */
 const scrollWithinEditor = EditorView.scrollHandler.of((view, range, target) => {
+	// CM6 calls every registered `scrollHandler` from INSIDE `docView.scrollIntoView`,
+	// which itself runs from `EditorView.measure()` at a point where
+	// `updateState` has already been set to `Updating` for that measure pass
+	// (reset to `Idle` only in `measure()`'s own `finally`, after every
+	// handler has already run) — confirmed by reading CM6's own source, not
+	// just observed live. `view.coordsAtPos`/`posAtCoords` unconditionally
+	// call `readMeasured()` first, which throws whenever `updateState ==
+	// Updating` — so calling either of those from THIS handler throws on
+	// essentially every scroll-into-view request, not just an early/
+	// first-open one, which is what silently ate every attempt at restoring
+	// a remembered scroll position. `view.lineBlockAt(pos)` sidesteps this
+	// entirely: it's a pure lookup against CM6's already-current internal
+	// height map (`viewState.heightMap`, freshly rebuilt earlier in this
+	// same `measure()` pass), calls no DOM-measuring API, and — unlike
+	// `coordsAtPos` — never calls `readMeasured()` at all, so it's always
+	// safe here. Its `top`/`bottom` are DOCUMENT-relative (top of the whole
+	// scrollable content == 0), the same coordinate space `scroller.scrollTop`
+	// already lives in, so the rest of this works entirely in that space and
+	// never needs `getBoundingClientRect()` on the target at all — only on
+	// `scroller`/`view.contentDOM` once, to find the constant offset between
+	// the two (plain DOM reads, unrelated to CM6's guard, always safe).
 	const scroller = view.scrollDOM;
-	const headCoords = view.coordsAtPos(range.head, range.assoc || (range.head > range.anchor ? -1 : 1));
-	if (!headCoords) return true;
-	let rect = headCoords;
+	const headBlock = view.lineBlockAt(range.head);
+	let top = headBlock.top;
+	let bottom = headBlock.bottom;
 	if (!range.empty) {
-		const otherCoords = view.coordsAtPos(range.anchor, range.anchor > range.head ? -1 : 1);
-		if (otherCoords) {
-			rect = {
-				left: Math.min(headCoords.left, otherCoords.left),
-				top: Math.min(headCoords.top, otherCoords.top),
-				right: Math.max(headCoords.right, otherCoords.right),
-				bottom: Math.max(headCoords.bottom, otherCoords.bottom),
-			};
-		}
+		const anchorBlock = view.lineBlockAt(range.anchor);
+		top = Math.min(top, anchorBlock.top);
+		bottom = Math.max(bottom, anchorBlock.bottom);
 	}
-	const boundingRect = scroller.getBoundingClientRect();
-	const boundingTop = boundingRect.top;
-	const boundingBottom = boundingRect.top + scroller.clientHeight;
+	const scrollerRect = scroller.getBoundingClientRect();
+	const contentRect = view.contentDOM.getBoundingClientRect();
+	// Constant regardless of current scroll position — see comment above.
+	const docTopOffset = contentRect.top - scrollerRect.top + scroller.scrollTop;
+	const visibleDocTop = scroller.scrollTop - docTopOffset;
+	const visibleDocBottom = visibleDocTop + scroller.clientHeight;
 	const yMargin = target.yMargin;
 	let moveY = 0;
 	if (target.y === 'nearest') {
-		if (rect.top < boundingTop + yMargin) {
-			moveY = rect.top - (boundingTop + yMargin);
-		} else if (rect.bottom > boundingBottom - yMargin) {
-			moveY = rect.bottom - boundingBottom + yMargin;
+		if (top < visibleDocTop + yMargin) {
+			moveY = top - (visibleDocTop + yMargin);
+		} else if (bottom > visibleDocBottom - yMargin) {
+			moveY = bottom - visibleDocBottom + yMargin;
 		}
 	} else {
-		const rectHeight = rect.bottom - rect.top;
-		const boundingHeight = boundingBottom - boundingTop;
+		const rectHeight = bottom - top;
+		const boundingHeight = scroller.clientHeight;
 		const targetTop =
 			target.y === 'center' && rectHeight <= boundingHeight
-				? rect.top + rectHeight / 2 - boundingHeight / 2
+				? top + rectHeight / 2 - boundingHeight / 2
 				: target.y === 'start'
-					? rect.top - yMargin
-					: rect.bottom - boundingHeight + yMargin;
-		moveY = targetTop - boundingTop;
+					? top - yMargin
+					: bottom - boundingHeight + yMargin;
+		moveY = targetTop - visibleDocTop;
 	}
 	if (moveY) scroller.scrollTop += moveY;
 	return true;
@@ -597,9 +615,11 @@ export const FountainField = forwardRef(function FountainField(
 		 */
 		class AnnotationHandlesOverlay {
 			private els = new Map<string, HTMLElement>();
+			private destroyed = false;
+			private syncQueued = false;
 
 			constructor(private view: EditorView) {
-				this.sync();
+				this.scheduleSync();
 			}
 
 			update(update: ViewUpdate) {
@@ -609,8 +629,36 @@ export const FountainField = forwardRef(function FountainField(
 					update.geometryChanged ||
 					update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations)))
 				) {
-					this.sync();
+					this.scheduleSync();
 				}
+			}
+
+			/** `sync()` reads layout via `coordsAtPos`, and CM6 forbids that
+			 *  synchronously in more places than just "the constructor" — a
+			 *  regular `update()` call CAN also land inside a forbidden window
+			 *  (confirmed live: this exact `update()` → `sync()` path crashed
+			 *  with "Reading the editor layout isn't allowed during an update"
+			 *  when a transaction dispatched very early, e.g. during a
+			 *  scroll/selection restore right on file open, before CM6's view
+			 *  had finished its own bootstrap). Routing EVERY trigger
+			 *  (constructor and update() alike) through one coalesced scheduler
+			 *  — never calling `sync()` synchronously from ANY CM6-invoked
+			 *  callback — is what closes off the whole class of bug, rather
+			 *  than chasing individual call sites one at a time. **`setTimeout`,
+			 *  not `requestAnimationFrame`**: a first attempt at this used rAF
+			 *  and STILL crashed live — CM6 schedules its own internal measure
+			 *  work via `requestAnimationFrame` too (confirmed in its own stack
+			 *  trace), so our rAF callback and CM6's can land in the exact same
+			 *  animation frame, still inside the same forbidden window; a
+			 *  `setTimeout` runs in a genuinely separate macrotask, after the
+			 *  browser has fully drained the current frame's rAF queue. */
+			private scheduleSync() {
+				if (this.syncQueued) return;
+				this.syncQueued = true;
+				this.view.dom.win.setTimeout(() => {
+					this.syncQueued = false;
+					if (!this.destroyed) this.sync();
+				}, 0);
 			}
 
 			sync() {
@@ -640,7 +688,20 @@ export const FountainField = forwardRef(function FountainField(
 							this.els.set(key, handleEl);
 						}
 						const pos = edge === 'start' ? span.contentFrom : span.contentTo;
-						const coords = view.coordsAtPos(pos, edge === 'start' ? 1 : -1);
+						// Belt-and-suspenders on top of `scheduleSync()` deferring
+						// every CALLER of `sync()` — if `coordsAtPos` still somehow
+						// throws (confirmed live to be reachable from more than one
+						// call site; see `scheduleSync`'s own doc comment), catching
+						// it here keeps this ONE frame's positioning a no-op instead
+						// of crashing the whole plugin, and the very next trigger
+						// (the next real update, or the editor's own viewport/
+						// geometry change) gets another chance to position correctly.
+						let coords: { left: number; top: number; bottom: number } | null = null;
+						try {
+							coords = view.coordsAtPos(pos, edge === 'start' ? 1 : -1);
+						} catch (e) {
+							console.error('Loom Loom: annotation handle could not read layout this frame', e);
+						}
 						if (coords) {
 							el.setCssProps({ display: 'block' });
 							el.style.left = `${coords.left}px`;
@@ -660,6 +721,7 @@ export const FountainField = forwardRef(function FountainField(
 			}
 
 			destroy() {
+				this.destroyed = true;
 				for (const el of this.els.values()) el.remove();
 				this.els.clear();
 			}
@@ -1235,7 +1297,30 @@ export const FountainField = forwardRef(function FountainField(
 		// page scrolling the whole editor box around on screen, which CM6 has
 		// no reason to know or care about. Same capture-phase "any scroll,
 		// anywhere" listener the comment popover's own scroll-tracking uses.
-		const onAnyScroll = () => view.plugin(annotationHandlesOverlay)?.sync();
+		// NOT a direct `sync()` call — a native 'scroll' event can fire
+		// SYNCHRONOUSLY from inside CM6's own internal scroll-into-view
+		// machinery (`scrollToLine`/`selectRange`/a search jump all trigger
+		// one), and this is a CAPTURE-phase listener, so it runs nested
+		// inside that same call stack — squarely inside the same "reading
+		// layout isn't allowed during an update" window `scheduleSync`
+		// (`AnnotationHandlesOverlay`, above) exists to dodge, confirmed by
+		// a live crash. `setTimeout`, not `requestAnimationFrame` — CM6
+		// schedules its own internal measure work via rAF too, so an rAF
+		// callback here can still land in the SAME animation frame as CM6's,
+		// still inside the forbidden window (also confirmed live, see
+		// `scheduleSync`'s own doc comment); `setTimeout` is a genuinely
+		// separate macrotask. The `queued` guard coalesces a scroll
+		// GESTURE's many rapid events into one sync rather than one per
+		// event.
+		let scrollSyncQueued = false;
+		const onAnyScroll = () => {
+			if (scrollSyncQueued) return;
+			scrollSyncQueued = true;
+			view.dom.win.setTimeout(() => {
+				scrollSyncQueued = false;
+				view.plugin(annotationHandlesOverlay)?.sync();
+			}, 0);
+		};
 		document.addEventListener('scroll', onAnyScroll, true);
 		return () => {
 			document.removeEventListener('scroll', onAnyScroll, true);

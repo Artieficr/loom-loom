@@ -600,6 +600,13 @@ function Script({ view }: { view: ScriptView }) {
 	/** Which comment's popover is open, and where to anchor it — `null` when
 	 *  none. Only ONE at a time, closed by the popover's own outside-click. */
 	const [openComment, setOpenComment] = useState<{ id: string; rect: DOMRect } | null>(null);
+	/** Marker ids that have had a reply added THIS session, checked by
+	 *  `handleCloseComment` instead of `scriptNotes.comments` directly —
+	 *  `scriptNotes` only catches up once the sidecar's own `vault.modify` +
+	 *  file-watch round trip completes, so trusting it at close time would
+	 *  misjudge a comment added and then immediately closed away from
+	 *  (within that round trip's window) as never having been written. */
+	const commentsWithNewEntryRef = useRef<Set<string>>(new Set());
 	/** `openComment.rect` is a one-time snapshot — without this, scrolling
 	 *  the editor/pages content left the popover floating in the same screen
 	 *  spot while the commented text scrolled out from under it. While a
@@ -1047,6 +1054,27 @@ function Script({ view }: { view: ScriptView }) {
 	};
 
 	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
+
+	/** Closing the popover with nothing ever added to the thread abandons the
+	 *  whole comment creation, mirroring `handleCreateAlt`'s own cancel — a
+	 *  freshly inserted marker pair backed by no `comments[id]` entry (only
+	 *  `handleAddCommentReply` ever creates one) would otherwise sit in the
+	 *  document forever as a permanently-empty gutter icon with no thread
+	 *  behind it. Checks BOTH `scriptNotes` (an existing comment, reopened)
+	 *  and `commentsWithNewEntryRef` (a reply just added this session, ahead
+	 *  of the sidecar's own async round trip) — only when neither shows a
+	 *  reply does the span get torn back out. */
+	const handleCloseComment = () => {
+		if (
+			openComment &&
+			!commentsWithNewEntryRef.current.has(openComment.id) &&
+			!scriptNotes.comments[openComment.id]
+		) {
+			fountainFieldRef.current?.removeAnnotationMarkers(openComment.id);
+			commitFieldEdit();
+		}
+		setOpenComment(null);
+	};
 
 	/** Saves an EDIT to one reply's text (the popover's per-row Edit action) —
 	 *  never touches `resolved`/`resolvedAt`, which the check icon owns. */
@@ -2750,8 +2778,11 @@ function Script({ view }: { view: ScriptView }) {
 							onSaveEntry={(index, text) => handleSaveCommentEntry(openComment.id, index, text)}
 							onToggleResolvedEntry={(index) => handleToggleCommentResolved(openComment.id, index)}
 							onDeleteEntry={(index) => handleDeleteCommentEntry(openComment.id, index)}
-							onAddEntry={(text) => handleAddCommentReply(openComment.id, text)}
-							onClose={() => setOpenComment(null)}
+							onAddEntry={(text) => {
+								commentsWithNewEntryRef.current.add(openComment.id);
+								handleAddCommentReply(openComment.id, text);
+							}}
+							onClose={handleCloseComment}
 						/>
 					) : null}
 
