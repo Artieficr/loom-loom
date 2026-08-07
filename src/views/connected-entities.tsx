@@ -1,8 +1,9 @@
 import { Notice } from 'obsidian';
 import { useEffect, useState } from 'react';
-import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType, FM } from '../types';
+import { ENTITY_TYPES, EntityRecord, EntityType, FM, entityPlural } from '../types';
 import { setLoomKey } from '../fm';
 import { ProjectDef } from '../indexer';
+import { t } from '../i18n';
 import { LoomNavigator } from './react-view';
 import { FRONTMATTER_RE, Icon, Truncated, autoGrowTextarea, recordLabel } from './common';
 
@@ -29,18 +30,18 @@ export function ConnectedEntities({
 		if (!list.some((r) => r.path === conn.record.path)) list.push(conn.record);
 		groups.set(conn.record.type, list);
 	}
-	const types = ENTITY_TYPES.filter((t) => groups.has(t));
+	const types = ENTITY_TYPES.filter((et) => groups.has(et));
 	if (types.length === 0) return null;
 
 	return (
 		<div className="loom-connected">
-			<span className="loom-field-label">Overview</span>
-			{types.map((t) => (
+			<span className="loom-field-label">{t('view.entity.connected.overview')}</span>
+			{types.map((et) => (
 				<Section
 					// key on record.path so collapsed state resets per page
-					key={record.path + t}
-					label={ENTITY_META[t].plural}
-					entries={(groups.get(t) ?? []).sort((a, b) =>
+					key={record.path + et}
+					label={entityPlural(et)}
+					entries={(groups.get(et) ?? []).sort((a, b) =>
 						recordLabel(a, project).localeCompare(recordLabel(b, project))
 					)}
 					navigator={navigator}
@@ -135,7 +136,7 @@ function Entry({
 			setEditing(false);
 		} catch (e) {
 			console.error('Loom Loom: failed to save connected entity', e);
-			new Notice('Could not save the change.');
+			new Notice(t('view.entity.common.saveFailed'));
 		}
 	};
 
@@ -150,14 +151,14 @@ function Entry({
 				</button>
 				<button
 					className="loom-entry-btn"
-					aria-label={editing ? 'Save' : 'Edit in place'}
+					aria-label={editing ? t('project.common.save') : t('view.entity.connected.editInPlace')}
 					onClick={() => (editing ? void save() : startEdit())}
 				>
 					<Icon name={editing ? 'check' : 'pencil'} />
 				</button>
 				<button
 					className="loom-entry-btn"
-					aria-label="Open full page"
+					aria-label={t('view.entity.common.openPage')}
 					onClick={() => navigator.openEntity(target.path)}
 				>
 					<Icon name="arrow-right" />
@@ -168,11 +169,11 @@ function Entry({
 					{editing ? (
 						<>
 							<label className="loom-field">
-								<span className="loom-field-label">Description</span>
+								<span className="loom-field-label">{t('project.createEntity.description')}</span>
 								<textarea rows={1} ref={(el) => autoGrowTextarea(el)} onInput={(ev) => autoGrowTextarea(ev.currentTarget)} value={descDraft} onChange={(e) => setDescDraft(e.target.value)} />
 							</label>
 							<label className="loom-field">
-								<span className="loom-field-label">Notes</span>
+								<span className="loom-field-label">{t('project.notes')}</span>
 								<textarea rows={1} ref={(el) => autoGrowTextarea(el)} onInput={(ev) => autoGrowTextarea(ev.currentTarget)} value={bodyDraft} onChange={(e) => setBodyDraft(e.target.value)} />
 							</label>
 						</>
@@ -180,18 +181,20 @@ function Entry({
 						<>
 							{target.description !== '' ? (
 								<div className="loom-field">
-									<span className="loom-field-label">Description</span>
+									<span className="loom-field-label">{t('project.createEntity.description')}</span>
 									<div className="loom-entry-text">{target.description}</div>
 								</div>
 							) : null}
 							{body !== null && body !== '' ? (
 								<div className="loom-field">
-									<span className="loom-field-label">Notes</span>
+									<span className="loom-field-label">{t('project.notes')}</span>
 									<div className="loom-entry-text">{body}</div>
 								</div>
 							) : null}
 							{!hasContent ? (
-								<div className="loom-entry-text loom-entry-empty">No description or notes yet.</div>
+								<div className="loom-entry-text loom-entry-empty">
+									{t('view.entity.connected.noContent')}
+								</div>
 							) : null}
 						</>
 					)}

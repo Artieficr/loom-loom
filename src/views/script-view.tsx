@@ -1,14 +1,16 @@
 import { Menu, Notice, TFile, normalizePath } from 'obsidian';
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement, useEffect, useMemo, useRef, useState } from 'react';
+import { t, tn } from '../i18n';
 import {
 	EntityRecord,
 	EntityType,
 	FM,
 	SCRIPT_EXTENSION,
 	SCRIPT_ICON,
-	SCRIPT_LABEL,
 	VIEW_SCRIPT,
+	entityPlural,
 	pcGroupStub,
+	scriptLabel,
 } from '../types';
 import {
 	AnnotationSpan,
@@ -105,7 +107,7 @@ export class ScriptView extends LoomFileReactView {
 	}
 
 	getDisplayText(): string {
-		return this.file ? `${this.file.basename} — ${SCRIPT_LABEL}` : SCRIPT_LABEL;
+		return this.file ? `${this.file.basename} — ${scriptLabel()}` : scriptLabel();
 	}
 
 	getIcon(): string {
@@ -450,7 +452,7 @@ export type ScriptSearchMatch =
 
 /** A scene's display name: the heading without its INT./EXT. prefix. */
 function sceneName(scene: ParsedScene): string {
-	const place = scene.location.trim() === '' ? 'Untitled scene' : scene.location.trim();
+	const place = scene.location.trim() === '' ? t('project.createEntity.untitledScene') : scene.location.trim();
 	return scene.timeOfDay.trim() === '' ? place : `${place} — ${scene.timeOfDay.trim()}`;
 }
 
@@ -952,9 +954,9 @@ function Script({ view }: { view: ScriptView }) {
 		});
 	}, [file?.path, project?.root, text !== null]);
 
-	if (!file) return <div className="loom-empty">Loading script…</div>;
+	if (!file) return <div className="loom-empty">{t('view.script.loading')}</div>;
 	if (!project) return <>{noProjectMessage()}</>;
-	if (text === null || parsed === null) return <div className="loom-empty">Loading script…</div>;
+	if (text === null || parsed === null) return <div className="loom-empty">{t('view.script.loading')}</div>;
 
 	const write = (next: string) => {
 		setText(next);
@@ -1021,9 +1023,9 @@ function Script({ view }: { view: ScriptView }) {
 			altText: { ...notes.altText, [id]: { id, options: [selectedText], activeIndex: 0, acceptedIndex: null } },
 		}));
 		new TextInputModal(plugin.app, {
-			title: 'Add an alternative wording',
+			title: t('view.entity.altText.addWordingTitle'),
 			placeholder: selectedText,
-			cta: 'Add',
+			cta: t('project.common.add'),
 			multiline: true,
 			onSubmit: (value) => {
 				void mutateScriptNotes(plugin.app, project, (notes) => {
@@ -1360,8 +1362,8 @@ function Script({ view }: { view: ScriptView }) {
 	// What the `@[` inline entity-link autocomplete offers, and what its
 	// clicks resolve against — never auto-created, so only what already
 	// exists shows up here.
-	const entityOptions = (['character', 'faction', 'location', 'item'] as const).flatMap((t) =>
-		plugin.indexer.getAll(t, project.root).map((r) => ({ name: r.name, type: r.type, path: r.path }))
+	const entityOptions = (['character', 'faction', 'location', 'item'] as const).flatMap((et) =>
+		plugin.indexer.getAll(et, project.root).map((r) => ({ name: r.name, type: r.type, path: r.path }))
 	);
 
 	// --- Outline panel ----------------------------------------------------
@@ -1805,14 +1807,14 @@ function Script({ view }: { view: ScriptView }) {
 		const api = plugin.app as unknown as Record<string, ((p: string) => void) | undefined>;
 		const fn = api[method];
 		if (typeof fn !== 'function') {
-			new Notice('This Obsidian build cannot hand files to the system.');
+			new Notice(t('view.script.systemOpenUnsupported'));
 			return;
 		}
 		try {
 			fn.call(plugin.app, path);
 		} catch (err) {
 			console.error('Loom Loom: system open failed', err);
-			new Notice('The system could not open that file.');
+			new Notice(t('view.script.systemOpenFailed'));
 		}
 	};
 
@@ -1843,7 +1845,7 @@ function Script({ view }: { view: ScriptView }) {
 				const writable = await handle.createWritable();
 				await writable.write(new Blob([bytes as BlobPart], { type: mime }));
 				await writable.close();
-				new Notice(`Exported ${name}.`);
+				new Notice(t('view.script.exportedNotice', { name }));
 				return;
 			} catch (err) {
 				// A cancelled dialog throws AbortError — that's a choice, not a
@@ -1859,7 +1861,7 @@ function Script({ view }: { view: ScriptView }) {
 			link.download = name;
 			link.click();
 			window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
-			new Notice(`Exported ${name}.`);
+			new Notice(t('view.script.exportedNotice', { name }));
 		} catch (err) {
 			console.error('Loom Loom: export download failed, writing into the vault', err);
 			const folder = file.parent?.path ?? '';
@@ -1868,10 +1870,10 @@ function Script({ view }: { view: ScriptView }) {
 				const existing = plugin.app.vault.getFileByPath(path);
 				if (existing) await plugin.app.vault.modifyBinary(existing, bytes.buffer as ArrayBuffer);
 				else await plugin.app.vault.createBinary(path, bytes.buffer as ArrayBuffer);
-				new Notice(`Exported to ${path}`);
+				new Notice(t('view.script.exportedToPath', { path }));
 			} catch (err2) {
 				console.error('Loom Loom: export failed', err2);
-				new Notice('Could not write the export. See console for details.');
+				new Notice(t('view.script.exportWriteFailed'));
 			}
 		}
 	};
@@ -1917,29 +1919,34 @@ function Script({ view }: { view: ScriptView }) {
 		const newCast = incoming.characters.filter((c) => !known2.has(c.trim().toLowerCase()));
 
 		const lines = [
-			`"${sourceName}" replaces the current script (${parsed.scenes.length} scenes, ${pageCount} pages) with ${incoming.scenes.length} scenes.`,
+			t('view.script.replaceSummary', {
+				name: sourceName,
+				scenes: parsed.scenes.length,
+				pages: pageCount,
+				newScenes: incoming.scenes.length,
+			}),
 			'',
-			'The script text is overwritten and cannot be undone from here.',
+			t('view.script.replaceTextWarning'),
 			'',
-			'Your entities are NOT touched: characters and locations that already exist keep their pages, descriptions and relationships, and the imported script just references them. Anything new is created for you.',
+			t('view.script.replaceEntitiesNote'),
 		];
-		if (newCast.length > 0) lines.push('', `New characters to create: ${newCast.join(', ')}.`);
+		if (newCast.length > 0) lines.push('', t('view.script.newCharactersToCreate', { list: newCast.join(', ') }));
 		if (known.length > 0 || knownSections.length > 0) {
 			lines.push(
 				'',
 				result.matched > 0
-					? `${result.matched} scene note(s) re-attach to the imported scenes.`
-					: 'No existing scene notes could be re-attached.',
+					? tn('view.script.scenesReattached', result.matched)
+					: t('view.script.noScenesReattached'),
 				sectionResult.matched > 0
-					? `${sectionResult.matched} chapter note(s) re-attach to the imported chapters.`
-					: 'No existing chapter notes could be re-attached.',
-				'Anything left without a match stays as an orphan — nothing is deleted.'
+					? tn('view.script.chaptersReattached', sectionResult.matched)
+					: t('view.script.noChaptersReattached'),
+				t('view.script.orphanNote')
 			);
 		}
 
 		new ConfirmModal(
 			plugin.app,
-			'Replace the script?',
+			t('view.script.replaceScriptTitle'),
 			lines.join('\n'),
 			() =>
 				void (async () => {
@@ -1949,13 +1956,13 @@ function Script({ view }: { view: ScriptView }) {
 						setText(result.text);
 						committedFor.current = null;
 						await commit(result.text);
-						new Notice(`Imported ${incoming.scenes.length} scene(s) from "${sourceName}".`);
+						new Notice(tn('view.script.importedNotice', incoming.scenes.length, { name: sourceName }));
 					} catch (err) {
 						console.error('Loom Loom: import failed', err);
-						new Notice('Could not import the script. See console for details.');
+						new Notice(t('view.script.importFailed'));
 					}
 				})(),
-			'Replace script'
+			t('view.script.replaceScriptCta')
 		).open();
 	};
 
@@ -1988,26 +1995,26 @@ function Script({ view }: { view: ScriptView }) {
 		const menu = new Menu();
 		menu.addItem((i) =>
 			i
-				.setTitle('Open in the default app')
+				.setTitle(t('view.script.openInDefaultApp'))
 				.setIcon('external-link')
 				.onClick(() => systemOpen('openWithDefaultApp', file.path))
 		);
 		menu.addItem((i) =>
 			i
-				.setTitle('Show in system file manager')
+				.setTitle(t('view.script.showInSystemFileManager'))
 				.setIcon('folder-open')
 				.onClick(() => systemOpen('showInFolder', file.path))
 		);
 		menu.addSeparator();
 		menu.addItem((i) =>
 			i
-				.setTitle('Export as PDF…')
+				.setTitle(t('view.script.exportAsPdf'))
 				.setIcon('file-text')
 				.onClick(() => void saveExport(`${stem}.pdf`, renderScreenplayPdf(parsed), 'application/pdf'))
 		);
 		menu.addItem((i) =>
 			i
-				.setTitle('Export as .fountain (no Loom ids)…')
+				.setTitle(t('view.script.exportAsFountain'))
 				.setIcon('file-down')
 				.onClick(() =>
 					void saveExport(
@@ -2018,7 +2025,7 @@ function Script({ view }: { view: ScriptView }) {
 				)
 		);
 		menu.addSeparator();
-		menu.addItem((i) => i.setTitle('Import a script…').setIcon('file-up').onClick(pickImport));
+		menu.addItem((i) => i.setTitle(t('view.script.importScriptAction')).setIcon('file-up').onClick(pickImport));
 		menu.showAtMouseEvent(e.nativeEvent);
 	};
 
@@ -2111,7 +2118,7 @@ function Script({ view }: { view: ScriptView }) {
 			<div ref={sidePanelRef} className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 				<button
 					className="loom-script-nav-toggle"
-					aria-label={navOpen ? 'Hide navigation' : 'Show navigation'}
+					aria-label={navOpen ? t('view.entity.script.hideNavigation') : t('view.entity.script.showNavigation')}
 					onClick={() => openSidePanel(navOpen ? null : 'nav')}
 				>
 					<Icon name={navOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
@@ -2119,10 +2126,10 @@ function Script({ view }: { view: ScriptView }) {
 				{navOpen ? (
 					<aside className="loom-script-nav">
 						<div className="loom-script-nav-head">
-							Navigate
+							{t('view.entity.script.navigate')}
 							<button
 								className="loom-rel-filter"
-								aria-label="Hide navigation"
+								aria-label={t('view.entity.script.hideNavigation')}
 								onClick={() => setNavOpen(false)}
 							>
 								<Icon name="chevron-left" />
@@ -2139,22 +2146,28 @@ function Script({ view }: { view: ScriptView }) {
 								setNavOpen(false);
 							}}
 						>
-							Title page
+							{t('view.script.titlePage')}
 						</button>
-						{parsed.scenes.length === 0 ? <div className="loom-script-nav-empty">No scenes yet.</div> : null}
+						{parsed.scenes.length === 0 ? (
+							<div className="loom-script-nav-empty">{t('view.script.noScenesYet')}</div>
+						) : null}
 						{renderNavTreeNode(navTree, 0, jumpToLine)}
 					</aside>
 				) : null}
 				{commentsPanelOpen ? (
 					<aside className="loom-script-nav">
 						<div className="loom-script-nav-head">
-							Unresolved comments
-							<button className="loom-rel-filter" aria-label="Hide comments" onClick={() => setCommentsPanelOpen(false)}>
+							{t('view.entity.script.unresolvedComments')}
+							<button
+								className="loom-rel-filter"
+								aria-label={t('view.entity.script.hideComments')}
+								onClick={() => setCommentsPanelOpen(false)}
+							>
 								<Icon name="chevron-left" />
 							</button>
 						</div>
 						{unresolvedCommentSpans.length === 0 ? (
-							<div className="loom-script-nav-empty">No unresolved comments.</div>
+							<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
 						) : (
 							unresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
 								<div key={span.id} className="loom-script-comments-panel-group">
@@ -2171,7 +2184,7 @@ function Script({ view }: { view: ScriptView }) {
 												className="loom-script-comments-panel-reply"
 												onClick={() => jumpToAnnotation(span)}
 											>
-												{entry.text.trim() === '' ? '(empty)' : entry.text}
+												{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
 											</button>
 										))}
 									</div>
@@ -2183,13 +2196,17 @@ function Script({ view }: { view: ScriptView }) {
 				{altPanelOpen ? (
 					<aside className="loom-script-nav">
 						<div className="loom-script-nav-head">
-							Unfinalized alternatives
-							<button className="loom-rel-filter" aria-label="Hide alternatives" onClick={() => setAltPanelOpen(false)}>
+							{t('view.entity.script.unfinalizedAlternatives')}
+							<button
+								className="loom-rel-filter"
+								aria-label={t('view.entity.script.hideAlternatives')}
+								onClick={() => setAltPanelOpen(false)}
+							>
 								<Icon name="chevron-left" />
 							</button>
 						</div>
 						{undecidedAltSpans.length === 0 ? (
-							<div className="loom-script-nav-empty">Every alternative has been accepted.</div>
+							<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
 						) : (
 							undecidedAltSpans.map((span) => (
 								<button
@@ -2210,14 +2227,14 @@ function Script({ view }: { view: ScriptView }) {
 		<ViewShell
 			view={view}
 			project={project}
-			title={`${project.name} — ${SCRIPT_LABEL}`}
+			title={`${project.name} — ${scriptLabel()}`}
 			railActive="script"
 			titleExtra={
 				<div className="loom-script-actions">
 					<span className="loom-script-stat">
-						{parsed.scenes.length} scenes · {pageCount} pages
+						{tn('view.script.sceneCount', parsed.scenes.length)} · {tn('view.script.pageCountLabel', pageCount)}
 					</span>
-					<button className="loom-rel-filter" aria-label="Script actions" onClick={actionMenu}>
+					<button className="loom-rel-filter" aria-label={t('view.script.scriptActionsAria')} onClick={actionMenu}>
 						<Icon name="menu" fallback="more-horizontal" />
 					</button>
 				</div>
@@ -2226,20 +2243,20 @@ function Script({ view }: { view: ScriptView }) {
 			<div className="loom-script-layout">
 				<div className="loom-script-main">
 					<details className="loom-script-section" ref={titleDetailsRef}>
-						<summary>Title page</summary>
+						<summary>{t('view.script.titlePage')}</summary>
 						<div className="loom-field-group">
-							{titleField('Title', 'title', project.name)}
-							{titleField('Credit', 'credit', 'Written by')}
-							{titleField('Author', 'author')}
-							{titleField('Draft date', 'draftDate')}
-							{titleField('Source', 'source')}
-							{titleField('Contact', 'contact')}
-							{titleField('Copyright', 'copyright')}
+							{titleField(t('project.createEntity.titleLabel'), 'title', project.name)}
+							{titleField(t('view.script.titlePageField.credit'), 'credit', t('view.script.creditDefault'))}
+							{titleField(t('view.script.titlePageField.author'), 'author')}
+							{titleField(t('view.script.titlePageField.draftDate'), 'draftDate')}
+							{titleField(t('view.script.titlePageField.source'), 'source')}
+							{titleField(t('view.script.titlePageField.contact'), 'contact')}
+							{titleField(t('view.script.titlePageField.copyright'), 'copyright')}
 							{/* `Notes:` is a real Fountain title-page key, so it stays —
 							    but it's an author's note ABOUT the script, which no
 							    renderer prints on the title page. That's why it never
 							    shows up in the preview or the PDF. */}
-							{titleField('Notes', 'notes')}
+							{titleField(t('project.notes'), 'notes')}
 						</div>
 					</details>
 
@@ -2249,13 +2266,13 @@ function Script({ view }: { view: ScriptView }) {
 								className={mode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
 								onClick={() => clickTab('script')}
 							>
-								Script
+								{scriptLabel()}
 							</button>
 							<button
 								className={mode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
 								onClick={() => clickTab('pages')}
 							>
-								Pages preview
+								{t('view.entity.script.pagesPreview')}
 							</button>
 						</div>
 						{/* Comments/Alternatives browser panels — standalone icon toggles
@@ -2266,14 +2283,14 @@ function Script({ view }: { view: ScriptView }) {
 						<div className="loom-script-side-toggles">
 							<button
 								className={commentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-								aria-label={commentsPanelOpen ? 'Hide comments' : 'Browse comments'}
+								aria-label={commentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
 								onClick={() => openSidePanel(commentsPanelOpen ? null : 'comments')}
 							>
 								<Icon name="message-square" />
 							</button>
 							<button
 								className={altPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-								aria-label={altPanelOpen ? 'Hide alternatives' : 'Browse undecided alternatives'}
+								aria-label={altPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
 								onClick={() => openSidePanel(altPanelOpen ? null : 'alt')}
 							>
 								<Icon name="repeat" fallback="arrow-right-left" />
@@ -2288,7 +2305,7 @@ function Script({ view }: { view: ScriptView }) {
 							className={mode === 'outline' ? 'loom-script-chapters-btn loom-seg-on' : 'loom-script-chapters-btn'}
 							onClick={() => clickTab('outline')}
 						>
-							Outline
+							{t('view.entity.script.outline')}
 						</button>
 					</div>
 
@@ -2299,7 +2316,7 @@ function Script({ view }: { view: ScriptView }) {
 									<input
 										className="loom-script-search"
 										type="search"
-										placeholder="Search the script…"
+										placeholder={t('view.script.searchPlaceholder')}
 										value={query}
 										onChange={(e) => {
 											setQuery(e.target.value);
@@ -2314,7 +2331,7 @@ function Script({ view }: { view: ScriptView }) {
 									{query !== '' ? (
 										<button
 											className="loom-chip-remove loom-search-clear"
-											aria-label="Clear search"
+											aria-label={t('view.entity.script.clearSearch')}
 											onClick={() => {
 												setQuery('');
 												setMatchIndex(0);
@@ -2326,7 +2343,7 @@ function Script({ view }: { view: ScriptView }) {
 								</div>
 								<button
 									className="loom-rel-filter"
-									aria-label="Previous match"
+									aria-label={t('view.entity.script.previousMatch')}
 									disabled={matches.length === 0}
 									onClick={() => gotoMatch(matchIndex - 1)}
 								>
@@ -2334,7 +2351,7 @@ function Script({ view }: { view: ScriptView }) {
 								</button>
 								<button
 									className="loom-rel-filter"
-									aria-label="Next match"
+									aria-label={t('view.entity.script.nextMatch')}
 									disabled={matches.length === 0}
 									onClick={() => gotoMatch(matchIndex + 1)}
 								>
@@ -2346,8 +2363,11 @@ function Script({ view }: { view: ScriptView }) {
 									{query.trim() === ''
 										? ''
 										: matches.length === 0
-											? 'No matches'
-											: `${(matchIndex % matches.length) + 1} of ${matches.length}`}
+											? t('view.entity.script.noMatches')
+											: t('view.entity.script.matchCount', {
+													current: (matchIndex % matches.length) + 1,
+													total: matches.length,
+												})}
 								</span>
 							</>
 						) : null}
@@ -2356,7 +2376,7 @@ function Script({ view }: { view: ScriptView }) {
 							<>
 								<button
 									className="loom-rel-filter"
-									aria-label="Previous page"
+									aria-label={t('view.script.previousPage')}
 									disabled={currentPage <= 1}
 									onClick={() => scrollToPage(currentPage - 1)}
 								>
@@ -2378,10 +2398,10 @@ function Script({ view }: { view: ScriptView }) {
 									}}
 									onBlur={() => setPageDraft(null)}
 								/>
-								<span className="loom-script-stat">of {pageCount}</span>
+								<span className="loom-script-stat">{t('view.script.ofCount', { count: pageCount })}</span>
 								<button
 									className="loom-rel-filter"
-									aria-label="Next page"
+									aria-label={t('view.script.nextPage')}
 									disabled={currentPage >= pageCount}
 									onClick={() => scrollToPage(currentPage + 1)}
 								>
@@ -2399,13 +2419,13 @@ function Script({ view }: { view: ScriptView }) {
 									className="loom-rel-add"
 									onClick={() => new CreateEntityModal(plugin, 'scene', project, {}).open()}
 								>
-									+ New scene
+									{t('view.entity.script.newSceneAction')}
 								</button>
 								<button
 									className="loom-rel-add"
 									onClick={() => new CreateEntityModal(plugin, 'chapter', project, {}).open()}
 								>
-									+ New chapter
+									{t('project.newChapterStub')}
 								</button>
 								{/* Page breaks are an Outline-only concept — the Script/Pages
 								    editors already write a bare `===` by hand, and this
@@ -2416,7 +2436,7 @@ function Script({ view }: { view: ScriptView }) {
 										className="loom-rel-add"
 										onClick={() => write(appendPageBreak(text))}
 									>
-										+ New page breaker
+										{t('view.script.newPageBreakAction')}
 									</button>
 								) : null}
 							</>
@@ -2437,7 +2457,7 @@ function Script({ view }: { view: ScriptView }) {
 								<span className="loom-subloc-grip-static" aria-hidden="true" />
 								<button
 									className="loom-row-caret"
-									aria-label={allChaptersCollapsed ? 'Expand all' : 'Collapse all'}
+									aria-label={allChaptersCollapsed ? t('view.list.expandAll') : t('view.list.collapseAll')}
 									onClick={() => setAllChaptersCollapsed(!allChaptersCollapsed)}
 								>
 									<Icon
@@ -2446,9 +2466,9 @@ function Script({ view }: { view: ScriptView }) {
 									/>
 								</button>
 								<span className="loom-scene-row-num">#</span>
-								<span className="loom-script-scene-head">Title</span>
+								<span className="loom-script-scene-head">{t('project.createEntity.titleLabel')}</span>
 								<span className="loom-script-outline-leader" aria-hidden="true" />
-								<span className="loom-script-chapter-count">Scenes</span>
+								<span className="loom-script-chapter-count">{entityPlural('scene')}</span>
 							</div>
 							<div
 								className={
@@ -2464,14 +2484,18 @@ function Script({ view }: { view: ScriptView }) {
 										<span className="loom-row-caret" aria-hidden="true" />
 										<span className="loom-scene-row-num" aria-hidden="true" />
 										<button className="loom-subloc-link" onClick={jumpToTitlePage}>
-											Title page
+											{t('view.script.titlePage')}
 										</button>
 										<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-										<span className="loom-script-chapter-count">{titleFirst ? 'p. 1' : '—'}</span>
+										<span className="loom-script-chapter-count">
+											{titleFirst ? t('view.entity.script.pageAbbrev', { range: '1' }) : '—'}
+										</span>
 									</div>
 									{topLevelRows.length === 0 ? (
 										<div className="loom-attendance-empty">
-											No chapters yet — a <code># Chapter name</code> line starts one.
+											{t('view.script.outlineNoChaptersPre')}
+											<code># Chapter name</code>
+											{t('view.script.outlineNoChaptersPost')}
 										</div>
 									) : null}
 									{(() => {
@@ -2498,7 +2522,7 @@ function Script({ view }: { view: ScriptView }) {
 														const menu = new Menu();
 														menu.addItem((item) =>
 															item
-																.setTitle('Delete')
+																.setTitle(t('project.common.delete'))
 																.setIcon('trash-2')
 																.setWarning(true)
 																.onClick(() => {
@@ -2514,10 +2538,12 @@ function Script({ view }: { view: ScriptView }) {
 														<span className="loom-row-caret" aria-hidden="true" />
 														<span className="loom-scene-row-num" aria-hidden="true" />
 														<span className="loom-script-outline-pagebreak-label">
-															<Icon name="separator-horizontal" fallback="minus" /> Page break
+															<Icon name="separator-horizontal" fallback="minus" /> {t('view.script.pageBreakLabel')}
 														</span>
 														<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-														<span className="loom-script-chapter-count">p. {pageBreakPage(row.line)}</span>
+														<span className="loom-script-chapter-count">
+															{t('view.entity.script.pageAbbrev', { range: pageBreakPage(row.line) })}
+														</span>
 													</div>
 												</div>
 											);
@@ -2551,7 +2577,7 @@ function Script({ view }: { view: ScriptView }) {
 													{scenes.length > 0 ? (
 														<button
 															className="loom-row-caret"
-															aria-label={collapsed ? 'Expand scenes' : 'Collapse scenes'}
+															aria-label={collapsed ? t('view.script.expandScenesAria') : t('view.script.collapseScenesAria')}
 															onClick={() => toggleChapterCollapsed(sec.loomId)}
 														>
 															<span className={collapsed ? 'loom-caret' : 'loom-caret loom-caret-open'}>▸</span>
@@ -2575,7 +2601,7 @@ function Script({ view }: { view: ScriptView }) {
 													    a two-digit count previously nudged this whole cell
 													    (and thus its left edge) sideways row to row. */}
 													<span className="loom-script-chapter-count">
-														{scenes.length} scene{scenes.length === 1 ? '' : 's'}
+														{tn('view.script.sceneCount', scenes.length)}
 													</span>
 												</div>
 												{!collapsed && scenes.length > 0 ? (
@@ -2617,7 +2643,9 @@ function Script({ view }: { view: ScriptView }) {
 																		<span className="loom-script-scene-head">{scene.heading}</span>
 																	)}
 																	<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-																	<span className="loom-script-chapter-count">p. {scenePages(scene)}</span>
+																	<span className="loom-script-chapter-count">
+																		{t('view.entity.script.pageAbbrev', { range: scenePages(scene) })}
+																	</span>
 																</div>
 															);
 														})}
@@ -2728,10 +2756,12 @@ function Script({ view }: { view: ScriptView }) {
 					) : null}
 
 					<details className="loom-script-section">
-						<summary>Outline links ({parsed.scenes.length})</summary>
+						<summary>{t('view.script.outlineLinksHeading', { count: parsed.scenes.length })}</summary>
 						{groups.length === 0 ? (
 							<div className="loom-attendance-empty">
-								No scenes yet — a heading like <code>INT. HOUSE - DAY</code> starts one.
+								{t('view.script.outlineNoScenesPre')}
+								<code>INT. HOUSE - DAY</code>
+								{t('view.script.outlineNoScenesPost')}
 							</div>
 						) : null}
 						{groups.map((group, gi) => (
@@ -2758,7 +2788,9 @@ function Script({ view }: { view: ScriptView }) {
 													)}
 												</span>
 												<span className="loom-script-scene-no">{scene.sceneNumber}</span>
-												<span className="loom-script-scene-page">p. {scenePages(scene)}</span>
+												<span className="loom-script-scene-page">
+													{t('view.entity.script.pageAbbrev', { range: scenePages(scene) })}
+												</span>
 												<span className="loom-script-scene-cast">{scene.characters.join(', ')}</span>
 											</div>
 										);
@@ -2770,7 +2802,7 @@ function Script({ view }: { view: ScriptView }) {
 
 					{chapterless.length > 0 ? (
 						<div className="loom-field loom-field-sep">
-							<span className="loom-field-label">Scenes without a chapter</span>
+							<span className="loom-field-label">{t('view.script.scenesWithoutChapter')}</span>
 							<div className="loom-tag-row">
 								{chapterless.map((s) => (
 									<span key={s.loomId ?? s.line} className="loom-chip">
@@ -2779,15 +2811,18 @@ function Script({ view }: { view: ScriptView }) {
 								))}
 							</div>
 							<span className="loom-field-hint">
-								A scene belongs to the <code>#</code> section it sits under — that is its chapter, and
-								where its writing lives. Add a <code># Chapter name</code> line above these.
+								{t('view.script.scenesWithoutChapterHintPre')}
+								<code>#</code>
+								{t('view.script.scenesWithoutChapterHintMid')}
+								<code># Chapter name</code>
+								{t('view.script.scenesWithoutChapterHintPost')}
 							</span>
 						</div>
 					) : null}
 
 					{orphans.length > 0 ? (
 						<div className="loom-field loom-field-sep">
-							<span className="loom-field-label">Scenes no longer in the script</span>
+							<span className="loom-field-label">{t('view.script.scenesNoLongerInScript')}</span>
 							<div className="loom-tag-row">
 								{orphans.map((o) => (
 									<button key={o.path} className="loom-chip" onClick={() => view.openEntity(o.path)}>
@@ -2795,10 +2830,7 @@ function Script({ view }: { view: ScriptView }) {
 									</button>
 								))}
 							</div>
-							<span className="loom-field-hint">
-								Their headings are gone from the script. Nothing is deleted automatically — open one to
-								keep or remove it.
-							</span>
+							<span className="loom-field-hint">{t('view.script.scenesNoLongerHint')}</span>
 						</div>
 					) : null}
 				</div>
@@ -3276,7 +3308,7 @@ export async function editScript(
 		return true;
 	} catch (e) {
 		console.error('Loom Loom: could not edit the script', e);
-		new Notice('Could not write to the script.');
+		new Notice(t('view.script.editWriteFailed'));
 		return false;
 	}
 }

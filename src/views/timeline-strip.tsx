@@ -10,7 +10,7 @@ import {
 	useState,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { ENTITY_META, EntityRecord, FM, TimelineDef } from '../types';
+import { ENTITY_META, EntityRecord, FM, TimelineDef, entityLabel, newEntityTitle } from '../types';
 import { projectRoleType, roleOf } from '../project-kind';
 import { buildColumns } from '../columns';
 import { ProjectDef, extractLinkpath, linkTargetOf } from '../indexer';
@@ -19,6 +19,7 @@ import { ConfirmModal, CreateEntityModal, RecordSuggestModal } from '../project'
 import { LoomNavigator } from './react-view';
 import { Icon, recordDate, recordLabel } from './common';
 import { useIndexVersion } from './hooks';
+import { t } from '../i18n';
 
 /** Longest description shown in the hover tooltip, in words. */
 const TOOLTIP_MAX_WORDS = 30;
@@ -195,8 +196,8 @@ export const TimelineStrip = memo(function TimelineStrip({
 	// itself is the same either way.
 	const anchorType = projectRoleType(project.config, 'anchor');
 	const beatType = projectRoleType(project.config, 'beat');
-	const anchorLabel = ENTITY_META[anchorType].label.toLowerCase();
-	const beatLabel = ENTITY_META[beatType].label.toLowerCase();
+	const anchorLabel = entityLabel(anchorType).toLowerCase();
+	const beatLabel = entityLabel(beatType).toLowerCase();
 	const [tooltip, setTooltip] = useState<TooltipState | null>(null);
 	const [open, setOpenState] = useState(nodateOpen);
 	const setOpen = (v: boolean) => {
@@ -283,7 +284,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 		if (!f) return;
 		plugin.app.fileManager.processFrontMatter(f, mutate).catch((e) => {
 			console.error(`Loom Loom: failed to update ${key}`, e);
-			new Notice('Could not save the change.');
+			new Notice(t('timeline.saveChangeFailed'));
 		});
 	};
 
@@ -381,9 +382,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 		// the event in that column — they can only be edited in the note text.
 		const bodyBound = from.length > 0 && noteHits === 0 && relHits === 0 && sessionSide.length === 0;
 		if (bodyBound) {
-			new Notice(
-				`"${event.name}" is linked to its session inside note text — edit the note to detach it.`
-			);
+			new Notice(t('timeline.sessionLinkedInNote', { name: event.name }));
 		}
 	};
 
@@ -397,12 +396,14 @@ export const TimelineStrip = memo(function TimelineStrip({
 		if (to !== null && from.length > 0 && plugin.settings.confirmTimelineMove) {
 			new ConfirmModal(
 				plugin.app,
-				'Move event?',
-				`Moves "${event.name}" from ${from
-					.map((s) => recordLabel(s, project))
-					.join(', ')} to ${recordLabel(to, project)}.`,
+				t('timeline.moveEventTitle'),
+				t('timeline.moveEventMessage', {
+					name: event.name,
+					from: from.map((s) => recordLabel(s, project)).join(', '),
+					to: recordLabel(to, project),
+				}),
 				apply,
-				'Move'
+				t('timeline.moveButton')
 			).open();
 		} else {
 			apply();
@@ -672,7 +673,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 			// Event node: move it to a session picked from a fuzzy search.
 			menu.addItem((item) =>
 				item
-					.setTitle('Move to…')
+					.setTitle(t('timeline.moveToMenuItem'))
 					.setIcon('move')
 					.onClick(() => {
 						const sessions = indexer
@@ -683,7 +684,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 							plugin.app,
 							sessions,
 							(session) => handleDropPath(bubble.path, session),
-							`Move ${beatLabel} to ${anchorLabel}…`,
+							t('timeline.moveToPickerTitle', { beat: beatLabel, anchor: anchorLabel }),
 							(s) => recordLabel(s, project)
 						).open();
 					})
@@ -698,7 +699,9 @@ export const TimelineStrip = memo(function TimelineStrip({
 		if (bubble && roleOf(bubble.type) === 'anchor') {
 			menu.addItem((item) =>
 				item
-					.setTitle(`New ${beatLabel} in ${recordLabel(bubble, project)}`)
+					.setTitle(
+						t('timeline.newBeatInAnchor', { beat: beatLabel, anchor: recordLabel(bubble, project) })
+					)
 					.setIcon(ENTITY_META[beatType].icon)
 					.onClick(() =>
 						new CreateEntityModal(plugin, beatType, project, {
@@ -715,7 +718,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 		// session or a session-less event.
 		menu.addItem((item) =>
 			item
-				.setTitle(`New ${anchorLabel}`)
+				.setTitle(newEntityTitle(anchorType))
 				.setIcon(ENTITY_META[anchorType].icon)
 				.onClick(() =>
 					new CreateEntityModal(plugin, anchorType, project, { onCreated: () => {} }).open()
@@ -723,7 +726,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 		);
 		menu.addItem((item) =>
 			item
-				.setTitle(`New ${beatLabel}`)
+				.setTitle(newEntityTitle(beatType))
 				.setIcon(ENTITY_META[beatType].icon)
 				.onClick(() =>
 					new CreateEntityModal(plugin, beatType, project, { onCreated: () => {} }).open()
@@ -744,7 +747,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 				data-dropzone="nodate"
 			>
 				<div className="loom-nodate-inner" style={{ width: panelWidth }}>
-					<div className="loom-nodate-label">No date</div>
+					<div className="loom-nodate-label">{t('timeline.noDate')}</div>
 					<div className="loom-nodate-list" data-bubble-list>
 						{undated.map((ev, i) => (
 							<Bubble
@@ -810,7 +813,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 												<Bubble
 													record={col.anchor}
 													kind="anchor"
-													label={recordLabel(col.anchor, project) || 'No date'}
+													label={recordLabel(col.anchor, project) || t('timeline.noDate')}
 													suppressTooltip={drag !== null}
 													{...bubbleProps}
 												/>
@@ -822,7 +825,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 											</>
 										) : (
 											<div className="loom-col-date">
-												{recordDate(col.anchor, project) || 'No date'}
+												{recordDate(col.anchor, project) || t('timeline.noDate')}
 											</div>
 										)}
 									</div>

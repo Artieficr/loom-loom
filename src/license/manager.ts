@@ -3,6 +3,7 @@ import { loadCache, saveCache } from './cache-store';
 import { graceExpiresAt, resolveTier } from './grace';
 import { ActivateResult, DeactivateResult, LicenseProvider } from './provider';
 import { CachedLicenseState, LicenseStatus, LicenseTier } from './types';
+import { t } from '../i18n';
 
 /** Floor between automatic re-checks, so app launches / the periodic timer in
  *  main.ts can't hammer the provider — a manual "Re-check now" click bypasses
@@ -80,7 +81,7 @@ export class LicenseManager {
 			saveCache(this.app, this.cache);
 			return result;
 		} catch (e) {
-			const reason = e instanceof Error ? e.message : 'Could not reach the license server.';
+			const reason = e instanceof Error ? e.message : t('settings.license.unreachable');
 			this.cache.lastCheckAt = Date.now();
 			this.cache.lastCheckOk = null;
 			this.cache.lastError = reason;
@@ -116,7 +117,7 @@ export class LicenseManager {
 			saveCache(this.app, this.cache);
 			return result;
 		} catch (e) {
-			const reason = e instanceof Error ? e.message : 'Could not reach the license server.';
+			const reason = e instanceof Error ? e.message : t('settings.license.unreachable');
 			this.cache.lastError = reason;
 			saveCache(this.app, this.cache);
 			return { ok: false, reason, unreachable: true };

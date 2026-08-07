@@ -8,6 +8,7 @@ import {
 	ViewStateResult,
 	debounce,
 	normalizePath,
+	setTooltip,
 } from 'obsidian';
 import {
 	MouseEvent as ReactMouseEvent,
@@ -24,10 +25,10 @@ import {
 	MAPS_FOLDER,
 	MAPS_ICON,
 	MAPS_IMAGES_FOLDER,
-	MAPS_LABEL,
 	NODE_SIZE_PRESETS,
 	NodeSizePreset,
 	VIEW_MAP,
+	mapsLabel,
 } from '../types';
 import { linkTargetOf, ProjectDef } from '../indexer';
 import { ConfirmModal } from '../project';
@@ -37,6 +38,7 @@ import { EntityChip, Icon, SearchableSelect, ViewShell, noProjectMessage, record
 import { resolveProject, useIndexVersion } from './hooks';
 import { focusNeighborhood } from './mini-graph';
 import { EdgeRoute, LANE_EPSILON, edgePoints, roundedPath } from '../graph/routing';
+import { t } from '../i18n';
 
 /** One drawn zone: a polygon associated (optionally) with a location, which
  *  pins a node inside it. */
@@ -180,10 +182,11 @@ const CLOSEUP_NODE_OPACITY = 0.28;
  *  from the camera zoom (wheel-zoom flips it); a slider stop animates to that
  *  mode's zoom. */
 type ViewMode = 'closeup' | 'regular' | 'nodeview';
-const VIEW_MODES: [ViewMode, string][] = [
-	['closeup', 'Close up'],
-	['regular', 'Regular'],
-	['nodeview', 'Node view'],
+// Translated at use (not stored — the locale can change at runtime).
+const VIEW_MODES: [ViewMode, () => string][] = [
+	['closeup', () => t('view.map.viewMode.closeup')],
+	['regular', () => t('view.map.viewMode.regular')],
+	['nodeview', () => t('view.map.viewMode.nodeview')],
 ];
 /** Zoom thresholds between the modes, and the zoom each slider stop targets. */
 const CLOSEUP_K = 0.7;
@@ -193,12 +196,13 @@ const NODEVIEW_K = 0.08;
 // squish animation plays, rather than landing on the fragile boundary.
 const MODE_K: Record<ViewMode, number> = { closeup: 1, regular: 0.5, nodeview: NODEVIEW_K * 0.85 };
 
-/** Node size dropdown labels. */
-const SIZE_OPTIONS: [NodeSizePreset, string][] = [
-	['small', 'S'],
-	['regular', 'M'],
-	['big', 'L'],
-	['very-big', 'XL'],
+/** Node size dropdown labels. Translated at use (not stored — the locale can
+ *  change at runtime). */
+const SIZE_OPTIONS: [NodeSizePreset, () => string][] = [
+	['small', () => t('view.map.size.s')],
+	['regular', () => t('view.map.size.m')],
+	['big', () => t('view.map.size.l')],
+	['very-big', () => t('view.map.size.xl')],
 ];
 
 function newId(): string {
@@ -370,7 +374,7 @@ export async function countMapPages(app: App, project: ProjectRef): Promise<numb
 
 /** A single default page (used for a brand-new project map). */
 function defaultPages(): MapPage[] {
-	return [{ id: newId(), name: 'Map', parentId: null, order: 0, zones: [], images: [], scale: 1 }];
+	return [{ id: newId(), name: t('view.map.defaultMapName'), parentId: null, order: 0, zones: [], images: [], scale: 1 }];
 }
 
 /**
@@ -457,7 +461,7 @@ function parseMapsFile(text: string): MapsFile | null {
 				const zones = parseZones(m.zones);
 				return {
 					id: typeof m.id === 'string' ? m.id : newId(),
-					name: typeof m.name === 'string' && m.name.trim() !== '' ? m.name : 'Map',
+					name: typeof m.name === 'string' && m.name.trim() !== '' ? m.name : t('view.map.defaultMapName'),
 					parentId: typeof m.parentId === 'string' ? m.parentId : null,
 					order: typeof m.order === 'number' ? m.order : i,
 					zones,
@@ -1079,7 +1083,7 @@ export class MapView extends LoomReactView {
 	}
 
 	getDisplayText(): string {
-		return MAPS_LABEL;
+		return mapsLabel();
 	}
 
 	getIcon(): string {
@@ -1202,11 +1206,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const dur = 260;
 		let raf = 0;
 		const step = (now: number) => {
-			const t = Math.min(1, (now - start) / dur);
-			const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+			const frac = Math.min(1, (now - start) / dur);
+			const e = frac < 0.5 ? 2 * frac * frac : 1 - Math.pow(-2 * frac + 2, 2) / 2;
 			squishRef.current = from + (target - from) * e;
 			forceTick((x) => x + 1);
-			if (t < 1) raf = window.requestAnimationFrame(step);
+			if (frac < 1) raf = window.requestAnimationFrame(step);
 			else squishRef.current = target;
 		};
 		raf = window.requestAnimationFrame(step);
@@ -1412,7 +1416,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		});
 		return () => {
 			plugin.app.vault.offref(ref);
-			pending.forEach((t) => window.clearTimeout(t));
+			pending.forEach((id) => window.clearTimeout(id));
 		};
 	}, [plugin, saveLater]);
 
@@ -1606,7 +1610,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	);
 	const renameMap = useCallback(
 		(id: string, name: string) => {
-			commitPages(pagesRef.current.map((p) => (p.id === id ? { ...p, name: name.trim() || 'Map' } : p)));
+			commitPages(
+				pagesRef.current.map((p) => (p.id === id ? { ...p, name: name.trim() || t('view.map.defaultMapName') } : p))
+			);
 		},
 		[commitPages]
 	);
@@ -1945,7 +1951,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			const hitLoc = hit && hit.kind === 'zone' && hit.location ? hit.location : null;
 			if (!roadDraft) {
 				if (!hitLoc) {
-					new Notice('Roads start on a location — click a location to begin.');
+					new Notice(t('view.map.roadsStartOnLocation'));
 					return;
 				}
 				const sNode = locNode(hitLoc);
@@ -2154,7 +2160,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		}
 		const created = await plugin.app.vault.createBinary(path, await file.arrayBuffer());
 		await placeImage(created, at);
-		new Notice(`Imported ${created.name} at its real pixel size.`);
+		new Notice(t('view.map.importedAtRealSize', { name: created.name }));
 	};
 
 	/** Begins an aspect-locked resize from one grip (or edge band) of an image. */
@@ -2171,7 +2177,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const m = new ObsidianMenu();
 		m.addItem((i) =>
 			i
-				.setTitle(im.locked ? 'Unlock' : 'Lock in place')
+				.setTitle(im.locked ? t('view.map.imageMenu.unlock') : t('view.map.imageMenu.lockInPlace'))
 				.setIcon(im.locked ? 'lock-open' : 'lock')
 				.onClick(() => {
 					snapshot();
@@ -2181,7 +2187,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		);
 		m.addItem((i) =>
 			i
-				.setTitle('Reset to real size')
+				.setTitle(t('view.map.imageMenu.resetToRealSize'))
 				.setIcon('scan')
 				.onClick(() => {
 					snapshot();
@@ -2192,7 +2198,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		for (const pct of [100, 75, 50, 25]) {
 			m.addItem((i) =>
 				i
-					.setTitle(`Opacity ${pct}%`)
+					.setTitle(t('view.map.imageMenu.opacityPercent', { pct }))
 					.setChecked(Math.round(im.opacity * 100) === pct)
 					.onClick(() => {
 						snapshot();
@@ -2203,7 +2209,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		m.addSeparator();
 		m.addItem((i) =>
 			i
-				.setTitle('Bring to front')
+				.setTitle(t('view.map.imageMenu.bringToFront'))
 				.setIcon('arrow-up')
 				.onClick(() => {
 					snapshot();
@@ -2212,7 +2218,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		);
 		m.addItem((i) =>
 			i
-				.setTitle('Send to back')
+				.setTitle(t('view.map.imageMenu.sendToBack'))
 				.setIcon('arrow-down')
 				.onClick(() => {
 					snapshot();
@@ -2224,7 +2230,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		// a re-place, may still want it).
 		m.addItem((i) =>
 			i
-				.setTitle('Remove from map')
+				.setTitle(t('view.map.imageMenu.removeFromMap'))
 				.setIcon('trash-2')
 				.onClick(() => {
 					snapshot();
@@ -2434,8 +2440,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			// Ignore keys while typing in a field (search box, inputs, etc.).
-			const t = e.target as HTMLElement | null;
-			if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+			const focusEl = e.target as HTMLElement | null;
+			if (focusEl && (focusEl.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(focusEl.tagName))) return;
 			// Undo / redo (map-local).
 			if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
 				e.preventDefault();
@@ -2696,11 +2702,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		() =>
 			pages
 				.filter((p) => p.id !== activeId)
-				.map((p) => ({ value: p.id, label: p.name || 'Untitled map' }))
+				.map((p) => ({ value: p.id, label: p.name || t('view.map.untitledMap') }))
 				.sort((a, b) => a.label.localeCompare(b.label)),
 		[pages, activeId]
 	);
-	const pageName = (id: string): string => pages.find((p) => p.id === id)?.name || 'Untitled map';
+	const pageName = (id: string): string => pages.find((p) => p.id === id)?.name || t('view.map.untitledMap');
 	const addDoor = (zone: MapZone, pageId: string) => {
 		snapshot();
 		// Offset each new door a little so several don't fully overlap.
@@ -2858,22 +2864,23 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		for (const [preset, label] of SIZE_OPTIONS) {
 			m.addItem((i) =>
 				i
-					.setTitle(`Size ${label}`)
+					.setTitle(t('view.map.sizeLabel', { label: label() }))
 					.setChecked(pin.size === preset)
 					.onClick(() => patch(preset))
 			);
 		}
-		if (pin.size) m.addItem((i) => i.setTitle('Default size').setIcon('rotate-ccw').onClick(() => patch(undefined)));
+		if (pin.size)
+			m.addItem((i) => i.setTitle(t('view.map.defaultSizeMenuItem')).setIcon('rotate-ccw').onClick(() => patch(undefined)));
 		m.addSeparator();
 		m.addItem((i) =>
 			i
-				.setTitle(kind === 'sub' ? 'Open sublocation' : 'Open item')
+				.setTitle(kind === 'sub' ? t('view.map.pinMenu.openSublocation') : t('view.map.pinMenu.openItem'))
 				.setIcon('square-arrow-out-up-right')
 				.onClick(() => (kind === 'sub' ? openSubloc(target) : openItem(target)))
 		);
 		m.addItem((i) =>
 			i
-				.setTitle('Remove from map')
+				.setTitle(t('view.map.imageMenu.removeFromMap'))
 				.setIcon('trash-2')
 				.onClick(() => {
 					snapshot();
@@ -2923,15 +2930,15 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const start = performance.now();
 		window.cancelAnimationFrame(camRaf.current);
 		const step = (now: number) => {
-			const t = Math.min(1, (now - start) / dur);
+			const frac = Math.min(1, (now - start) / dur);
 			// Ease in-out: leaves and arrives calmly, travels fast in between.
-			const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+			const e = frac < 0.5 ? 2 * frac * frac : 1 - Math.pow(-2 * frac + 2, 2) / 2;
 			setCamera({
 				k: from.k,
 				tx: from.tx + (to.tx - from.tx) * e,
 				ty: from.ty + (to.ty - from.ty) * e,
 			});
-			if (t < 1) camRaf.current = window.requestAnimationFrame(step);
+			if (frac < 1) camRaf.current = window.requestAnimationFrame(step);
 		};
 		camRaf.current = window.requestAnimationFrame(step);
 	};
@@ -2947,18 +2954,18 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const start = performance.now();
 		window.cancelAnimationFrame(camRaf.current);
 		const step = (now: number) => {
-			const t = Math.min(1, (now - start) / 260);
-			const e = 1 - (1 - t) * (1 - t);
+			const frac = Math.min(1, (now - start) / 260);
+			const e = 1 - (1 - frac) * (1 - frac);
 			const k = from.k + (targetK - from.k) * e;
 			setCamera({ k, tx: w / 2 - wx * k, ty: h / 2 - wy * k });
-			if (t < 1) camRaf.current = window.requestAnimationFrame(step);
+			if (frac < 1) camRaf.current = window.requestAnimationFrame(step);
 		};
 		camRaf.current = window.requestAnimationFrame(step);
 	};
 
 	if (!project) {
 		return (
-			<ViewShell view={view} project={null} title={MAPS_LABEL}>
+			<ViewShell view={view} project={null} title={mapsLabel()}>
 				{noProjectMessage()}
 			</ViewShell>
 		);
@@ -3045,7 +3052,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	};
 
 	return (
-		<ViewShell view={view} project={project} title={MAPS_LABEL} railActive="map">
+		<ViewShell view={view} project={project} title={mapsLabel()} railActive="map">
 			<div className={tool !== 'select' ? 'loom-map-wrap loom-map-drawing' : 'loom-map-wrap'} ref={wrapRef}>
 				<MapsPanel
 					plugin={plugin}
@@ -3169,11 +3176,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									}
 									// Collapse the polygon toward its node (or centroid) as node
 									// view turns on.
-									const t = z.node ?? centroid(z.points);
+									const pivot = z.node ?? centroid(z.points);
 									const s = 1 - squish;
 									const squishTransform =
 										squish > 0.001
-											? `translate(${t.x},${t.y}) scale(${s}) translate(${-t.x},${-t.y})`
+											? `translate(${pivot.x},${pivot.y}) scale(${s}) translate(${-pivot.x},${-pivot.y})`
 											: undefined;
 									return (
 										<g key={z.id} transform={squishTransform} opacity={squish > 0.001 ? s : undefined}>
@@ -3777,7 +3784,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				<div className="loom-map-controls">
 					<div className="loom-map-search">
 						<SearchableSelect
-							placeholder="Find a location…"
+							placeholder={t('view.map.findLocationPlaceholder')}
 							options={zones
 								.filter((z) => z.location)
 								.map((z) => ({ value: z.id, label: locationName(z.location) }))
@@ -3785,13 +3792,13 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							onPick={(id) => {
 								const z = zones.find((zz) => zz.id === id);
 								if (!z) return;
-								const t = z.node ?? centroid(z.points);
-								flyTo(t.x, t.y);
+								const pt = z.node ?? centroid(z.points);
+								flyTo(pt.x, pt.y);
 								setSelectedZone(z.id);
 							}}
 						/>
 					</div>
-					<div className="loom-map-scale" role="group" aria-label="View scale">
+					<div className="loom-map-scale" role="group" aria-label={t('view.map.viewScaleAria')}>
 						{VIEW_MODES.map(([m, label]) => (
 							<button
 								key={m}
@@ -3799,7 +3806,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 								aria-pressed={viewMode === m}
 								onClick={() => animateCameraK(MODE_K[m] / scale)}
 							>
-								{label}
+								{label()}
 							</button>
 						))}
 					</div>
@@ -3809,7 +3816,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					<div className="loom-map-elemsize">
 						<button
 							className={sizeOpen ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-							aria-label="Element size"
+							aria-label={t('view.map.elementSizeAria')}
 							onClick={() => setSizeOpen(!sizeOpen)}
 						>
 							<Icon name="ruler" fallback="move-diagonal" />
@@ -3817,7 +3824,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						{sizeOpen ? (
 							<div className="loom-map-palette-pop">
 								<label className="loom-map-palette-row">
-									<span>Elements</span>
+									<span>{t('view.map.elements')}</span>
 									<ObsidianSlider
 										min={0}
 										max={100}
@@ -3827,16 +3834,17 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									/>
 									<button
 										className="loom-map-icon-btn loom-map-reset"
-										aria-label="Fit to the zones already drawn"
+										aria-label={t('view.map.fitToZonesAria')}
 										onClick={() => setPageScale(inferScale(zonesRef.current))}
 									>
 										<Icon name="wand-2" fallback="rotate-ccw" />
 									</button>
 								</label>
 								<div className="loom-map-elemsize-readout">
-									{`${scale >= 10 ? scale.toFixed(0) : scale.toFixed(2)}× · node ≈ ${Math.round(
-										NODE_SIZE_PRESETS.regular * scale
-									)} units`}
+									{t('view.map.elementScaleReadout', {
+										scale: scale >= 10 ? scale.toFixed(0) : scale.toFixed(2),
+										units: Math.round(NODE_SIZE_PRESETS.regular * scale),
+									})}
 								</div>
 							</div>
 						) : null}
@@ -3867,9 +3875,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						onDoorDragStart={(pageId) => setPinDrag({ kind: 'door', target: pageId, zoneId: menuZone.id })}
 						itemOptions={itemOptions}
 						itemPinned={new Set(menuZone.itemPins.map((p) => p.item))}
-						onToggleItem={(t) => toggleItemPin(menuZone, t)}
+						onToggleItem={(val) => toggleItemPin(menuZone, val)}
 						onOpenItem={(target) => openItem(target)}
-						onItemDragStart={(t) => setPinDrag({ kind: 'item', target: t, zoneId: menuZone.id })}
+						onItemDragStart={(val) => setPinDrag({ kind: 'item', target: val, zoneId: menuZone.id })}
 						sublocations={sublocationsOf(menuZone).map((l) => ({
 							value: linkTargetOf(l),
 							label: recordLabel(l, project),
@@ -3941,9 +3949,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							onClick={(e) => {
 								const m = new ObsidianMenu();
 								for (const [tool, title, icon] of [
-									['rect', 'Rectangle', 'square'],
-									['draw', 'Polygon', 'pen-tool'],
-									['road', 'Road', 'route'],
+									['rect', t('view.map.tool.rectangle'), 'square'],
+									['draw', t('view.map.tool.polygon'), 'pen-tool'],
+									['road', t('view.map.tool.road'), 'route'],
 								] as const) {
 									m.addItem((i) =>
 										i
@@ -3959,12 +3967,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							}}
 						>
 							<Icon name="square-dashed" fallback="square" />
-							<span>Draw a zone</span>
+							<span>{t('view.map.drawAZone')}</span>
 							<Icon name="chevron-right" fallback="plus" />
 						</button>
 						<button className="loom-map-menu-row" onClick={() => setImagePicker(true)}>
 							<Icon name="image" />
-							<span>Background image</span>
+							<span>{t('view.map.backgroundImage')}</span>
 							<Icon name="chevron-right" fallback="plus" />
 						</button>
 					</div>
@@ -3990,7 +3998,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					>
 						<button className="loom-map-menu-row" onClick={() => setImagePicker(false)}>
 							<Icon name="chevron-left" fallback="arrow-left" />
-							<span>Background image</span>
+							<span>{t('view.map.backgroundImage')}</span>
 						</button>
 						<button
 							className="loom-map-menu-row"
@@ -4002,11 +4010,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							}}
 						>
 							<Icon name="image-plus" fallback="image" />
-							<span>Import image…</span>
+							<span>{t('view.map.importImage')}</span>
 						</button>
 						{(() => {
 							if (importedImages.length === 0) {
-								return <div className="loom-map-subs-more">Nothing imported yet</div>;
+								return <div className="loom-map-subs-more">{t('view.map.nothingImportedYet')}</div>;
 							}
 							const q = imageQuery.trim().toLowerCase();
 							const filtered = q
@@ -4021,7 +4029,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										<input
 											className="loom-map-subs-search"
 											type="text"
-											placeholder={`Search ${importedImages.length} images…`}
+											placeholder={t('view.map.searchImages', { count: importedImages.length })}
 											value={imageQuery}
 											onChange={(e) => setImageQuery(e.target.value)}
 										/>
@@ -4044,7 +4052,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 												<span>{f.name}</span>
 											</button>
 										))}
-										{filtered.length === 0 ? <div className="loom-map-subs-more">No matches</div> : null}
+										{filtered.length === 0 ? <div className="loom-map-subs-more">{t('common.noMatches')}</div> : null}
 									</div>
 								</>
 							);
@@ -4069,7 +4077,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				/>
 
 				{zones.length === 0 && images.length === 0 && draft.length === 0 ? (
-					<div className="loom-map-hint">Right-click for options, then draw a zone.</div>
+					<div className="loom-map-hint">{t('view.map.rightClickHint')}</div>
 				) : null}
 			</div>
 		</ViewShell>
@@ -4129,7 +4137,7 @@ function ZonePinList({
 	dragTitle,
 	rowIcon,
 	rowIconFallback,
-	pinAriaLabel = 'Show as node in the zone',
+	pinAriaLabel = t('view.map.showAsNodeAria'),
 	options,
 	pinned,
 	query,
@@ -4165,14 +4173,16 @@ function ZonePinList({
 			/>
 			<div className="loom-map-subs-head">
 				<span>{columnLabel}</span>
-				<span>Node</span>
+				<span>{t('view.map.columnNode')}</span>
 			</div>
 			<div className="loom-map-subs-list">
 				{filtered.map((o) => (
 					<div key={o.value} className="loom-map-doors-row loom-map-subs-row">
 						<button
 							className="loom-map-doors-open"
-							title={dragTitle}
+							ref={(el) => {
+								if (el) setTooltip(el, dragTitle);
+							}}
 							draggable
 							onDragStart={(e) => {
 								e.dataTransfer.effectAllowed = 'copy';
@@ -4194,7 +4204,7 @@ function ZonePinList({
 						/>
 					</div>
 				))}
-				{filtered.length === 0 ? <div className="loom-map-subs-more">No matches</div> : null}
+				{filtered.length === 0 ? <div className="loom-map-subs-more">{t('common.noMatches')}</div> : null}
 			</div>
 		</div>
 	);
@@ -4297,7 +4307,7 @@ function ZonePanel({
 			{/* Grip — a drag handle, not a button (no hover box, grab cursor). */}
 			<button
 				className="loom-map-icon-btn loom-map-grip"
-				aria-label={zone.locked ? 'Locked' : 'Move zone'}
+				aria-label={zone.locked ? t('view.map.zoneAria.locked') : t('view.map.zoneAria.moveZone')}
 				disabled={zone.locked}
 				onPointerDown={onGripDown}
 			>
@@ -4312,7 +4322,7 @@ function ZonePanel({
 						// Keyed on the association state so clearing remounts it empty
 						// (its query is seeded on mount, not reset in place).
 						key={`${zone.location ?? ''}:${editingLoc}`}
-						placeholder="Associate a location…"
+						placeholder={t('view.map.zoneAria.associateLocationPlaceholder')}
 						// Don't offer a location that's already placed on this map
 						// (except this zone's own current one).
 						options={locationOptions.filter(
@@ -4328,7 +4338,7 @@ function ZonePanel({
 					{editingLoc ? (
 						<button
 							className="loom-map-icon-btn"
-							aria-label="Clear location"
+							aria-label={t('view.entity.faction.clearLocation')}
 							onClick={() => {
 								onClearLocation();
 								setEditingLoc(false);
@@ -4343,7 +4353,7 @@ function ZonePanel({
 					<EntityChip plugin={plugin} record={locationRecord} label={locationName} onOpen={onOpenLocation} />
 					<button
 						className="loom-map-icon-btn"
-						aria-label="Change location"
+						aria-label={t('view.map.zoneAria.changeLocation')}
 						onClick={() => setEditingLoc(true)}
 					>
 						<Icon name="square-pen" fallback="pencil" />
@@ -4356,16 +4366,16 @@ function ZonePanel({
 				<div className="loom-map-palette">
 					<button
 						className={openPanel === 'subs' ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-						aria-label="Sublocations in this zone"
+						aria-label={t('view.map.zoneAria.sublocationsInZone')}
 						onClick={() => togglePanel('subs')}
 					>
 						<Icon name="list" />
 					</button>
 					{openPanel === 'subs' ? (
 						<ZonePinList
-							columnLabel="Location"
-							searchPlaceholder="Search sublocations…"
-							dragTitle="Click to open · drag onto the map to place its node"
+							columnLabel={t('view.map.columnLocation')}
+							searchPlaceholder={t('view.map.searchSublocations')}
+							dragTitle={t('view.map.dragTitleNode')}
 							rowIcon="map-pin"
 							options={sublocations}
 							pinned={subPinned}
@@ -4382,19 +4392,19 @@ function ZonePanel({
 			<div className="loom-map-palette">
 				<button
 					className={openPanel === 'doors' ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-					aria-label="Doors to other maps"
+					aria-label={t('view.map.zoneAria.doorsToOtherMaps')}
 					onClick={() => togglePanel('doors')}
 				>
 					<Icon name="door-open" fallback="log-in" />
 				</button>
 				{openPanel === 'doors' ? (
 					<ZonePinList
-						columnLabel="Map"
-						searchPlaceholder="Search map pages"
-						dragTitle="Click to open · drag onto the map to place its door"
+						columnLabel={t('view.map.columnMap')}
+						searchPlaceholder={t('view.map.searchMapPages')}
+						dragTitle={t('view.map.dragTitleDoor')}
 						rowIcon="door-open"
 						rowIconFallback="log-in"
-						pinAriaLabel="Show a door in the zone"
+						pinAriaLabel={t('view.map.showDoorAria')}
 						options={mapPageOptions}
 						pinned={doorPinned}
 						query={doorQuery}
@@ -4409,16 +4419,16 @@ function ZonePanel({
 			<div className="loom-map-palette">
 				<button
 					className={openPanel === 'items' ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-					aria-label="Items in this zone"
+					aria-label={t('view.map.zoneAria.itemsInZone')}
 					onClick={() => togglePanel('items')}
 				>
 					<Icon name="gem" />
 				</button>
 				{openPanel === 'items' ? (
 					<ZonePinList
-						columnLabel="Item"
-						searchPlaceholder="Search items"
-						dragTitle="Click to open · drag onto the map to place its node"
+						columnLabel={t('view.map.columnItem')}
+						searchPlaceholder={t('view.map.searchItems')}
+						dragTitle={t('view.map.dragTitleNode')}
 						rowIcon="gem"
 						options={itemOptions}
 						pinned={itemPinned}
@@ -4433,7 +4443,7 @@ function ZonePanel({
 			<span className="loom-map-sep" />
 			{/* Group: node size + style + lock. */}
 			{zone.location ? (
-				<label className="loom-map-size-btn" aria-label="Node size">
+				<label className="loom-map-size-btn" aria-label={t('view.map.zoneAria.nodeSize')}>
 					<select
 						className="loom-map-size"
 						value={zone.nodeSize}
@@ -4441,7 +4451,7 @@ function ZonePanel({
 					>
 						{SIZE_OPTIONS.map(([v, l]) => (
 							<option key={v} value={v}>
-								{l}
+								{l()}
 							</option>
 						))}
 					</select>
@@ -4450,7 +4460,7 @@ function ZonePanel({
 			<div className="loom-map-palette">
 				<button
 					className={openPanel === 'style' ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-					aria-label="Style"
+					aria-label={t('view.map.zoneAria.style')}
 					onClick={() => togglePanel('style')}
 				>
 					<Icon name="palette" />
@@ -4458,7 +4468,7 @@ function ZonePanel({
 				{openPanel === 'style' ? (
 					<div className="loom-map-palette-pop">
 						<label className="loom-map-palette-row">
-							<span>Color</span>
+							<span>{t('view.map.zoneAria.color')}</span>
 							<input
 								type="color"
 								value={zone.color}
@@ -4467,7 +4477,7 @@ function ZonePanel({
 							/>
 						</label>
 						<label className="loom-map-palette-row">
-							<span>Opacity</span>
+							<span>{t('view.map.zoneAria.opacity')}</span>
 							<ObsidianSlider
 								min={0}
 								max={100}
@@ -4477,7 +4487,7 @@ function ZonePanel({
 							/>
 							<button
 								className="loom-map-icon-btn loom-map-reset"
-								aria-label="Reset transparency"
+								aria-label={t('view.map.zoneAria.resetTransparency')}
 								onClick={onResetAlpha}
 							>
 								<Icon name="rotate-ccw" />
@@ -4485,7 +4495,7 @@ function ZonePanel({
 						</label>
 						{isRoad ? (
 							<label className="loom-map-palette-row">
-								<span>Width</span>
+								<span>{t('view.map.zoneAria.width')}</span>
 								{/* Widths are world units, so the usable range scales with the
 								    map's element scale — the same feel on a 200-unit town map and
 								    on a 3000-unit continent. */}
@@ -4498,7 +4508,7 @@ function ZonePanel({
 								/>
 								<button
 									className="loom-map-icon-btn loom-map-reset"
-									aria-label="Reset width"
+									aria-label={t('view.map.zoneAria.resetWidth')}
 									onClick={onResetWidth}
 								>
 									<Icon name="rotate-ccw" />
@@ -4511,13 +4521,17 @@ function ZonePanel({
 			<span className="loom-map-sep" />
 			<button
 				className={zone.locked ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-				aria-label={zone.locked ? 'Unlock zone' : 'Lock zone'}
+				aria-label={zone.locked ? t('view.map.zoneAria.unlockZone') : t('view.map.zoneAria.lockZone')}
 				onClick={onToggleLock}
 			>
 				<Icon name={zone.locked ? 'lock' : 'lock-open'} fallback="lock" />
 			</button>
 			<span className="loom-map-sep" />
-			<button className="loom-map-icon-btn loom-map-danger" aria-label="Delete zone" onClick={onDelete}>
+			<button
+				className="loom-map-icon-btn loom-map-danger"
+				aria-label={t('view.map.zoneAria.deleteZone')}
+				onClick={onDelete}
+			>
 				<Icon name="trash-2" />
 			</button>
 		</div>
@@ -4564,8 +4578,8 @@ function MapsPanel({
 	const nextAutoName = () => {
 		const used = new Set(pages.map((p) => p.name));
 		let n = 1;
-		while (used.has(`New map ${n}`)) n++;
-		return `New map ${n}`;
+		while (used.has(t('view.map.newMapNumbered', { n }))) n++;
+		return t('view.map.newMapNumbered', { n });
 	};
 	const nameExists = (name: string, exceptId: string) =>
 		pages.some((p) => p.id !== exceptId && p.name === name);
@@ -4604,13 +4618,13 @@ function MapsPanel({
 			const suggestion = dedupName(text);
 			new ConfirmModal(
 				plugin.app,
-				'Name already exists',
-				`A map named "${text}" already exists.`,
+				t('view.map.nameExistsTitle'),
+				t('view.map.nameExistsDetail', { name: text }),
 				() => {
 					onRename(id, suggestion);
 					setRenaming(null);
 				},
-				`Create "${suggestion}"`
+				t('view.map.createNamed', { name: suggestion })
 			).open();
 			return;
 		}
@@ -4634,19 +4648,19 @@ function MapsPanel({
 	const openMenu = (e: ReactMouseEvent<HTMLElement>, p: MapPage) => {
 		e.preventDefault();
 		const menu = new ObsidianMenu();
-		menu.addItem((i) => i.setTitle('New map inside').setIcon('plus').onClick(() => onCreate(p.id)));
-		menu.addItem((i) => i.setTitle('Rename').setIcon('pencil').onClick(() => startRename(p)));
+		menu.addItem((i) => i.setTitle(t('view.map.newMapInside')).setIcon('plus').onClick(() => onCreate(p.id)));
+		menu.addItem((i) => i.setTitle(t('view.list.rename')).setIcon('pencil').onClick(() => startRename(p)));
 		menu.addItem((i) =>
 			i
-				.setTitle('Delete')
+				.setTitle(t('project.common.delete'))
 				.setIcon('trash-2')
 				.onClick(() =>
 					new ConfirmModal(
 						plugin.app,
-						'Delete map?',
-						`"${p.name}" and all of its zones will be removed.`,
+						t('view.map.deleteMapTitle'),
+						t('view.map.deleteMapDetail', { name: p.name }),
 						() => onDelete(p.id),
-						'Delete'
+						t('project.common.delete')
 					).open()
 				)
 		);
@@ -4683,7 +4697,7 @@ function MapsPanel({
 							setDropTarget(p.id);
 						}
 					}}
-					onDragLeave={() => setDropTarget((t) => (t === p.id ? null : t))}
+					onDragLeave={() => setDropTarget((cur) => (cur === p.id ? null : cur))}
 					onDrop={(e) => {
 						e.preventDefault();
 						e.stopPropagation();
@@ -4700,7 +4714,7 @@ function MapsPanel({
 					{kids.length > 0 ? (
 						<button
 							className="loom-map-page-caret"
-							aria-label={isCollapsed ? 'Expand' : 'Collapse'}
+							aria-label={isCollapsed ? t('view.map.expand') : t('view.map.collapse')}
 							onClick={(e) => {
 								e.stopPropagation();
 								toggleCollapse(p.id);
@@ -4716,7 +4730,7 @@ function MapsPanel({
 						<input
 							className="loom-map-page-rename"
 							type="text"
-							placeholder="New map"
+							placeholder={t('view.map.newMap')}
 							value={renameText}
 							autoFocus
 							onChange={(e) => setRenameText(e.target.value)}
@@ -4743,14 +4757,14 @@ function MapsPanel({
 		<div className={forceOpen ? 'loom-map-panel loom-map-panel-pinned' : 'loom-map-panel'}>
 			<div className="loom-map-panel-inner">
 				<div className="loom-map-panel-head">
-					<span className="loom-map-panel-title">Maps</span>
+					<span className="loom-map-panel-title">{mapsLabel()}</span>
 					<div className="loom-shell-spacer" />
-					<button className="loom-map-icon-btn" aria-label="New map" onClick={() => onCreate(null)}>
+					<button className="loom-map-icon-btn" aria-label={t('view.map.newMap')} onClick={() => onCreate(null)}>
 						<Icon name="plus" />
 					</button>
 					<button
 						className={pinned ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-						aria-label={pinned ? 'Unpin panel' : 'Pin panel open'}
+						aria-label={pinned ? t('view.map.unpinPanel') : t('view.map.pinPanelOpen')}
 						onClick={() => setPinned((v) => !v)}
 					>
 						<Icon name={pinned ? 'pin' : 'pin-off'} fallback="pin" />
@@ -4759,7 +4773,7 @@ function MapsPanel({
 				<input
 					className="loom-map-panel-search"
 					type="text"
-					placeholder="Search maps…"
+					placeholder={t('view.map.searchMapsPlaceholder')}
 					value={query}
 					onChange={(e) => setQuery(e.target.value)}
 				/>
@@ -4779,7 +4793,7 @@ function MapsPanel({
 					}}
 				>
 					{(matches ?? childrenOf(null)).map((p) => row(p, 0, matches !== null))}
-					{pages.length === 0 ? <div className="loom-map-panel-empty">No maps</div> : null}
+					{pages.length === 0 ? <div className="loom-map-panel-empty">{t('view.map.noMaps')}</div> : null}
 				</div>
 			</div>
 			<div className="loom-map-panel-edge" aria-hidden="true">
@@ -4932,9 +4946,9 @@ function FocusGraphLayer({
 		const start = performance.now();
 		let raf = 0;
 		const step = (now: number) => {
-			const t = Math.min(1, (now - start) / DUR);
-			setProg(from + (to - from) * t);
-			if (t < 1) raf = window.requestAnimationFrame(step);
+			const frac = Math.min(1, (now - start) / DUR);
+			setProg(from + (to - from) * frac);
+			if (frac < 1) raf = window.requestAnimationFrame(step);
 			else if (closing) onClosedRef.current();
 		};
 		raf = window.requestAnimationFrame(step);
@@ -5212,7 +5226,7 @@ function FocusGraphLayer({
 	if (!layout) return null;
 	const { slots, routes } = layout;
 
-	const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
+	const easeOut = (x: number) => 1 - Math.pow(1 - x, 3);
 	// Layer distance from the focus (0) drives the ripple; region (−1) and deep
 	// layers reveal after the focus.
 	const layerProg = (layer: number) => {

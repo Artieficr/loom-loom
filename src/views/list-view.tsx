@@ -15,12 +15,16 @@ import {
 	EntityType,
 	FM,
 	MAPS_ICON,
-	MAPS_LABEL,
 	PC_TAG,
 	QUEST_OUTCOMES,
+	questOutcomeLabel,
 	VIEW_LIST,
 	VIEW_MAP,
+	entityLabel,
+	newEntityTitle,
+	entityPlural,
 	isEntityType,
+	mapsLabel,
 	pcGroupStub,
 } from '../types';
 import { features, projectRoleType, roleOf } from '../project-kind';
@@ -37,6 +41,7 @@ import {
 	renameEntityRecord,
 	sessionFileName,
 } from '../project';
+import { LocaleKey, t } from '../i18n';
 import { linkTargetOf } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
 import { LoomReactView } from './react-view';
@@ -68,7 +73,7 @@ export class EntityListView extends LoomReactView {
 	}
 
 	getDisplayText(): string {
-		return ENTITY_META[this.entityType].plural;
+		return entityPlural(this.entityType);
 	}
 
 	getIcon(): string {
@@ -381,9 +386,12 @@ function EntityList({
 	// these rather than naming a type.
 	const anchorType = projectRoleType(project?.config, 'anchor');
 	const beatType = projectRoleType(project?.config, 'beat');
-	const anchorLabel = ENTITY_META[anchorType].label.toLowerCase();
-	const beatLabel = ENTITY_META[beatType].label.toLowerCase();
-	const addBeatTitle = `Add ${/^[aeiou]/.test(beatLabel) ? 'an' : 'a'} ${beatLabel}`;
+	const anchorLabel = entityLabel(anchorType).toLowerCase();
+	const beatLabel = entityLabel(beatType).toLowerCase();
+	const addBeatTitle = t('view.list.addBeatTitle', {
+		article: /^[aeiou]/.test(beatLabel) ? 'an' : 'a',
+		beat: beatLabel,
+	});
 
 	// --- Event filter matching (involved incl. group snapshots; a location
 	// matches its own events and every descendant's, like location pages). ---
@@ -585,7 +593,7 @@ function EntityList({
 			const stub: EntityRecord = {
 				...pcGroupStub(project.root),
 				path: UNSPEC_REGION,
-				name: 'Unspecified Region',
+				name: t('view.list.unspecifiedRegion'),
 				type: 'region',
 			};
 			roots.push(stub);
@@ -606,7 +614,7 @@ function EntityList({
 
 	if (!project) {
 		return (
-			<ViewShell view={view} project={null} title={ENTITY_META[type].plural}>
+			<ViewShell view={view} project={null} title={entityPlural(type)}>
 				{noProjectMessage()}
 			</ViewShell>
 		);
@@ -666,7 +674,7 @@ function EntityList({
 				.filter((ev) => !already(ev))
 				.sort((a, b) => a.name.localeCompare(b.name)),
 			(ev) => involveInEvent(ev, r),
-			`Pick the ${beatLabel}…`
+			t('view.list.pickBeat', { beat: beatLabel })
 		).open();
 	};
 	const pickSessionNoteFor = (r: EntityRecord) =>
@@ -681,15 +689,15 @@ function EntityList({
 					text: '',
 					seq: Date.now(),
 				}),
-			`Pick the ${anchorLabel}…`,
+			t('view.list.pickAnchor', { anchor: anchorLabel }),
 			pickLabel
 		).open();
 	const changeSessionDate = (r: EntityRecord) =>
 		new TextInputModal(plugin.app, {
-			title: 'Change the date',
+			title: t('view.list.changeDate'),
 			initial: r.date?.raw ?? '',
 			placeholder: 'YYYY-MM-DD',
-			cta: 'Save',
+			cta: t('project.common.save'),
 			onSubmit: (value) => {
 				writeFmOf(r, (fm) => setLoomKey(fm, FM.date, value));
 				const file = plugin.app.vault.getFileByPath(r.path);
@@ -730,7 +738,7 @@ function EntityList({
 	const addItemMenuItem = (menu: Menu, r: EntityRecord) =>
 		menu.addItem((i) =>
 			i
-				.setTitle('Add an item')
+				.setTitle(t('view.list.addItem'))
 				.setIcon(ENTITY_META.item.icon)
 				.onClick(() =>
 					new RecordSuggestModal(
@@ -741,7 +749,7 @@ function EntityList({
 							.filter((it) => !r.items.some((lp) => plugin.indexer.resolve(lp, r.path)?.path === it.path))
 							.sort((a, b) => a.name.localeCompare(b.name)),
 						(it) => appendFmList(r, FM.items, `[[${linkTargetOf(it)}]]`),
-						'Pick the item…'
+						t('view.list.pickItem')
 					).open()
 				)
 		);
@@ -761,9 +769,9 @@ function EntityList({
 	const deleteMessage = (r: EntityRecord): string =>
 		scriptBacked(r)
 			? r.type === 'chapter'
-				? "The note is moved to the trash, this chapter is removed from the script, and its scenes' notes are trashed too."
-				: 'The note is moved to the trash, and this scene is removed from the script.'
-			: 'The note is moved to the trash.';
+				? t('view.list.deleteMessageChapter')
+				: t('view.list.deleteMessageScene')
+			: t('view.list.deleteMessageGeneral');
 	const deleteRow = (r: EntityRecord): void => {
 		if (scriptBacked(r)) {
 			void deleteScriptEntity(plugin, project, r);
@@ -787,13 +795,13 @@ function EntityList({
 		if (r.type !== 'session' && !isItemCopy) {
 			menu.addItem((i) =>
 				i
-					.setTitle('Rename')
+					.setTitle(t('view.list.rename'))
 					.setIcon('pencil')
 					.onClick(() =>
 						new TextInputModal(plugin.app, {
-							title: `Rename "${r.name}"`,
+							title: t('view.list.renameTitle', { name: r.name }),
 							initial: r.name,
-							cta: 'Rename',
+							cta: t('view.list.rename'),
 							onSubmit: (v) => void renameEntityRecord(plugin, project, r, v),
 						}).open()
 					)
@@ -802,7 +810,7 @@ function EntityList({
 		if (!isItemCopy) {
 			menu.addItem((i) =>
 				i
-					.setTitle('Copy')
+					.setTitle(t('view.list.copy'))
 					.setIcon('copy')
 					.onClick(() => void copyEntityRecord(plugin, project, r))
 			);
@@ -810,13 +818,13 @@ function EntityList({
 		if (r.type !== 'session') {
 			menu.addItem((i) =>
 				i
-					.setTitle('Add alias')
+					.setTitle(t('view.list.addAlias'))
 					.setIcon('at-sign')
 					.onClick(() =>
 						new TextInputModal(plugin.app, {
-							title: `Add alias — ${r.name}`,
-							placeholder: 'Alias',
-							cta: 'Add',
+							title: t('view.list.addAliasTitle', { name: r.name }),
+							placeholder: t('view.list.aliasPlaceholder'),
+							cta: t('project.common.add'),
 							onSubmit: (alias) =>
 								writeFmOf(r, (fm) => {
 									const cur: unknown[] = Array.isArray(fm.aliases)
@@ -830,7 +838,7 @@ function EntityList({
 		}
 		menu.addItem((i) =>
 			i
-				.setTitle('Add relationship')
+				.setTitle(t('project.addRelationship.title'))
 				.setIcon('link')
 				.onClick(() => new AddRelationshipModal(plugin, project, r).open())
 		);
@@ -840,7 +848,7 @@ function EntityList({
 			for (const tag of ENTITY_TAGS.character) {
 				menu.addItem((i) =>
 					i
-						.setTitle(`Tag: ${tag}`)
+						.setTitle(t('view.list.tagMenuItem', { tag }))
 						.setIcon('tag')
 						.setChecked(r.loomTags.includes(tag))
 						.onClick(() => toggleTagOf(r, tag))
@@ -849,7 +857,7 @@ function EntityList({
 			menu.addSeparator();
 			menu.addItem((i) =>
 				i
-					.setTitle('Add a faction')
+					.setTitle(t('view.list.addFaction'))
 					.setIcon(ENTITY_META.faction.icon)
 					.onClick(() =>
 						new RecordSuggestModal(
@@ -864,7 +872,7 @@ function EntityList({
 								)
 								.sort((a, b) => a.name.localeCompare(b.name)),
 							(faction) => appendFmList(faction, FM.members, `[[${linkTargetOf(r)}]]`),
-							'Pick the faction…'
+							t('view.list.pickFaction')
 						).open()
 					)
 			);
@@ -878,7 +886,7 @@ function EntityList({
 			addItemMenuItem(menu, r);
 			menu.addItem((i) =>
 				i
-					.setTitle('Add sublocation')
+					.setTitle(t('view.list.addSublocation'))
 					.setIcon(ENTITY_META.location.icon)
 					.onClick(() =>
 						new CreateEntityModal(plugin, 'location', project, {
@@ -893,7 +901,7 @@ function EntityList({
 			menu.addSeparator();
 			menu.addItem((i) =>
 				i
-					.setTitle('Add location')
+					.setTitle(t('view.list.addLocation'))
 					.setIcon(ENTITY_META.location.icon)
 					.onClick(() =>
 						new RecordSuggestModal(
@@ -903,13 +911,13 @@ function EntityList({
 								.filter((l) => plugin.indexer.resolve(l.region ?? '', l.path)?.path !== r.path)
 								.sort((a, b) => a.name.localeCompare(b.name)),
 							(l) => writeFmOf(l, (fm) => setLoomKey(fm, FM.region, `[[${linkTargetOf(r)}]]`)),
-							'Pick the location…'
+							t('view.list.pickLocation')
 						).open()
 					)
 			);
 			menu.addItem((i) =>
 				i
-					.setTitle('New location in region')
+					.setTitle(t('view.list.newLocationInRegion'))
 					.setIcon(ENTITY_META.location.icon)
 					.onClick(() =>
 						new CreateEntityModal(plugin, 'location', project, {
@@ -924,7 +932,7 @@ function EntityList({
 			menu.addSeparator();
 			menu.addItem((i) =>
 				i
-					.setTitle('Add a member')
+					.setTitle(t('view.list.addMember'))
 					.setIcon(ENTITY_META.character.icon)
 					.onClick(() =>
 						new RecordSuggestModal(
@@ -939,7 +947,7 @@ function EntityList({
 								)
 								.sort((a, b) => a.name.localeCompare(b.name)),
 							(c) => appendFmList(r, FM.members, `[[${linkTargetOf(c)}]]`),
-							'Pick the character…'
+							t('view.list.pickCharacter')
 						).open()
 					)
 			);
@@ -951,13 +959,13 @@ function EntityList({
 			addBeatMenuItem(menu, r);
 			menu.addItem((i) =>
 				i
-					.setTitle('Add to character')
+					.setTitle(t('view.list.addToCharacter'))
 					.setIcon(ENTITY_META.character.icon)
 					.onClick(() => new AddToHoldersModal(plugin, project, r, 'character').open())
 			);
 			menu.addItem((i) =>
 				i
-					.setTitle('Add to location')
+					.setTitle(t('view.list.addToLocation'))
 					.setIcon(ENTITY_META.location.icon)
 					.onClick(() => new AddToHoldersModal(plugin, project, r, 'location').open())
 			);
@@ -968,7 +976,9 @@ function EntityList({
 			for (const tag of ENTITY_TAGS.quest) {
 				menu.addItem((i) =>
 					i
-						.setTitle(`Tag: ${tag}`)
+						.setTitle(
+							t('view.list.tagMenuItem', { tag: t(`settings.entities.questTagNames.${tag}` as LocaleKey) })
+						)
 						.setIcon(QUEST_TAG_ICONS[tag] ?? 'tag')
 						.setChecked(r.loomTags.includes(tag))
 						.onClick(() => toggleTagOf(r, tag))
@@ -982,7 +992,7 @@ function EntityList({
 				});
 			menu.addItem((i) =>
 				i
-					.setTitle('Status: active')
+					.setTitle(t('view.list.statusActive'))
 					.setIcon('circle')
 					.setChecked(r.questOutcome === '')
 					.onClick(() => setOutcome(''))
@@ -990,7 +1000,7 @@ function EntityList({
 			for (const outcome of QUEST_OUTCOMES) {
 				menu.addItem((i) =>
 					i
-						.setTitle(`Status: ${outcome}`)
+						.setTitle(t('view.list.statusOutcome', { outcome }))
 						.setIcon(
 							outcome === 'completed' ? 'circle-check' : outcome === 'failed' ? 'circle-x' : 'circle-off'
 						)
@@ -1001,7 +1011,7 @@ function EntityList({
 			menu.addSeparator();
 			menu.addItem((i) =>
 				i
-					.setTitle('Add a quest giver')
+					.setTitle(t('view.list.addQuestGiver'))
 					.setIcon(ENTITY_META.character.icon)
 					.onClick(() =>
 						new RecordSuggestModal(
@@ -1016,13 +1026,13 @@ function EntityList({
 								)
 								.sort((a, b) => a.name.localeCompare(b.name)),
 							(c) => appendFmList(r, FM.questGiver, `[[${linkTargetOf(c)}]]`),
-							'Pick the character…'
+							t('view.list.pickCharacter')
 						).open()
 					)
 			);
 			menu.addItem((i) =>
 				i
-					.setTitle(`Add a ${anchorLabel} note`)
+					.setTitle(t('view.list.addAnchorNote', { anchor: anchorLabel }))
 					.setIcon(ENTITY_META[anchorType].icon)
 					.onClick(() => pickSessionNoteFor(r))
 			);
@@ -1032,20 +1042,20 @@ function EntityList({
 			menu.addSeparator();
 			menu.addItem((i) =>
 				i
-					.setTitle(`Add a ${anchorLabel} note`)
+					.setTitle(t('view.list.addAnchorNote', { anchor: anchorLabel }))
 					.setIcon(ENTITY_META[anchorType].icon)
 					.onClick(() => pickSessionNoteFor(r))
 			);
 			menu.addItem((i) =>
 				i
-					.setTitle(r.date ? 'Change the date' : 'Add a date')
+					.setTitle(r.date ? t('view.list.changeDate') : t('view.list.addDate'))
 					.setIcon('calendar')
 					.onClick(() =>
 						new TextInputModal(plugin.app, {
-							title: r.date ? 'Change the date' : 'Add a date',
+							title: r.date ? t('view.list.changeDate') : t('view.list.addDate'),
 							initial: r.date?.raw ?? '',
 							placeholder: 'YYYY-MM-DD',
-							cta: 'Save',
+							cta: t('project.common.save'),
 							onSubmit: (value) => writeFmOf(r, (fm) => setLoomKey(fm, FM.date, value)),
 						}).open()
 					)
@@ -1055,14 +1065,14 @@ function EntityList({
 		if (roleOf(r.type) === 'anchor') {
 			menu.addSeparator();
 			menu.addItem((i) =>
-				i.setTitle('Change the date').setIcon('calendar').onClick(() => changeSessionDate(r))
+				i.setTitle(t('view.list.changeDate')).setIcon('calendar').onClick(() => changeSessionDate(r))
 			);
 			const pcs = sessionPcs(r);
 			if (pcs.length > 0) menu.addSeparator();
 			for (const pc of pcs) {
 				menu.addItem((i) =>
 					i
-						.setTitle(`Attends: ${pc.name}`)
+						.setTitle(t('view.list.attends', { name: pc.name }))
 						.setIcon(ENTITY_META.character.icon)
 						.setChecked(
 							r.attendance.some((lp) => plugin.indexer.resolve(lp, r.path)?.path === pc.path)
@@ -1084,7 +1094,7 @@ function EntityList({
 			);
 			menu.addItem((i) =>
 				i
-					.setTitle('Add a quest')
+					.setTitle(t('view.list.addQuest'))
 					.setIcon(ENTITY_META.quest.icon)
 					.onClick(() =>
 						new CreateEntityModal(plugin, 'quest', project, {
@@ -1098,16 +1108,16 @@ function EntityList({
 		menu.addSeparator();
 		menu.addItem((i) =>
 			i
-				.setTitle('Delete')
+				.setTitle(t('project.common.delete'))
 				.setIcon('trash-2')
 				.setWarning(true)
 				.onClick(() =>
 					new ConfirmModal(
 						plugin.app,
-						`Delete "${recordLabel(r, project)}"?`,
+						t('view.list.deleteConfirmTitle', { name: recordLabel(r, project) }),
 						deleteMessage(r),
 						() => deleteRow(r),
-						'Delete'
+						t('project.common.delete')
 					).open()
 				)
 		);
@@ -1125,30 +1135,30 @@ function EntityList({
 			<input
 				type="search"
 				className="loom-search"
-				placeholder="Search…"
+				placeholder={t('project.common.searchPlaceholder')}
 				value={query}
 				onChange={(e) => setQuery(e.target.value)}
 			/>
 			<select className="dropdown" value={sort} onChange={(e) => setSort(e.target.value as SortMode)}>
-				{scripted ? <option value="order">Sort: script order</option> : null}
+				{scripted ? <option value="order">{t('view.list.sort.scriptOrder')}</option> : null}
 				{type === 'character' && characterAppearance ? (
-					<option value="appearance">Sort: appearance</option>
+					<option value="appearance">{t('view.list.sort.appearance')}</option>
 				) : null}
-				{type !== 'session' ? <option value="name">Sort: name</option> : null}
-				<option value="created">Sort: created</option>
-				<option value="modified">Sort: modified</option>
-				{dated ? <option value="date">Sort: date</option> : null}
+				{type !== 'session' ? <option value="name">{t('view.list.sort.name')}</option> : null}
+				<option value="created">{t('view.list.sort.created')}</option>
+				<option value="modified">{t('view.list.sort.modified')}</option>
+				{dated ? <option value="date">{t('view.list.sort.date')}</option> : null}
 			</select>
 			<button
 				className="loom-list-iconbtn"
-				aria-label={sortAsc ? 'Ascending — click to reverse' : 'Descending — click to reverse'}
+				aria-label={sortAsc ? t('view.list.ascending') : t('view.list.descending')}
 				onClick={() => setSortAsc(!sortAsc)}
 			>
 				<Icon name={sortAsc ? 'arrow-up-narrow-wide' : 'arrow-down-wide-narrow'} />
 			</button>
 			{vocab.length > 0 ? (
 				<select className="dropdown" value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}>
-					<option value="">All tags</option>
+					<option value="">{t('view.list.allTags')}</option>
 					{vocab.map((tag) => (
 						<option key={tag} value={tag}>
 							{tag}
@@ -1163,17 +1173,17 @@ function EntityList({
 						value={questStatus}
 						onChange={(e) => setQuestStatus(e.target.value)}
 					>
-						<option value="">All statuses</option>
-						<option value="active">Active</option>
+						<option value="">{t('view.list.allStatuses')}</option>
+						<option value="active">{t('view.list.active')}</option>
 						{QUEST_OUTCOMES.map((o) => (
 							<option key={o} value={o}>
-								{o[0].toUpperCase() + o.slice(1)}
+								{questOutcomeLabel(o)}
 							</option>
 						))}
 					</select>
 					<button
 						className="loom-list-iconbtn"
-						aria-label={questView === 'list' ? 'Card view' : 'List view'}
+						aria-label={questView === 'list' ? t('view.list.cardView') : t('view.list.listViewLabel')}
 						onClick={() => setQuestView(questView === 'list' ? 'cards' : 'list')}
 					>
 						<Icon name={questView === 'list' ? 'layout-grid' : 'list'} />
@@ -1188,7 +1198,7 @@ function EntityList({
 								? 'loom-rel-filter loom-list-filter-btn loom-list-filter-btn-on'
 								: 'loom-rel-filter loom-list-filter-btn'
 						}
-						aria-label={filterPanelOpen ? 'Hide filters' : 'Filter'}
+						aria-label={filterPanelOpen ? t('view.list.hideFilters') : t('view.list.filterLabel')}
 						onClick={() => setFilterPanelOpen(!filterPanelOpen)}
 					>
 						<Icon name="filter" />
@@ -1198,9 +1208,9 @@ function EntityList({
 							{hasInvolvedLocationFilter ? (
 								<>
 									<div className="loom-list-filter-section">
-										<span className="loom-field-label loom-group-sublabel">Involved</span>
+										<span className="loom-field-label loom-group-sublabel">{t('view.list.involvedLabel')}</span>
 										<SearchableSelect
-											placeholder="Add an involved entity…"
+											placeholder={t('view.list.addInvolvedPlaceholder')}
 											options={plugin.indexer
 												.getAll(undefined, project.root)
 												.filter(
@@ -1224,7 +1234,7 @@ function EntityList({
 														onRemove={() =>
 															setEventInvolvedFilter(eventInvolvedFilter.filter((p) => p !== r.path))
 														}
-														removeLabel="Clear involved filter"
+														removeLabel={t('view.list.clearInvolvedFilter')}
 													/>
 												))}
 											</div>
@@ -1232,7 +1242,7 @@ function EntityList({
 									</div>
 									<div className="loom-list-filter-sep" />
 									<div className="loom-list-filter-section">
-										<span className="loom-field-label loom-group-sublabel">Location</span>
+										<span className="loom-field-label loom-group-sublabel">{entityLabel('location')}</span>
 										{locationFilterRecord ? (
 											<div className="loom-tag-row loom-list-filter-chips">
 												<EntityChip
@@ -1241,12 +1251,12 @@ function EntityList({
 													label={locationLabel(locationFilterRecord, plugin)}
 													onOpen={() => view.openEntity(locationFilterRecord.path)}
 													onRemove={() => setEventLocation(null)}
-													removeLabel="Clear location filter"
+													removeLabel={t('view.list.clearLocationFilter')}
 												/>
 											</div>
 										) : (
 											<SearchableSelect
-												placeholder="Filter by location…"
+												placeholder={t('view.list.filterByLocationPlaceholder')}
 												options={plugin.indexer
 													.getAll('location', project.root)
 													.sort((a, b) => a.name.localeCompare(b.name))
@@ -1266,7 +1276,7 @@ function EntityList({
 											checked={scriptFilter}
 											onChange={() => setScriptFilter(!scriptFilter)}
 										/>
-										Not in the script
+										{t('view.list.notInScript')}
 									</label>
 								</>
 							) : null}
@@ -1277,7 +1287,7 @@ function EntityList({
 			{nested && childrenOf.size > 0 ? (
 				<button
 					className="loom-list-iconbtn"
-					aria-label={allCollapsed ? 'Expand all' : 'Collapse all'}
+					aria-label={allCollapsed ? t('view.list.expandAll') : t('view.list.collapseAll')}
 					onClick={() => setAllCollapsed(!allCollapsed)}
 				>
 					<Icon
@@ -1290,8 +1300,8 @@ function EntityList({
 			{type === 'location' ? (
 				<button
 					className="loom-rel-filter"
-					aria-label={`Open ${MAPS_LABEL}`}
-					title={MAPS_LABEL}
+					aria-label={t('common.openLabel', { label: mapsLabel() })}
+					title={mapsLabel()}
 					onClick={() => view.navigateTo(VIEW_MAP, { project: project.root })}
 				>
 					<Icon name={MAPS_ICON} />
@@ -1307,7 +1317,7 @@ function EntityList({
 					}).open()
 				}
 			>
-				New {ENTITY_META[type].label.toLowerCase()}
+				{newEntityTitle(type)}
 			</button>
 		</>
 	);
@@ -1353,7 +1363,7 @@ function EntityList({
 					hasChildren ? (
 						<button
 							className="loom-row-caret"
-							aria-label={isCollapsed(r.path) ? 'Expand sublocations' : 'Collapse sublocations'}
+							aria-label={isCollapsed(r.path) ? t('view.list.expandSublocations') : t('view.list.collapseSublocations')}
 							onClick={(e) => {
 								e.stopPropagation();
 								toggleCollapsed(r.path);
@@ -1401,19 +1411,21 @@ function EntityList({
 					<span className="loom-row-date">{recordDate(r, project)}</span>
 				) : null}
 				<span className="loom-row-desc">{r.description}</span>
-				{hasScriptFilter && isOrphan(r) ? <span className="loom-chip loom-chip-orphan">Orphan</span> : null}
+				{hasScriptFilter && isOrphan(r) ? (
+				<span className="loom-chip loom-chip-orphan">{t('view.list.orphanChip')}</span>
+			) : null}
 				{isUnspecRegion ? null : (
 				<button
 					className="loom-row-delete"
-					aria-label="Delete"
+					aria-label={t('project.common.delete')}
 					onClick={(e) => {
 						e.stopPropagation();
 						new ConfirmModal(
 							plugin.app,
-							`Delete "${recordLabel(r, project)}"?`,
+							t('view.list.deleteConfirmTitle', { name: recordLabel(r, project) }),
 							deleteMessage(r),
 							() => deleteRow(r),
-							'Delete'
+							t('project.common.delete')
 						).open();
 					}}
 				>
@@ -1440,7 +1452,9 @@ function EntityList({
 					</button>
 				</div>
 				<div className="loom-quest-card-row">
-					<span className="loom-quest-card-label">{givers.length > 1 ? 'Quest givers:' : 'Quest giver:'}</span>
+					<span className="loom-quest-card-label">
+						{givers.length > 1 ? t('view.list.questGivers') : t('view.list.questGiver')}
+					</span>
 					<span className="loom-quest-card-value">
 						{givers.length > 0 ? (
 							givers.map((g) => (
@@ -1454,7 +1468,7 @@ function EntityList({
 					</span>
 				</div>
 				<div className="loom-quest-card-row">
-					<span className="loom-quest-card-label">Received on:</span>
+					<span className="loom-quest-card-label">{t('view.list.receivedOn')}</span>
 					<span className="loom-quest-card-value">
 						{received && roleOf(received.type) === 'anchor' ? (
 							<button className="loom-subloc-link" onClick={() => view.openEntity(received.path)}>
@@ -1466,14 +1480,14 @@ function EntityList({
 					</span>
 				</div>
 				<div className="loom-quest-card-row">
-					<span className="loom-quest-card-label">Status:</span>
+					<span className="loom-quest-card-label">{t('view.list.statusLabel')}</span>
 					<span className="loom-quest-card-value">
-						{q.questOutcome === '' ? 'Active' : q.questOutcome[0].toUpperCase() + q.questOutcome.slice(1)}
+						{q.questOutcome === '' ? t('view.list.active') : questOutcomeLabel(q.questOutcome)}
 					</span>
 				</div>
 				{q.questOutcome !== '' && outcomeSes && roleOf(outcomeSes.type) === 'anchor' ? (
 					<div className="loom-quest-card-row">
-						<span className="loom-quest-card-label">Completed on:</span>
+						<span className="loom-quest-card-label">{t('view.list.completedOn')}</span>
 						<span className="loom-quest-card-value">
 							<button className="loom-subloc-link" onClick={() => view.openEntity(outcomeSes.path)}>
 								{recordLabel(outcomeSes, project)}
@@ -1483,10 +1497,12 @@ function EntityList({
 				) : null}
 				{q.loomTags.length > 0 ? (
 					<div className="loom-quest-card-row">
-						<span className="loom-quest-card-label">{q.loomTags.length > 1 ? 'Tags:' : 'Tag:'}</span>
+						<span className="loom-quest-card-label">
+							{q.loomTags.length > 1 ? t('view.list.tagsLabel') : t('view.list.tagLabel')}
+						</span>
 						<span className="loom-quest-card-value">
-							{q.loomTags.map((t) => (
-								<QuestTagChip key={t} plugin={plugin} tag={t} />
+							{q.loomTags.map((tag) => (
+								<QuestTagChip key={tag} plugin={plugin} tag={tag} />
 							))}
 						</span>
 					</div>
@@ -1525,9 +1541,9 @@ function EntityList({
 	}
 
 	return (
-		<ViewShell view={view} project={project} title={ENTITY_META[type].plural} railActive={type} toolbar={toolbar}>
+		<ViewShell view={view} project={project} title={entityPlural(type)} railActive={type} toolbar={toolbar}>
 			{records.length === 0 ? (
-				<div className="loom-empty">Nothing here yet.</div>
+				<div className="loom-empty">{t('view.list.nothingHereYet')}</div>
 			) : type === 'quest' && questView === 'cards' ? (
 				<div className="loom-quest-cards loom-list-quest-cards">{records.map((q) => questCard(q))}</div>
 			) : (

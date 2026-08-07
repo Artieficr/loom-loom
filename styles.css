@@ -2003,6 +2003,33 @@ span.loom-row-caret {
 	width: fit-content;
 }
 
+/* Wraps a `.loom-check` + its `InfoIcon` as one unit so the pair still lays out
+   as a single flex item among sibling checkboxes (e.g. Alive/Active) in the same
+   row — the icon must be a SIBLING of the `<label>`, never a child of it, or
+   clicking it would also toggle the checkbox the label wraps. */
+.loom-check-with-info {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+	width: fit-content;
+}
+
+/* A small explanatory `info` glyph next to a label/control whose meaning isn't
+   obvious from its own text — see `InfoIcon` (common.tsx). Not `cursor: pointer`
+   (nothing to click) but `cursor: help`, the CSS-native cue for "hover for more". */
+.loom-info-icon {
+	display: inline-flex;
+	cursor: help;
+	color: var(--text-faint);
+}
+.loom-info-icon svg {
+	width: var(--icon-xs, 12px);
+	height: var(--icon-xs, 12px);
+}
+.loom-info-icon:hover {
+	color: var(--text-muted);
+}
+
 .loom-attendance-empty {
 	color: var(--text-faint);
 	font-size: 0.9em;
@@ -2609,13 +2636,6 @@ span.loom-row-caret {
 	border-top: 1px solid var(--background-modifier-border);
 	padding-top: var(--size-4-4);
 	margin-top: var(--size-4-2);
-}
-
-/* A section that also closes with a separator (e.g. the character Faction
-   section, whose neighbors carry no border of their own). */
-.loom-field-sep-after {
-	border-bottom: 1px solid var(--background-modifier-border);
-	padding-bottom: var(--size-4-4);
 }
 
 /* Sublocations section: a left-aligned scannable column of clickable child
@@ -4434,8 +4454,16 @@ span.loom-row-caret {
 	color: var(--text-muted);
 }
 
+/* NOT a fixed `width` — a translated label (Russian "Непрозрачность" for
+   "Opacity" is nearly double the English length) overlapped the slider/value
+   next to it once localized. `min-width` keeps short labels (English) aligned
+   to the old measurement while `white-space: nowrap` + letting the flex item
+   grow is what actually prevents a longer label from ever being clipped or
+   overlapping its sibling — same root cause as the native-dropdown width fix
+   elsewhere in this codebase, just for plain text instead of a `<select>`. */
 .loom-map-palette-row > span {
-	width: 52px;
+	min-width: 52px;
+	white-space: nowrap;
 }
 
 .loom-map-palette-row input[type='range'] {

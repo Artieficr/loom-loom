@@ -30,6 +30,7 @@ import { MapView } from './views/map-view';
 import { ScriptView } from './views/script-view';
 import { LicenseManager } from './license/manager';
 import { POLAR_ORGANIZATION_ID, PolarLicenseProvider } from './license/polar-provider';
+import { resolveActiveLocale, setLocale, t } from './i18n';
 
 /** How often the plugin re-checks an activated license in the background,
  *  independent of the manual "Re-check now" button. Well inside the 30-day
@@ -49,6 +50,7 @@ export default class LoomLoomPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.applyTextSize();
+		this.applyLocale();
 
 		this.licenseManager = new LicenseManager(this.app, new PolarLicenseProvider(POLAR_ORGANIZATION_ID));
 
@@ -70,34 +72,34 @@ export default class LoomLoomPlugin extends Plugin {
 		// non-exporting script note as a wikilink.
 		this.registerExtensions([SCRIPT_EXTENSION], VIEW_SCRIPT);
 
-		this.addRibbonIcon('dices', 'Open Loom Loom home', () => this.openHome());
+		this.addRibbonIcon('dices', t('command.ribbonTooltip'), () => this.openHome());
 
 		this.addCommand({
 			id: 'open-home',
-			name: 'Open home',
+			name: t('command.openHome'),
 			callback: () => this.openHome(),
 		});
 		this.addCommand({
 			id: 'open-graph',
-			name: 'Open Loom',
+			name: t('command.openLoom'),
 			callback: () => this.withProject((p) => void this.activateView(VIEW_GRAPH, { project: p.root })),
 		});
 		this.addCommand({
 			id: 'setup-project',
-			name: 'Set up project',
+			name: t('command.setupProject'),
 			callback: () => new SetupProjectModal(this).open(),
 		});
 		this.addCommand({
 			id: 'apply-managed-file-names',
-			name: 'Apply managed file names',
+			name: t('command.applyManagedFileNames'),
 			callback: () => {
-				new Notice('Loom Loom: applying managed file names…');
+				new Notice(t('notice.applyingManagedFileNames'));
 				void this.indexer.rebuildNow().then(() => this.indexer.migrateFiles(true));
 			},
 		});
 		this.addCommand({
 			id: 'create-entity',
-			name: 'Create entity in current project',
+			name: t('command.createEntity'),
 			callback: () =>
 				this.withProject((p) =>
 					new EntityTypeSuggestModal(
@@ -305,7 +307,7 @@ export default class LoomLoomPlugin extends Plugin {
 		}
 		const projects = this.indexer.getProjects();
 		if (projects.length === 0) {
-			new Notice('No project yet — set one up first.');
+			new Notice(t('notice.noProjectYet'));
 			new SetupProjectModal(this).open();
 			return;
 		}
@@ -363,12 +365,21 @@ export default class LoomLoomPlugin extends Plugin {
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
 		this.applyTextSize();
+		this.applyLocale();
 	}
 
 	/** Reflects the text-size setting as a body class the stylesheet keys off. */
 	applyTextSize(): void {
 		document.body.classList.toggle('loom-text-compact', this.settings.textSize === 'compact');
 		document.body.classList.toggle('loom-text-large', this.settings.textSize === 'large');
+	}
+
+	/** Resolves 'auto' against Obsidian's own display language (falling back
+	 *  to English) and applies it to the i18n runtime every open view's `t()`
+	 *  calls read from — mirrors `applyTextSize`'s "settings field -> global
+	 *  runtime effect" shape. */
+	applyLocale(): void {
+		setLocale(resolveActiveLocale(this.settings.locale));
 	}
 
 	onunload(): void {

@@ -8,6 +8,7 @@ import {
 } from './calendar';
 import { LoomDate } from './types';
 import { ProjectDef } from './indexer';
+import { t } from './i18n';
 import type LoomLoomPlugin from './main';
 
 /** A fixed sample date rendered next to each format option. */
@@ -25,7 +26,7 @@ function sampleDate(config: ProjectConfig): LoomDate {
 
 /**
  * Per-project timeline settings, stored in the project's .loom file: date
- * display format and the optional custom in-game calendar. Sessions always
+ * display format and the optional custom calendar. Sessions always
  * keep real-world dates; the calendar applies to events. Rendered inside the
  * plugin settings tab (Graph tab).
  */
@@ -46,14 +47,14 @@ export class TimelineSettingsEditor {
 	private async save(): Promise<void> {
 		const file = this.plugin.app.vault.getFileByPath(this.project.loomPath);
 		if (!file) {
-			new Notice('Project file not found.');
+			new Notice(t('timeline.projectNotFound'));
 			return;
 		}
 		try {
 			await this.plugin.app.vault.process(file, () => serializeProjectConfig(this.config));
 		} catch (e) {
 			console.error('Loom Loom: failed to save project config', e);
-			new Notice('Could not save timeline settings.');
+			new Notice(t('timeline.saveFailed'));
 		}
 	}
 
@@ -74,8 +75,8 @@ export class TimelineSettingsEditor {
 		}
 
 		new Setting(containerEl)
-			.setName('Date format')
-			.setDesc('How dates are displayed in the timeline and graph.')
+			.setName(t('timeline.dateFormat.name'))
+			.setDesc(t('timeline.dateFormat.desc'))
 			.addDropdown((dd) => {
 				const sample = sampleDate(this.config);
 				const labels = formats.map((format) => formatLoomDate(sample, { ...this.config, dateFormat: format }));
@@ -93,8 +94,8 @@ export class TimelineSettingsEditor {
 			});
 
 		new Setting(containerEl)
-			.setName('Use in-game calendar')
-			.setDesc('Events use a custom fictional calendar. Sessions always track real-world dates.')
+			.setName(t('timeline.useCalendar.name'))
+			.setDesc(t('timeline.useCalendar.desc'))
 			.addToggle((toggle) =>
 				toggle.setValue(cal.enabled).onChange((v) => {
 					cal.enabled = v;
@@ -104,7 +105,7 @@ export class TimelineSettingsEditor {
 
 		if (!cal.enabled) return;
 
-		new Setting(containerEl).setName('Months in a year').addText((text) => {
+		new Setting(containerEl).setName(t('timeline.monthsInYear')).addText((text) => {
 			text.inputEl.type = 'number';
 			text.setValue(String(cal.monthCount)).onChange((v) => {
 				const n = Math.floor(Number(v));
@@ -115,8 +116,8 @@ export class TimelineSettingsEditor {
 		});
 
 		new Setting(containerEl)
-			.setName('Short names')
-			.setDesc('Define abbreviated month names to unlock the short date formats.')
+			.setName(t('timeline.shortNames.name'))
+			.setDesc(t('timeline.shortNames.desc'))
 			.addToggle((toggle) =>
 				toggle.setValue(cal.useShortNames).onChange((v) => {
 					cal.useShortNames = v;
@@ -128,9 +129,10 @@ export class TimelineSettingsEditor {
 
 		for (let i = 0; i < cal.monthCount; i++) {
 			const month = cal.months[i];
-			const setting = new Setting(containerEl).setName(`Month ${i + 1}`).addText((text) =>
+			const monthLabel = t('timeline.monthLabel', { n: i + 1 });
+			const setting = new Setting(containerEl).setName(monthLabel).addText((text) =>
 				text
-					.setPlaceholder(`Month ${i + 1}`)
+					.setPlaceholder(monthLabel)
 					.setValue(month.name)
 					.onChange((v) => {
 						month.name = v.trim();
@@ -140,7 +142,7 @@ export class TimelineSettingsEditor {
 			if (cal.useShortNames) {
 				setting.addText((text) =>
 					text
-						.setPlaceholder('Short')
+						.setPlaceholder(t('timeline.shortPlaceholder'))
 						.setValue(month.short)
 						.onChange((v) => {
 							month.short = v.trim();

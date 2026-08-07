@@ -5,15 +5,16 @@ import {
 	EntityType,
 	LOOM_EXTENSION,
 	MAPS_ICON,
-	MAPS_LABEL,
 	SCRIPT_ICON,
-	SCRIPT_LABEL,
 	PC_GROUP_ICON,
 	VIEW_GRAPH,
 	VIEW_GROUP,
 	VIEW_HOME,
 	VIEW_LIST,
 	VIEW_MAP,
+	entityPlural,
+	mapsLabel,
+	scriptLabel,
 } from '../types';
 import { groupNameOf } from '../calendar';
 import { features, projectTypes } from '../project-kind';
@@ -22,6 +23,7 @@ import { Icon } from './common';
 import { useIndexVersion } from './hooks';
 import { countMapPages, mapsFilePath } from './map-view';
 import { createScriptFile, scriptFilePath } from './script-view';
+import { t } from '../i18n';
 import type LoomLoomPlugin from '../main';
 
 /**
@@ -96,7 +98,7 @@ function Home({ view }: { view: HomeView }) {
 	// Before the early return — hooks can't live behind a condition.
 	const mapCount = useMapPageCount(plugin, project);
 	if (!project) {
-		return <div className="loom-empty">Loading project…</div>;
+		return <div className="loom-empty">{t('view.home.loadingProject')}</div>;
 	}
 
 	const state = { project: project.root };
@@ -122,7 +124,7 @@ function Home({ view }: { view: HomeView }) {
 					{
 						key: 'script',
 						icon: SCRIPT_ICON,
-						label: SCRIPT_LABEL,
+						label: scriptLabel(),
 						color: plugin.settings.nodeColors.scene,
 						// No count: a project has exactly one script, so "1" is noise.
 						open: () => {
@@ -159,7 +161,7 @@ function Home({ view }: { view: HomeView }) {
 			const entry = {
 				key: type,
 				icon: ENTITY_META[type].icon,
-				label: ENTITY_META[type].plural,
+				label: entityPlural(type),
 				color: plugin.settings.nodeColors[type],
 				count: plugin.indexer.getAll(type, project.root).length,
 				open: () => openList(type),
@@ -170,7 +172,7 @@ function Home({ view }: { view: HomeView }) {
 					{
 						key: 'maps',
 						icon: MAPS_ICON,
-						label: MAPS_LABEL,
+						label: mapsLabel(),
 						color: plugin.settings.mapsColor,
 						count: mapCount,
 						open: () => view.navigateTo(VIEW_MAP, state),
@@ -207,7 +209,7 @@ function Home({ view }: { view: HomeView }) {
 					onClick={() => view.navigateTo(VIEW_GRAPH, state)}
 				>
 					<Icon name="spool" />
-					<span className="loom-card-label">Loom</span>
+					<span className="loom-card-label">{t('common.loomGraph')}</span>
 				</button>
 				{satellites.map((s, i) => {
 					const angle = ((-90 + (360 / satellites.length) * i) * Math.PI) / 180;

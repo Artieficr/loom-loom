@@ -6,6 +6,7 @@
 		"target": "ES2018",
 		"jsx": "react-jsx",
 		"allowSyntheticDefaultImports": true,
+		"resolveJsonModule": true,
 		"moduleResolution": "bundler",
 		"importHelpers": true,
 		"isolatedModules": true,

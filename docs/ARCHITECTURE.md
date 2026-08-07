@@ -263,7 +263,7 @@ subscription.
 depends on JS `Date` or on month lengths, and a custom calendar needs no epoch.
 
 Per-project config (in the .loom file) holds a display format and an optional custom
-in-game calendar (month count, month names with optional short forms; unnamed months
+calendar (month count, month names with optional short forms; unnamed months
 default to "Month N"). Rules:
 
 - **Sessions always parse and display as Gregorian** — they track real-life play dates.

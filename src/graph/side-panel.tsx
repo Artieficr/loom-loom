@@ -1,9 +1,10 @@
 import { App } from 'obsidian';
 import { PointerEvent as ReactPointerEvent, memo, useRef, useState } from 'react';
-import { Connection, ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
+import { Connection, ENTITY_TYPES, EntityRecord, EntityType, entityPlural } from '../types';
 import { Icon, Truncated } from '../views/common';
 import { MarkdownField } from '../views/markdown-field';
 import type { LinkOption } from '../views/link-textarea';
+import { t } from '../i18n';
 
 /** The panel's original fixed width — resizing can only widen it. */
 export const PANEL_MIN = 260;
@@ -35,7 +36,7 @@ function Section({
 				</button>
 				<button
 					className="loom-section-add"
-					aria-label={`New connected ${label.toLowerCase()}`}
+					aria-label={t('view.graph.newConnectedType', { label: label.toLowerCase() })}
 					onClick={onCreate}
 				>
 					<Icon name="plus" />
@@ -148,7 +149,7 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 				<button className="loom-link loom-sidepanel-title" onClick={() => onOpen(record.path)}>
 					<Truncated className="loom-sidepanel-title-text" text={label} />
 				</button>
-				<button className="loom-nav-btn" onClick={onClose} aria-label="Close panel">
+				<button className="loom-nav-btn" onClick={onClose} aria-label={t('view.graph.closePanel')}>
 					✕
 				</button>
 			</div>
@@ -165,18 +166,18 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 				</div>
 			) : null}
 			{deduped.length === 0 ? (
-				<div className="loom-empty">No connections.</div>
+				<div className="loom-empty">{t('view.graph.noConnections')}</div>
 			) : (
 				// key on record.path so open/collapsed state resets per selection
-				ENTITY_TYPES.filter((t) => groups.has(t)).map((t) => (
+				ENTITY_TYPES.filter((et) => groups.has(et)).map((et) => (
 					<Section
-						key={record.path + t}
-						label={ENTITY_META[t].plural}
-						entries={groups.get(t) ?? []}
+						key={record.path + et}
+						label={entityPlural(et)}
+						entries={groups.get(et) ?? []}
 						threshold={threshold}
 						connectionLabel={connectionLabel}
 						onOpen={onOpen}
-						onCreate={() => onCreate(t)}
+						onCreate={() => onCreate(et)}
 					/>
 				))
 			)}
