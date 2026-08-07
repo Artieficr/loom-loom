@@ -67,6 +67,12 @@ export interface LoomLoomSettings {
 	 *  whichever language Obsidian itself is configured to display in, when
 	 *  supported, else English. */
 	locale: LocaleCode | 'auto';
+	/** Whether bold/italic/underline text and structural headings in the
+	 *  Script editor (and its Pages preview) pick up the active Obsidian
+	 *  theme's accent color. Off by default — these are plugin-managed
+	 *  decorative marks, not native Obsidian markdown, so they stay a plain
+	 *  fixed color unless the user opts in to match their theme. */
+	followThemeTextColoring: boolean;
 	/** Background colors for the built-in quest tags (main / important / side). */
 	questTagColors: { main: string; important: string; side: string };
 	/** Session page — how many previously-resolved quests to list in the Quests
@@ -148,6 +154,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	projectRoot: '',
 	textSize: 'normal',
 	locale: 'auto',
+	followThemeTextColoring: false,
 	questTagColors: { main: '#b48b0e', important: '#c95f5f', side: '#58b478' },
 	sessionResolvedQuests: 6,
 	subChipFullAncestry: true,
@@ -163,11 +170,13 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	nodeColors: {
 		session: '#7c5cff',
 		event: '#e08e45',
-		// Writer projects hold Acts/Scenes where player and GM ones hold
-		// Sessions/Events — same structural role, so they start from the same
-		// colors and can be tuned apart.
+		// Writer/Script projects hold Acts/Scenes, Writer/Prose holds just
+		// Chapters, where player and GM ones hold Sessions/Events — same
+		// anchor structural role, so they start from the same color and can
+		// be tuned apart.
 		act: '#7c5cff',
 		scene: '#e08e45',
+		chapter: '#7c5cff',
 		character: '#58b478',
 		location: '#4aa3d8',
 		// Region is not user-configurable — always kept as a darker shade of the
@@ -182,6 +191,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		event: 20,
 		act: 26,
 		scene: 20,
+		chapter: 26,
 		character: 17,
 		location: 17,
 		region: 17,
@@ -324,6 +334,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof data.subChipFullAncestry === 'boolean') {
 		base.subChipFullAncestry = data.subChipFullAncestry;
 	}
+	if (typeof data.followThemeTextColoring === 'boolean') {
+		base.followThemeTextColoring = data.followThemeTextColoring;
+	}
 	if (typeof data.questTagColors === 'object' && data.questTagColors !== null) {
 		for (const k of ['main', 'important', 'side'] as const) {
 			const color = (data.questTagColors as Record<string, unknown>)[k];
@@ -430,7 +443,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
  * page's list here and the row covers it automatically.
  */
 const PAGE_SETTINGS_KEYS = {
-	general: ['textSize', 'locale'] as (keyof LoomLoomSettings)[],
+	general: ['textSize', 'locale', 'followThemeTextColoring'] as (keyof LoomLoomSettings)[],
 	entities: [
 		'questTagColors',
 		'sessionResolvedQuests',
@@ -679,6 +692,47 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 									['normal', t('settings.general.textSize.normal')],
 									['large', t('settings.general.textSize.large')],
 								]),
+							},
+							{
+								name: t('settings.general.followThemeTextColoring.name'),
+								// The example row is real HTML gated by the SAME
+								// `.loom-follow-theme-color` body class the actual
+								// Script/Prose editors key off (styles.css, right after
+								// `.loom-fountain-underline`) — a pure CSS switch, so it
+								// re-colors live the instant the toggle below changes,
+								// with no re-render needed.
+								render: (setting) => {
+									setting.setDesc(
+										createFragment((frag) => {
+											frag.appendText(t('settings.general.followThemeTextColoring.desc'));
+											const example = frag.createDiv({ cls: 'loom-setting-color-preview' });
+											example.createSpan({
+												cls: 'loom-setting-color-preview-heading',
+												text: '# ' + t('settings.general.followThemeTextColoring.exampleHeading'),
+											});
+											example.appendText(', ');
+											example.createEl('strong', {
+												text: t('settings.general.followThemeTextColoring.exampleBold'),
+											});
+											example.appendText(', ');
+											example.createEl('em', {
+												text: t('settings.general.followThemeTextColoring.exampleItalic'),
+											});
+											example.appendText(', ');
+											example.createEl('u', {
+												text: t('settings.general.followThemeTextColoring.exampleUnderline'),
+											});
+										})
+									);
+									setting.addToggle((toggle) =>
+										toggle
+											.setValue(this.plugin.settings.followThemeTextColoring)
+											.onChange(async (value) => {
+												this.plugin.settings.followThemeTextColoring = value;
+												await this.plugin.saveSettings();
+											})
+									);
+								},
 							},
 						],
 					},
@@ -938,7 +992,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// writer project has no reason to show Act and Scene rows (and vice
 		// versa). With no projects yet, fall back to the default kind's set.
 		const inUse = new Set<EntityType>(
-			this.plugin.indexer.getProjects().flatMap((p) => [...typesFor(p.config.kind)])
+			this.plugin.indexer.getProjects().flatMap((p) => [...typesFor(p.config.kind, p.config.writerMode)])
 		);
 		const shown = inUse.size > 0 ? inUse : new Set<EntityType>(typesFor(DEFAULT_PROJECT_KIND));
 

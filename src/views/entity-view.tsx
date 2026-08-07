@@ -1231,12 +1231,22 @@ function EntityPage({ view }: { view: EntityView }) {
 	// the parts that really are session-only (dates, attendance) gate on the
 	// kind's features instead.
 	const anchorType = projectRoleType(project?.config, 'anchor');
+	// Writer/Prose has no beat type at all (a Chapter has no smaller unit
+	// beneath it) — every beat-hub/"Add a [beat]" section below is skipped
+	// entirely when this is null, not just its label.
 	const beatType = projectRoleType(project?.config, 'beat');
 	const anchorLabel = entityLabel(anchorType).toLowerCase();
-	const beatLabel = entityLabel(beatType).toLowerCase();
+	const beatLabel = beatType !== null ? entityLabel(beatType).toLowerCase() : '';
 	const kindFeatures = features(project?.config);
 	/** Writer projects: the writing lives in the script, not in note fields. */
 	const scriptMode = kindFeatures.script;
+	/** True for BOTH Writer sub-modes (Script's Acts and Prose's Chapters are
+	 *  both manually ordered, `loomSeq`, not dated) — distinct from
+	 *  `scriptMode`, which is Script-only. Chronology math (quest resolution
+	 *  position, anchor numbering) should key off this, not `scriptMode` —
+	 *  a Chapter has no date to fall back to, so using `scriptMode` there
+	 *  would silently misorder/misresolve everything against Prose. */
+	const seqOrdered = kindFeatures.anchorOrder === 'sequence';
 	/** Named by the script rather than here — see the Name field. */
 	const scriptNamed =
 		scriptMode && (record.type === 'act' ? record.actId !== '' : record.sceneId !== '');
@@ -2018,16 +2028,23 @@ function EntityPage({ view }: { view: EntityView }) {
 		.slice()
 		.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
 	// A quest resolves against whatever unit play/writing actually happens in:
-	// Sessions in a Player/GM project, Scenes in a Writer one (acts have no
-	// date or single sitting of their own — the scene is where a quest is
-	// actually received or completed). `questAnchorRole` is what a resolved
-	// link must be to count as valid.
-	const questAnchorType = scriptMode ? beatType : anchorType;
+	// Sessions in a Player/GM project, Scenes in a Writer/Script one, Chapters
+	// directly in a Writer/Prose one (acts have no date or single sitting of
+	// their own — the scene is where a quest is actually received or
+	// completed; a Writer/Prose project has no scene-equivalent at all, so it
+	// falls to the `!scriptMode` branch same as a Session does).
+	// `questAnchorRole` is what a resolved link must be to count as valid.
+	// `beatType` is only ever null when `scriptMode` is already false (a
+	// Writer/Prose project has neither a script nor a beat type), so this
+	// ternary can never actually produce `null` — the `?? anchorType`
+	// satisfies the type checker for that impossible case without masking a
+	// real one.
+	const questAnchorType = scriptMode ? (beatType ?? anchorType) : anchorType;
 	const questAnchorRole = scriptMode ? 'beat' : 'anchor';
 	const questAnchorsSorted = (project ? plugin.indexer.getAll(questAnchorType, project.root) : [])
 		.slice()
 		.sort((a, b) =>
-			scriptMode ? (a.seq ?? a.created) - (b.seq ?? b.created) : (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)
+			seqOrdered ? (a.seq ?? a.created) - (b.seq ?? b.created) : (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)
 		);
 	const sessionChip = (s: EntityRecord, clear: () => void) => (
 		<div className="loom-tag-row">
@@ -2428,7 +2445,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		record.type === 'location' ||
 		record.type === 'region' ||
 		record.type === 'quest';
-	const pageEventEntries: LocNoteEntry[] = showsEvents
+	const pageEventEntries: LocNoteEntry[] = showsEvents && beatType !== null
 		? plugin.indexer
 				.getAll(beatType, record.project)
 				.flatMap((owner) =>
@@ -3258,18 +3275,22 @@ function EntityPage({ view }: { view: EntityView }) {
 				new Notice(t('view.entity.common.renameFailed'));
 			});
 	};
-	// Writer projects: quests resolve against Scenes (script order, `seq`),
-	// same as Sessions resolve against dates elsewhere. A quest's own
-	// `questReceived`/`questOutcomeSession` is always a leaf (Scene or
-	// Session, never an Act), so `anchorPositionKey` only needs the two
-	// leaf cases; an Act page's OWN position is the special case, since
-	// "as of this act" means "as of its last scene" (`actScenes` is
-	// already sorted ascending by `seq`).
+	// Writer/Script projects: quests resolve against Scenes (script order,
+	// `seq`); Writer/Prose ones resolve directly against Chapters (`seq`
+	// too — a Chapter has no date). A quest's own `questReceived`/
+	// `questOutcomeSession` is always a leaf in Script mode (a Scene, never
+	// an Act) but the anchor itself in every other mode (Session, or
+	// Chapter) — `anchorPositionKey` covers all of those non-Act cases
+	// uniformly by keying on `seqOrdered`, not `scriptMode`, since Prose is
+	// sequence-ordered too but has no beat type to be a "leaf" of; an Act
+	// page's OWN position is the one special case, since "as of this act"
+	// means "as of its last scene" (`actScenes` is already sorted ascending
+	// by `seq`).
 	const anchorPositionKey = (r: EntityRecord): number | null =>
-		scriptMode ? r.seq ?? r.created : (r.date?.sortKey ?? null);
+		seqOrdered ? r.seq ?? r.created : (r.date?.sortKey ?? null);
 	const showsQuestSection = (isSession || record.type === 'scene') && project;
 	const lastActScene = actScenes.length > 0 ? actScenes[actScenes.length - 1] : null;
-	const asOf = scriptMode
+	const asOf = seqOrdered
 		? record.type === 'act'
 			? (lastActScene?.seq ?? lastActScene?.created ?? record.seq ?? record.created)
 			: (record.seq ?? record.created)
@@ -3298,13 +3319,15 @@ function EntityPage({ view }: { view: EntityView }) {
 		.filter((e): e is { quest: EntityRecord; state: string } => e !== null)
 		// Manual order (drag-reorderable), then chronological for the unstamped.
 		.sort((a, b) => (a.quest.seq ?? a.quest.created) - (b.quest.seq ?? b.quest.created));
-	// Scene/Act pages hide the whole Quests block when nothing resolves
-	// against them yet — Session pages keep showing it empty (a session's
-	// quest involvement is worth surfacing as an invitation to add one; a
-	// scene/act's isn't, since most of them will never touch a quest).
+	// Scene/Act/Chapter pages hide the whole Quests block when nothing
+	// resolves against them yet — Session pages keep showing it empty (a
+	// session's quest involvement is worth surfacing as an invitation to add
+	// one; a scene/act/chapter's isn't, since most of them will never touch
+	// a quest).
 	const questSectionVisible =
 		showsQuestSection &&
-		((record.type !== 'scene' && record.type !== 'act') || sessionQuests.length > 0);
+		((record.type !== 'scene' && record.type !== 'act' && record.type !== 'chapter') ||
+			sessionQuests.length > 0);
 
 	// PC life state: unticking Alive reveals the death-session picker.
 	// Gated on the kind: a writer project's cast has no party to be away from,
@@ -4216,9 +4239,11 @@ function EntityPage({ view }: { view: EntityView }) {
 	};
 
 	// Events hub — rendered near the top on most entity pages, but pushed below
-	// the location-only sections (Factions/Items/Sublocations) on a location page.
+	// the location-only sections (Factions/Items/Sublocations) on a location
+	// page. Nothing to show at all in a Writer/Prose project — there's no
+	// beat-type entity (Chapter has none) to hold an event/session note on.
 	const eventsSection =
-		showsEvents && project ? (
+		showsEvents && project && beatType !== null ? (
 			<div className="loom-field loom-field-sep">
 				<span className="loom-field-label">{entityPlural(beatType)}</span>
 				<div className="loom-hub-add-row">
@@ -4804,6 +4829,54 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
+			{/* Chapter (Writer/Prose): unlike Act, there's no script to be named
+			    by — a Chapter's title is a normal editable field, same shape as
+			    the generic Name field every non-anchor type gets (which `isSession`
+			    excludes Chapter from, same as Act/Session), just without the
+			    alias row those get (Act doesn't have one either today). */}
+			{record.type === 'chapter' ? (
+				<label className="loom-field">
+					<span className="loom-field-label loom-field-label-row">
+						{t('view.entity.common.nameLabel')}
+						{sessionNumber > 0 ? (
+							<span className="loom-session-number">{t('view.entity.common.chapterNumber', { n: sessionNumber })}</span>
+						) : null}
+					</span>
+					<input
+						type="text"
+						value={name}
+						onChange={(e) => setName(e.target.value)}
+						onBlur={() => void commitName()}
+						onKeyDown={(e) => {
+							if (e.key === 'Enter') void commitName();
+						}}
+					/>
+				</label>
+			) : null}
+
+			{/* The prose text itself — same body/saveBody mechanism as every other
+			    entity type's Notes field, same placement rationale as Act's above
+			    (right after the title, not down with the rest of the page).
+			    `MarkdownField` is a placeholder here — swapped for the richer
+			    `ProseField` once it exists (bold/italic/underline/strikethrough/
+			    alignment/page-break, still the exact same body/saveBody wiring). */}
+			{record.type === 'chapter' ? (
+				<div className="loom-field loom-field-body">
+					<span className="loom-field-label">{t('project.notes')}</span>
+					<MarkdownField
+						app={plugin.app}
+						value={body ?? ''}
+						names={linkNames}
+						onOpenLink={openLinkTarget}
+						onCreateEntity={createLinkEntity}
+						onChange={(v) => {
+							setBody(v);
+							saveBody(v);
+						}}
+					/>
+				</div>
+			) : null}
+
 			{isSession && kindFeatures.attendance ? (
 				<div className="loom-field">
 					<span className="loom-field-label">{t('view.entity.common.attendance')}</span>
@@ -5156,10 +5229,10 @@ function EntityPage({ view }: { view: EntityView }) {
 						</details>
 					) : null}
 				</div>
-			) : record.type === 'scene' || record.type === 'act' ? (
-				// The script IS the writing — a scene/act's own blurb field
-				// is redundant with it, so this page shows only the freeform
-				// Notes section below instead.
+			) : record.type === 'scene' || record.type === 'act' || record.type === 'chapter' ? (
+				// The script/prose body IS the writing — a scene/act/chapter's own
+				// blurb field is redundant with it, so this page shows only the
+				// freeform Notes section (above, right after the title) instead.
 				null
 			) : (
 		<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
@@ -5825,7 +5898,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{isSession && !scriptMode && project ? (
+			{isSession && !scriptMode && project && beatType !== null ? (
 				<div className="loom-field loom-field-sep">
 					<span className="loom-field-label">{entityPlural(beatType)}</span>
 					{/* Creation first, as always. The modal's Name field searches

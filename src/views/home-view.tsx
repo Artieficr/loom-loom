@@ -1,6 +1,7 @@
 import { TAbstractFile } from 'obsidian';
 import { CSSProperties, ReactElement, useEffect, useState } from 'react';
 import {
+	BOOK_ICON,
 	ENTITY_META,
 	EntityType,
 	LOOM_EXTENSION,
@@ -12,6 +13,7 @@ import {
 	VIEW_HOME,
 	VIEW_LIST,
 	VIEW_MAP,
+	bookLabel,
 	entityPlural,
 	mapsLabel,
 	scriptLabel,
@@ -136,6 +138,22 @@ function Home({ view }: { view: HomeView }) {
 					},
 				]
 			: []),
+		// Writer/Prose's own 12 o'clock entry, mirroring Script's — mutually
+		// exclusive with it (never both in one project), same slot. Like
+		// Script, a project has exactly one Book, so no count (noise).
+		// Chapters keep their own normal entry further down the wheel too —
+		// this is a separate "whole book" entry point, not a replacement for it.
+		...(project.config.kind === 'writer' && project.config.writerMode === 'prose'
+			? [
+					{
+						key: 'book',
+						icon: BOOK_ICON,
+						label: bookLabel(),
+						color: plugin.settings.nodeColors.chapter,
+						open: () => openList('chapter'),
+					},
+				]
+			: []),
 		// The Group is the party — it only exists in kinds that have one.
 		...(features(project.config).group
 			? [
@@ -156,7 +174,9 @@ function Home({ view }: { view: HomeView }) {
 		// Maps sits right after Locations, counting the project's map PAGES (its
 		// entities aren't notes, so the count comes from the Maps file, not the
 		// index). Regions are reached through Locations (the location list groups by
-		// region), so they don't get their own wheel satellite.
+		// region), so they don't get their own wheel satellite. Chapter keeps its
+		// normal satellite here too — the "Book" 12-o'clock entry above is an
+		// additional whole-book entry point, not a replacement for this one.
 		...projectTypes(project.config).filter((t) => t !== 'region').flatMap((type) => {
 			const entry = {
 				key: type,

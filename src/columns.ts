@@ -52,11 +52,15 @@ export function buildColumns(
 	const allow = (r: EntityRecord) => restrictTo === undefined || restrictTo.has(r.path);
 	const config = indexer.getProjectByRoot(projectRoot)?.config;
 	const anchorType = projectRoleType(config, 'anchor');
+	// Writer/Prose has no beat type at all (a Chapter has no smaller
+	// structural unit beneath it — see project-kind.ts's `TypeRole` doc
+	// comment), so there's simply nothing to gather here in that case.
 	const beatType = projectRoleType(config, 'beat');
 	const sessions = indexer
 		.getAll(anchorType, projectRoot)
 		.filter((r) => matchesDef(r, def) && allow(r));
-	const events = indexer.getAll(beatType, projectRoot).filter((r) => matchesDef(r, def) && allow(r));
+	const events =
+		beatType === null ? [] : indexer.getAll(beatType, projectRoot).filter((r) => matchesDef(r, def) && allow(r));
 
 	const columns = new Map<string, TimelineColumn>();
 	for (const session of sessions) {

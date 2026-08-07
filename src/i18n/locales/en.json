@@ -122,6 +122,8 @@
 			"title": "Set up project",
 			"pillCreate": "Create a project folder",
 			"pillUse": "Use existing folder",
+			"pillScript": "Fountain script",
+			"pillProse": "Prose",
 			"projectName": "Project name",
 			"projectNameDesc": "A folder with this name is created in the chosen location.",
 			"projectNamePlaceholder": "My Loom project",
@@ -157,6 +159,7 @@
 		"notSpecified": "Not specified",
 		"mapsLabel": "Maps",
 		"scriptLabel": "Script",
+		"bookLabel": "Book",
 		"noMatches": "No matches.",
 		"remove": "Remove",
 		"noProjectFound": "No project found. Open a project home file (.loom) first.",
@@ -266,6 +269,7 @@
 				"removeAlias": "Remove alias",
 				"sessionNumber": "Session {n}",
 				"actNumber": "Act {n}",
+				"chapterNumber": "Chapter {n}",
 				"todayLink": "@today",
 				"attendance": "Attendance",
 				"noPcCharacters": "No PC characters in this project yet.",
@@ -784,6 +788,11 @@
 			"label": "Act",
 			"plural": "Acts",
 			"newTitle": "New Act"
+		},
+		"chapter": {
+			"label": "Chapter",
+			"plural": "Chapters",
+			"newTitle": "New Chapter"
 		}
 	},
 	"projectKind": {
@@ -824,6 +833,14 @@
 				"compact": "Compact",
 				"normal": "Normal",
 				"large": "Large"
+			},
+			"followThemeTextColoring": {
+				"name": "Follow theme text coloring",
+				"desc": "Let text formatting and section headings in the Script and Prose editors pick up your Obsidian theme's colors.",
+				"exampleHeading": "H1 Heading",
+				"exampleBold": "Bold",
+				"exampleItalic": "Italic",
+				"exampleUnderline": "Underline"
 			},
 			"language": {
 				"name": "Language",

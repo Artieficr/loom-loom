@@ -9,6 +9,7 @@ import {
 	useState,
 } from 'react';
 import {
+	BOOK_ICON,
 	ENTITY_META,
 	EntityRecord,
 	MAPS_ICON,
@@ -19,6 +20,7 @@ import {
 	VIEW_GROUP,
 	VIEW_LIST,
 	VIEW_MAP,
+	bookLabel,
 	entityPlural,
 	mapsLabel,
 	scriptLabel,
@@ -565,6 +567,17 @@ export function NavRail({
 							);
 						}
 					}}
+				/>
+			) : null}
+			{/* Writer/Prose's own rail entry, mirroring Script's above (mutually
+			    exclusive, same slot) — an additional whole-book entry point;
+			    Chapters keep their own normal entry in the generic loop below too. */}
+			{project.config.kind === 'writer' && project.config.writerMode === 'prose' ? (
+				<RailButton
+					icon={BOOK_ICON}
+					label={bookLabel()}
+					active={active === 'chapter'}
+					onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: 'chapter' })}
 				/>
 			) : null}
 			{/* The Group is the party — present only in kinds that have one. */}

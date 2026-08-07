@@ -37,9 +37,11 @@ import {
 import { defaultProjectConfig, formatLoomDate, groupNameOf, serializeProjectConfig, todayRaw } from './calendar';
 import {
 	DEFAULT_PROJECT_KIND,
+	DEFAULT_WRITER_MODE,
 	PROJECT_KIND_META,
 	PROJECT_KINDS,
 	ProjectKind,
+	WriterMode,
 	featuresOf,
 	projectKindDescription,
 	projectKindLabel,
@@ -67,12 +69,14 @@ import {
 } from './fountain';
 import type LoomLoomPlugin from './main';
 
-/** Folders scaffolded for a new project: only the entity types its kind
- *  actually holds, so a writer project gets Acts/Scenes and a player one
- *  Sessions/Events rather than both. Types added to a kind later are covered
- *  by `createEntity`, which ensures its folder on the way in. */
-function projectSubfolders(kind: ProjectKind): string[] {
-	return ['Entities', ...typesFor(kind).map((t) => ENTITY_META[t].folder), TIMELINES_FOLDER];
+/** Folders scaffolded for a new project: only the entity types its kind (and,
+ *  for Writer, its sub-mode) actually holds, so a writer/script project gets
+ *  Acts/Scenes, a writer/prose one gets Chapters, and a player one gets
+ *  Sessions/Events — never more than one of these at once. Types added to a
+ *  kind later are covered by `createEntity`, which ensures its folder on the
+ *  way in. */
+function projectSubfolders(kind: ProjectKind, writerMode: WriterMode = DEFAULT_WRITER_MODE): string[] {
+	return ['Entities', ...typesFor(kind, writerMode).map((t) => ENTITY_META[t].folder), TIMELINES_FOLDER];
 }
 
 async function ensureFolder(app: App, path: string): Promise<void> {
@@ -100,15 +104,20 @@ function projectPath(project: ProjectDef, sub: string): string {
 export async function scaffoldProject(
 	app: App,
 	rootPath: string,
-	kind: ProjectKind = DEFAULT_PROJECT_KIND
+	kind: ProjectKind = DEFAULT_PROJECT_KIND,
+	writerMode: WriterMode = DEFAULT_WRITER_MODE
 ): Promise<TFile> {
 	const root = normalizePath(rootPath);
 	await ensureFolder(app, root);
-	for (const sub of projectSubfolders(kind)) {
+	for (const sub of projectSubfolders(kind, writerMode)) {
 		await ensureFolder(app, root + '/' + sub);
 	}
-	const anchorType = roleType(kind, 'anchor');
-	const beatType = roleType(kind, 'beat');
+	const anchorType = roleType(kind, 'anchor', writerMode);
+	const beatType = roleType(kind, 'beat', writerMode);
+	// Writer/Prose has an anchor (Chapter) and no beat type at all — see
+	// project-kind.ts's `TypeRole` doc comment — so the timeline only ever
+	// lists one type there, not the usual [anchor, beat] pair.
+	const timelineTypes = [anchorType, beatType].filter((t): t is EntityType => t !== null);
 	const timelinePath = root + '/' + TIMELINES_FOLDER + '/Main timeline.md';
 	if (!app.vault.getFileByPath(timelinePath)) {
 		await app.vault.create(
@@ -116,12 +125,12 @@ export async function scaffoldProject(
 			[
 				'---',
 				`${FM.name}: Main timeline`,
-				`${FM.timelineTypes}: [${anchorType}, ${beatType}]`,
+				`${FM.timelineTypes}: [${timelineTypes.join(', ')}]`,
 				`${FM.tags}: []`,
 				'---',
 				'',
 				`Timeline definition. \`${FM.timelineTypes}\` lists which entity types populate it`,
-				`(${anchorType}, ${beatType}); \`${FM.tags}\` optionally filters to entities carrying one`,
+				`(${timelineTypes.join(', ')}); \`${FM.tags}\` optionally filters to entities carrying one`,
 				'of those plugin tags.',
 				'',
 			].join('\n')
@@ -129,10 +138,11 @@ export async function scaffoldProject(
 	}
 	const baseName = root.split('/').pop() ?? 'Project';
 	const loomPath = normalizePath(`${root}/${baseName}.${LOOM_EXTENSION}`);
-	// Writer projects get their Fountain script up front — it's the spine of the
-	// kind, and an empty one carrying a title page is friendlier than an empty
-	// view with a "create it" button.
-	if (featuresOf(kind).script) {
+	// Writer/Script projects get their Fountain script up front — it's the
+	// spine of that sub-mode, and an empty one carrying a title page is
+	// friendlier than an empty view with a "create it" button. Writer/Prose
+	// has no equivalent single file — its Chapters are created individually.
+	if (featuresOf(kind, writerMode).script) {
 		const scriptPath = normalizePath(`${root}/${baseName}.${SCRIPT_EXTENSION}`);
 		if (!app.vault.getFileByPath(scriptPath)) {
 			await app.vault.create(
@@ -143,7 +153,9 @@ export async function scaffoldProject(
 	}
 	const existing = app.vault.getFileByPath(loomPath);
 	if (existing) return existing;
-	return app.vault.create(loomPath, serializeProjectConfig(defaultProjectConfig(kind)));
+	const config = defaultProjectConfig(kind);
+	config.writerMode = writerMode;
+	return app.vault.create(loomPath, serializeProjectConfig(config));
 }
 
 export { sanitizeFileName } from './naming';
@@ -2756,6 +2768,10 @@ export class SetupProjectModal extends Modal {
 	private dir = '';
 	private name = '';
 	private kind: ProjectKind = DEFAULT_PROJECT_KIND;
+	/** Writer only: Fountain script vs. prose — mutually exclusive per project
+	 *  (see project-kind.ts's `WriterMode` doc comment). Ignored for every
+	 *  other kind. */
+	private writerMode: WriterMode = DEFAULT_WRITER_MODE;
 
 	constructor(private plugin: LoomLoomPlugin) {
 		super(plugin.app);
@@ -2853,10 +2869,30 @@ export class SetupProjectModal extends Modal {
 				// external stylesheet rule that isn't itself `!important`.
 				dd.selectEl.setCssProps({ width: '17ch' });
 			});
+
+		// Writer's own sub-mode pick — mutually exclusive (never both in one
+		// project, see project-kind.ts), so a `.loom-seg` pill pair same as the
+		// Create/Use pills above rather than a second dropdown.
+		if (this.kind === 'writer') {
+			const modePills = this.contentEl.createDiv({ cls: 'loom-seg loom-setup-mode-pills' });
+			const modePill = (mode: WriterMode, label: string) => {
+				const btn = modePills.createEl('button', {
+					cls: 'loom-seg-btn' + (this.writerMode === mode ? ' loom-seg-on' : ''),
+					text: label,
+				});
+				btn.addEventListener('click', () => {
+					this.writerMode = mode;
+					this.render();
+				});
+			};
+			modePill('script', t('project.setup.pillScript'));
+			modePill('prose', t('project.setup.pillProse'));
+		}
+
 		this.contentEl.createEl('p', {
 			cls: 'setting-item-description',
 			text: t('project.setup.holds', {
-				list: typesFor(this.kind)
+				list: typesFor(this.kind, this.writerMode)
 					.map((et) => entityPlural(et))
 					.join(', '),
 			}),
@@ -2928,7 +2964,7 @@ export class SetupProjectModal extends Modal {
 			return;
 		}
 		try {
-			const loomFile = await scaffoldProject(this.app, root, this.kind);
+			const loomFile = await scaffoldProject(this.app, root, this.kind, this.writerMode);
 			this.plugin.indexer.rebuild();
 			this.close();
 			new Notice(t('project.setup.projectReady'));
