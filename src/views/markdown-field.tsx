@@ -18,6 +18,7 @@ import {
 } from '@codemirror/autocomplete';
 import { App, Scope } from 'obsidian';
 import { useEffect, useRef } from 'react';
+import { t } from '../i18n';
 import type { LinkOption } from './link-textarea';
 
 /**
@@ -68,7 +69,7 @@ const WIKILINK_RE = /\[\[([^[\]\n|]+)(?:\|([^[\]\n]*))?\]\]/g;
 function lineTokens(text: string, lineFrom: number): InlineToken[] {
 	const tokens: InlineToken[] = [];
 	const overlaps = (from: number, to: number) =>
-		tokens.some((t) => from < t.to && to > t.from);
+		tokens.some((tok) => from < tok.to && to > tok.from);
 
 	WIKILINK_RE.lastIndex = 0;
 	for (let m = WIKILINK_RE.exec(text); m; m = WIKILINK_RE.exec(text)) {
@@ -492,7 +493,7 @@ function linkCompletion(
 		const create = createEntity();
 		if (create && typed.trim() !== '' && !all.some((n) => n.label.toLowerCase() === query)) {
 			options.push({
-				label: `+ Create "${typed.trim()}"…`,
+				label: t('view.markdownField.createEntityOption', { name: typed.trim() }),
 				apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
 					create(typed.trim(), (linkInsert) => {
 						if (!view.dom.isConnected) return;

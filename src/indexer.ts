@@ -13,7 +13,7 @@ import {
 } from 'obsidian';
 import {
 	Connection,
-	DEFAULT_MEMBER_ROLE,
+	defaultMemberRole,
 	EntityRecord,
 	EntityType,
 	EventKind,
@@ -35,6 +35,7 @@ import {
 } from './types';
 import { ProjectConfig, parseLoomDate, parseProjectConfig } from './calendar';
 import { managedEntityFileName } from './naming';
+import { t } from './i18n';
 import type LoomLoomPlugin from './main';
 
 /** A project = a folder containing a .loom home file. */
@@ -89,7 +90,7 @@ function parseMemberList(value: unknown): FactionMemberDecl[] {
 				: { role: undefined, location: undefined };
 		out.push({
 			linkpath,
-			role: typeof role === 'string' && role.trim() !== '' ? role : DEFAULT_MEMBER_ROLE,
+			role: typeof role === 'string' && role.trim() !== '' ? role : defaultMemberRole(),
 			location: typeof location === 'string' ? extractLinkpath(location) : null,
 		});
 	}
@@ -479,12 +480,7 @@ export class LoomIndexer extends Component {
 		}
 		if (renames.length > BULK_RENAME_LIMIT && !force) {
 			console.warn(`Loom Loom: ${renames.length} notes are off the managed naming scheme — not renaming.`);
-			new Notice(
-				`Loom Loom: ${renames.length} notes don't match the managed file names. ` +
-					'This is unusual — if the vault is mid-sync, wait for it to finish. ' +
-					'Run the "Apply managed file names" command to rename them.',
-				15000
-			);
+			new Notice(t('notice.bulkRenameSkipped', { count: String(renames.length) }), 15000);
 		} else {
 			for (const { file, newPath } of renames) {
 				// Re-check: an earlier rename in this same loop may have taken the name.
@@ -821,7 +817,7 @@ export class LoomIndexer extends Component {
 		}
 
 		// Sessions always track real-world dates; everything else follows the
-		// project's calendar (custom in-game calendar when enabled).
+		// project's calendar (a custom calendar when enabled).
 		const calendar =
 			type !== 'session' && project.config.customCalendar.enabled ? 'custom' : 'gregorian';
 		const nameValue = fmLoom(fm, FM.name);
@@ -1021,7 +1017,7 @@ export class LoomIndexer extends Component {
 			if (member?.type === 'character' && !linked.has(member.path)) {
 				out.push({
 					record: member,
-					relType: m.role === DEFAULT_MEMBER_ROLE ? 'member' : m.role,
+					relType: m.role === defaultMemberRole() ? 'member' : m.role,
 					direction: 'outgoing',
 				});
 				linked.add(member.path);

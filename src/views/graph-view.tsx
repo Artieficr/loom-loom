@@ -21,8 +21,11 @@ import {
 	GraphCamera,
 	PC_TAG,
 	QUEST_OUTCOMES,
+	questOutcomeLabel,
 	TimelineDef,
 	VIEW_GRAPH,
+	newEntityTitle,
+	entityPlural,
 } from '../types';
 import type { LoomTextSize, SavedGraphView } from '../settings';
 import { ConfirmModal, CreateEntityModal, RelationshipPromptModal, TextInputModal } from '../project';
@@ -36,6 +39,7 @@ import { EntityChip, Icon, SearchableSelect, ViewShell, noProjectMessage, record
 import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
 import { projectRoleType, projectTypes, roleOf } from '../project-kind';
+import { t, tn } from '../i18n';
 
 type Camera = GraphCamera;
 
@@ -59,7 +63,7 @@ export class GraphView extends LoomReactView {
 	}
 
 	getDisplayText(): string {
-		return 'Loom';
+		return t('common.loomGraph');
 	}
 
 	getIcon(): string {
@@ -708,9 +712,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	/** Snapshots the current filter/focus/pins into a new named view. */
 	const saveCurrentAsView = () => {
 		new TextInputModal(plugin.app, {
-			title: 'Save current graph as a view',
-			placeholder: 'View name',
-			cta: 'Save',
+			title: t('view.graph.saveViewTitle'),
+			placeholder: t('view.graph.viewNamePlaceholder'),
+			cta: t('project.common.save'),
 			onSubmit: (name) => {
 				const snapshot: SavedGraphView = {
 					id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
@@ -727,19 +731,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	};
 	const renameView = (v: SavedGraphView) => {
 		new TextInputModal(plugin.app, {
-			title: 'Rename view',
+			title: t('view.graph.renameViewTitle'),
 			initial: v.name,
-			cta: 'Rename',
+			cta: t('view.list.rename'),
 			onSubmit: (name) => persistViews(views.map((x) => (x.id === v.id ? { ...x, name } : x))),
 		}).open();
 	};
 	const deleteView = (v: SavedGraphView) => {
 		new ConfirmModal(
 			plugin.app,
-			'Delete view',
-			`Delete the saved view "${v.name}"?`,
+			t('view.graph.deleteViewTitle'),
+			t('view.graph.deleteViewConfirm', { name: v.name }),
 			() => persistViews(views.filter((x) => x.id !== v.id)),
-			'Delete'
+			t('project.common.delete')
 		).open();
 	};
 	/** Overwrites an existing view with the current graph state. */
@@ -807,9 +811,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	useEffect(() => {
 		if (drawerBarRef.current) {
-			setTooltip(drawerBarRef.current, drawerOpen ? 'Collapse timeline' : 'Open timeline', {
-				placement: 'top',
-			});
+			setTooltip(
+				drawerBarRef.current,
+				drawerOpen ? t('view.graph.collapseTimeline') : t('view.graph.openTimeline'),
+				{ placement: 'top' }
+			);
 		}
 	}, [drawerOpen]);
 
@@ -1330,13 +1336,13 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				startSpring();
 				new ConfirmModal(
 					plugin.app,
-					`Delete "${recordLabel(drag.node.record, project ?? null)}"?`,
-					'The note is moved to the trash.',
+					t('view.list.deleteConfirmTitle', { name: recordLabel(drag.node.record, project ?? null) }),
+					t('view.list.deleteMessageGeneral'),
 					() => {
 						const file = plugin.app.vault.getFileByPath(drag.id);
 						if (file) void plugin.app.fileManager.trashFile(file);
 					},
-					'Delete'
+					t('project.common.delete')
 				).open();
 				return;
 			}
@@ -1458,7 +1464,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (!file) return;
 		plugin.app.fileManager.processFrontMatter(file, apply).catch((err) => {
 			console.error('Loom Loom: failed to update frontmatter', err);
-			new Notice('Could not save the change.');
+			new Notice(t('view.entity.common.saveFailed'));
 		});
 	};
 
@@ -1516,7 +1522,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			const resolve = resolvesFrom(quest);
 			if (!quest.record.questGivers.some((lp) => resolve(lp) === char.id)) {
 				options.push({
-					title: 'Add as quest giver',
+					title: t('view.graph.addAsQuestGiver'),
 					action: () =>
 						writeNodeFm(quest, (fm) => {
 							setLoomKey(fm, FM.questGiver, [
@@ -1536,7 +1542,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			const resolve = resolvesFrom(faction);
 			if (!faction.record.members.some((m) => resolve(m.linkpath) === char.id)) {
 				options.push({
-					title: 'Add as member',
+					title: t('view.graph.addAsMember'),
 					action: () =>
 						writeNodeFm(faction, (fm) => {
 							setLoomKey(fm, FM.members, [
@@ -1556,7 +1562,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			const resolve = resolvesFrom(holder);
 			if (holder.record.items.some((lp) => resolve(lp) === item.id)) continue;
 			options.push({
-				title: 'Add item',
+				title: t('view.graph.addItem'),
 				action: () =>
 					writeNodeFm(holder, (fm) => {
 						setLoomKey(fm, FM.items, [
@@ -1577,7 +1583,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				resolve(quest.record.questReceived) !== session.id
 			) {
 				options.push({
-					title: 'Set as received session',
+					title: t('view.graph.setAsReceivedSession'),
 					action: () =>
 						writeNodeFm(quest, (fm) => {
 							setLoomKey(fm, FM.questReceived, link);
@@ -1591,7 +1597,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					resolve(quest.record.questOutcomeSession) === session.id;
 				if (alreadySet) continue;
 				options.push({
-					title: `${outcome[0].toUpperCase() + outcome.slice(1)} in this session`,
+					title: t('view.graph.outcomeInSession', {
+						outcome: questOutcomeLabel(outcome),
+					}),
 					action: () =>
 						writeNodeFm(quest, (fm) => {
 							setLoomKey(fm, FM.questOutcome, outcome);
@@ -1609,7 +1617,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			const link = `[[${linkTargetOf(item.record)}]]`;
 			if (!quest.record.reward.includes(linkTargetOf(item.record))) {
 				options.push({
-					title: 'Add as reward',
+					title: t('view.graph.addAsReward'),
 					action: () =>
 						writeNodeFm(quest, (fm) => {
 							const cur = fmLoomValue(fm, FM.reward);
@@ -1639,10 +1647,16 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					)
 				);
 			if (!onNote('involved')) {
-				options.push({ title: 'Involve in event', action: () => addToEventNote(event, other, 'involved') });
+				options.push({
+					title: t('view.graph.involveInEvent'),
+					action: () => addToEventNote(event, other, 'involved'),
+				});
 			}
 			if (other.record.type === 'location' && !onNote('places')) {
-				options.push({ title: 'Add as place', action: () => addToEventNote(event, other, 'places') });
+				options.push({
+					title: t('view.graph.addAsPlace'),
+					action: () => addToEventNote(event, other, 'places'),
+				});
 			}
 		}
 
@@ -1665,7 +1679,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				)
 			) {
 				options.push({
-					title: 'Mark as attending',
+					title: t('view.graph.markAsAttending'),
 					action: () =>
 						writeNodeFm(session, (fm) => {
 							setLoomKey(fm, FM.attendance, [
@@ -1680,7 +1694,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			);
 			if (!has) {
 				options.push({
-					title: 'Add session note',
+					title: t('view.graph.addSessionNote'),
 					action: () =>
 						writeNodeFm(other, (fm) => {
 							const cur = fmLoomValue(fm, FM.sessionNotes);
@@ -1715,7 +1729,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			const wouldCycle = descendsFrom(to.record, from.id);
 			if (!alreadyChild && !wouldCycle) {
 				options.push({
-					title: `Make sublocation of ${toLabel}`,
+					title: t('view.graph.makeSublocationOf', { name: toLabel }),
 					action: () =>
 						writeNodeFm(from, (fm) => {
 							setLoomKey(fm, FM.parentLocation, `[[${linkTargetOf(to.record)}]]`);
@@ -1733,19 +1747,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		const otherLabel = declarer === from ? toLabel : fromLabel;
 		if (declaresConnection(declarer, other.id)) {
 			options.push({
-				title: 'Remove relationship…',
+				title: t('view.graph.removeRelationshipEllipsis'),
 				action: () =>
 					new ConfirmModal(
 						plugin.app,
-						'Remove relationship',
-						`Remove the relationship ${declarerLabel} declares to ${otherLabel}?`,
+						t('view.graph.removeRelationshipTitle'),
+						t('view.graph.removeRelationshipConfirm', { declarer: declarerLabel, other: otherLabel }),
 						() => removeConnection(declarer, other),
-						'Remove'
+						t('common.remove')
 					).open(),
 			});
 		} else {
 			options.push({
-				title: 'Add relationship…',
+				title: t('view.graph.addRelationshipEllipsis'),
 				action: () =>
 					new RelationshipPromptModal(plugin.app, declarerLabel, otherLabel, (relType) => {
 						writeNodeFm(declarer, (fm) => {
@@ -1796,7 +1810,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			});
 		} catch (err) {
 			console.error('Loom Loom: failed to remove connection', err);
-			new Notice('Could not remove the connection.');
+			new Notice(t('view.graph.couldNotRemoveConnection'));
 		}
 	};
 
@@ -1843,7 +1857,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		for (const type of projectTypes(project.config)) {
 			menu.addItem((item) =>
 				item
-					.setTitle(`New ${ENTITY_META[type].label.toLowerCase()}`)
+					.setTitle(newEntityTitle(type))
 					.setIcon(ENTITY_META[type].icon)
 					.onClick(() =>
 						new CreateEntityModal(plugin, type, project, {
@@ -2117,7 +2131,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	if (!project) {
 		return (
-			<ViewShell view={view} project={null} title="Loom">
+			<ViewShell view={view} project={null} title={t('common.loomGraph')}>
 				{noProjectMessage()}
 			</ViewShell>
 		);
@@ -2127,23 +2141,23 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		<ViewShell
 			view={view}
 			project={project}
-			title="Loom"
+			title={t('common.loomGraph')}
 			railActive="graph"
 		titleExtra={
 				<>
 			<div className="loom-graph-search">
-						
+
 						<input
 							type="search"
 							className="loom-search"
-							placeholder="Search nodes…"
+							placeholder={t('view.graph.searchPlaceholder')}
 							value={search}
 							onChange={(e) => setSearch(e.target.value)}
 						/>
 						{search !== '' ? (
 							<button
 								className="loom-chip-remove loom-search-clear"
-								aria-label="Clear search"
+								aria-label={t('view.graph.clearSearch')}
 								onClick={() => setSearch('')}
 							>
 								✕
@@ -2154,14 +2168,14 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						<div className="loom-search-nav">
 							<button
 								className="loom-rel-filter"
-								aria-label="Fit all search results"
+								aria-label={t('view.graph.fitAllSearchResults')}
 								onClick={() => fitNodes(searchResults)}
 							>
 								<Icon name="scan-search" />
 							</button>
 							<button
 								className="loom-rel-filter"
-								aria-label="Previous search result"
+								aria-label={t('view.graph.previousSearchResult')}
 								onClick={searchPrev}
 							>
 								<Icon name="chevron-left" />
@@ -2171,7 +2185,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							</span>
 							<button
 								className="loom-rel-filter"
-								aria-label="Next search result"
+								aria-label={t('view.graph.nextSearchResult')}
 								onClick={searchNext}
 							>
 								<Icon name="chevron-right" />
@@ -2181,7 +2195,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				<div className="loom-graph-filter" ref={viewsRef}>
 							<button
 								className="loom-rel-filter"
-								aria-label="Saved views"
+								aria-label={t('view.graph.savedViews')}
 								onClick={() => setViewsOpen(!viewsOpen)}
 							>
 								<Icon name="bookmark" fallback="star" />
@@ -2195,30 +2209,30 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 													<button
 														className="loom-views-name"
 														onClick={() => applyView(v)}
-														title="Apply this view"
+														title={t('view.graph.applyThisView')}
 													>
 														{v.name}
 													</button>
 													<button
 														className="loom-rel-filter loom-views-act"
-														aria-label="Update view to current graph"
-														title="Update to current"
+														aria-label={t('view.graph.updateViewToCurrent')}
+														title={t('view.graph.updateToCurrent')}
 														onClick={() => updateView(v)}
 													>
 														<Icon name="save" fallback="check" />
 													</button>
 													<button
 														className="loom-rel-filter loom-views-act"
-														aria-label="Rename view"
-														title="Rename"
+														aria-label={t('view.graph.renameViewTitle')}
+														title={t('view.list.rename')}
 														onClick={() => renameView(v)}
 													>
 														<Icon name="pencil" fallback="edit" />
 													</button>
 													<button
 														className="loom-rel-filter loom-views-act"
-														aria-label="Delete view"
-														title="Delete"
+														aria-label={t('view.graph.deleteViewTitle')}
+														title={t('project.common.delete')}
 														onClick={() => deleteView(v)}
 													>
 														<Icon name="trash-2" fallback="x" />
@@ -2227,11 +2241,11 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 											))}
 										</div>
 									) : (
-										<div className="loom-views-empty">No saved views yet.</div>
+										<div className="loom-views-empty">{t('view.graph.noSavedViewsYet')}</div>
 									)}
 									<button className="loom-filter-clear" onClick={saveCurrentAsView}>
 										<Icon name="plus" />
-										Save current as view
+										{t('view.graph.saveCurrentAsViewAction')}
 									</button>
 								</div>
 							) : null}
@@ -2243,7 +2257,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										? 'loom-rel-filter loom-filter-active'
 										: 'loom-rel-filter'
 								}
-								aria-label="Filter graph"
+								aria-label={t('view.graph.filterGraph')}
 								onClick={() => setFilterOpen(!filterOpen)}
 							>
 								<Icon name="filter" />
@@ -2259,34 +2273,34 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										onClick={() => setFilterMode(filterMode === 'dim' ? 'hide' : 'dim')}
 									>
 										<Icon name={filterMode === 'dim' ? 'eye-off' : 'eye-closed'} />
-										<span>{filterMode === 'dim' ? 'Dimmed' : 'Hidden'}</span>
+										<span>{filterMode === 'dim' ? t('view.graph.dimmed') : t('view.graph.hidden')}</span>
 										<div
 											className={
 												filterMode === 'hide' ? 'checkbox-container is-enabled' : 'checkbox-container'
 											}
 										/>
 									</div>
-									{projectTypes(project?.config).map((t) => (
-										<label key={t} className="loom-check">
+									{projectTypes(project?.config).map((et) => (
+										<label key={et} className="loom-check">
 											<input
 												type="checkbox"
-												checked={filterTypes.has(t)}
+												checked={filterTypes.has(et)}
 												onChange={() => {
 													const next = new Set(filterTypes);
-													if (next.has(t)) next.delete(t);
-													else next.add(t);
+													if (next.has(et)) next.delete(et);
+													else next.add(et);
 													setFilterTypes(next);
 												}}
 											/>
-											{ENTITY_META[t].plural}
+											{entityPlural(et)}
 										</label>
 									))}
 									{project ? (
 										<div className="loom-filter-pick">
-											<div className="loom-filter-pick-head">Focus on entities</div>
+											<div className="loom-filter-pick-head">{t('view.graph.focusOnEntities')}</div>
 											<div className="loom-filter-pick-search">
 												<SearchableSelect
-													placeholder="Add an entity…"
+													placeholder={t('view.graph.addAnEntityPlaceholder')}
 													options={filterPickOptions}
 													onPick={(path) => {
 														// A left-click selection dims everything not connected to
@@ -2313,7 +2327,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 																	next.delete(r.path);
 																	setPickedPaths(next);
 																}}
-																removeLabel="Remove from focus"
+																removeLabel={t('view.graph.removeFromFocus')}
 															/>
 														))}
 												</div>
@@ -2321,7 +2335,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 											{pickedPaths.size > 0 ? (
 												<>
 													<div className="loom-filter-seg-row">
-														<span className="loom-filter-seg-label">Render</span>
+														<span className="loom-filter-seg-label">{t('view.graph.render')}</span>
 														<div className="loom-seg">
 															<button
 																className={
@@ -2329,7 +2343,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 																}
 																onClick={() => setPickSeparate(false)}
 															>
-																In place
+																{t('view.graph.inPlace')}
 															</button>
 															<button
 																className={
@@ -2337,7 +2351,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 																}
 																onClick={() => setPickSeparate(true)}
 															>
-																Separate
+																{t('view.graph.separate')}
 															</button>
 														</div>
 													</div>
@@ -2346,7 +2360,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 														onClick={() => setPickedPaths(new Set())}
 													>
 														<Icon name="eraser" />
-														Clear focus
+														{t('view.graph.clearFocus')}
 													</button>
 												</>
 											) : null}
@@ -2358,7 +2372,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					{pinned.size > 0 ? (
 						<button
 							className="loom-rel-filter loom-filter-active"
-							aria-label={`Clear ${pinned.size} pinned node${pinned.size > 1 ? 's' : ''}`}
+							aria-label={tn('view.graph.clearPinnedNodes', pinned.size)}
 							onClick={unpinAll}
 						>
 							<Icon name="pin-off" fallback="x" />
@@ -2366,12 +2380,12 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					) : null}
 					<button
 						className={animActive ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-						aria-label={animActive ? 'Stop time-lapse animation' : 'Start time-lapse animation'}
+						aria-label={animActive ? t('view.graph.stopAnimation') : t('view.graph.startAnimation')}
 						onClick={() => (animActive ? finishAnimation() : startAnimation())}
 					>
 						<Icon name={animActive ? 'square' : 'play'} fallback={animActive ? 'x' : 'chevron-right'} />
 					</button>
-					<button className="loom-rel-filter" aria-label="Fit view" onClick={fitAll}>
+					<button className="loom-rel-filter" aria-label={t('view.graph.fitView')} onClick={fitAll}>
 						<Icon name="scan" />
 					</button>
 				</>
@@ -2723,7 +2737,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					/>
 				) : null}
 				{layout.nodes.length === 0 ? (
-					<div className="loom-empty loom-graph-empty">No entities yet. Right-click to create one.</div>
+					<div className="loom-empty loom-graph-empty">{t('view.graph.noEntitiesYet')}</div>
 				) : null}
 				</div>
 				<div className="loom-drawer">
@@ -2739,7 +2753,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							<div
 								className="loom-drawer-handle"
 								ref={(el) => {
-									if (el) setTooltip(el, 'Drag to resize', { placement: 'top' });
+									if (el) setTooltip(el, t('view.graph.dragToResize'), { placement: 'top' });
 								}}
 							/>
 						) : null}
@@ -2774,7 +2788,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 									max={1}
 									step={0.05}
 									value={1.4 - timelineZoom}
-									aria-label="Zoom timeline"
+									aria-label={t('view.graph.zoomTimeline')}
 									onChange={(e) => setTimelineZoom(1.4 - parseFloat(e.target.value))}
 								/>
 							</div>
@@ -2837,9 +2851,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							style={{ left: confirmTip.x, top: confirmTip.y }}
 						>
 							<div className="loom-tooltip-name">
-								No confirmation mode is {noConfirm ? 'enabled' : 'disabled'}
+								{noConfirm ? t('view.graph.noConfirmModeEnabled') : t('view.graph.noConfirmModeDisabled')}
 							</div>
-							<div>Make adjustments in the timeline without a confirmation prompt.</div>
+							<div>{t('view.graph.noConfirmModeDesc')}</div>
 						</div>,
 						confirmTip.body
 					)

@@ -1,4 +1,5 @@
 import { ENTITY_TYPES, EntityType } from './types';
+import { t } from './i18n';
 
 /**
  * Project kinds — the per-project "mode" that reshapes the plugin for a
@@ -50,6 +51,16 @@ export const PROJECT_KIND_META: Record<ProjectKind, ProjectKindMeta> = {
 		description: 'Writing a story or screenplay: chapters and scenes, with a Fountain script.',
 	},
 };
+
+/** `PROJECT_KIND_META[kind].label`/`.description` are the English source
+ *  strings — every DISPLAY read should go through these instead, mirroring
+ *  `entityLabel`/`entityPlural` in `types.ts`. */
+export function projectKindLabel(kind: ProjectKind): string {
+	return t(`projectKind.${kind}.label`);
+}
+export function projectKindDescription(kind: ProjectKind): string {
+	return t(`projectKind.${kind}.description`);
+}
 
 /**
  * The structural role a type plays in the chronological layout: the `anchor`

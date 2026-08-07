@@ -5,12 +5,13 @@ import {
 	useRef,
 	useState,
 } from 'react';
-import { ENTITY_META, ENTITY_TYPES, EntityRecord, EntityType } from '../types';
+import { ENTITY_TYPES, EntityRecord, EntityType, entityPlural } from '../types';
 import { projectTypes, roleOf } from '../project-kind';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { edgePath } from '../graph/routing';
 import { LoomIndexer, ProjectDef } from '../indexer';
 import { Icon, recordLabel } from './common';
+import { t } from '../i18n';
 import type LoomLoomPlugin from '../main';
 
 /** Fallback node radius per layout row (anchor / beat / global layers),
@@ -388,7 +389,7 @@ export function MiniGraph({
 				<div className="loom-graph-filter">
 					<button
 						className={filterActive ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-						aria-label="Filter graph"
+						aria-label={t('view.graph.filterGraph')}
 						onClick={() => setFilterOpen(!filterOpen)}
 					>
 						<Icon name="filter" />
@@ -397,7 +398,7 @@ export function MiniGraph({
 						<div className="loom-filter-pop">
 							<div className="loom-filter-mode">
 								<Icon name={filterMode === 'dim' ? 'eye-off' : 'eye-closed'} />
-								<span>{filterMode === 'dim' ? 'Dimmed' : 'Hidden'}</span>
+								<span>{filterMode === 'dim' ? t('view.graph.dimmed') : t('view.graph.hidden')}</span>
 								<div
 									className={filterMode === 'hide' ? 'checkbox-container is-enabled' : 'checkbox-container'}
 									role="switch"
@@ -405,25 +406,25 @@ export function MiniGraph({
 									onClick={() => setFilterMode(filterMode === 'dim' ? 'hide' : 'dim')}
 								/>
 							</div>
-							{projectTypes(project.config).map((t) => (
-								<label key={t} className="loom-check">
+							{projectTypes(project.config).map((et) => (
+								<label key={et} className="loom-check">
 									<input
 										type="checkbox"
-										checked={filterTypes.has(t)}
+										checked={filterTypes.has(et)}
 										onChange={() => {
 											const next = new Set(filterTypes);
-											if (next.has(t)) next.delete(t);
-											else next.add(t);
+											if (next.has(et)) next.delete(et);
+											else next.add(et);
 											setFilterTypes(next);
 										}}
 									/>
-									{ENTITY_META[t].plural}
+									{entityPlural(et)}
 								</label>
 							))}
 						</div>
 					) : null}
 				</div>
-				<button className="loom-rel-filter" aria-label="Fit view" onClick={fit}>
+				<button className="loom-rel-filter" aria-label={t('view.graph.fitView')} onClick={fit}>
 					<Icon name="scan" />
 				</button>
 			</div>

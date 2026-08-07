@@ -12,21 +12,23 @@ import {
 	ENTITY_META,
 	EntityRecord,
 	MAPS_ICON,
-	MAPS_LABEL,
 	SCRIPT_ICON,
-	SCRIPT_LABEL,
 	PC_GROUP_ICON,
 	PC_GROUP_VALUE,
 	VIEW_GRAPH,
 	VIEW_GROUP,
 	VIEW_LIST,
 	VIEW_MAP,
+	entityPlural,
+	mapsLabel,
+	scriptLabel,
 } from '../types';
 import { formatLoomDate, groupNameOf } from '../calendar';
 import { features, projectTypes, roleOf } from '../project-kind';
 import { createScriptFile, scriptFilePath as scriptPathOf } from './script-view';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
+import { LocaleKey, t } from '../i18n';
 import type LoomLoomPlugin from '../main';
 
 /** Matches a note's leading frontmatter block (used to split it from the body). */
@@ -90,6 +92,35 @@ export function Icon({ name, fallback }: { name: string; fallback?: string }) {
 		if (fallback && !el.firstChild) setIcon(el, fallback);
 	}, [name, fallback]);
 	return <span className="loom-icon" ref={ref} />;
+}
+
+/** A small `info` glyph carrying an explanatory hover tooltip — Obsidian's own
+ *  styled tooltip (`setTooltip`, same as every other tooltip in this codebase),
+ *  never a raw `title=` attribute, which renders the browser's own unstyled
+ *  black/white tooltip instead of matching the plugin's theme. Meant to sit
+ *  right after a label whose meaning isn't obvious from the label text alone,
+ *  rather than putting the explanation on the label/control itself where a
+ *  user has to hover the CONTROL (easy to trigger by accident while trying to
+ *  click it) to learn what it means. */
+export function InfoIcon({ text }: { text: string }) {
+	const ref = useRef<HTMLSpanElement>(null);
+	useEffect(() => {
+		const el = ref.current;
+		if (!el) return;
+		setIcon(el, 'info');
+		// `delay: 1`, NOT `0` — a real bug in Obsidian's own `setTooltip`
+		// (confirmed against the actual 1.13.4 `app.js`): its internal option
+		// storage does `delay && el.setAttribute('data-tooltip-delay', …)`,
+		// and `0` is falsy, so the attribute never gets written at all —
+		// `delay: 0` silently falls back to Obsidian's own DEFAULT delay
+		// (reading the missing attribute back finds nothing and substitutes
+		// the standard constant), the opposite of what's intended. `1`
+		// survives that truthy check (the attribute DOES get set) while
+		// still being a single millisecond — imperceptible, functionally
+		// instant, without hitting the bug.
+		setTooltip(el, text, { delay: 1 });
+	}, [text]);
+	return <span className="loom-info-icon" ref={ref} />;
 }
 
 /**
@@ -317,7 +348,7 @@ export function SearchableSelect({
 							{o.label}
 						</button>
 					))}
-					{filtered.length === 0 ? <div className="loom-combo-empty">No matches.</div> : null}
+					{filtered.length === 0 ? <div className="loom-combo-empty">{t('common.noMatches')}</div> : null}
 				</div>
 			) : null}
 		</div>
@@ -426,7 +457,7 @@ export function EntityChip({
 				text
 			)}
 			{onRemove ? (
-				<button className="loom-chip-remove" aria-label={removeLabel ?? 'Remove'} onClick={onRemove}>
+				<button className="loom-chip-remove" aria-label={removeLabel ?? t('common.remove')} onClick={onRemove}>
 					✕
 				</button>
 			) : null}
@@ -450,7 +481,9 @@ export function readableOn(hex: string): string {
 	return lum > 0.6 ? '#000000' : '#ffffff';
 }
 
-/** A quest tag chip: configured tag color + its icon, readable text. */
+/** A quest tag chip: configured tag color + its icon, readable text. `tag` is
+ *  the stored English key ('main'/'important'/'side') — displayed through the
+ *  same locale strings the Settings quest-tag-color rows use. */
 export function QuestTagChip({ plugin, tag }: { plugin: LoomLoomPlugin; tag: string }) {
 	const colors = plugin.settings.questTagColors as Record<string, string>;
 	const bg = colors[tag] ?? null;
@@ -460,7 +493,7 @@ export function QuestTagChip({ plugin, tag }: { plugin: LoomLoomPlugin; tag: str
 			style={bg !== null ? { background: bg, borderColor: bg, color: readableOn(bg) } : undefined}
 		>
 			{QUEST_TAG_ICONS[tag] ? <Icon name={QUEST_TAG_ICONS[tag]} /> : null}
-			{tag}
+			{t(`settings.entities.questTagNames.${tag}` as LocaleKey)}
 		</span>
 	);
 }
@@ -512,14 +545,14 @@ export function NavRail({
 }) {
 	return (
 		<nav className="loom-rail">
-			<RailButton icon="home" label="Home" onClick={() => navigator.openLoomFile(project.loomPath)} />
+			<RailButton icon="home" label={t('common.home')} onClick={() => navigator.openLoomFile(project.loomPath)} />
 			<div className="loom-rail-sep" />
 			{/* The script leads, in the slot the Group takes in the other kinds,
 			    so every entity button below keeps its usual position. */}
 			{features(project.config).script ? (
 				<RailButton
 					icon={SCRIPT_ICON}
-					label={SCRIPT_LABEL}
+					label={scriptLabel()}
 					active={active === 'script'}
 					onClick={() => {
 						// Created on demand: a project switched to Writer after
@@ -554,24 +587,24 @@ export function NavRail({
 				}}
 			/>
 			) : null}
-			{projectTypes(project.config).filter((t) => t !== 'region').flatMap((t) => {
+			{projectTypes(project.config).filter((et) => et !== 'region').flatMap((et) => {
 				const btn = (
 					<RailButton
-						key={t}
-						icon={ENTITY_META[t].icon}
-						label={ENTITY_META[t].plural}
-						active={active === t}
-						onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: t })}
+						key={et}
+						icon={ENTITY_META[et].icon}
+						label={entityPlural(et)}
+						active={active === et}
+						onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: et })}
 					/>
 				);
 				// Maps sits right after Locations, matching the home wheel order.
-				if (t === 'location') {
+				if (et === 'location') {
 					return [
 						btn,
 						<RailButton
 							key="maps"
 							icon={MAPS_ICON}
-							label={MAPS_LABEL}
+							label={mapsLabel()}
 							active={active === 'map'}
 							onClick={() => navigator.navigateTo(VIEW_MAP, { project: project.root })}
 						/>,
@@ -582,7 +615,7 @@ export function NavRail({
 			<div className="loom-rail-sep" />
 			<RailButton
 				icon="spool"
-				label="Loom"
+				label={t('common.loomGraph')}
 				active={active === 'graph'}
 				onClick={() => navigator.navigateTo(VIEW_GRAPH, { project: project.root })}
 			/>
@@ -630,7 +663,7 @@ export function ViewShell({
 
 /** Formats a record label for missing projects/dates. */
 export function noProjectMessage(): ReactNode {
-	return <div className="loom-empty">No project found. Open a project home file (.loom) first.</div>;
+	return <div className="loom-empty">{t('common.noProjectFound')}</div>;
 }
 
 /**

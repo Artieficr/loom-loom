@@ -15,7 +15,7 @@ import {
 	setIcon,
 } from 'obsidian';
 import {
-	DEFAULT_MEMBER_ROLE,
+	defaultMemberRole,
 	ENTITY_META,
 	ENTITY_TAGS,
 	ENTITY_TYPES,
@@ -28,6 +28,9 @@ import {
 	SCRIPT_EXTENSION,
 	TIMELINES_FOLDER,
 	VIEW_LIST,
+	entityLabel,
+	newEntityTitle,
+	entityPlural,
 	formatTimestamp,
 	pcGroupStub,
 } from './types';
@@ -38,6 +41,8 @@ import {
 	PROJECT_KINDS,
 	ProjectKind,
 	featuresOf,
+	projectKindDescription,
+	projectKindLabel,
 	projectRoleType,
 	projectTypes,
 	roleOf,
@@ -48,6 +53,7 @@ import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from 
 import { ProjectDef, extractLinkpath, linkTargetOf } from './indexer';
 import { fmLoomValue, setLoomKey } from './fm';
 import { canCreateProjectOfKind } from './license/gating';
+import { LocaleKey, t } from './i18n';
 import {
 	appendChapter,
 	appendScene,
@@ -248,7 +254,7 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 		if (members.length > 0) {
 			lines.push(`${FM.members}:`);
 			for (const m of members) {
-				const roleIsDefault = m.role === '' || m.role.toLowerCase() === DEFAULT_MEMBER_ROLE.toLowerCase();
+				const roleIsDefault = m.role === '' || m.role.toLowerCase() === defaultMemberRole().toLowerCase();
 				if (roleIsDefault && m.location === '') {
 					lines.push(`  - ${yamlQuote(`[[${m.character}]]`)}`);
 				} else {
@@ -446,7 +452,7 @@ export class TextInputModal extends Modal {
 		}
 		new Setting(this.contentEl).addButton((b) =>
 			b
-				.setButtonText(this.opts.cta ?? 'Save')
+				.setButtonText(this.opts.cta ?? t('project.common.save'))
 				.setCta()
 				.onClick(submit)
 		);
@@ -523,7 +529,7 @@ export class AltTextModal extends Modal {
 	}
 
 	onOpen(): void {
-		this.setTitle('Alternative text');
+		this.setTitle(t('project.altText.title'));
 		this.modalEl.addClass('loom-alt-modal');
 		this.listEl = this.contentEl.createDiv({ cls: 'loom-alt-modal-list' });
 		this.renderList();
@@ -538,7 +544,7 @@ export class AltTextModal extends Modal {
 		// than growing the modal itself indefinitely.
 		const input = addRow.createEl('textarea', {
 			cls: 'loom-modal-input loom-alt-modal-add-textarea',
-			attr: { placeholder: 'New alternative wording…', rows: 1 },
+			attr: { placeholder: t('project.altText.newPlaceholder'), rows: 1 },
 		});
 		// A plain button, not `Setting(...).addButton(...)` — a `Setting` wraps
 		// its own content in a full `.setting-item` (its own internal flex
@@ -548,7 +554,7 @@ export class AltTextModal extends Modal {
 		// pushed to the setting-item's own far edge rather than centered next
 		// to the input, and that stray top border showed as a half-cut
 		// separator line above the row.
-		const addBtn = addRow.createEl('button', { cls: 'mod-cta loom-alt-modal-add-btn', text: 'Add' });
+		const addBtn = addRow.createEl('button', { cls: 'mod-cta loom-alt-modal-add-btn', text: t('project.common.add') });
 		const autoGrowAddTextarea = () => {
 			input.setCssProps({ height: 'auto' });
 			input.style.height = `${input.scrollHeight}px`;
@@ -609,8 +615,8 @@ export class AltTextModal extends Modal {
 
 			const actions = row.createDiv({ cls: 'loom-alt-modal-row-actions' });
 			const pills = actions.createDiv({ cls: 'loom-seg loom-alt-modal-pills' });
-			const draftBtn = pills.createEl('button', { cls: 'loom-seg-btn', text: 'Draft' });
-			const acceptBtn = pills.createEl('button', { cls: 'loom-seg-btn', text: 'Accept' });
+			const draftBtn = pills.createEl('button', { cls: 'loom-seg-btn', text: t('project.altText.draft') });
+			const acceptBtn = pills.createEl('button', { cls: 'loom-seg-btn', text: t('project.altText.accept') });
 			draftBtn.classList.toggle('loom-seg-on', i === this.activeIndex && this.acceptedIndex !== i);
 			acceptBtn.classList.toggle('loom-seg-on', i === this.acceptedIndex);
 			draftBtn.addEventListener('click', () => {
@@ -628,14 +634,14 @@ export class AltTextModal extends Modal {
 
 			const deleteBtn = actions.createEl('button', {
 				cls: 'loom-alt-modal-delete',
-				attr: { 'aria-label': 'Delete this alternative' },
+				attr: { 'aria-label': t('project.altText.deleteAria') },
 			});
 			setIcon(deleteBtn, 'trash-2');
 			deleteBtn.disabled = this.options.length <= 1;
 			deleteBtn.addEventListener('click', () => {
 				new ConfirmModal(
 					this.app,
-					'Delete this alternative?',
+					t('project.altText.deleteConfirmTitle'),
 					opt.length > 120 ? `${opt.slice(0, 120)}…` : opt,
 					async () => {
 						const next = await this.opts.onDeleteOption(i);
@@ -652,7 +658,7 @@ export class AltTextModal extends Modal {
 						this.acceptedIndex = next.acceptedIndex;
 						this.renderList();
 					},
-					'Delete'
+					t('project.common.delete')
 				).open();
 			});
 		});
@@ -696,7 +702,7 @@ export async function renameEntityRecord(
 	const parent = file.parent?.path ?? '';
 	const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
 	if (newPath !== file.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
-		new Notice('A note with that name already exists.');
+		new Notice(t('project.common.nameExists'));
 		return;
 	}
 	await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
@@ -765,16 +771,16 @@ export class AddRelationshipModal extends Modal {
 	}
 
 	onOpen(): void {
-		this.titleEl.setText('Add relationship');
-		new Setting(this.contentEl).setName('Identifier').addText((t) => {
-			t.setPlaceholder('Related');
-			t.onChange((v) => (this.relType = v));
+		this.titleEl.setText(t('project.addRelationship.title'));
+		new Setting(this.contentEl).setName(t('project.addRelationship.identifier')).addText((tc) => {
+			tc.setPlaceholder(t('project.addRelationship.identifierPlaceholder'));
+			tc.onChange((v) => (this.relType = v));
 		});
-		new Setting(this.contentEl).setName('Target').addText((t) => {
-			t.setPlaceholder('Target note');
+		new Setting(this.contentEl).setName(t('project.addRelationship.target')).addText((tc) => {
+			tc.setPlaceholder(t('project.addRelationship.targetPlaceholder'));
 			new RecordInputSuggest(
 				this.app,
-				t.inputEl,
+				tc.inputEl,
 				() =>
 					this.plugin.indexer
 						.getAll(undefined, this.project.root)
@@ -782,7 +788,7 @@ export class AddRelationshipModal extends Modal {
 						.sort((a, b) => a.name.localeCompare(b.name)),
 				(r) => {
 					this.target = r;
-					t.setValue(recordPickLabel(this.plugin, this.project, r));
+					tc.setValue(recordPickLabel(this.plugin, this.project, r));
 				},
 				(r) => recordPickLabel(this.plugin, this.project, r),
 				false
@@ -790,7 +796,7 @@ export class AddRelationshipModal extends Modal {
 		});
 		new Setting(this.contentEl).addButton((b) =>
 			b
-				.setButtonText('Add')
+				.setButtonText(t('project.common.add'))
 				.setCta()
 				.onClick(() => void this.submit())
 		);
@@ -798,7 +804,7 @@ export class AddRelationshipModal extends Modal {
 
 	private async submit(): Promise<void> {
 		if (!this.target) {
-			new Notice('Pick a target note.');
+			new Notice(t('project.addRelationship.pickTarget'));
 			return;
 		}
 		const file = this.plugin.app.vault.getFileByPath(this.record.path);
@@ -835,15 +841,17 @@ export class AddToHoldersModal extends Modal {
 	}
 
 	onOpen(): void {
-		this.titleEl.setText(`Add "${this.item.name}" to ${ENTITY_META[this.holderType].plural.toLowerCase()}`);
+		this.titleEl.setText(
+			t('project.addToHolders.title', { item: this.item.name, plural: entityPlural(this.holderType).toLowerCase() })
+		);
 		let chips: HTMLElement;
 		const alreadyHolds = (r: EntityRecord) =>
 			r.items.some((lp) => this.plugin.indexer.resolve(lp, r.path)?.path === this.item.path);
-		new Setting(this.contentEl).setName(ENTITY_META[this.holderType].plural).addText((t) => {
-			t.setPlaceholder('Search…');
+		new Setting(this.contentEl).setName(entityPlural(this.holderType)).addText((tc) => {
+			tc.setPlaceholder(t('project.common.searchPlaceholder'));
 			new RecordInputSuggest(
 				this.app,
-				t.inputEl,
+				tc.inputEl,
 				() =>
 					this.plugin.indexer
 						.getAll(this.holderType, this.project.root)
@@ -868,7 +876,7 @@ export class AddToHoldersModal extends Modal {
 		};
 		new Setting(this.contentEl).addButton((b) =>
 			b
-				.setButtonText('Add')
+				.setButtonText(t('project.common.add'))
 				.setCta()
 				.onClick(() => void this.submit())
 		);
@@ -876,7 +884,7 @@ export class AddToHoldersModal extends Modal {
 
 	private async submit(): Promise<void> {
 		if (this.picked.length === 0) {
-			new Notice(`Pick at least one ${ENTITY_META[this.holderType].label.toLowerCase()}.`);
+			new Notice(t('project.addToHolders.pickAtLeastOne', { label: entityLabel(this.holderType).toLowerCase() }));
 			return;
 		}
 		const link = `[[${linkTargetOf(this.item)}]]`;
@@ -1063,7 +1071,7 @@ async function editScriptFile(
  *  Group faction (`PC_GROUP_VALUE`). */
 const NEW_CHAPTER_SENTINEL = 'loom:new-chapter';
 function newChapterStub(projectRoot: string): EntityRecord {
-	return { ...pcGroupStub(projectRoot), path: NEW_CHAPTER_SENTINEL, name: '+ New chapter', type: 'chapter' };
+	return { ...pcGroupStub(projectRoot), path: NEW_CHAPTER_SENTINEL, name: t('project.newChapterStub'), type: 'chapter' };
 }
 
 /** Matches the file's own frontmatter block — same regex as `FRONTMATTER_RE`
@@ -1217,13 +1225,15 @@ export class CreateEntityModal extends Modal {
 	private renderTagPills(): void {
 		const vocab = ENTITY_TAGS[this.type];
 		if (vocab.length === 0) return;
-		const setting = new Setting(this.contentEl).setName('Tag');
+		const setting = new Setting(this.contentEl).setName(t('project.createEntity.tagLabel'));
 		const seg = setting.controlEl.createDiv({ cls: 'loom-seg' });
 		const buttons: HTMLButtonElement[] = [];
 		const refresh = () => {
 			for (const b of buttons) b.classList.toggle('loom-seg-on', this.fields.tag === b.dataset.tag);
 		};
-		for (const opt of [{ v: '', label: '—' }, ...vocab.map((t) => ({ v: t, label: t }))]) {
+		const tagLabel = (tag: string) =>
+			this.type === 'quest' ? t(`settings.entities.questTagNames.${tag}` as LocaleKey) : tag;
+		for (const opt of [{ v: '', label: '—' }, ...vocab.map((tag) => ({ v: tag, label: tagLabel(tag) }))]) {
 			const b = seg.createEl('button', { text: opt.label, cls: 'loom-seg-btn' });
 			b.dataset.tag = opt.v;
 			b.addEventListener('click', (e) => {
@@ -1282,8 +1292,11 @@ export class CreateEntityModal extends Modal {
 			this.renderChapterModal();
 			return;
 		}
-		const meta = ENTITY_META[this.type];
-		this.setTitle(this.options.parentLocation ? 'New sublocation' : `New ${meta.label.toLowerCase()}`);
+		this.setTitle(
+			this.options.parentLocation
+				? t('project.createEntity.newSublocationTitle')
+				: newEntityTitle(this.type)
+		);
 
 		if (this.type !== 'session') {
 			// From a session page (noteSession set), the event/quest Name is a
@@ -1292,11 +1305,15 @@ export class CreateEntityModal extends Modal {
 			const searchable =
 				(roleOf(this.type) === 'beat' || this.type === 'quest') &&
 				this.options.noteSession !== undefined;
-			const noun = meta.label.toLowerCase();
+			const noun = entityLabel(this.type).toLowerCase();
 			const article = /^[aeiou]/.test(noun) ? 'an' : 'a';
-			new Setting(this.contentEl).setName('Name').addText((text) => {
+			new Setting(this.contentEl).setName(t('project.createEntity.nameLabel')).addText((text) => {
 				text
-					.setPlaceholder(searchable ? `Search or name ${article} ${noun}` : meta.label + ' name')
+					.setPlaceholder(
+						searchable
+							? t('project.createEntity.namePlaceholderSearchable', { article, noun })
+							: t('project.createEntity.namePlaceholderNew', { label: entityLabel(this.type) })
+					)
 					.setValue(this.fields.name)
 					.onChange((v) => {
 						this.fields.name = v.trim();
@@ -1346,8 +1363,8 @@ export class CreateEntityModal extends Modal {
 
 			// Quest givers: search + entity tags with ✕, like the quest page.
 			this.fields.questGivers = [];
-			new Setting(this.contentEl).setName('Quest giver').addText((text) => {
-				text.setPlaceholder('Add a quest giver…');
+			new Setting(this.contentEl).setName(t('project.createEntity.questGiver')).addText((text) => {
+				text.setPlaceholder(t('project.createEntity.addQuestGiver'));
 				new RecordInputSuggest(
 					this.app,
 					text.inputEl,
@@ -1374,7 +1391,7 @@ export class CreateEntityModal extends Modal {
 			// session tag with ✕. Quests born from a session page (or from an event
 			// note that already carries a session) default there.
 			this.receivedSession = this.options.noteSession ?? this.options.receivedSession ?? null;
-			const receivedSetting = new Setting(this.contentEl).setName('Received in session');
+			const receivedSetting = new Setting(this.contentEl).setName(t('project.createEntity.receivedInSession'));
 			const receivedEl = receivedSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 			const refreshReceived = () => {
 				receivedEl.empty();
@@ -1386,7 +1403,7 @@ export class CreateEntityModal extends Modal {
 				} else {
 					const input = receivedEl.createEl('input', {
 						type: 'text',
-						attr: { placeholder: 'Pick the session…' },
+						attr: { placeholder: t('project.createEntity.pickSession') },
 					});
 					new RecordInputSuggest(
 						this.app,
@@ -1406,15 +1423,14 @@ export class CreateEntityModal extends Modal {
 			this.renderTagPills();
 
 			const reward = new Setting(this.contentEl)
-				.setName('Reward')
-				.setDesc('Supports markdown and multiple lines, so you can link an [[item]].')
+				.setName(t('project.createEntity.reward'))
 				.addTextArea((text) =>
-					text.setPlaceholder('Not specified').onChange((v) => (this.fields.reward = v.trim()))
+					text.setPlaceholder(t('common.notSpecified')).onChange((v) => (this.fields.reward = v.trim()))
 				);
 			reward.setClass('loom-modal-wide');
 			// Full-width row: label above, the text box using the whole window width.
 			const desc = new Setting(this.contentEl)
-				.setName('Description')
+				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
 			desc.setClass('loom-modal-wide');
 		}
@@ -1423,7 +1439,7 @@ export class CreateEntityModal extends Modal {
 			// Sessions are always Gregorian, so a native date input's calendar
 			// picker applies cleanly — no free-text/custom-calendar ambiguity
 			// like events have, and it already lands on today by default.
-			new Setting(this.contentEl).setName('Date').addText((text) => {
+			new Setting(this.contentEl).setName(t('project.createEntity.date')).addText((text) => {
 				text.inputEl.type = 'date';
 				text.setValue(this.fields.date).onChange((v) => (this.fields.date = v));
 			});
@@ -1442,15 +1458,16 @@ export class CreateEntityModal extends Modal {
 				// A scene MUST have a chapter — that's where its writing lives, so
 				// a chapterless scene has nowhere to belong. An event may be a
 				// session-less lore event, so there the pick stays optional.
-				const anchorMeta = ENTITY_META[projectRoleType(this.project.config, 'anchor')];
+				const anchorType = projectRoleType(this.project.config, 'anchor');
 				const sessionSetting = new Setting(this.contentEl)
-					.setName(anchorMeta.label)
+					.setName(entityLabel(anchorType))
 					.setDesc(
 						this.anchorRequired()
-							? `Which ${anchorMeta.label.toLowerCase()} this ${ENTITY_META[
-									this.type
-								].label.toLowerCase()} belongs to.`
-							: 'When it happened; leave unspecified for a lore event with no session.'
+							? t('project.createEntity.anchorDescRequired', {
+									anchor: entityLabel(anchorType).toLowerCase(),
+									type: entityLabel(this.type).toLowerCase(),
+								})
+							: t('project.createEntity.anchorDescOptional')
 					);
 				const sessionEl = sessionSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 				const refreshSession = () => {
@@ -1465,8 +1482,8 @@ export class CreateEntityModal extends Modal {
 							type: 'text',
 							attr: {
 								placeholder: this.anchorRequired()
-									? `Pick the ${anchorMeta.label.toLowerCase()}…`
-									: 'Not specified',
+									? t('project.createEntity.pickAnchor', { anchor: entityLabel(anchorType).toLowerCase() })
+									: t('common.notSpecified'),
 							},
 						});
 						new RecordInputSuggest(
@@ -1513,9 +1530,9 @@ export class CreateEntityModal extends Modal {
 					.sort((a, b) => a.name.localeCompare(b.name)),
 			];
 			new Setting(this.contentEl)
-				.setName('Involved entities')
+				.setName(t('project.createEntity.involvedEntities'))
 				.addText((text) => {
-					text.setPlaceholder('Involve…');
+					text.setPlaceholder(t('project.createEntity.involvePlaceholder'));
 					new RecordInputSuggest(this.app, text.inputEl, candidates, (r) => {
 						if (r.path === PC_GROUP_VALUE) {
 							const group = (this.fields.group ??= []);
@@ -1527,12 +1544,12 @@ export class CreateEntityModal extends Modal {
 					});
 				})
 				.addExtraButton((btn) => {
-					btn.setIcon('filter').setTooltip('Filter suggestions by entity type');
+					btn.setIcon('filter').setTooltip(t('project.createEntity.filterByType'));
 					btn.extraSettingsEl.addEventListener('click', (e) => {
 						const menu = new Menu();
 						menu.addItem((item) =>
 							item
-								.setTitle('All entities')
+								.setTitle(t('project.createEntity.allEntities'))
 								.setIcon('filter')
 								.setChecked(involveFilter === null)
 								.onClick(() => {
@@ -1540,15 +1557,15 @@ export class CreateEntityModal extends Modal {
 									btn.setIcon('filter');
 								})
 						);
-						for (const t of projectTypes(this.project.config).filter((t) => roleOf(t) === null)) {
+						for (const et of projectTypes(this.project.config).filter((et) => roleOf(et) === null)) {
 							menu.addItem((item) =>
 								item
-									.setTitle(ENTITY_META[t].plural)
-									.setIcon(ENTITY_META[t].icon)
-									.setChecked(involveFilter === t)
+									.setTitle(entityPlural(et))
+									.setIcon(ENTITY_META[et].icon)
+									.setChecked(involveFilter === et)
 									.onClick(() => {
-										involveFilter = t;
-										btn.setIcon(ENTITY_META[t].icon);
+										involveFilter = et;
+										btn.setIcon(ENTITY_META[et].icon);
 									})
 							);
 						}
@@ -1588,8 +1605,8 @@ export class CreateEntityModal extends Modal {
 							(a.parentLocation === null ? 0 : 1) - (b.parentLocation === null ? 0 : 1) ||
 							a.name.localeCompare(b.name)
 					);
-			new Setting(this.contentEl).setName('Locations').addText((text) => {
-				text.setPlaceholder('Location…');
+			new Setting(this.contentEl).setName(entityPlural('location')).addText((text) => {
+				text.setPlaceholder(t('project.createEntity.locationEllipsis'));
 				new RecordInputSuggest(
 					this.app,
 					text.inputEl,
@@ -1621,19 +1638,19 @@ export class CreateEntityModal extends Modal {
 		if (roleOf(this.type) === 'beat' && !this.options.noteSession) {
 			let dateText: TextComponent;
 			new Setting(this.contentEl)
-				.setName('Date')
-				.setDesc('Year-month-day format.')
+				.setName(t('project.createEntity.date'))
+				.setDesc(t('project.createEntity.dateFormatDesc'))
 				.addText((text) => {
 					dateText = text;
 					text
-						.setPlaceholder('Year-month-day')
+						.setPlaceholder(t('project.createEntity.dateFormatPlaceholder'))
 						.setValue(this.fields.date)
 						.onChange((v) => (this.fields.date = v.trim()));
 				})
 				.addExtraButton((btn) =>
 					btn
 						.setIcon('calendar')
-						.setTooltip('Set to today')
+						.setTooltip(t('project.createEntity.setToToday'))
 						.onClick(() => {
 							this.fields.date = todayRaw();
 							dateText.setValue(this.fields.date);
@@ -1663,11 +1680,17 @@ export class CreateEntityModal extends Modal {
 				rowsEl.empty();
 				(this.fields.factions ?? []).forEach((m, i) => {
 					const row = rowsEl.createDiv({ cls: 'loom-modal-faction-row' });
-					const roleInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Member' } });
+					const roleInput = row.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.memberPlaceholder') },
+					});
 					roleInput.value = m.role;
 					roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
-					row.createSpan({ text: 'of', cls: 'loom-modal-faction-lbl' });
-					const factionInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Faction…' } });
+					row.createSpan({ text: t('project.createEntity.ofLabel'), cls: 'loom-modal-faction-lbl' });
+					const factionInput = row.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.factionEllipsis') },
+					});
 					factionInput.value = m.faction === '' ? '' : displayNameOf(factions, m.faction);
 					new RecordInputSuggest(
 						this.app,
@@ -1680,8 +1703,11 @@ export class CreateEntityModal extends Modal {
 						(r) => r.name,
 						false
 					);
-					row.createSpan({ text: 'at', cls: 'loom-modal-faction-lbl' });
-					const locInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Location…' } });
+					row.createSpan({ text: t('project.createEntity.atLabel'), cls: 'loom-modal-faction-lbl' });
+					const locInput = row.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.locationEllipsis') },
+					});
 					locInput.value = m.location === '' ? '' : displayNameOf(locations, m.location);
 					new RecordInputSuggest(
 						this.app,
@@ -1702,20 +1728,20 @@ export class CreateEntityModal extends Modal {
 					});
 				});
 			};
-			new Setting(this.contentEl).setName('Faction').addButton((btn) => {
+			new Setting(this.contentEl).setName(entityLabel('faction')).addButton((btn) => {
 				// "Add faction" (sentence case) + a separate "+ " so it reads
 				// "+ Add faction" like the character page without tripping the lint.
-				btn.setButtonText('Add faction');
+				btn.setButtonText(t('project.createEntity.addFactionButton'));
 				btn.buttonEl.prepend('+ ');
 				btn.onClick(() => {
-					(this.fields.factions ??= []).push({ faction: '', role: 'Member', location: '' });
+					(this.fields.factions ??= []).push({ faction: '', role: defaultMemberRole(), location: '' });
 					render();
 				});
 			});
 			rowsEl = this.contentEl.createDiv({ cls: 'loom-modal-factions' });
 			render();
 			const charDesc = new Setting(this.contentEl)
-				.setName('Description')
+				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
 			charDesc.setClass('loom-modal-wide');
 		}
@@ -1739,10 +1765,16 @@ export class CreateEntityModal extends Modal {
 				rowsEl.empty();
 				(this.fields.members ?? []).forEach((m, i) => {
 					const row = rowsEl.createDiv({ cls: 'loom-modal-faction-row' });
-					const roleInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Member' } });
+					const roleInput = row.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.memberPlaceholder') },
+					});
 					roleInput.value = m.role;
 					roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
-					const charInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Character…' } });
+					const charInput = row.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.characterEllipsis') },
+					});
 					charInput.value = m.character === '' ? '' : displayNameOf(characters, m.character);
 					new RecordInputSuggest(
 						this.app,
@@ -1758,8 +1790,11 @@ export class CreateEntityModal extends Modal {
 						(r) => r.name,
 						false
 					);
-					row.createSpan({ text: 'at', cls: 'loom-modal-faction-lbl' });
-					const locInput = row.createEl('input', { type: 'text', attr: { placeholder: 'Location…' } });
+					row.createSpan({ text: t('project.createEntity.atLabel'), cls: 'loom-modal-faction-lbl' });
+					const locInput = row.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.locationEllipsis') },
+					});
 					locInput.value = m.location === '' ? '' : displayNameOf(locations, m.location);
 					new RecordInputSuggest(
 						this.app,
@@ -1780,25 +1815,25 @@ export class CreateEntityModal extends Modal {
 					});
 				});
 			};
-			new Setting(this.contentEl).setName('Members').addButton((btn) => {
-				btn.setButtonText('Add member');
+			new Setting(this.contentEl).setName(t('project.createEntity.membersLabel')).addButton((btn) => {
+				btn.setButtonText(t('project.createEntity.addMemberButton'));
 				btn.buttonEl.prepend('+ ');
 				btn.onClick(() => {
-					(this.fields.members ??= []).push({ character: '', role: 'Member', location: '' });
+					(this.fields.members ??= []).push({ character: '', role: defaultMemberRole(), location: '' });
 					render();
 				});
 			});
 			rowsEl = this.contentEl.createDiv({ cls: 'loom-modal-factions' });
 			render();
 			const facDesc = new Setting(this.contentEl)
-				.setName('Description')
+				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
 			facDesc.setClass('loom-modal-wide');
 		}
 
 		if (this.type === 'item') {
 			const itemDesc = new Setting(this.contentEl)
-				.setName('Description')
+				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
 			itemDesc.setClass('loom-modal-wide');
 		}
@@ -1815,7 +1850,7 @@ export class CreateEntityModal extends Modal {
 				);
 			let pickedParent: EntityRecord | null = this.options.parentLocation ?? null;
 			if (pickedParent) this.fields.parentLocation = linkTargetOf(pickedParent);
-			const parentSetting = new Setting(this.contentEl).setName('Sublocation of');
+			const parentSetting = new Setting(this.contentEl).setName(t('project.createEntity.sublocationOf'));
 			const parentEl = parentSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 			const refreshParent = () => {
 				parentEl.empty();
@@ -1826,7 +1861,10 @@ export class CreateEntityModal extends Modal {
 						refreshParent();
 					});
 				} else {
-					const input = parentEl.createEl('input', { type: 'text', attr: { placeholder: '(Optional)' } });
+					const input = parentEl.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.optionalPlaceholder') },
+					});
 					new RecordInputSuggest(
 						this.app,
 						input,
@@ -1847,7 +1885,7 @@ export class CreateEntityModal extends Modal {
 				.sort((a, b) => a.name.localeCompare(b.name));
 			let pickedRegion: EntityRecord | null = this.options.region ?? null;
 			if (pickedRegion) this.fields.region = linkTargetOf(pickedRegion);
-			const regionSetting = new Setting(this.contentEl).setName('Part of region');
+			const regionSetting = new Setting(this.contentEl).setName(t('project.createEntity.partOfRegion'));
 			const regionEl = regionSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 			const refreshRegion = () => {
 				regionEl.empty();
@@ -1858,7 +1896,10 @@ export class CreateEntityModal extends Modal {
 						refreshRegion();
 					});
 				} else {
-					const input = regionEl.createEl('input', { type: 'text', attr: { placeholder: '(Not specified)' } });
+					const input = regionEl.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.notSpecifiedParens') },
+					});
 					new RecordInputSuggest(
 						this.app,
 						input,
@@ -1874,14 +1915,14 @@ export class CreateEntityModal extends Modal {
 			};
 			refreshRegion();
 			const locDesc = new Setting(this.contentEl)
-				.setName('Description')
+				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
 			locDesc.setClass('loom-modal-wide');
 		}
 
 		if (this.type === 'region') {
 			const regDesc = new Setting(this.contentEl)
-				.setName('Description')
+				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
 			regDesc.setClass('loom-modal-wide');
 		}
@@ -1889,7 +1930,7 @@ export class CreateEntityModal extends Modal {
 		if (roleOf(this.type) === 'beat') {
 			// When an existing event is picked (session-page add), its description
 			// is shown read-only — you're adding it to the session, not editing it.
-			const evDesc = new Setting(this.contentEl).setName('Description');
+			const evDesc = new Setting(this.contentEl).setName(t('project.createEntity.description'));
 			evDesc.setClass('loom-modal-wide');
 			const roEl = evDesc.controlEl.createDiv({ cls: 'loom-modal-existing-desc' });
 			let ta: TextAreaComponent | null = null;
@@ -1901,8 +1942,12 @@ export class CreateEntityModal extends Modal {
 				const existing = this.pickedExisting;
 				if (ta) ta.inputEl.style.display = existing ? 'none' : '';
 				roEl.style.display = existing ? '' : 'none';
-				if (existing) roEl.setText(existing.description !== '' ? existing.description : '(No description)');
-				evDesc.setName(existing ? 'Description (existing event)' : 'Description');
+				if (existing) {
+					roEl.setText(existing.description !== '' ? existing.description : t('project.createEntity.noDescription'));
+				}
+				evDesc.setName(
+					existing ? t('project.createEntity.descriptionExisting') : t('project.createEntity.description')
+				);
 			};
 			this.refreshDesc();
 		}
@@ -1910,17 +1955,24 @@ export class CreateEntityModal extends Modal {
 		const connectTo = this.options.connectTo;
 		if (connectTo) {
 			new Setting(this.contentEl)
-				.setName('Relationship')
-				.setDesc(`How the new ${meta.label.toLowerCase()} relates to ${connectTo.label}.`)
+				.setName(t('project.createEntity.relationship'))
+				.setDesc(
+					t('project.createEntity.relationshipDesc', {
+						type: entityLabel(this.type).toLowerCase(),
+						target: connectTo.label,
+					})
+				)
 				.addText((text) =>
-					text.setPlaceholder('Identifier').onChange((v) => (this.relComment = v.trim()))
+					text
+						.setPlaceholder(t('project.createEntity.identifierPlaceholder'))
+						.onChange((v) => (this.relComment = v.trim()))
 				);
 		}
 
 		new Setting(this.contentEl).addButton((btn) => {
 			this.submitBtn = btn;
 			btn
-				.setButtonText('Create')
+				.setButtonText(t('project.createEntity.createButton'))
 				.setCta()
 				.onClick(() => void this.submit());
 			this.refreshSubmitLabel();
@@ -1930,7 +1982,7 @@ export class CreateEntityModal extends Modal {
 	/** Primary button reads "Add" when a name search matched an existing
 	 *  event/quest (it gets pinned to the session), "Create" otherwise. */
 	private refreshSubmitLabel(): void {
-		this.submitBtn?.setButtonText(this.pickedExisting ? 'Add' : 'Create');
+		this.submitBtn?.setButtonText(this.pickedExisting ? t('project.common.add') : t('project.createEntity.createButton'));
 	}
 
 	/**
@@ -1951,16 +2003,16 @@ export class CreateEntityModal extends Modal {
 			return;
 		}
 		if (this.type !== 'session' && this.fields.name === '') {
-			new Notice('Name is required.');
+			new Notice(t('project.createEntity.nameRequired'));
 			return;
 		}
 		if (this.type === 'session' && this.fields.date === '') {
-			new Notice('Date is required.');
+			new Notice(t('project.createEntity.dateRequired'));
 			return;
 		}
 		if (this.anchorRequired() && !this.options.noteSession && !this.pickedSession) {
-			const anchorMeta = ENTITY_META[projectRoleType(this.project.config, 'anchor')];
-			new Notice(`${anchorMeta.label} is required.`);
+			const anchorType = projectRoleType(this.project.config, 'anchor');
+			new Notice(t('project.createEntity.anchorRequiredNotice', { anchor: entityLabel(anchorType) }));
 			return;
 		}
 		const connectTo = this.options.connectTo;
@@ -1995,7 +2047,7 @@ export class CreateEntityModal extends Modal {
 			}
 		} catch (e) {
 			console.error('Loom Loom: failed to create entity', e);
-			new Notice('Could not create the note. See console for details.');
+			new Notice(t('project.createEntity.createNoteFailed'));
 		}
 	}
 
@@ -2007,7 +2059,7 @@ export class CreateEntityModal extends Modal {
 			if (m.faction === '') continue;
 			const factionFile = this.plugin.app.metadataCache.getFirstLinkpathDest(m.faction, '');
 			if (!factionFile) continue;
-			const roleIsDefault = m.role === '' || m.role.toLowerCase() === DEFAULT_MEMBER_ROLE.toLowerCase();
+			const roleIsDefault = m.role === '' || m.role.toLowerCase() === defaultMemberRole().toLowerCase();
 			let entry: unknown = charLink;
 			if (!roleIsDefault || m.location !== '') {
 				const o: Record<string, unknown> = { character: charLink };
@@ -2031,7 +2083,7 @@ export class CreateEntityModal extends Modal {
 			(n) => n.session !== null && this.plugin.indexer.resolve(n.session, entity.path)?.path === session.path
 		);
 		if (already) {
-			new Notice(`"${entity.name}" is already in this session.`);
+			new Notice(t('project.createEntity.alreadyInSession', { name: entity.name }));
 			this.close();
 			return;
 		}
@@ -2060,7 +2112,7 @@ export class CreateEntityModal extends Modal {
 			if (this.options.onCreated) this.options.onCreated(f);
 		} catch (e) {
 			console.error('Loom Loom: failed to pin existing entity', e);
-			new Notice('Could not add it to the session.');
+			new Notice(t('project.createEntity.addToSessionFailed'));
 		}
 	}
 
@@ -2074,7 +2126,7 @@ export class CreateEntityModal extends Modal {
 	 * waiting for that pass, so the new page can be opened immediately.
 	 */
 	private renderSceneModal(): void {
-		this.setTitle('New scene');
+		this.setTitle(t('project.createEntity.newSceneTitle'));
 		// The heading row alone (a dropdown + three text fields) is wider than
 		// Obsidian's default modal — without this it clips at the edge.
 		this.modalEl.addClass('loom-modal-scene');
@@ -2090,14 +2142,16 @@ export class CreateEntityModal extends Modal {
 		// callbacks can refresh it without caring about source order.
 		let refreshSceneOrderItems: () => void = () => {};
 
-		const headingSetting = new Setting(this.contentEl).setName('Scene heading');
+		const headingSetting = new Setting(this.contentEl).setName(t('project.createEntity.sceneHeadingLabel'));
 		headingSetting.setClass('loom-modal-scene-heading');
 		headingSetting.addDropdown((dd) => {
+			// Fountain scene-heading prefixes — literal document syntax written
+			// into the .fountain file, never translated (see fountain.ts).
 			for (const opt of ['INT.', 'EXT.', 'INT./EXT.', 'EST.']) dd.addOption(opt, opt);
 			dd.setValue(intExt).onChange((v) => (intExt = v));
 		});
 		headingSetting.addText((text) => {
-			text.setPlaceholder('Location').onChange((v) => (mainLoc = v));
+			text.setPlaceholder(entityLabel('location')).onChange((v) => (mainLoc = v));
 			new RecordInputSuggest(
 				this.app,
 				text.inputEl,
@@ -2114,7 +2168,7 @@ export class CreateEntityModal extends Modal {
 			);
 		});
 		headingSetting.addText((text) => {
-			text.setPlaceholder('Sublocation (optional)').onChange((v) => (subLoc = v));
+			text.setPlaceholder(t('project.createEntity.sublocationOptional')).onChange((v) => (subLoc = v));
 			new RecordInputSuggest(
 				this.app,
 				text.inputEl,
@@ -2142,13 +2196,13 @@ export class CreateEntityModal extends Modal {
 			);
 		});
 		headingSetting.addText((text) => {
-			text.setPlaceholder('Time').onChange((v) => (timeOfDay = v));
+			text.setPlaceholder(t('project.createEntity.timePlaceholder')).onChange((v) => (timeOfDay = v));
 		});
 
-		const chapterMeta = ENTITY_META[projectRoleType(this.project.config, 'anchor')];
+		const chapterType = projectRoleType(this.project.config, 'anchor');
 		const chapterSetting = new Setting(this.contentEl)
-			.setName(chapterMeta.label)
-			.setDesc(`Which ${chapterMeta.label.toLowerCase()} this scene belongs to.`);
+			.setName(entityLabel(chapterType))
+			.setDesc(t('project.createEntity.chapterDesc', { anchor: entityLabel(chapterType).toLowerCase() }));
 		const chapterEl = chapterSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 		const refreshChapter = () => {
 			chapterEl.empty();
@@ -2162,7 +2216,7 @@ export class CreateEntityModal extends Modal {
 			}
 			const input = chapterEl.createEl('input', {
 				type: 'text',
-				attr: { placeholder: `Pick the ${chapterMeta.label.toLowerCase()}…` },
+				attr: { placeholder: t('project.createEntity.pickAnchor', { anchor: entityLabel(chapterType).toLowerCase() }) },
 			});
 			new RecordInputSuggest(
 				this.app,
@@ -2194,10 +2248,10 @@ export class CreateEntityModal extends Modal {
 		refreshChapter();
 
 		new Setting(this.contentEl)
-			.setName('Append to the end of the chapter')
-			.setDesc("Turn off to choose where among the chapter's existing scenes this one lands.")
-			.addToggle((t) =>
-				t.setValue(true).onChange((v) => {
+			.setName(t('project.createEntity.appendToEndChapter.name'))
+			.setDesc(t('project.createEntity.appendToEndChapter.desc'))
+			.addToggle((tg) =>
+				tg.setValue(true).onChange((v) => {
 					sceneAppendToEnd = v;
 					sceneOrderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
 				})
@@ -2206,7 +2260,7 @@ export class CreateEntityModal extends Modal {
 			cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden',
 		});
 		const sceneOrderPicker = this.buildOrderPicker(sceneOrderWrap);
-		sceneOrderPicker.setPhantomLabel('New scene');
+		sceneOrderPicker.setPhantomLabel(t('project.createEntity.newSceneTitle'));
 		refreshSceneOrderItems = () => {
 			const chapterScenes = pickedChapter
 				? this.plugin.indexer
@@ -2223,13 +2277,13 @@ export class CreateEntityModal extends Modal {
 		refreshSceneOrderItems();
 
 		const notesSetting = new Setting(this.contentEl)
-			.setName('Notes')
+			.setName(t('project.notes'))
 			.addTextArea((text) => text.onChange((v) => (notes = v.trim())));
 		notesSetting.setClass('loom-modal-wide');
 
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
-				.setButtonText('Create')
+				.setButtonText(t('project.createEntity.createButton'))
 				.setCta()
 				.onClick(() =>
 					void this.submitScene({
@@ -2258,11 +2312,15 @@ export class CreateEntityModal extends Modal {
 	}): Promise<void> {
 		const mainLoc = fields.mainLoc.trim();
 		if (mainLoc === '') {
-			new Notice('Location is required.');
+			new Notice(t('project.createEntity.locationRequired'));
 			return;
 		}
 		if (!fields.pickedChapter) {
-			new Notice(`${ENTITY_META[projectRoleType(this.project.config, 'anchor')].label} is required.`);
+			new Notice(
+				t('project.createEntity.anchorRequiredNotice', {
+					anchor: entityLabel(projectRoleType(this.project.config, 'anchor')),
+				})
+			);
 			return;
 		}
 		const chapter = fields.pickedChapter;
@@ -2307,17 +2365,17 @@ export class CreateEntityModal extends Modal {
 			return t;
 		});
 		if (nextText === null || !newId) {
-			new Notice('Could not write the scene into the script.');
+			new Notice(t('project.createEntity.sceneWriteFailed'));
 			return;
 		}
 
 		const location = await this.resolveModalLocation(mainLoc, fields.subLoc);
 		const scene = parseFountain(nextText).scenes.find((sc) => sc.loomId === newId);
 		if (!scene) {
-			new Notice('Could not create the scene.');
+			new Notice(t('project.createEntity.sceneCreateFailed'));
 			return;
 		}
-		const place = scene.location.trim() === '' ? 'Untitled scene' : scene.location.trim();
+		const place = scene.location.trim() === '' ? t('project.createEntity.untitledScene') : scene.location.trim();
 		const name = scene.timeOfDay.trim() === '' ? place : `${place} — ${scene.timeOfDay.trim()}`;
 		try {
 			const created = await createEntity(this.plugin, this.project, 'scene', {
@@ -2345,7 +2403,7 @@ export class CreateEntityModal extends Modal {
 			}
 		} catch (e) {
 			console.error('Loom Loom: failed to create the scene', e);
-			new Notice('Could not create the note. See console for details.');
+			new Notice(t('project.createEntity.createNoteFailed'));
 		}
 	}
 
@@ -2497,7 +2555,7 @@ export class CreateEntityModal extends Modal {
 	 * chapters — and a Notes field.
 	 */
 	private renderChapterModal(): void {
-		this.setTitle('New chapter');
+		this.setTitle(t('project.createEntity.newChapterTitle'));
 		let title = '';
 		let displayTitle = '';
 		let appendToEnd = true;
@@ -2507,10 +2565,10 @@ export class CreateEntityModal extends Modal {
 			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
 
 		let displayTitleInput: TextComponent | null = null;
-		new Setting(this.contentEl).setName('Title').addText((text) => {
+		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
 			text.onChange((v) => {
 				title = v;
-				orderPicker.setPhantomLabel(v.trim() === '' ? 'New chapter' : v.trim());
+				orderPicker.setPhantomLabel(v.trim() === '' ? t('project.createEntity.newChapterTitle') : v.trim());
 				// Mirrors what an empty Display title will actually resolve to
 				// (`applyDisplayTitles` falls back to the Title) rather than a
 				// generic hint.
@@ -2519,35 +2577,35 @@ export class CreateEntityModal extends Modal {
 			window.setTimeout(() => text.inputEl.focus());
 		});
 		new Setting(this.contentEl)
-			.setName('Display title')
-			.setDesc('How the title appears on the printed page — defaults to the title above when left blank.')
+			.setName(t('project.createEntity.displayTitle.name'))
+			.setDesc(t('project.createEntity.displayTitle.desc'))
 			.addText((text) => {
 				displayTitleInput = text;
 				text.onChange((v) => (displayTitle = v));
 			});
 
 		new Setting(this.contentEl)
-			.setName('Append to the end of the script')
-			.setDesc('Turn off to choose where among the existing chapters this one lands.')
-			.addToggle((t) =>
-				t.setValue(true).onChange((v) => {
+			.setName(t('project.createEntity.appendToEndScript.name'))
+			.setDesc(t('project.createEntity.appendToEndScript.desc'))
+			.addToggle((tg) =>
+				tg.setValue(true).onChange((v) => {
 					appendToEnd = v;
 					orderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
 				})
 			);
 		const orderWrap = this.contentEl.createDiv({ cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden' });
 		const orderPicker = this.buildOrderPicker(orderWrap);
-		orderPicker.setPhantomLabel('New chapter');
+		orderPicker.setPhantomLabel(t('project.createEntity.newChapterTitle'));
 		orderPicker.setItems(existingChapters.map((c) => c.name));
 
 		const notesSetting = new Setting(this.contentEl)
-			.setName('Notes')
+			.setName(t('project.notes'))
 			.addTextArea((text) => text.onChange((v) => (notes = v.trim())));
 		notesSetting.setClass('loom-modal-wide');
 
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
-				.setButtonText('Create')
+				.setButtonText(t('project.createEntity.createButton'))
 				.setCta()
 				.onClick(() =>
 					void this.submitChapter({
@@ -2572,7 +2630,7 @@ export class CreateEntityModal extends Modal {
 	}): Promise<void> {
 		const title = fields.title.trim();
 		if (title === '') {
-			new Notice('Title is required.');
+			new Notice(t('project.createEntity.titleRequired'));
 			return;
 		}
 		const displayTitle = fields.displayTitle.trim();
@@ -2594,7 +2652,7 @@ export class CreateEntityModal extends Modal {
 			return t;
 		});
 		if (nextText === null || !newId) {
-			new Notice('Could not write the chapter into the script.');
+			new Notice(t('project.createEntity.chapterWriteFailed'));
 			return;
 		}
 		const sections = parseFountain(nextText)
@@ -2638,7 +2696,7 @@ export class CreateEntityModal extends Modal {
 			}
 		} catch (e) {
 			console.error('Loom Loom: failed to create the chapter', e);
-			new Notice('Could not create the note. See console for details.');
+			new Notice(t('project.createEntity.createNoteFailed'));
 		}
 	}
 
@@ -2704,7 +2762,7 @@ export class SetupProjectModal extends Modal {
 	}
 
 	onOpen(): void {
-		this.setTitle('Set up project');
+		this.setTitle(t('project.setup.title'));
 		// Obsidian vertically centers a modal by default — this one's height
 		// changes a lot switching Create/Use (a different field set each way),
 		// so centering kept shifting the box's own TOP edge up and down on
@@ -2729,15 +2787,15 @@ export class SetupProjectModal extends Modal {
 				this.render();
 			});
 		};
-		pill('create', 'Create a project folder');
-		pill('use', 'Use existing folder');
+		pill('create', t('project.setup.pillCreate'));
+		pill('use', t('project.setup.pillUse'));
 
 		if (this.mode === 'create') {
 			new Setting(this.contentEl)
-				.setName('Project name')
-				.setDesc('A folder with this name is created in the chosen location.')
+				.setName(t('project.setup.projectName'))
+				.setDesc(t('project.setup.projectNameDesc'))
 				.addText((text) => {
-					text.setPlaceholder('My Loom project')
+					text.setPlaceholder(t('project.setup.projectNamePlaceholder'))
 						.setValue(this.name)
 						.onChange((v) => (this.name = v.trim()));
 					text.inputEl.addEventListener('keydown', (e) => {
@@ -2748,14 +2806,12 @@ export class SetupProjectModal extends Modal {
 		}
 
 		new Setting(this.contentEl)
-			.setName(this.mode === 'create' ? 'Location' : 'Project folder')
+			.setName(this.mode === 'create' ? t('project.setup.locationLabel') : t('project.setup.projectFolderLabel'))
 			.setDesc(
-				this.mode === 'create'
-					? 'Where the project folder is created. Leave empty for the vault root.'
-					: 'This folder becomes the project folder; entity subfolders and the home file are scaffolded inside it.'
+				this.mode === 'create' ? t('project.setup.locationDesc') : t('project.setup.projectFolderDesc')
 			)
 			.addText((text) => {
-				text.setPlaceholder('Pick a folder')
+				text.setPlaceholder(t('project.setup.pickFolderPlaceholder'))
 					.setValue(this.dir)
 					.onChange((v) => (this.dir = v.trim()));
 				const suggest = new FolderSuggest(this.app, text.inputEl);
@@ -2769,10 +2825,10 @@ export class SetupProjectModal extends Modal {
 		// The kind decides which entity types the project holds, so it is
 		// picked up front — fixed at creation, not something you switch later.
 		new Setting(this.contentEl)
-			.setName('Project type')
-			.setDesc(PROJECT_KIND_META[this.kind].description)
+			.setName(t('project.setup.projectType'))
+			.setDesc(projectKindDescription(this.kind))
 			.addDropdown((dd) => {
-				for (const kind of PROJECT_KINDS) dd.addOption(kind, PROJECT_KIND_META[kind].label);
+				for (const kind of PROJECT_KINDS) dd.addOption(kind, projectKindLabel(kind));
 				dd.setValue(this.kind).onChange((v) => {
 					this.kind = v as ProjectKind;
 					this.render();
@@ -2799,9 +2855,11 @@ export class SetupProjectModal extends Modal {
 			});
 		this.contentEl.createEl('p', {
 			cls: 'setting-item-description',
-			text: `Holds: ${typesFor(this.kind)
-				.map((t) => ENTITY_META[t].plural)
-				.join(', ')}.`,
+			text: t('project.setup.holds', {
+				list: typesFor(this.kind)
+					.map((et) => entityPlural(et))
+					.join(', '),
+			}),
 		});
 
 		// Freemium gate: one project of each kind is free with every feature
@@ -2823,17 +2881,17 @@ export class SetupProjectModal extends Modal {
 				createFragment((frag) => {
 					const box = frag.createDiv({ cls: 'loom-setup-warning' });
 					box.createDiv({
-						text: `This vault already has a free-tier ${PROJECT_KIND_META[this.kind].label.toLowerCase()} project.`,
+						text: t('project.setup.alreadyFreeTier', { kind: projectKindLabel(this.kind).toLowerCase() }),
 					});
-					box.createDiv({ text: 'A license key unlocks unlimited projects of any type.' });
-					box.createDiv({ text: 'See Settings → General → License' });
+					box.createDiv({ text: t('project.setup.licenseUnlocks') });
+					box.createDiv({ text: t('project.setup.seeSettings') });
 				})
 			);
 		}
 
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
-				.setButtonText('Create project')
+				.setButtonText(t('project.setup.createProjectButton'))
 				.setCta()
 				.setDisabled(blocked)
 				.onClick(() => void this.submit())
@@ -2845,13 +2903,13 @@ export class SetupProjectModal extends Modal {
 		if (this.mode === 'create') {
 			const name = sanitizeFileName(this.name);
 			if (name === '') {
-				new Notice('Project name is required.');
+				new Notice(t('project.setup.projectNameRequired'));
 				return;
 			}
 			root = this.dir === '' ? name : `${this.dir}/${name}`;
 		} else {
 			if (this.dir === '') {
-				new Notice('Folder path is required.');
+				new Notice(t('project.setup.folderPathRequired'));
 				return;
 			}
 			root = this.dir;
@@ -2866,18 +2924,18 @@ export class SetupProjectModal extends Modal {
 				this.kind
 			)
 		) {
-			new Notice('This vault already has a free-tier project of that type. See settings → license.');
+			new Notice(t('project.setup.alreadyFreeTierNotice'));
 			return;
 		}
 		try {
 			const loomFile = await scaffoldProject(this.app, root, this.kind);
 			this.plugin.indexer.rebuild();
 			this.close();
-			new Notice('Project ready.');
+			new Notice(t('project.setup.projectReady'));
 			await this.app.workspace.getLeaf('tab').openFile(loomFile);
 		} catch (e) {
 			console.error('Loom Loom: failed to scaffold project', e);
-			new Notice('Could not set up the project. See console for details.');
+			new Notice(t('project.setup.setupFailed'));
 		}
 	}
 
@@ -2904,12 +2962,12 @@ export class RelationshipPromptModal extends Modal {
 	}
 
 	onOpen(): void {
-		this.setTitle('Connect entities');
+		this.setTitle(t('project.relationshipPrompt.title'));
 		new Setting(this.contentEl)
-			.setName('Relationship')
-			.setDesc(`How ${this.fromLabel} relates to ${this.toLabel}.`)
+			.setName(t('project.createEntity.relationship'))
+			.setDesc(t('project.relationshipPrompt.desc', { from: this.fromLabel, to: this.toLabel }))
 			.addText((text) => {
-				text.setPlaceholder('Identifier').onChange((v) => (this.value = v.trim()));
+				text.setPlaceholder(t('project.createEntity.identifierPlaceholder')).onChange((v) => (this.value = v.trim()));
 				text.inputEl.addEventListener('keydown', (e) => {
 					if (e.key === 'Enter') this.submit();
 				});
@@ -2917,7 +2975,7 @@ export class RelationshipPromptModal extends Modal {
 			});
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
-				.setButtonText('Connect')
+				.setButtonText(t('project.relationshipPrompt.connectButton'))
 				.setCta()
 				.onClick(() => this.submit())
 		);
@@ -2939,7 +2997,7 @@ export class ConfirmModal extends Modal {
 		private heading: string,
 		private detail: string,
 		private onConfirm: () => void | Promise<void>,
-		private confirmText = 'Continue'
+		private confirmText = t('project.confirm.continueDefault')
 	) {
 		super(app);
 	}
@@ -2950,7 +3008,7 @@ export class ConfirmModal extends Modal {
 		// which has to spell out what is and isn't destroyed) keeps its breaks.
 		this.contentEl.createEl('p', { cls: 'loom-confirm-detail', text: this.detail });
 		new Setting(this.contentEl)
-			.addButton((btn) => btn.setButtonText('Cancel').onClick(() => this.close()))
+			.addButton((btn) => btn.setButtonText(t('project.common.cancel')).onClick(() => this.close()))
 			.addButton((btn) => {
 				// mod-warning by class: setWarning() is deprecated and its
 				// replacement (setDestructive) is 1.13/Catalyst-only.
@@ -2976,7 +3034,7 @@ export class EntityTypeSuggestModal extends FuzzySuggestModal<EntityType> {
 		private project?: ProjectDef
 	) {
 		super(plugin.app);
-		this.setPlaceholder('Pick the entity type');
+		this.setPlaceholder(t('project.pickEntityType'));
 	}
 
 	getItems(): EntityType[] {
@@ -2984,7 +3042,7 @@ export class EntityTypeSuggestModal extends FuzzySuggestModal<EntityType> {
 	}
 
 	getItemText(type: EntityType): string {
-		return ENTITY_META[type].label;
+		return entityLabel(type);
 	}
 
 	onChooseItem(type: EntityType): void {
@@ -2995,7 +3053,7 @@ export class EntityTypeSuggestModal extends FuzzySuggestModal<EntityType> {
 export class ProjectSuggestModal extends FuzzySuggestModal<ProjectDef> {
 	constructor(private plugin: LoomLoomPlugin, private onPick: (project: ProjectDef) => void) {
 		super(plugin.app);
-		this.setPlaceholder('Pick a project');
+		this.setPlaceholder(t('project.pickProject'));
 	}
 
 	getItems(): ProjectDef[] {

@@ -10,11 +10,13 @@ import {
 	PC_GROUP_NAME,
 	PC_TAG,
 	VIEW_GROUP,
+	entityPlural,
 	pcGroupStub,
 } from '../types';
 import { formatLoomDateShort, groupNameOf, serializeProjectConfig } from '../calendar';
 import { projectRoleType, projectTypes, roleOf } from '../project-kind';
 import { linkTargetOf } from '../indexer';
+import { t } from '../i18n';
 import { LoomReactView } from './react-view';
 import {
 	EntityChip,
@@ -29,9 +31,27 @@ import { MarkdownField } from './markdown-field';
 import type { LinkOption } from './link-textarea';
 import { resolveProject, useIndexVersion } from './hooks';
 
-const MONTH_LABELS = [
-	'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-];
+/** Short Gregorian month labels for the session-month filter grid — sessions
+ *  are always Gregorian, unlike a project's optional custom calendar, so
+ *  these are a fixed 12-entry set rather than anything calendar-config-driven.
+ *  Read inside the component (not module scope) so a live language switch
+ *  updates them immediately. */
+function monthLabels(): string[] {
+	return [
+		t('view.group.months.jan'),
+		t('view.group.months.feb'),
+		t('view.group.months.mar'),
+		t('view.group.months.apr'),
+		t('view.group.months.may'),
+		t('view.group.months.jun'),
+		t('view.group.months.jul'),
+		t('view.group.months.aug'),
+		t('view.group.months.sep'),
+		t('view.group.months.oct'),
+		t('view.group.months.nov'),
+		t('view.group.months.dec'),
+	];
+}
 
 /**
  * The virtual Group's page: the player hub, one click away from every page
@@ -248,18 +268,18 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 		const menu = new Menu();
 		menu.addItem((item) =>
 			item
-				.setTitle('All entities')
+				.setTitle(t('project.createEntity.allEntities'))
 				.setIcon('filter')
 				.setChecked(filterType === null)
 				.onClick(() => setFilterType(null))
 		);
-		for (const t of projectTypes(project.config).filter((t) => roleOf(t) === null)) {
+		for (const et of projectTypes(project.config).filter((et) => roleOf(et) === null)) {
 			menu.addItem((item) =>
 				item
-					.setTitle(ENTITY_META[t].plural)
-					.setIcon(ENTITY_META[t].icon)
-					.setChecked(filterType === t)
-					.onClick(() => setFilterType(t))
+					.setTitle(entityPlural(et))
+					.setIcon(ENTITY_META[et].icon)
+					.setChecked(filterType === et)
+					.onClick(() => setFilterType(et))
 			);
 		}
 		menu.showAtMouseEvent(e.nativeEvent);
@@ -376,7 +396,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 							if (origin) view.navigateTo(origin.type, origin.state);
 						}}
 					>
-						← Back
+						← {t('view.entity.common.back')}
 					</button>
 					<span
 						className="loom-chip"
@@ -391,7 +411,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 				</div>
 
 				<div className="loom-field">
-					<span className="loom-field-label">Name</span>
+					<span className="loom-field-label">{t('view.entity.common.nameLabel')}</span>
 					<input
 						type="text"
 						key={groupName}
@@ -404,22 +424,22 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 				</div>
 
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Members</span>
-					<span className="loom-field-label loom-group-sublabel">Alive</span>
+					<span className="loom-field-label">{t('project.createEntity.membersLabel')}</span>
+					<span className="loom-field-label loom-group-sublabel">{t('view.group.alive')}</span>
 					{aliveActive.length > 0 ? (
 						chipRow(aliveActive)
 					) : (
-						<div className="loom-empty">No active player characters (tag a character PC).</div>
+						<div className="loom-empty">{t('view.group.noActivePcs')}</div>
 					)}
 					{inactive.length > 0 ? (
 						<>
-							<span className="loom-field-label loom-group-sublabel">Inactive</span>
+							<span className="loom-field-label loom-group-sublabel">{t('view.group.inactive')}</span>
 							{chipRow(inactive)}
 						</>
 					) : null}
 					{dead.length > 0 ? (
 						<>
-							<span className="loom-field-label loom-group-sublabel">Dead</span>
+							<span className="loom-field-label loom-group-sublabel">{t('view.group.dead')}</span>
 							{dead.map((c) => {
 								const death =
 									c.deathSession !== null ? plugin.indexer.resolve(c.deathSession, c.path) : null;
@@ -446,12 +466,12 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 				</div>
 
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Events</span>
+					<span className="loom-field-label">{entityPlural('event')}</span>
 					<div className="loom-hub-add-row">
 						<input
 							type="text"
 							className="loom-search"
-							placeholder="Search events and notes…"
+							placeholder={t('view.group.searchPlaceholder')}
 							value={query}
 							onChange={(e) => setQuery(e.target.value)}
 						/>
@@ -461,21 +481,25 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 									? 'loom-rel-filter loom-group-filter-btn loom-group-filter-btn-on'
 									: 'loom-rel-filter loom-group-filter-btn'
 							}
-							aria-label="Filter the events"
+							aria-label={t('view.group.filterEventsAria')}
 							onClick={() => setFilterOpen(!filterOpen)}
 						>
 							<Icon name="filter" />
 						</button>
 						<button className="loom-rel-add loom-order-toggle" onClick={toggleNotesOrder}>
 							<Icon name={newestFirst ? 'arrow-up-wide-narrow' : 'arrow-down-narrow-wide'} />
-							{newestFirst ? 'New on top' : 'New on bottom'}
+							{newestFirst
+								? t('view.entity.events.newOnTop')
+								: t('view.entity.events.newOnBottom')}
 						</button>
 					</div>
 					{filterOpen ? (
 						<div className="loom-group-filter">
 							{pcs.length > 0 ? (
 								<>
-									<span className="loom-field-label loom-group-sublabel">Player characters</span>
+									<span className="loom-field-label loom-group-sublabel">
+										{t('view.group.playerCharacters')}
+									</span>
 									<div className="loom-tag-row">
 										{pcs.map((c) => {
 											const on = entityFilter.includes(c.path);
@@ -504,10 +528,12 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 									</div>
 								</>
 							) : null}
-							<span className="loom-field-label loom-group-sublabel">Any entity</span>
+							<span className="loom-field-label loom-group-sublabel">
+								{t('view.group.anyEntity')}
+							</span>
 							<div className="loom-hub-involve">
 								<SearchableSelect
-									placeholder="Filter by entity…"
+									placeholder={t('view.group.filterByEntityPlaceholder')}
 									options={plugin.indexer
 										.getAll(undefined, project.root)
 										.filter((r) => roleOf(r.type) === null)
@@ -519,7 +545,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 								/>
 								<button
 									className="loom-rel-filter"
-									aria-label="Filter suggestions by entity type"
+									aria-label={t('project.createEntity.filterByType')}
 									onClick={openFilterTypeMenu}
 								>
 									<Icon name={filterType ? ENTITY_META[filterType].icon : 'filter'} />
@@ -535,17 +561,19 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 											label={locationLabel(r, plugin)}
 											onOpen={() => view.openEntity(r.path)}
 											onRemove={() => toggleEntityFilter(r.path)}
-											removeLabel="Remove from the filter"
+											removeLabel={t('view.group.removeFromFilter')}
 										/>
 									))}
 								</div>
 							) : null}
-							<span className="loom-field-label loom-group-sublabel">Session months</span>
+							<span className="loom-field-label loom-group-sublabel">
+								{t('view.group.sessionMonths')}
+							</span>
 							<div className="loom-group-months">
 								<div className="loom-group-year">
 									<button
 										className="loom-nav-btn"
-										aria-label="Previous year"
+										aria-label={t('view.group.previousYear')}
 										onClick={() => setFilterYear(shownYear - 1)}
 									>
 										‹
@@ -553,14 +581,14 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 									<span className="loom-group-year-label">{shownYear}</span>
 									<button
 										className="loom-nav-btn"
-										aria-label="Next year"
+										aria-label={t('view.group.nextYear')}
 										onClick={() => setFilterYear(shownYear + 1)}
 									>
 										›
 									</button>
 								</div>
 								<div className="loom-month-grid">
-									{MONTH_LABELS.map((label, m) => {
+									{monthLabels().map((label, m) => {
 										const key = `${shownYear}-${m + 1}`;
 										const on = monthFilter.includes(key);
 										return (
@@ -587,7 +615,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 									}}
 								>
 									<Icon name="rotate-ccw" />
-									Reset filters
+									{t('view.group.resetFilters')}
 								</button>
 							</div>
 						</div>
@@ -606,7 +634,11 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 										onOpen={() => g.session && view.openEntity(g.session.path)}
 									/>
 								) : (
-									<EntityChip plugin={plugin} record={null} label="No session" />
+									<EntityChip
+										plugin={plugin}
+										record={null}
+										label={t('view.entity.events.noSession')}
+									/>
 								)}
 							</div>
 							<div className="loom-event-nest">{g.entries.map((en, i) => entryRow(en, i))}</div>

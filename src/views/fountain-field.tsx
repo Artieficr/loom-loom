@@ -19,6 +19,7 @@ import {
 } from '@codemirror/autocomplete';
 import { Menu, Notice, setIcon } from 'obsidian';
 import { ForwardedRef, forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { t } from '../i18n';
 import {
 	ElementType,
 	findAnnotationSpans,
@@ -29,7 +30,7 @@ import {
 	readLoomId,
 } from '../fountain';
 import { AltTextEntry, CommentEntry } from './script-notes';
-import { EntityType } from '../types';
+import { EntityType, entityLabel } from '../types';
 
 /**
  * Live-preview editor for the Fountain script. Deliberately NOT
@@ -563,7 +564,7 @@ export const FountainField = forwardRef(function FountainField(
 					return partiallyOverlaps(newContentFrom, newContentTo, s.contentFrom, s.contentTo);
 				});
 				if (overlaps) {
-					new Notice("Can't resize a comment span to partially overlap another one.");
+					new Notice(t('view.script.overlapNotice.resize'));
 					return;
 				}
 				view.dispatch({
@@ -959,7 +960,7 @@ export const FountainField = forwardRef(function FountainField(
 				.slice(0, 8)
 				.map((e) => ({
 					label: e.name,
-					detail: e.type,
+					detail: entityLabel(e.type),
 					apply: (v: EditorView, _c: unknown, _from: number, applyTo: number) => {
 						v.dispatch({
 							changes: { from, to: applyTo, insert: e.name },
@@ -1068,19 +1069,19 @@ export const FountainField = forwardRef(function FountainField(
 			const spans = findAnnotationSpans(view.state.doc.toString());
 			const overlaps = spans.some((s) => partiallyOverlaps(sel.from, sel.to, s.from, s.to));
 			if (overlaps) {
-				new Notice("Comments and alternative text can't partially overlap an existing one.");
+				new Notice(t('view.script.overlapNotice.create'));
 			}
 			const menu = new Menu();
 			menu.addItem((item) =>
 				item
-					.setTitle('Comment')
+					.setTitle(t('view.script.contextMenu.comment'))
 					.setIcon('message-square')
 					.setDisabled(overlaps)
 					.onClick(() => insertMarkerPair(view, 'comment', sel.from, sel.to))
 			);
 			menu.addItem((item) =>
 				item
-					.setTitle('Alternative text…')
+					.setTitle(t('view.script.contextMenu.altText'))
 					.setIcon('arrow-right-left')
 					.setDisabled(overlaps)
 					.onClick(() => insertMarkerPair(view, 'alt', sel.from, sel.to))

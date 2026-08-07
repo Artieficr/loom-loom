@@ -11,7 +11,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
-	DEFAULT_MEMBER_ROLE,
+	defaultMemberRole,
 	ENTITY_META,
 	ENTITY_TAGS,
 	ENTITY_TYPES,
@@ -23,6 +23,7 @@ import {
 	PC_GROUP_VALUE,
 	PC_TAG,
 	QUEST_OUTCOMES,
+	questOutcomeLabel,
 	VIEW_ENTITY,
 	VIEW_GROUP,
 	VIEW_LIST,
@@ -48,6 +49,7 @@ import {
 	EntityChip,
 	FRONTMATTER_RE,
 	Icon,
+	InfoIcon,
 	NavRail,
 	SearchableSelect,
 	SuggestInput,
@@ -105,6 +107,8 @@ import {
 import { pdfPages } from '../pdf';
 import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
 import type LoomLoomPlugin from '../main';
+import { LocaleKey, t, tn } from '../i18n';
+import { entityLabel, entityPlural } from '../types';
 
 
 /**
@@ -139,7 +143,7 @@ export class EntityView extends LoomFileReactView {
 	}
 
 	getDisplayText(): string {
-		if (!this.file) return 'Entity';
+		if (!this.file) return t('view.entity.tabFallback');
 		const record = this.plugin.indexer.get(this.file.path);
 		if (!record) return this.file.basename;
 		const project = this.plugin.indexer.getProjectByRoot(record.project) ?? null;
@@ -186,7 +190,7 @@ function useFrontmatterWriter(plugin: LoomLoomPlugin, file: TFile | null) {
 			if (!file) return;
 			plugin.app.fileManager.processFrontMatter(file, apply).catch((e) => {
 				console.error('Loom Loom: failed to update frontmatter', e);
-				new Notice('Could not save the change.');
+				new Notice(t('view.entity.common.saveFailed'));
 			});
 		},
 		[plugin, file]
@@ -382,9 +386,9 @@ function EntityPage({ view }: { view: EntityView }) {
 			altText: { ...notes.altText, [id]: { id, options: [selectedText], activeIndex: 0, acceptedIndex: null } },
 		}));
 		new TextInputModal(plugin.app, {
-			title: 'Add an alternative wording',
+			title: t('view.entity.altText.addWordingTitle'),
 			placeholder: selectedText,
-			cta: 'Add',
+			cta: t('project.common.add'),
 			multiline: true,
 			onSubmit: (value) => {
 				if (!project) return;
@@ -1186,8 +1190,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	if (!file || !record) {
 		return (
 			<div className="loom-entity loom-empty">
-				<p>Loading… If this note is not a Loom Loom entity (no `loomType` frontmatter), it has no entity page.</p>
-				<button onClick={() => view.navigateTo('markdown', { file: file?.path })}>Open as markdown</button>
+				<p>{t('view.entity.notEntity.loading')}</p>
+				<button onClick={() => view.navigateTo('markdown', { file: file?.path })}>{t('view.entity.notEntity.openAsMarkdown')}</button>
 			</div>
 		);
 	}
@@ -1198,8 +1202,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	// kind's features instead.
 	const anchorType = projectRoleType(project?.config, 'anchor');
 	const beatType = projectRoleType(project?.config, 'beat');
-	const anchorLabel = ENTITY_META[anchorType].label.toLowerCase();
-	const beatLabel = ENTITY_META[beatType].label.toLowerCase();
+	const anchorLabel = entityLabel(anchorType).toLowerCase();
+	const beatLabel = entityLabel(beatType).toLowerCase();
 	const kindFeatures = features(project?.config);
 	/** Writer projects: the writing lives in the script, not in note fields. */
 	const scriptMode = kindFeatures.script;
@@ -1429,7 +1433,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			})
 			.catch((e) => {
 				console.error(`Loom Loom: failed to update ${key}`, e);
-				new Notice('Could not save the change.');
+				new Notice(t('view.entity.common.saveFailed'));
 			});
 	};
 
@@ -1457,7 +1461,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
 		if (newPath === file.path) return;
 		if (plugin.app.vault.getAbstractFileByPath(newPath)) {
-			new Notice('A note with that name already exists.');
+			new Notice(t('project.common.nameExists'));
 			return;
 		}
 		await plugin.app.fileManager.renameFile(file, newPath);
@@ -1607,9 +1611,11 @@ function EntityPage({ view }: { view: EntityView }) {
 				const other = candidates.find((r) => r.name.trim().toLowerCase() === key && r.path !== current.path);
 				if (other) return other;
 				const ok = await confirmDialog(
-					`Rename "${current.name}" to "${name}"?`,
-					`This ${kind} is renamed everywhere it's referenced, not just on this scene's heading.`,
-					'Rename'
+					t('view.entity.scene.renameConfirmTitle', { name: current.name, newName: name }),
+					kind === 'sublocation'
+						? t('view.entity.scene.renameSublocationDetail')
+						: t('view.entity.scene.renameLocationDetail'),
+					t('view.list.rename')
 				);
 				if (!ok) return null;
 				await renameEntityRecord(plugin, project, current, name);
@@ -1694,9 +1700,9 @@ function EntityPage({ view }: { view: EntityView }) {
 				else {
 					if (currentSub.name.trim().toLowerCase() !== subKey) {
 						const ok = await confirmDialog(
-							`Rename "${currentSub.name}" to "${subName}"?`,
-							"This sublocation is renamed everywhere it's referenced, not just on this scene's heading.",
-							'Rename'
+							t('view.entity.scene.renameConfirmTitle', { name: currentSub.name, newName: subName }),
+							t('view.entity.scene.renameSublocationDetail'),
+							t('view.list.rename')
 						);
 						if (!ok) {
 							setSceneSub(currentSub.name);
@@ -1754,9 +1760,9 @@ function EntityPage({ view }: { view: EntityView }) {
 			const subName = currentSub.name;
 			setSceneSub(subName);
 			void confirmDialog(
-				`Delete "${subName}" sublocation?`,
-				"Clearing this field removes the sublocation's own note, not just this scene's heading. The note is moved to the trash.",
-				'Delete'
+				t('view.entity.scene.deleteSublocationTitle', { name: subName }),
+				t('view.entity.scene.deleteSublocationDetail'),
+				t('project.common.delete')
 			).then((ok) => {
 				if (!ok) return;
 				setSceneSub('');
@@ -2001,7 +2007,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				label={recordLabel(s, project)}
 				onOpen={() => view.openEntity(s.path)}
 				onRemove={clear}
-				removeLabel="Clear session"
+				removeLabel={t('view.entity.common.clearSession')}
 			/>
 		</div>
 	);
@@ -2077,7 +2083,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				await renameLocationFile(s, undefined);
 			} catch (e) {
 				console.error('Loom Loom: failed to detach sublocation', e);
-				new Notice('Could not detach the sublocation.');
+				new Notice(t('view.entity.location.detachFailed'));
 			}
 		})();
 		writeSublocationOrder(sublocations.filter((o) => o.path !== s.path));
@@ -2291,23 +2297,22 @@ function EntityPage({ view }: { view: EntityView }) {
 					if (zoneExists) {
 						new ConfirmModal(
 							plugin.app,
-							'Turn into a sublocation?',
-							'This location has a zone on the map. Turning it into a sublocation will ' +
-								'delete that zone from the map.',
+							t('view.entity.location.turnIntoSublocationTitle'),
+							t('view.entity.location.turnIntoSublocationDetail'),
 							() => {
 								void (async () => {
 									await dropMapZonesForThisLocation();
 									setParentLocation(target);
 								})();
 							},
-							'Turn into sublocation'
+							t('view.entity.location.turnIntoSublocationCta')
 						).open();
 					} else {
 						setParentLocation(target);
 					}
 				})();
 			},
-			'Pick the parent location…'
+			t('view.entity.location.pickParentPlaceholder')
 		).open();
 	};
 
@@ -2450,7 +2455,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		const orderToggle = (
 			<button className="loom-rel-add loom-order-toggle" onClick={toggleNotesOrder}>
 				<Icon name={newestFirst ? 'arrow-up-wide-narrow' : 'arrow-down-narrow-wide'} />
-				{newestFirst ? 'New on top' : 'New on bottom'}
+				{newestFirst ? t('view.entity.events.newOnTop') : t('view.entity.events.newOnBottom')}
 			</button>
 		);
 
@@ -2523,7 +2528,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				.processFrontMatter(f, (fm: Record<string, unknown>) => setLoomKey(fm, FM.description, value))
 				.catch((e) => {
 					console.error('Loom Loom: failed to save item description', e);
-					new Notice('Could not save the item description.');
+					new Notice(t('view.entity.items.descriptionSaveFailed'));
 				});
 		};
 		// A character-specific copy of the row's item: a new item note owned by
@@ -2542,7 +2547,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				view.openEntity(copy.path);
 			} catch (e) {
 				console.error('Loom Loom: failed to create character-specific item', e);
-				new Notice('Could not create the item copy.');
+				new Notice(t('view.entity.items.copyCreateFailed'));
 			}
 		};
 		// Reverse of the Items section: on an item page, the characters and
@@ -2631,7 +2636,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				})
 				.catch((e) => {
 					console.error('Loom Loom: failed to add event to page', e);
-					new Notice('Could not add the event.');
+					new Notice(t('view.entity.events.addFailed'));
 				});
 		};
 		const itemRow = (item: EntityRecord, i: number) => {
@@ -2665,7 +2670,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							)}
 							<button
 								className="loom-nav-btn"
-								aria-label="Open page"
+								aria-label={t('view.entity.common.openPage')}
 								onClick={() => view.openEntity(item.path)}
 							>
 								→
@@ -2679,7 +2684,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								{record.type === 'character' && !rowIsCopy ? (
 									<button
 										className="loom-nav-btn loom-item-copy-btn"
-										aria-label="Replace with a character specific copy of this item"
+										aria-label={t('view.entity.items.replaceWithCopy')}
 										onClick={() => void makeItemCopy(item)}
 									>
 										<Icon name="layers-2" />
@@ -2687,12 +2692,12 @@ function EntityPage({ view }: { view: EntityView }) {
 								) : null}
 								<button
 									className="loom-nav-btn loom-entity-delete"
-									aria-label="Delete this item"
+									aria-label={t('view.entity.items.deleteThisItem')}
 									onClick={() =>
 										new ConfirmModal(
 											plugin.app,
-											`Delete "${item.name}"?`,
-											'The note is moved to the trash.',
+											t('view.list.deleteConfirmTitle', { name: item.name }),
+											t('view.list.deleteMessageGeneral'),
 											() => {
 												const f = plugin.app.vault.getFileByPath(item.path);
 												if (!f) return;
@@ -2700,7 +2705,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													plugin.app.fileManager.trashFile(f)
 												);
 											},
-											'Delete'
+											t('project.common.delete')
 										).open()
 									}
 								>
@@ -2708,7 +2713,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								</button>
 								<button
 									className="loom-nav-btn"
-									aria-label="Remove from this page"
+									aria-label={t('view.entity.items.removeFromPage')}
 									onClick={() => removeItem(item)}
 								>
 									✕
@@ -2716,7 +2721,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							</div>
 							<button
 								className="loom-nav-btn"
-								aria-label={hubMenu === menuKey ? 'Close actions' : 'Show actions'}
+								aria-label={hubMenu === menuKey ? t('view.entity.common.closeActions') : t('view.entity.common.showActions')}
 								onClick={() => setHubMenu(hubMenu === menuKey ? null : menuKey)}
 							>
 								{hubMenu === menuKey ? '>' : '<'}
@@ -2749,7 +2754,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				const character = typeof rawCharacter === 'string' ? rawCharacter : `[[${linkTargetOf(record)}]]`;
 				const role = (
 					patch.role ??
-					(typeof obj?.role === 'string' ? obj.role : DEFAULT_MEMBER_ROLE)
+					(typeof obj?.role === 'string' ? obj.role : defaultMemberRole())
 				).trim();
 				const location =
 					patch.location !== undefined
@@ -2759,7 +2764,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						: typeof obj?.location === 'string'
 							? obj.location
 							: '';
-				const roleIsDefault = role === '' || role === DEFAULT_MEMBER_ROLE;
+				const roleIsDefault = role === '' || role === defaultMemberRole();
 				if (roleIsDefault && location === '') return character;
 				const next: Record<string, unknown> = { character };
 				if (!roleIsDefault) next.role = role;
@@ -2785,7 +2790,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			.processFrontMatter(f, (fm: Record<string, unknown>) => setLoomKey(fm, FM.seq, seq))
 			.catch((e) => {
 				console.error('Loom Loom: failed to save order', e);
-				new Notice('Could not save the new order.');
+				new Notice(t('view.entity.common.orderSaveFailed'));
 			});
 	};
 	const seqShift = (group: string, i: number): number => {
@@ -2953,7 +2958,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						<span className="loom-scene-row-num" aria-hidden="true" />
 						<span className="loom-script-scene-head">{item.node.title}</span>
 						<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-						<span className="loom-script-chapter-count">p. {sceneOutlinePageRange(item.node)}</span>
+						<span className="loom-script-chapter-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(item.node) })}</span>
 					</div>
 					{hasChildren ? (
 						<div className="loom-script-outline-scenes">
@@ -2978,7 +2983,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					</span>
 					<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
 					<span className="loom-script-chapter-count">
-						{branches.length} branch{branches.length === 1 ? '' : 'es'}
+						{tn('view.entity.script.branchCount', branches.length)}
 					</span>
 				</div>
 				<div
@@ -3017,7 +3022,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									<span className="loom-scene-row-num">{i + 1}</span>
 									<span className="loom-script-scene-head">{b.node.title}</span>
 									<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-									<span className="loom-script-chapter-count">p. {sceneOutlinePageRange(b.node)}</span>
+									<span className="loom-script-chapter-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(b.node) })}</span>
 								</div>
 								{hasChildren ? (
 									<div className="loom-script-outline-scenes">
@@ -3206,7 +3211,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		const parent = f.parent?.path ?? '';
 		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
 		if (newPath !== f.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
-			new Notice('A note with that name already exists.');
+			new Notice(t('project.common.nameExists'));
 			return;
 		}
 		void plugin.app.fileManager
@@ -3220,7 +3225,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			.then(() => (newPath !== f.path ? plugin.app.fileManager.renameFile(f, newPath) : undefined))
 			.catch((e) => {
 				console.error('Loom Loom: failed to rename entity', e);
-				new Notice('Could not rename the entity.');
+				new Notice(t('view.entity.common.renameFailed'));
 			});
 	};
 	// Writer projects: quests resolve against Scenes (script order, `seq`),
@@ -3329,18 +3334,18 @@ function EntityPage({ view }: { view: EntityView }) {
 		const menu = new Menu();
 		menu.addItem((item) =>
 			item
-				.setTitle('All entities')
+				.setTitle(t('project.createEntity.allEntities'))
 				.setIcon('filter')
 				.setChecked(current === null)
 				.onClick(() => setRowFilter(i, null))
 		);
-		for (const t of ENTITY_TYPES) {
+		for (const et of ENTITY_TYPES) {
 			menu.addItem((item) =>
 				item
-					.setTitle(ENTITY_META[t].plural)
-					.setIcon(ENTITY_META[t].icon)
-					.setChecked(current === t)
-					.onClick(() => setRowFilter(i, t))
+					.setTitle(entityPlural(et))
+					.setIcon(ENTITY_META[et].icon)
+					.setChecked(current === et)
+					.onClick(() => setRowFilter(i, et))
 			);
 		}
 		menu.showAtMouseEvent(e.nativeEvent);
@@ -3351,7 +3356,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			<input
 				type="text"
 				className="loom-rel-type"
-				placeholder="Identifier"
+				placeholder={t('project.addRelationship.identifier')}
 				value={rel.type}
 				onChange={(e) => {
 					const next = [...relationships];
@@ -3363,7 +3368,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			<div className="loom-rel-targetbox">
 				<SuggestInput
 				className="loom-rel-target"
-				placeholder={rel.filter ? `${ENTITY_META[rel.filter].label} note` : 'Target note'}
+				placeholder={rel.filter ? t('view.entity.relationships.targetPlaceholderTyped', { label: entityLabel(rel.filter) }) : t('project.addRelationship.targetPlaceholder')}
 				value={rel.target}
 				options={[
 					...(groupPcs.length > 0 && (!rel.filter || rel.filter === 'character' || rel.filter === 'faction')
@@ -3399,7 +3404,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				action={
 					project
 						? {
-								label: '+ Create entity…',
+								label: t('view.entity.relationships.createEntityAction'),
 								onPick: () =>
 									new EntityTypeSuggestModal(plugin, (type) =>
 										new CreateEntityModal(plugin, type, project, {
@@ -3440,7 +3445,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			/>
 				<button
 				className="loom-rel-filter"
-				aria-label="Filter suggestions by entity type"
+				aria-label={t('project.createEntity.filterByType')}
 				onClick={(e) => openRelFilterMenu(e, i)}
 			>
 				<Icon name={rel.filter ? ENTITY_META[rel.filter].icon : 'filter'} />
@@ -3448,7 +3453,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			</div>
 			<button
 				className="loom-nav-btn"
-				aria-label="Remove relationship"
+				aria-label={t('view.entity.relationships.removeRelationship')}
 				onClick={() => {
 					const remove = () => commitRelationships(relationships.filter((_, j) => j !== i));
 					// A still-empty new row goes silently; a filled one asks first.
@@ -3456,10 +3461,13 @@ function EntityPage({ view }: { view: EntityView }) {
 					else {
 						new ConfirmModal(
 							plugin.app,
-							'Remove relationship?',
-							`Removes "${rel.type.trim() === '' ? 'related' : rel.type.trim()}" → ${rel.target.trim()}.`,
+							t('view.entity.relationships.removeConfirmTitle'),
+							t('view.entity.relationships.removeConfirmDetail', {
+								type: rel.type.trim() === '' ? t('view.entity.relationships.relatedFallback') : rel.type.trim(),
+								target: rel.target.trim(),
+							}),
 							remove,
-							'Remove'
+							t('common.remove')
 						).open();
 					}
 				}}
@@ -3528,12 +3536,12 @@ function EntityPage({ view }: { view: EntityView }) {
 								label={shortSessionLabel(picked)}
 								onOpen={() => view.openEntity(picked.path)}
 								onRemove={() => setNote({ session: '' }, true)}
-								removeLabel="Clear session"
+								removeLabel={t('view.entity.common.clearSession')}
 							/>
 						</div>
 					) : (
 						<SearchableSelect
-							placeholder="Pick a session…"
+							placeholder={t('view.entity.sessionNotes.pickSession')}
 							options={sessionsByDate
 								.filter((s) => s.path !== record.path && !takenSessions.has(s.path))
 								.map((s) => ({ value: linkTargetOf(s), label: shortSessionLabel(s) }))}
@@ -3541,7 +3549,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							action={
 								project
 									? {
-											label: '+ New session…',
+											label: t('view.entity.sessionNotes.newSessionAction'),
 											onPick: () =>
 												new CreateEntityModal(plugin, anchorType, project, {
 													onCreated: (created) => setNote({ session: created.basename }, true),
@@ -3555,7 +3563,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			<div className="loom-hub-col">
 					<div className="loom-hub-involve">
 						<SearchableSelect
-							placeholder="Involve…"
+							placeholder={t('view.entity.sessionNotes.involvePlaceholder')}
 							options={[
 								...groupOption(
 									groupPcs.filter(
@@ -3586,7 +3594,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							action={
 								project
 									? {
-											label: '+ Create new entity',
+											label: t('view.entity.sessionNotes.createNewEntityAction'),
 											onPick: () =>
 												new EntityTypeSuggestModal(plugin, (type) =>
 													new CreateEntityModal(plugin, type, project, {
@@ -3606,25 +3614,25 @@ function EntityPage({ view }: { view: EntityView }) {
 						/>
 						<button
 							className="loom-rel-filter"
-							aria-label="Filter suggestions by entity type"
+							aria-label={t('project.createEntity.filterByType')}
 							onClick={(e) => {
 								const menu = new Menu();
 								const fkey = 'row:' + String(i);
 								const current = hubFilter[fkey] ?? null;
 								menu.addItem((item) =>
 									item
-										.setTitle('All entities')
+										.setTitle(t('project.createEntity.allEntities'))
 										.setIcon('filter')
 										.setChecked(current === null)
 										.onClick(() => setHubFilter({ ...hubFilter, [fkey]: null }))
 								);
-								for (const t of projectTypes(project?.config).filter((t) => roleOf(t) === null)) {
+								for (const et of projectTypes(project?.config).filter((et) => roleOf(et) === null)) {
 									menu.addItem((item) =>
 										item
-											.setTitle(ENTITY_META[t].plural)
-											.setIcon(ENTITY_META[t].icon)
-											.setChecked(current === t)
-											.onClick(() => setHubFilter({ ...hubFilter, [fkey]: t }))
+											.setTitle(entityPlural(et))
+											.setIcon(ENTITY_META[et].icon)
+											.setChecked(current === et)
+											.onClick(() => setHubFilter({ ...hubFilter, [fkey]: et }))
 									);
 								}
 								menu.showAtMouseEvent(e.nativeEvent);
@@ -3644,7 +3652,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									label={groupName}
 									onOpen={openGroupPage}
 									onRemove={() => setNote({ group: [] }, true)}
-									removeLabel="Remove the group"
+									removeLabel={t('view.entity.common.removeTheGroup')}
 								/>
 							) : null}
 							{note.involved
@@ -3663,7 +3671,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										label={target?.name ?? lp}
 										onOpen={target ? () => view.openEntity(target.path) : undefined}
 										onRemove={() => setNote({ involved: note.involved.filter((v) => v !== lp) }, true)}
-										removeLabel="Remove involved entity"
+										removeLabel={t('view.entity.common.removeInvolvedEntity')}
 									/>
 								))}
 						</div>
@@ -3673,7 +3681,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						<div className="loom-hub-col">
 						<div className="loom-hub-location">
 							<SearchableSelect
-								placeholder="Location…"
+								placeholder={t('view.entity.common.locationPlaceholder')}
 								options={(project ? plugin.indexer.getAll('location', project.root) : [])
 									.filter((l) => !noteLocs.some((q) => q.target?.path === l.path))
 									.sort(mainLocationFirst)
@@ -3682,7 +3690,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								action={
 									project
 										? {
-												label: '+ Create new location',
+												label: t('view.entity.sessionNotes.createNewLocationAction'),
 												onPick: () =>
 													new CreateEntityModal(plugin, 'location', project, {
 														onCreated: (created) =>
@@ -3703,7 +3711,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										label={target ? locationLabel(target, plugin) : key}
 										onOpen={target ? () => view.openEntity(target.path) : undefined}
 										onRemove={remove}
-										removeLabel="Remove location"
+										removeLabel={t('view.entity.common.removeLocation')}
 									/>
 								))}
 							</div>
@@ -3712,7 +3720,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					) : null}
 								<button
 					className="loom-nav-btn loom-note-remove loom-entity-delete"
-					aria-label="Delete session note"
+					aria-label={t('view.entity.sessionNotes.deleteNote')}
 					onClick={() => {
 						const remove = () => commitSessionNotes(sessionNotes.filter((_, j) => j !== i));
 						// Only a note that actually holds text needs a confirmation.
@@ -3720,10 +3728,10 @@ function EntityPage({ view }: { view: EntityView }) {
 						else {
 							new ConfirmModal(
 								plugin.app,
-								'Delete this session note?',
-								'The note text will be lost.',
+								t('view.entity.sessionNotes.deleteConfirmTitle'),
+								t('view.entity.sessionNotes.deleteConfirmDetail'),
 								remove,
-								'Delete'
+								t('project.common.delete')
 							).open();
 						}
 					}}
@@ -3742,12 +3750,12 @@ function EntityPage({ view }: { view: EntityView }) {
 									record={placeRec}
 									label={placeRec ? locationLabel(placeRec, plugin) : pl}
 									onRemove={() => setNote({ places: note.places.filter((_, j) => j !== pi) }, true)}
-									removeLabel="Remove place"
+									removeLabel={t('view.entity.common.removePlace')}
 								/>
 							);
 						})}
 						<SearchableSelect
-							placeholder="Add a place…"
+							placeholder={t('view.entity.common.addPlacePlaceholder')}
 							options={projectLocations
 								.filter((l) => l.path !== record.path && !note.places.includes(linkTargetOf(l)))
 								.sort(mainLocationFirst)
@@ -3848,7 +3856,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					/>
 					<button
 						className="loom-nav-btn"
-						aria-label="Open page"
+						aria-label={t('view.entity.common.openPage')}
 						onClick={() => view.openEntity(en.owner.path)}
 					>
 					→
@@ -3861,12 +3869,12 @@ function EntityPage({ view }: { view: EntityView }) {
 					>
 						<button
 							className="loom-nav-btn loom-entity-delete"
-							aria-label="Delete this entity"
+							aria-label={t('view.entity.common.deleteThisEntity')}
 							onClick={() =>
 								new ConfirmModal(
 									plugin.app,
-									`Delete "${en.owner.name}"?`,
-									'The note is moved to the trash.',
+									t('view.list.deleteConfirmTitle', { name: en.owner.name }),
+									t('view.list.deleteMessageGeneral'),
 									() => {
 										const f = plugin.app.vault.getFileByPath(en.owner.path);
 										if (!f) return;
@@ -3874,7 +3882,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											plugin.app.fileManager.trashFile(f)
 										);
 									},
-									'Delete'
+									t('project.common.delete')
 								).open()
 							}
 						>
@@ -3885,19 +3893,19 @@ function EntityPage({ view }: { view: EntityView }) {
 							// session link) — the note itself stays, just dateless.
 							<button
 								className="loom-nav-btn"
-								aria-label="Remove from this note"
+								aria-label={t('view.entity.common.removeFromNote')}
 								onClick={() =>
 									new ConfirmModal(
 										plugin.app,
-										'Remove this note from the session?',
-										"It will clear the current session date in the note and it won't be displayed here anymore.",
+										t('view.entity.events.removeFromSessionTitle'),
+										t('view.entity.events.removeFromSessionDetail'),
 										() =>
 											writeOwnerNotes(en.owner, (arr) => {
 												const item = arr[en.idx];
 												if (typeof item === 'object' && item !== null)
 													(item as { session?: unknown }).session = '';
 											}),
-										'Remove'
+										t('common.remove')
 									).open()
 								}
 							>
@@ -3909,12 +3917,12 @@ function EntityPage({ view }: { view: EntityView }) {
 							// event stops showing here while the note itself survives.
 							<button
 								className="loom-nav-btn"
-								aria-label="Remove from this note"
+								aria-label={t('view.entity.common.removeFromNote')}
 								onClick={() =>
 									new ConfirmModal(
 										plugin.app,
-										'Remove from this note?',
-										`If you remove ${record.name} from ${en.owner.name}, this event won't be displayed here anymore.`,
+										t('view.entity.events.removeFromNoteTitle'),
+										t('view.entity.events.removeFromNoteDetail', { name: record.name, owner: en.owner.name }),
 										() => {
 											if (isLocation) {
 												writeEntryPlaces(en, (list) =>
@@ -3948,18 +3956,18 @@ function EntityPage({ view }: { view: EntityView }) {
 													}
 												});
 											}
-										},
-										'Remove'
-									).open()
-								}
-							>
+									},
+									t('common.remove')
+								).open()
+							}
+						>
 								✕
 							</button>
 						)}
 					</div>
 					<button
 						className="loom-nav-btn"
-						aria-label={hubMenu === menuKey ? 'Close actions' : 'Show actions'}
+						aria-label={hubMenu === menuKey ? t('view.entity.common.closeActions') : t('view.entity.common.showActions')}
 						onClick={() => setHubMenu(hubMenu === menuKey ? null : menuKey)}
 					>
 						{hubMenu === menuKey ? '>' : '<'}
@@ -3969,7 +3977,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<div className="loom-hub-col">
 						<div className="loom-hub-involve">
 							<SearchableSelect
-							placeholder="Involve…"
+							placeholder={t('view.entity.sessionNotes.involvePlaceholder')}
 					options={[
 								...groupOption(
 									groupPcs.filter(
@@ -4000,7 +4008,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							action={
 								project
 									? {
-											label: '+ Create new entity',
+											label: t('view.entity.sessionNotes.createNewEntityAction'),
 											onPick: () => {
 												// A quest created here inherits the note's session as its
 												// "Received in session".
@@ -4024,24 +4032,24 @@ function EntityPage({ view }: { view: EntityView }) {
 						/>
 							<button
 							className="loom-rel-filter"
-							aria-label="Filter suggestions by entity type"
+							aria-label={t('project.createEntity.filterByType')}
 							onClick={(e) => {
 								const menu = new Menu();
 								const current = hubFilter[menuKey] ?? null;
 								menu.addItem((item) =>
 									item
-										.setTitle('All entities')
+										.setTitle(t('project.createEntity.allEntities'))
 										.setIcon('filter')
 										.setChecked(current === null)
 										.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: null }))
 								);
-								for (const t of projectTypes(project?.config).filter((t) => roleOf(t) === null)) {
+								for (const et of projectTypes(project?.config).filter((et) => roleOf(et) === null)) {
 									menu.addItem((item) =>
 										item
-											.setTitle(ENTITY_META[t].plural)
-											.setIcon(ENTITY_META[t].icon)
-											.setChecked(current === t)
-											.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: t }))
+											.setTitle(entityPlural(et))
+											.setIcon(ENTITY_META[et].icon)
+											.setChecked(current === et)
+											.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: et }))
 									);
 								}
 								menu.showAtMouseEvent(e.nativeEvent);
@@ -4061,7 +4069,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										label={groupName}
 										onOpen={openGroupPage}
 										onRemove={() => writeEntryGroup(en, () => [])}
-										removeLabel="Remove the group"
+										removeLabel={t('view.entity.common.removeTheGroup')}
 									/>
 								) : null}
 								{involved.map(({ lp, target }, ii) => (
@@ -4085,14 +4093,14 @@ function EntityPage({ view }: { view: EntityView }) {
 											if (target && target.path === record.path) {
 												new ConfirmModal(
 													plugin.app,
-													'Remove from involved?',
-													`If you remove ${target.name} from ${en.owner.name}, this event won't be displayed here anymore.`,
+													t('view.entity.events.removeFromInvolvedTitle'),
+													t('view.entity.events.removeFromNoteDetail', { name: target.name, owner: en.owner.name }),
 													doRemove,
-													'Remove'
+													t('common.remove')
 												).open();
 											} else doRemove();
 										}}
-										removeLabel="Remove involved entity"
+										removeLabel={t('view.entity.common.removeInvolvedEntity')}
 									/>
 								))}
 							</div>
@@ -4101,7 +4109,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<div className="loom-hub-col">
 						<div className="loom-hub-location">
 						<SearchableSelect
-							placeholder="Location…"
+							placeholder={t('view.entity.common.locationPlaceholder')}
 							options={(project ? plugin.indexer.getAll('location', project.root) : [])
 								.filter((t) => !locs.some((l) => l.target?.path === t.path))
 								.sort(mainLocationFirst)
@@ -4110,7 +4118,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							action={
 								project
 									? {
-											label: '+ Create new location',
+											label: t('view.entity.sessionNotes.createNewLocationAction'),
 											onPick: () =>
 												new CreateEntityModal(plugin, 'location', project, {
 													onCreated: (created) =>
@@ -4141,14 +4149,14 @@ function EntityPage({ view }: { view: EntityView }) {
 											) {
 												new ConfirmModal(
 													plugin.app,
-													'Remove from this location?',
-													`If you remove ${target.name} from ${en.owner.name}, this event won't be displayed here anymore.`,
+													t('view.entity.events.removeFromLocationTitle'),
+													t('view.entity.events.removeFromNoteDetail', { name: target.name, owner: en.owner.name }),
 													remove,
-													'Remove'
+													t('common.remove')
 												).open();
 											} else remove();
 										}}
-										removeLabel="Remove location"
+										removeLabel={t('view.entity.common.removeLocation')}
 									/>
 								))}
 							</div>
@@ -4182,10 +4190,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	const eventsSection =
 		showsEvents && project ? (
 			<div className="loom-field loom-field-sep">
-				<span className="loom-field-label">{ENTITY_META[beatType].plural}</span>
+				<span className="loom-field-label">{entityPlural(beatType)}</span>
 				<div className="loom-hub-add-row">
 					<SearchableSelect
-						placeholder={`Add ${/^[aeiou]/.test(beatLabel) ? 'an' : 'a'} ${beatLabel}…`}
+						placeholder={t('view.list.addBeatTitle', {
+							article: /^[aeiou]/.test(beatLabel) ? 'an' : 'a',
+							beat: beatLabel,
+						}) + '…'}
 						options={plugin.indexer
 							.getAll(beatType, record.project)
 							.filter((ev) => !pageEventEntries.some((e) => e.owner.path === ev.path))
@@ -4196,7 +4207,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							if (ev) addExistingEventToPage(ev);
 						}}
 						action={{
-							label: `+ Create new ${beatLabel}`,
+							label: t('view.entity.events.createNewBeatAction', { beat: beatLabel }),
 							onPick: () =>
 								new CreateEntityModal(plugin, beatType, project, {
 									...(isLocation
@@ -4225,7 +4236,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										onOpen={() => g.session && view.openEntity(g.session.path)}
 									/>
 								) : (
-									<EntityChip plugin={plugin} record={null} label="No session" />
+									<EntityChip plugin={plugin} record={null} label={t('view.entity.events.noSession')} />
 								)}
 							</div>
 							<div
@@ -4254,10 +4265,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	const itemsSection =
 		showsItems && project ? (
 			<div className="loom-field loom-field-sep">
-				<span className="loom-field-label">Items</span>
+				<span className="loom-field-label">{entityPlural('item')}</span>
 				<div className="loom-hub-add-row">
 					<SearchableSelect
-						placeholder="Add an item…"
+						placeholder={t('view.entity.items.addItemPlaceholder')}
 						options={plugin.indexer
 							.getAll('item', project.root)
 							.filter((it) => !itemRecords.some((r) => r.path === it.path))
@@ -4265,7 +4276,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							.map((it) => ({ value: linkTargetOf(it), label: it.name }))}
 						onPick={(linkTarget) => addItemLink(linkTarget)}
 						action={{
-							label: '+ Create new item',
+							label: t('view.entity.items.createNewItemAction'),
 							onPick: () =>
 								new CreateEntityModal(plugin, 'item', project, {
 									onCreated: (created) => addItemLink(created.basename),
@@ -4284,7 +4295,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				) : null}
 				{inheritedGroups.length > 0 ? (
 					<div className="loom-inherited-items">
-						<span className="loom-field-sublabel">Items in sublocations</span>
+						<span className="loom-field-sublabel">{t('view.entity.items.itemsInSublocations')}</span>
 						{inheritedGroups.map((g) => (
 							<div key={g.holder.path} className="loom-locnote-group loom-char-event-group">
 								<div className="loom-tag-row loom-event-group-session">
@@ -4324,7 +4335,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						if (origin) view.navigateTo(origin.type, origin.state);
 					}}
 				>
-					← Back
+					← {t('view.entity.common.back')}
 				</button>
 			<span
 					className="loom-chip"
@@ -4333,28 +4344,28 @@ function EntityPage({ view }: { view: EntityView }) {
 						border: `1px solid ${plugin.settings.nodeColors[record.type]}`,
 					}}
 				>
-					{ENTITY_META[record.type].label}
+					{entityLabel(record.type)}
 				</span>
 				<div className="loom-shell-spacer" />
 				{isLocation && record.parentLocation === null && project ? (
 					<button className="loom-nav-btn" onClick={openTurnIntoPicker}>
-						Turn to a sublocation
+						{t('view.entity.location.turnToSublocation')}
 					</button>
 				) : null}
 			<button
 					className="loom-rel-filter"
-					aria-label="Open as markdown"
+					aria-label={t('view.entity.notEntity.openAsMarkdown')}
 					onClick={() => view.navigateTo('markdown', { file: file.path })}
 				>
 					<Icon name="file-type" />
 				</button>
 			<button
 					className="loom-rel-filter loom-entity-delete"
-					aria-label="Delete"
+					aria-label={t('project.common.delete')}
 					onClick={() =>
 						new ConfirmModal(
 							plugin.app,
-							`Delete "${recordLabel(record, project)}"?`,
+							t('view.list.deleteConfirmTitle', { name: recordLabel(record, project) }),
 							// A scene/chapter IS its stretch of the script — deleting the
 							// note while leaving the writing behind would just resurrect it
 							// on the next parse, so the two go together. Deleting a chapter
@@ -4362,9 +4373,9 @@ function EntityPage({ view }: { view: EntityView }) {
 							// the chapter's own script block, which is about to go too).
 							scriptNamed
 								? record.type === 'chapter'
-									? "The note is moved to the trash, this chapter is removed from the script, and its scenes' notes are trashed too."
-									: 'The note is moved to the trash, and this scene is removed from the script.'
-								: 'The note is moved to the trash.',
+									? t('view.list.deleteMessageChapter')
+									: t('view.list.deleteMessageScene')
+								: t('view.list.deleteMessageGeneral'),
 							() => {
 								// Leave the page first so the view never sits on a
 								// trashed file, then delete.
@@ -4381,7 +4392,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									);
 								}
 							},
-							'Delete'
+							t('project.common.delete')
 						).open()
 					}
 				>
@@ -4393,7 +4404,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    original item and the owning character as chips instead. */}
 			{isItemCopy ? (
 				<div className="loom-field">
-					<span className="loom-field-label">Item</span>
+					<span className="loom-field-label">{entityLabel('item')}</span>
 					<div className="loom-tag-row">
 						{copyOriginal ? (
 							<EntityChip
@@ -4430,7 +4441,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							    Labeled "Title" rather than "Name" when it's script-owned,
 							    since that's what pairs with the chapter's editable
 							    "Display title" below. */}
-							<span className="loom-field-label">{scriptNamed ? 'Title' : 'Name'}</span>
+							<span className="loom-field-label">{scriptNamed ? t('view.entity.common.titleLabel') : t('view.entity.common.nameLabel')}</span>
 							<input
 								type="text"
 								value={name}
@@ -4442,18 +4453,18 @@ function EntityPage({ view }: { view: EntityView }) {
 							/>
 						</label>
 						<div className="loom-alias-col">
-							<span className="loom-field-label">Aliases</span>
+							<span className="loom-field-label">{t('view.entity.common.aliases')}</span>
 							<div className="loom-alias-box">
 								<input
 									type="text"
-									placeholder="Add alias"
+									placeholder={t('view.list.addAlias')}
 									value={aliasDraft}
 									onChange={(e) => setAliasDraft(e.target.value)}
 									onKeyDown={(e) => {
 										if (e.key === 'Enter') addAlias();
 									}}
 								/>
-								<button className="loom-rel-filter loom-alias-add" aria-label="Add alias" onClick={addAlias}>
+								<button className="loom-rel-filter loom-alias-add" aria-label={t('view.list.addAlias')} onClick={addAlias}>
 									<Icon name="plus" />
 								</button>
 							</div>
@@ -4468,7 +4479,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									record={null}
 									label={alias}
 									onRemove={() => removeAlias(alias)}
-									removeLabel="Remove alias"
+									removeLabel={t('view.entity.common.removeAlias')}
 								/>
 							))}
 						</div>
@@ -4487,7 +4498,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    the script heading — this field group IS the heading. */}
 			{record.type === 'scene' ? (
 				<div className="loom-field">
-					<span className="loom-field-label">Scene heading</span>
+					<span className="loom-field-label">{t('view.entity.scene.headingLabel')}</span>
 					<div className="loom-scene-heading-fields">
 						<SuggestInput
 							className="loom-scene-heading-intext"
@@ -4503,7 +4514,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						/>
 						<SuggestInput
 							className="loom-scene-heading-location"
-							placeholder="Location"
+							placeholder={entityLabel('location')}
 							value={sceneMain}
 							options={plugin.indexer
 								.getAll('location', record.project)
@@ -4518,7 +4529,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						/>
 						<SuggestInput
 							className="loom-scene-heading-location"
-							placeholder="Sublocation (optional)"
+							placeholder={t('project.createEntity.sublocationOptional')}
 							value={sceneSub}
 							options={(() => {
 								const mainRecord = plugin.indexer
@@ -4544,7 +4555,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						<input
 							type="text"
 							className="loom-scene-heading-time"
-							placeholder="Time"
+							placeholder={t('project.createEntity.timePlaceholder')}
 							value={sceneTime}
 							onChange={(e) => setSceneTime(e.target.value)}
 							onBlur={() => commitSceneTime()}
@@ -4565,7 +4576,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    parent's page, not its own. */}
 			{isLocation && record.parentLocation !== null ? (
 				<div className="loom-field">
-					<span className="loom-field-label">Sublocation of</span>
+					<span className="loom-field-label">{t('project.createEntity.sublocationOf')}</span>
 					{parentLocation ? (
 						<button className="loom-subloc-link" onClick={() => view.openEntity(parentLocation.path)}>
 							{parentLocation.name}
@@ -4580,12 +4591,12 @@ function EntityPage({ view }: { view: EntityView }) {
 			    sublocations included; shown right after "Sublocation of"). */}
 			{isLocation ? (
 				<div className="loom-field">
-					<span className="loom-field-label">Part of region</span>
+					<span className="loom-field-label">{t('project.createEntity.partOfRegion')}</span>
 					{!record.region || editingRegion ? (
 						<div className="loom-region-pick">
 							<SearchableSelect
 								key={`${record.region ?? ''}:${editingRegion}`}
-								placeholder="Not specified"
+								placeholder={t('common.notSpecified')}
 								options={regions
 									.map((r) => ({ value: linkTargetOf(r), label: r.name }))
 									.sort((a, b) => a.label.localeCompare(b.label))}
@@ -4593,7 +4604,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								action={
 									project
 										? {
-												label: '+ Create region…',
+												label: t('view.entity.location.createRegionAction'),
 												onPick: () =>
 													new CreateEntityModal(plugin, 'region', project, {
 														onCreated: (created) => {
@@ -4612,7 +4623,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							{editingRegion ? (
 								<button
 									className="loom-rel-filter"
-									aria-label="Clear region"
+									aria-label={t('view.entity.location.clearRegion')}
 									onClick={() => {
 										clearLocationRegion();
 										setEditingRegion(false);
@@ -4632,7 +4643,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							/>
 							<button
 								className="loom-rel-filter"
-								aria-label="Change region"
+								aria-label={t('view.entity.location.changeRegion')}
 								onClick={() => setEditingRegion(true)}
 							>
 								<Icon name="square-pen" fallback="pencil" />
@@ -4645,9 +4656,9 @@ function EntityPage({ view }: { view: EntityView }) {
 			{record.type === 'session' ? (
 				<label className="loom-field">
 					<span className="loom-field-label loom-field-label-row">
-						Date
+						{t('project.createEntity.date')}
 						{sessionNumber > 0 ? (
-							<span className="loom-session-number">Session {sessionNumber}</span>
+							<span className="loom-session-number">{t('view.entity.common.sessionNumber', { n: sessionNumber })}</span>
 						) : null}
 					</span>
 					<input
@@ -4665,10 +4676,10 @@ function EntityPage({ view }: { view: EntityView }) {
 			    the story is the script order (`seq`), same as a Chapter's. */}
 			{isBeat && record.type !== 'scene' ? (
 				<label className="loom-field">
-					<span className="loom-field-label">Date</span>
+					<span className="loom-field-label">{t('project.createEntity.date')}</span>
 					<input
 						type="text"
-						placeholder="Not specified"
+						placeholder={t('common.notSpecified')}
 						value={date}
 						onChange={(e) => setDate(e.target.value)}
 						onBlur={() => void commitDate()}
@@ -4693,7 +4704,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							void commitDate(today);
 						}}
 					>
-						@today
+						{t('view.entity.common.todayLink')}
 					</span>
 				</label>
 			) : null}
@@ -4701,9 +4712,9 @@ function EntityPage({ view }: { view: EntityView }) {
 			{record.type === 'chapter' ? (
 				<label className="loom-field">
 					<span className="loom-field-label loom-field-label-row">
-						Title
+						{t('view.entity.common.titleLabel')}
 						{sessionNumber > 0 ? (
-							<span className="loom-session-number">Chapter {sessionNumber}</span>
+							<span className="loom-session-number">{t('view.entity.common.chapterNumber', { n: sessionNumber })}</span>
 						) : null}
 					</span>
 					{/* The script's `# section` line — editing it writes straight into
@@ -4726,7 +4737,7 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{record.type === 'chapter' ? (
 				<label className="loom-field">
-					<span className="loom-field-label">Display title</span>
+					<span className="loom-field-label">{t('project.createEntity.displayTitle.name')}</span>
 					<input
 						type="text"
 						placeholder={record.name}
@@ -4748,7 +4759,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    rest of the page. */}
 			{record.type === 'chapter' ? (
 				<div className="loom-field loom-field-body">
-					<span className="loom-field-label">Notes</span>
+					<span className="loom-field-label">{t('project.notes')}</span>
 					<MarkdownField
 						app={plugin.app}
 						value={body ?? ''}
@@ -4765,7 +4776,7 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{isSession && kindFeatures.attendance ? (
 				<div className="loom-field">
-					<span className="loom-field-label">Attendance</span>
+					<span className="loom-field-label">{t('view.entity.common.attendance')}</span>
 					{attendancePcs.length > 0 ? (
 						<div className="loom-tag-row">
 							{attendancePcs.map((c) => (
@@ -4779,7 +4790,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							))}
 						</div>
 					) : (
-						<div className="loom-attendance-empty">No PC characters in this project yet.</div>
+						<div className="loom-attendance-empty">{t('view.entity.common.noPcCharacters')}</div>
 					)}
 				</div>
 			) : null}
@@ -4787,7 +4798,7 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{questSectionVisible ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Quests</span>
+					<span className="loom-field-label">{entityPlural('quest')}</span>
 					{(['active', 'resolvedThis', 'resolvedPrev'] as const).map((state) => {
 						const outcomeKey = (q: EntityRecord) => {
 							const out = q.questOutcomeSession ? plugin.indexer.resolve(q.questOutcomeSession, q.path) : null;
@@ -4815,10 +4826,10 @@ function EntityPage({ view }: { view: EntityView }) {
 						const pageLabel = record.type === 'scene' ? beatLabel : anchorLabel;
 						const heading =
 							state === 'active'
-								? 'Active'
+								? t('view.list.active')
 								: state === 'resolvedThis'
-									? `Resolved this ${pageLabel}`
-									: 'Resolved previously';
+									? t('view.entity.quests.resolvedThis', { page: pageLabel })
+									: t('view.entity.quests.resolvedPreviously');
 						return (
 							<div key={state} className="loom-section">
 								<button
@@ -4829,7 +4840,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									{heading}
 									<span className="loom-section-count">
 										{state === 'resolvedPrev' && limit > 0 && total > list.length
-											? `${list.length} of ${total}`
+											? t('view.entity.quests.countOfTotal', { count: list.length, total })
 											: list.length}
 									</span>
 								</button>
@@ -4872,7 +4883,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													</div>
 													<div className="loom-quest-card-row">
 														<span className="loom-quest-card-label">
-															{givers.length > 1 ? 'Quest givers:' : 'Quest giver:'}
+															{givers.length > 1 ? t('view.list.questGivers') : t('view.list.questGiver')}
 														</span>
 <span className="loom-quest-card-value">														{givers.length > 0 ? (
 															givers.map((g) => (
@@ -4889,10 +4900,10 @@ function EntityPage({ view }: { view: EntityView }) {
 														)}</span>
 													</div>
 													<div className="loom-quest-card-row">
-													<span className="loom-quest-card-label">Received on:</span>
+													<span className="loom-quest-card-label">{t('view.list.receivedOn')}</span>
 <span className="loom-quest-card-value">														{received && roleOf(received.type) === questAnchorRole ? (
 															received.path === record.path ? (
-																<span>This {pageLabel}</span>
+																<span>{t('view.entity.quests.thisPage', { page: pageLabel })}</span>
 															) : (
 																<button
 																	className="loom-subloc-link"
@@ -4908,7 +4919,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													{quest.loomTags.length > 0 ? (
 														<div className="loom-quest-card-row">
 															<span className="loom-quest-card-label">
-																{quest.loomTags.length > 1 ? 'Tags:' : 'Tag:'}
+																{quest.loomTags.length > 1 ? t('view.list.tagsLabel') : t('view.list.tagLabel')}
 															</span>
 															<span className="loom-quest-card-value">
 																{quest.loomTags.map((t) => (
@@ -4921,10 +4932,10 @@ function EntityPage({ view }: { view: EntityView }) {
 													{state !== 'active' ? (
 														<>
 															<div className="loom-quest-card-row">
-															<span className="loom-quest-card-label">Completed on:</span>
+															<span className="loom-quest-card-label">{t('view.list.completedOn')}</span>
 <span className="loom-quest-card-value">																{outcomeSes && roleOf(outcomeSes.type) === questAnchorRole ? (
 																	outcomeSes.path === record.path ? (
-																		<span>This {pageLabel}</span>
+																		<span>{t('view.entity.quests.thisPage', { page: pageLabel })}</span>
 																	) : (
 																		<button
 																			className="loom-subloc-link"
@@ -4938,20 +4949,18 @@ function EntityPage({ view }: { view: EntityView }) {
 																)}</span>
 															</div>
 															<div className="loom-quest-card-row">
-																<span className="loom-quest-card-label">Outcome:</span>
+																<span className="loom-quest-card-label">{t('view.entity.quests.outcomeLabel')}</span>
 <span className="loom-quest-card-value">																<span>
-																	{quest.questOutcome !== ''
-																		? quest.questOutcome[0].toUpperCase() + quest.questOutcome.slice(1)
-																		: '—'}
+																	{quest.questOutcome !== '' ? questOutcomeLabel(quest.questOutcome) : '—'}
 																</span></span>
 															</div>
 														</>
 													) : null}
 													<div className="loom-quest-card-row">
-													<span className="loom-quest-card-label">Reward:</span>
+													<span className="loom-quest-card-label">{t('view.entity.quests.rewardLabel')}</span>
 <span className="loom-quest-card-value">														<Truncated
 															className="loom-clip"
-															text={quest.reward !== '' ? quest.reward : 'Not specified'}
+															text={quest.reward !== '' ? quest.reward : t('common.notSpecified')}
 														/></span>
 													</div>
 												</div>
@@ -4995,9 +5004,9 @@ function EntityPage({ view }: { view: EntityView }) {
 			{isQuest ? (
 				<div className="loom-quest-grid">
 					<div className="loom-field loom-quest-givers">
-						<span className="loom-field-label">Quest givers</span>
+						<span className="loom-field-label">{t('view.entity.quests.questGiversLabel')}</span>
 						<SearchableSelect
-							placeholder="Add a quest giver…"
+							placeholder={t('project.createEntity.addQuestGiver')}
 							options={characters
 								.filter((c) => !questGiverRecords.some((g) => g.path === c.path))
 								.sort((a, b) => a.name.localeCompare(b.name))
@@ -5017,7 +5026,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												questGiverRecords.filter((o) => o.path !== c.path).map((o) => o.name)
 											)
 										}
-										removeLabel="Remove quest giver"
+										removeLabel={t('view.entity.quests.removeQuestGiver')}
 									/>
 								))}
 							</div>
@@ -5026,12 +5035,12 @@ function EntityPage({ view }: { view: EntityView }) {
 					<div className="loom-quest-right">
 						<div className="loom-quest-sessions">
 							<div className="loom-field">
-								<span className="loom-field-label">Received in {questAnchorRole === 'beat' ? beatLabel : anchorLabel}</span>
+								<span className="loom-field-label">{t('view.entity.quests.receivedIn', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel })}</span>
 								{questReceived && roleOf(questReceived.type) === questAnchorRole ? (
 									sessionChip(questReceived, () => setQuestSession('questReceived', null))
 								) : (
 									<SearchableSelect
-										placeholder={`Pick the ${questAnchorRole === 'beat' ? beatLabel : anchorLabel}…`}
+										placeholder={t('project.createEntity.pickAnchor', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel })}
 										options={questAnchorsSorted.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 										onPick={(name) => setQuestSession('questReceived', name)}
 									/>
@@ -5040,14 +5049,16 @@ function EntityPage({ view }: { view: EntityView }) {
 							{record.questOutcome !== '' ? (
 								<div className="loom-field">
 									<span className="loom-field-label">
-										{record.questOutcome[0].toUpperCase() + record.questOutcome.slice(1)} in{' '}
-										{questAnchorRole === 'beat' ? beatLabel : anchorLabel}
+										{t('view.entity.quests.outcomeInAnchor', {
+											outcome: questOutcomeLabel(record.questOutcome),
+											anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel,
+										})}
 									</span>
 									{questOutcomeSession && roleOf(questOutcomeSession.type) === questAnchorRole ? (
 										sessionChip(questOutcomeSession, () => setQuestSession('questOutcomeSession', null))
 									) : (
 										<SearchableSelect
-											placeholder={`Pick the ${questAnchorRole === 'beat' ? beatLabel : anchorLabel}…`}
+											placeholder={t('project.createEntity.pickAnchor', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel })}
 											options={questAnchorsSorted.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 											onPick={(name) => setQuestSession('questOutcomeSession', name)}
 										/>
@@ -5055,24 +5066,24 @@ function EntityPage({ view }: { view: EntityView }) {
 								</div>
 							) : null}
 							<label className="loom-field">
-								<span className="loom-field-label">Outcome</span>
+								<span className="loom-field-label">{t('view.entity.quests.outcomeSelectLabel')}</span>
 								<select value={record.questOutcome} onChange={(e) => setQuestOutcome(e.target.value)}>
-									<option value="">Active</option>
+									<option value="">{t('view.list.active')}</option>
 									{QUEST_OUTCOMES.map((o) => (
 										<option key={o} value={o}>
-											{o[0].toUpperCase() + o.slice(1)}
+											{questOutcomeLabel(o)}
 										</option>
 									))}
 								</select>
 							</label>
 						</div>
 						<div className="loom-field">
-							<span className="loom-field-label">Reward</span>
+							<span className="loom-field-label">{t('project.createEntity.reward')}</span>
 							<MarkdownField
 								app={plugin.app}
 								value={reward}
 								names={linkNames}
-								placeholder="Not specified"
+								placeholder={t('common.notSpecified')}
 								onOpenLink={openLinkTarget}
 								onCreateEntity={createLinkEntity}
 								onChange={(v) => {
@@ -5088,7 +5099,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		{isItemCopy ? (
 				<div className="loom-field">
 					<span className="loom-field-label">
-						{description === '' ? 'Description' : 'Alternative description'}
+						{description === '' ? t('project.createEntity.description') : t('view.entity.items.alternativeDescription')}
 					</span>
 					<MarkdownField
 						app={plugin.app}
@@ -5103,7 +5114,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					/>
 					{description !== '' ? (
 						<details className="loom-orig-desc">
-							<summary>Original description</summary>
+							<summary>{t('view.entity.items.originalDescription')}</summary>
 							<MarkdownField
 								app={plugin.app}
 								value={copyOriginal?.description ?? ''}
@@ -5122,29 +5133,29 @@ function EntityPage({ view }: { view: EntityView }) {
 				null
 			) : (
 		<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
-				<span className="loom-field-label">Description</span>
+				<span className="loom-field-label">{t('project.createEntity.description')}</span>
 				{isPc ? (
 					<label className="loom-check">
 						<input type="checkbox" checked={record.alive} onChange={(e) => setAlive(e.target.checked)} />
-						Alive
+						{t('view.entity.common.alive')}
 					</label>
 				) : null}
 				{isPc ? (
-					<label
-						className="loom-check"
-						title="Inactive characters are not included when the Group is added (e.g. while away from the party)"
-					>
-						<input
-							type="checkbox"
-							checked={record.active}
-							onChange={(e) => setActive(e.target.checked)}
-						/>
-						Active
-					</label>
+					<div className="loom-check-with-info">
+						<label className="loom-check">
+							<input
+								type="checkbox"
+								checked={record.active}
+								onChange={(e) => setActive(e.target.checked)}
+							/>
+							{t('view.list.active')}
+						</label>
+						<InfoIcon text={t('view.entity.common.activeTooltip')} />
+					</div>
 				) : null}
 				{isPc && !record.alive ? (
 					<div className="loom-death-row">
-						<span className="loom-field-label">Death session</span>
+						<span className="loom-field-label">{t('view.entity.common.deathSession')}</span>
 						{deathSession && roleOf(deathSession.type) === 'anchor' ? (
 							<div className="loom-tag-row">
 								<EntityChip
@@ -5153,12 +5164,12 @@ function EntityPage({ view }: { view: EntityView }) {
 									label={recordLabel(deathSession, project)}
 									onOpen={() => view.openEntity(deathSession.path)}
 									onRemove={() => setDeathSession(null)}
-									removeLabel="Clear death session"
+									removeLabel={t('view.entity.common.clearDeathSession')}
 								/>
 							</div>
 						) : (
 							<SearchableSelect
-								placeholder="Pick the session…"
+								placeholder={t('project.createEntity.pickSession')}
 								options={sessions
 									.slice()
 									.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
@@ -5174,6 +5185,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					names={linkNames}
 					onOpenLink={openLinkTarget}
 					onCreateEntity={createLinkEntity}
+					placeholder={t('view.entity.common.descriptionPlaceholder')}
 					onChange={(v) => {
 						setDescription(v);
 						saveDescription(v);
@@ -5186,7 +5198,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				<div className="loom-field loom-graph-under">
 					<button className="loom-section-header" onClick={() => setGraphOpen(!graphOpen)}>
 						<span className={graphOpen ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
-						{ENTITY_META[anchorType].label} graph
+						{t('view.entity.common.anchorGraph', { anchor: entityLabel(anchorType) })}
 					</button>
 					{graphOpen ? (
 						<MiniGraph
@@ -5203,7 +5215,7 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{record.type === 'chapter' && scriptMode && project ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Script</span>
+					<span className="loom-field-label">{t('common.scriptLabel')}</span>
 					{chapterExcerpt !== null
 						? (() => {
 								// Same box-local placement as the Scene page's own panel —
@@ -5214,7 +5226,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 											<button
 												className="loom-script-nav-toggle"
-												aria-label={chapterNavOpen ? 'Hide navigation' : 'Show navigation'}
+												aria-label={chapterNavOpen ? t('view.entity.script.hideNavigation') : t('view.entity.script.showNavigation')}
 												onClick={() => openChapterSidePanel(chapterNavOpen ? null : 'nav')}
 											>
 												<Icon name={chapterNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
@@ -5222,10 +5234,10 @@ function EntityPage({ view }: { view: EntityView }) {
 											{chapterNavOpen ? (
 												<aside className="loom-script-nav">
 													<div className="loom-script-nav-head">
-														Navigate
+														{t('view.entity.script.navigate')}
 														<button
 															className="loom-rel-filter"
-															aria-label="Hide navigation"
+															aria-label={t('view.entity.script.hideNavigation')}
 															onClick={() => setChapterNavOpen(false)}
 														>
 															<Icon name="chevron-left" />
@@ -5445,17 +5457,17 @@ function EntityPage({ view }: { view: EntityView }) {
 									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 										<aside className="loom-script-nav">
 											<div className="loom-script-nav-head">
-												Unresolved comments
+												{t('view.entity.script.unresolvedComments')}
 												<button
 													className="loom-rel-filter"
-													aria-label="Hide comments"
+													aria-label={t('view.entity.script.hideComments')}
 													onClick={() => setChapterCommentsPanelOpen(false)}
 												>
 													<Icon name="chevron-left" />
 												</button>
 											</div>
 											{chapterUnresolvedCommentSpans.length === 0 ? (
-												<div className="loom-script-nav-empty">No unresolved comments.</div>
+												<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
 											) : (
 												chapterUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
 													<div key={span.id} className="loom-script-comments-panel-group">
@@ -5472,7 +5484,7 @@ function EntityPage({ view }: { view: EntityView }) {
 																	className="loom-script-comments-panel-reply"
 																	onClick={() => jumpToChapterAnnotation(span)}
 																>
-																	{entry.text.trim() === '' ? '(empty)' : entry.text}
+																	{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
 																</button>
 															))}
 														</div>
@@ -5486,17 +5498,17 @@ function EntityPage({ view }: { view: EntityView }) {
 									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 										<aside className="loom-script-nav">
 											<div className="loom-script-nav-head">
-												Unfinalized alternatives
+												{t('view.entity.script.unfinalizedAlternatives')}
 												<button
 													className="loom-rel-filter"
-													aria-label="Hide alternatives"
+													aria-label={t('view.entity.script.hideAlternatives')}
 													onClick={() => setChapterAltPanelOpen(false)}
 												>
 													<Icon name="chevron-left" />
 												</button>
 											</div>
 											{chapterUndecidedAltSpans.length === 0 ? (
-												<div className="loom-script-nav-empty">Every alternative has been accepted.</div>
+												<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
 											) : (
 												chapterUndecidedAltSpans.map((span) => (
 													<button
@@ -5538,7 +5550,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													}
 													onClick={() => clickChapterTab('script')}
 												>
-													Script
+													{t('common.scriptLabel')}
 												</button>
 												<button
 													className={
@@ -5546,7 +5558,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													}
 													onClick={() => clickChapterTab('pages')}
 												>
-													Pages preview
+													{t('view.entity.script.pagesPreview')}
 												</button>
 											</div>
 											<div className="loom-script-side-toggles">
@@ -5554,14 +5566,14 @@ function EntityPage({ view }: { view: EntityView }) {
 													className={
 														chapterCommentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
 													}
-													aria-label={chapterCommentsPanelOpen ? 'Hide comments' : 'Browse comments'}
+													aria-label={chapterCommentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
 													onClick={() => openChapterSidePanel(chapterCommentsPanelOpen ? null : 'comments')}
 												>
 													<Icon name="message-square" />
 												</button>
 												<button
 													className={chapterAltPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-													aria-label={chapterAltPanelOpen ? 'Hide alternatives' : 'Browse undecided alternatives'}
+													aria-label={chapterAltPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
 													onClick={() => openChapterSidePanel(chapterAltPanelOpen ? null : 'alt')}
 												>
 													<Icon name="repeat" fallback="arrow-right-left" />
@@ -5579,7 +5591,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												}
 												onClick={() => clickChapterTab('outline')}
 											>
-												Outline
+												{t('view.entity.script.outline')}
 											</button>
 										</div>
 										<div className="loom-script-toolbar">
@@ -5589,7 +5601,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												<input
 													className="loom-script-search"
 													type="search"
-													placeholder="Search this chapter…"
+													placeholder={t('view.entity.script.searchThisChapter')}
 													value={chapterScriptQuery}
 													onChange={(e) => {
 														setChapterScriptQuery(e.target.value);
@@ -5606,7 +5618,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												{chapterScriptQuery !== '' ? (
 													<button
 														className="loom-chip-remove loom-search-clear"
-														aria-label="Clear search"
+														aria-label={t('view.entity.script.clearSearch')}
 														onClick={() => {
 															setChapterScriptQuery('');
 															setChapterScriptMatchIndex(0);
@@ -5618,7 +5630,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											</div>
 											<button
 												className="loom-rel-filter"
-												aria-label="Previous match"
+												aria-label={t('view.entity.script.previousMatch')}
 												disabled={chapterMatches.length === 0}
 												onClick={() => gotoChapterMatch(chapterScriptMatchIndex - 1)}
 											>
@@ -5626,7 +5638,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											</button>
 											<button
 												className="loom-rel-filter"
-												aria-label="Next match"
+												aria-label={t('view.entity.script.nextMatch')}
 												disabled={chapterMatches.length === 0}
 												onClick={() => gotoChapterMatch(chapterScriptMatchIndex + 1)}
 											>
@@ -5636,8 +5648,8 @@ function EntityPage({ view }: { view: EntityView }) {
 												{chapterScriptQuery.trim() === ''
 													? ''
 													: chapterMatches.length === 0
-														? 'No matches'
-														: `${(chapterScriptMatchIndex % chapterMatches.length) + 1} of ${chapterMatches.length}`}
+														? t('view.entity.script.noMatches')
+														: t('view.entity.script.matchCount', { current: (chapterScriptMatchIndex % chapterMatches.length) + 1, total: chapterMatches.length })}
 											</span>
 											</>
 											) : null}
@@ -5650,7 +5662,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														new CreateEntityModal(plugin, 'scene', project, { defaultChapter: record }).open();
 													}}
 												>
-													+ New scene
+													{t('view.entity.script.newSceneAction')}
 												</button>
 											) : null}
 										</div>
@@ -5736,8 +5748,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											>
 												{chapterScenes.length === 0 ? (
 													<div className="loom-attendance-empty">
-														No scenes yet — a heading under this <code># {record.name}</code>{' '}
-														section in the script creates them.
+														{t('view.entity.script.noScenesYetPre')}<code># {record.name}</code>{t('view.entity.script.noScenesYetPost')}
 													</div>
 												) : (
 													chapterScenes.map((sc, i) => {
@@ -5768,7 +5779,7 @@ function EntityPage({ view }: { view: EntityView }) {
 																	{chapterExcerptParsed?.scenes[i]?.heading ?? sc.name}
 																</button>
 																<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-																<span className="loom-script-chapter-count">p. {chapterScenePageRange(i)}</span>
+																<span className="loom-script-chapter-count">{t('view.entity.script.pageAbbrev', { range: chapterScenePageRange(i) })}</span>
 															</div>
 														);
 													})
@@ -5779,14 +5790,14 @@ function EntityPage({ view }: { view: EntityView }) {
 								);
 							})()
 						: (
-							<div className="loom-attendance-empty">This chapter isn't in the script yet.</div>
+							<div className="loom-attendance-empty">{t('view.entity.script.chapterNotInScript')}</div>
 						)}
 				</div>
 			) : null}
 
 			{isSession && !scriptMode && project ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">{ENTITY_META[beatType].plural}</span>
+					<span className="loom-field-label">{entityPlural(beatType)}</span>
 					{/* Creation first, as always. The modal's Name field searches
 					    existing beats — picking one pins it here instead of
 					    creating a duplicate. */}
@@ -5800,17 +5811,17 @@ function EntityPage({ view }: { view: EntityView }) {
 								}).open()
 							}
 						>
-							+ Add {/^[aeiou]/.test(beatLabel) ? 'an' : 'a'} {beatLabel}
+							+ {t('view.list.addBeatTitle', { article: /^[aeiou]/.test(beatLabel) ? 'an' : 'a', beat: beatLabel })}
 						</button>
 					</div>
-					{ENTITY_TYPES.filter((t) => hubEntries.some((e) => e.owner.type === t)).map((t) => {
-						const entries = hubEntries.filter((e) => e.owner.type === t);
+					{ENTITY_TYPES.filter((et) => hubEntries.some((e) => e.owner.type === et)).map((et) => {
+						const entries = hubEntries.filter((e) => e.owner.type === et);
 						// Event and quest notes are drag-reorderable by loomSeq (events
 						// share it with the timeline); other hub groups keep note order.
-						if (roleOf(t) !== 'beat' && t !== 'quest') {
+						if (roleOf(et) !== 'beat' && et !== 'quest') {
 							return (
-								<div key={t} className="loom-hub-section">
-									<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
+								<div key={et} className="loom-hub-section">
+									<span className="loom-rel-group-label">{entityPlural(et)}</span>
 									{entries.map((en) => hubEntryRow(en))}
 								</div>
 							);
@@ -5821,18 +5832,18 @@ function EntityPage({ view }: { view: EntityView }) {
 						const owners = ordered.map((e) => e.owner);
 						return (
 							<div
-								key={t}
+								key={et}
 								className={
-									seqDrag?.group === t ? 'loom-hub-section loom-subloc-dragging' : 'loom-hub-section'
+									seqDrag?.group === et ? 'loom-hub-section loom-subloc-dragging' : 'loom-hub-section'
 								}
 							>
-								<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
+								<span className="loom-rel-group-label">{entityPlural(et)}</span>
 								{ordered.map((en, i) =>
 									hubEntryRow(
 										en,
-										seqGrip(t, i, owners),
-										seqRowStyle(t, i),
-										seqDrag?.group === t && seqDrag.from === i,
+										seqGrip(et, i, owners),
+										seqRowStyle(et, i),
+										seqDrag?.group === et && seqDrag.from === i,
 										i
 									)
 								)}
@@ -5845,7 +5856,7 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{allTags.length > 0 ? (
 				<div className="loom-field">
-					<span className="loom-field-label">Tags</span>
+					<span className="loom-field-label">{t('view.entity.common.tags')}</span>
 					<div className="loom-tag-row">
 						{allTags.map((tag) => (
 							<button
@@ -5853,7 +5864,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								className={record.loomTags.includes(tag) ? 'loom-chip loom-chip-on' : 'loom-chip'}
 								onClick={() => toggleTag(tag)}
 							>
-								{tag}
+								{record.type === 'quest' ? t(`settings.entities.questTagNames.${tag}` as LocaleKey) : tag}
 							</button>
 						))}
 					</div>
@@ -5902,7 +5913,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										sessionChip(finished, () => commitSet(idx, { finishedOn: '' }))
 									) : (
 										<SearchableSelect
-											placeholder="Finished on…"
+											placeholder={t('view.entity.quests.finishedOn')}
 											options={questAnchorsSorted.map((s) => ({
 												value: linkTargetOf(s),
 												label: recordLabel(s, project),
@@ -5913,7 +5924,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								</div>
 								<button
 									className="loom-nav-btn loom-obj-remove"
-									aria-label="Remove objective"
+									aria-label={t('view.entity.quests.removeObjective')}
 									onClick={() => del(idx)}
 								>
 									✕
@@ -5923,18 +5934,18 @@ function EntityPage({ view }: { view: EntityView }) {
 					};
 					return (
 						<div className="loom-field loom-field-sep">
-							<span className="loom-field-label">Objectives</span>
+							<span className="loom-field-label">{t('view.entity.quests.objectives')}</span>
 							<div className="loom-hub-add-row">
 								<button
 									className="loom-rel-add"
 									onClick={() => setObjectives([...objectives, { name: '', finishedOn: '' }])}
 								>
-									+ Add objective
+									+ {t('view.entity.quests.addObjective')}
 								</button>
 							</div>
 							<div className="loom-obj-section">
 								<span className="loom-rel-group-label">
-									Active<span className="loom-section-count">{active.length}</span>
+									{t('view.list.active')}<span className="loom-section-count">{active.length}</span>
 								</span>
 								<div className={objDrag ? 'loom-obj-list loom-subloc-dragging' : 'loom-obj-list'}>
 									{active.map((r, i) =>
@@ -5950,7 +5961,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							{resolved.length > 0 ? (
 								<div className="loom-obj-section">
 									<span className="loom-rel-group-label">
-										Resolved<span className="loom-section-count">{resolved.length}</span>
+										{t('view.entity.quests.resolvedHeading')}<span className="loom-section-count">{resolved.length}</span>
 									</span>
 									<div className="loom-obj-list">
 										{resolved.map((r) => objectiveRow(r.idx, null, undefined, false))}
@@ -5964,9 +5975,9 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{record.type === 'faction' ? (
 				<div className="loom-field">
-					<span className="loom-field-label">Members</span>
+					<span className="loom-field-label">{t('view.entity.faction.members')}</span>
 					<SearchableSelect
-						placeholder="Add a member…"
+						placeholder={t('view.list.addMember') + '…'}
 						options={[
 							...groupOption(
 								groupPcs.filter((c) => !memberRecords.some((m) => m.path === c.path)).length,
@@ -5989,7 +6000,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						action={
 							project
 								? {
-										label: '+ Create new character',
+										label: t('view.entity.faction.createNewCharacterAction'),
 										onPick: () =>
 											new CreateEntityModal(plugin, 'character', project, {
 												onCreated: (created) =>
@@ -6008,7 +6019,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									record={c}
 									onOpen={() => view.openEntity(c.path)}
 									onRemove={() => removeMemberEntry(record, c)}
-									removeLabel="Remove member"
+									removeLabel={t('view.entity.faction.removeMember')}
 								/>
 							))}
 						</div>
@@ -6017,12 +6028,12 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : null}
 
 			{record.type === 'character' ? (
-				<div className="loom-field loom-field-sep loom-field-sep-after">
-					<span className="loom-field-label">{membershipRows.length > 1 ? 'Factions' : 'Faction'}</span>
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">{membershipRows.length > 1 ? entityPlural('faction') : entityLabel('faction')}</span>
 					{factionDraft ? (
 						<div className="loom-rel-row loom-member-row">
 							<SearchableSelect
-								placeholder="Pick a faction…"
+								placeholder={t('view.list.pickFaction')}
 								options={projectFactions
 									.filter((f) => !membershipRows.some((m) => m.faction.path === f.path))
 									.sort((a, b) => a.name.localeCompare(b.name))
@@ -6036,7 +6047,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							/>
 							<button
 								className="loom-nav-btn"
-								aria-label="Cancel adding faction"
+								aria-label={t('view.entity.faction.cancelAddingFaction')}
 								onClick={() => setFactionDraft(false)}
 							>
 								✕
@@ -6044,7 +6055,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						</div>
 					) : (
 						<button className="loom-rel-add loom-faction-add" onClick={() => setFactionDraft(true)}>
-							+ Add a faction
+							+ {t('view.list.addFaction')}
 						</button>
 					)}
 					{membershipRows.map((m) => (
@@ -6052,20 +6063,20 @@ function EntityPage({ view }: { view: EntityView }) {
 							<input
 								type="text"
 								className="loom-rel-type"
-								placeholder={DEFAULT_MEMBER_ROLE}
+								placeholder={t('project.createEntity.memberPlaceholder')}
 								defaultValue={m.role}
 								onBlur={(e) => {
 									if (e.target.value.trim() !== m.role)
 										setMembershipField(m.faction, { role: e.target.value });
 								}}
 							/>
-							<span className="loom-member-sep">of faction</span>
+							<span className="loom-member-sep">{t('project.createEntity.ofLabel')}</span>
 							<EntityChip
 								plugin={plugin}
 								record={m.faction}
 								onOpen={() => view.openEntity(m.faction.path)}
 							/>
-							<span className="loom-member-sep">at</span>
+							<span className="loom-member-sep">{t('project.createEntity.atLabel')}</span>
 							<div className="loom-member-loc">
 								{m.location ? (
 									<EntityChip
@@ -6073,11 +6084,11 @@ function EntityPage({ view }: { view: EntityView }) {
 										record={m.location}
 										onOpen={() => m.location && view.openEntity(m.location.path)}
 										onRemove={() => setMembershipField(m.faction, { location: null })}
-										removeLabel="Clear location"
+										removeLabel={t('view.entity.faction.clearLocation')}
 									/>
 								) : (
 									<SearchableSelect
-										placeholder="Not specified"
+										placeholder={t('common.notSpecified')}
 										options={membershipLocations
 											.slice()
 											.sort((a, b) => a.name.localeCompare(b.name))
@@ -6088,14 +6099,14 @@ function EntityPage({ view }: { view: EntityView }) {
 							</div>
 							<button
 								className="loom-nav-btn"
-								aria-label="Remove membership"
+								aria-label={t('view.entity.faction.removeMembership')}
 								onClick={() =>
 									new ConfirmModal(
 										plugin.app,
-										'Remove membership?',
-										`Removes ${record.name} from ${m.faction.name}'s members — on both pages.`,
+										t('view.entity.faction.removeMembershipTitle'),
+										t('view.entity.faction.removeMembershipDetail', { name: record.name, faction: m.faction.name }),
 										() => removeMemberEntry(m.faction, record),
-										'Remove'
+										t('common.remove')
 									).open()
 								}
 							>
@@ -6113,13 +6124,14 @@ function EntityPage({ view }: { view: EntityView }) {
 			    instead (up near the Title fields) — see below. */}
 			{!isSession ? (
 <div className="loom-field loom-field-body">
-				<span className="loom-field-label">Notes</span>
+				<span className="loom-field-label">{t('project.notes')}</span>
 				<MarkdownField
 					app={plugin.app}
 					value={body ?? ''}
 					names={linkNames}
 					onOpenLink={openLinkTarget}
 					onCreateEntity={createLinkEntity}
+					placeholder={t('view.entity.common.notesPlaceholder')}
 					onChange={(v) => {
 						setBody(v);
 						saveBody(v);
@@ -6154,7 +6166,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						}
 					>
 					<div className="loom-scene-chapter-left">
-						<span className="loom-field-label">{ENTITY_META[anchorType].label}</span>
+						<span className="loom-field-label">{entityLabel(anchorType)}</span>
 						<div className="loom-tag-row">
 							{sceneChapterRecord ? (
 								<EntityChip
@@ -6166,7 +6178,9 @@ function EntityPage({ view }: { view: EntityView }) {
 							{moveTargetChapter ? null : (
 								<SearchableSelect
 									placeholder={
-										sceneChapterRecord ? `Move to another ${anchorLabel}…` : `Pick the ${anchorLabel}…`
+										sceneChapterRecord
+											? t('view.entity.scene.moveToAnother', { anchor: anchorLabel })
+											: t('project.createEntity.pickAnchor', { anchor: anchorLabel })
 									}
 									options={plugin.indexer
 										.getAll(anchorType, record.project)
@@ -6184,7 +6198,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						</div>
 						{sceneChapterRecord || moveTargetChapter ? null : (
 							<span className="loom-field-hint">
-								Every scene belongs to a chapter — that's where its writing lives in the script.
+								{t('view.entity.scene.everySceneBelongsHint')}
 							</span>
 						)}
 						{moveTargetChapter && project
@@ -6217,8 +6231,8 @@ function EntityPage({ view }: { view: EntityView }) {
 										<>
 											<div className="loom-field-hint">
 												{siblings.length === 0
-													? `"${moveTargetChapter.name}" has no scenes yet — this will be its first.`
-													: `Drag this scene into position among "${moveTargetChapter.name}"'s scenes, then confirm.`}
+													? t('view.entity.scene.chapterHasNoScenesYet', { name: moveTargetChapter.name })
+													: t('view.entity.scene.dragIntoPositionHint', { name: moveTargetChapter.name })}
 											</div>
 											{siblings.length > 0 ? (
 												<div
@@ -6268,7 +6282,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											) : null}
 											<div className="loom-hub-add-row">
 												<button className="loom-rel-add" onClick={finishMove}>
-													Move the scene
+													{t('view.entity.scene.moveTheScene')}
 												</button>
 												<button
 													className="loom-rel-filter"
@@ -6277,7 +6291,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														setMovePlaceAt(0);
 													}}
 												>
-													Cancel
+													{t('project.common.cancel')}
 												</button>
 											</div>
 										</>
@@ -6291,18 +6305,18 @@ function EntityPage({ view }: { view: EntityView }) {
 						sceneItemRecords.length ===
 					0 ? null : (
 						<div className="loom-scene-chapter-right">
-							<span className="loom-field-label">Entities in the scene</span>
+							<span className="loom-field-label">{t('view.entity.scene.entitiesInScene')}</span>
 							{(
 								[
-									['Characters', sceneCastRecords],
-									['Factions', sceneFactionRecords],
-									['Locations', sceneMentionedLocationRecords],
-									['Items', sceneItemRecords],
+									['character', sceneCastRecords],
+									['faction', sceneFactionRecords],
+									['location', sceneMentionedLocationRecords],
+									['item', sceneItemRecords],
 								] as const
-							).map(([label, records]) =>
+							).map(([type, records]) =>
 								records.length === 0 ? null : (
-									<div key={label} className="loom-scene-entity-group">
-										<span className="loom-field-sublabel">{label}</span>
+									<div key={type} className="loom-scene-entity-group">
+										<span className="loom-field-sublabel">{entityPlural(type)}</span>
 										<div className="loom-tag-row">
 											{records.map((r) => (
 												<EntityChip
@@ -6326,7 +6340,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					    preview + search mirror the main Script view exactly, scoped
 					    to just this scene's own excerpt. */}
 					<div className="loom-field loom-field-sep">
-						<span className="loom-field-label">Script</span>
+						<span className="loom-field-label">{t('common.scriptLabel')}</span>
 						{sceneExcerpt !== null
 							? (() => {
 									const sceneAnnotationSpans = findAnnotationSpans(sceneExcerpt);
@@ -6499,17 +6513,17 @@ function EntityPage({ view }: { view: EntityView }) {
 										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 											<aside className="loom-script-nav">
 												<div className="loom-script-nav-head">
-													Unresolved comments
+													{t('view.entity.script.unresolvedComments')}
 													<button
 														className="loom-rel-filter"
-														aria-label="Hide comments"
+														aria-label={t('view.entity.script.hideComments')}
 														onClick={() => setSceneCommentsPanelOpen(false)}
 													>
 														<Icon name="chevron-left" />
 													</button>
 												</div>
 												{sceneUnresolvedCommentSpans.length === 0 ? (
-													<div className="loom-script-nav-empty">No unresolved comments.</div>
+													<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
 												) : (
 													sceneUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
 														<div key={span.id} className="loom-script-comments-panel-group">
@@ -6526,7 +6540,7 @@ function EntityPage({ view }: { view: EntityView }) {
 																		className="loom-script-comments-panel-reply"
 																		onClick={() => jumpToSceneAnnotation(span)}
 																	>
-																		{entry.text.trim() === '' ? '(empty)' : entry.text}
+																		{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
 																	</button>
 																))}
 															</div>
@@ -6540,17 +6554,17 @@ function EntityPage({ view }: { view: EntityView }) {
 										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 											<aside className="loom-script-nav">
 												<div className="loom-script-nav-head">
-													Unfinalized alternatives
+													{t('view.entity.script.unfinalizedAlternatives')}
 													<button
 														className="loom-rel-filter"
-														aria-label="Hide alternatives"
+														aria-label={t('view.entity.script.hideAlternatives')}
 														onClick={() => setSceneAltPanelOpen(false)}
 													>
 														<Icon name="chevron-left" />
 													</button>
 												</div>
 												{sceneUndecidedAltSpans.length === 0 ? (
-													<div className="loom-script-nav-empty">Every alternative has been accepted.</div>
+													<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
 												) : (
 													sceneUndecidedAltSpans.map((span) => (
 														<button
@@ -6591,7 +6605,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
 												<button
 													className="loom-script-nav-toggle"
-													aria-label={sceneNavOpen ? 'Hide navigation' : 'Show navigation'}
+													aria-label={sceneNavOpen ? t('view.entity.script.hideNavigation') : t('view.entity.script.showNavigation')}
 													onClick={() => openSceneSidePanel(sceneNavOpen ? null : 'nav')}
 												>
 													<Icon name={sceneNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
@@ -6599,10 +6613,10 @@ function EntityPage({ view }: { view: EntityView }) {
 												{sceneNavOpen ? (
 													<aside className="loom-script-nav">
 														<div className="loom-script-nav-head">
-															Navigate
+															{t('view.entity.script.navigate')}
 															<button
 																className="loom-rel-filter"
-																aria-label="Hide navigation"
+																aria-label={t('view.entity.script.hideNavigation')}
 																onClick={() => setSceneNavOpen(false)}
 															>
 																<Icon name="chevron-left" />
@@ -6670,7 +6684,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														}
 														onClick={() => clickSceneTab('script')}
 													>
-														Script
+														{t('common.scriptLabel')}
 													</button>
 													<button
 														className={
@@ -6678,7 +6692,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														}
 														onClick={() => clickSceneTab('pages')}
 													>
-														Pages preview
+														{t('view.entity.script.pagesPreview')}
 													</button>
 												</div>
 												<div className="loom-script-side-toggles">
@@ -6686,14 +6700,14 @@ function EntityPage({ view }: { view: EntityView }) {
 														className={
 															sceneCommentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
 														}
-														aria-label={sceneCommentsPanelOpen ? 'Hide comments' : 'Browse comments'}
+														aria-label={sceneCommentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
 														onClick={() => openSceneSidePanel(sceneCommentsPanelOpen ? null : 'comments')}
 													>
 														<Icon name="message-square" />
 													</button>
 													<button
 														className={sceneAltPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-														aria-label={sceneAltPanelOpen ? 'Hide alternatives' : 'Browse undecided alternatives'}
+														aria-label={sceneAltPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
 														onClick={() => openSceneSidePanel(sceneAltPanelOpen ? null : 'alt')}
 													>
 														<Icon name="repeat" fallback="arrow-right-left" />
@@ -6711,7 +6725,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													}
 													onClick={() => clickSceneTab('outline')}
 												>
-													Outline
+													{t('view.entity.script.outline')}
 												</button>
 											</div>
 											<div className="loom-script-toolbar">
@@ -6721,7 +6735,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													<input
 														className="loom-script-search"
 														type="search"
-														placeholder="Search this scene…"
+														placeholder={t('view.entity.script.searchThisScene')}
 														value={sceneScriptQuery}
 														onChange={(e) => {
 															setSceneScriptQuery(e.target.value);
@@ -6736,7 +6750,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													{sceneScriptQuery !== '' ? (
 														<button
 															className="loom-chip-remove loom-search-clear"
-															aria-label="Clear search"
+															aria-label={t('view.entity.script.clearSearch')}
 															onClick={() => {
 																setSceneScriptQuery('');
 																setSceneScriptMatchIndex(0);
@@ -6748,7 +6762,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												</div>
 												<button
 													className="loom-rel-filter"
-													aria-label="Previous match"
+													aria-label={t('view.entity.script.previousMatch')}
 													disabled={sceneMatches.length === 0}
 													onClick={() => gotoSceneMatch(sceneScriptMatchIndex - 1)}
 												>
@@ -6756,7 +6770,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												</button>
 												<button
 													className="loom-rel-filter"
-													aria-label="Next match"
+													aria-label={t('view.entity.script.nextMatch')}
 													disabled={sceneMatches.length === 0}
 													onClick={() => gotoSceneMatch(sceneScriptMatchIndex + 1)}
 												>
@@ -6766,8 +6780,8 @@ function EntityPage({ view }: { view: EntityView }) {
 													{sceneScriptQuery.trim() === ''
 														? ''
 														: sceneMatches.length === 0
-															? 'No matches'
-															: `${(sceneScriptMatchIndex % sceneMatches.length) + 1} of ${sceneMatches.length}`}
+															? t('view.entity.script.noMatches')
+															: t('view.entity.script.matchCount', { current: (sceneScriptMatchIndex % sceneMatches.length) + 1, total: sceneMatches.length })}
 												</span>
 												</>
 												)}
@@ -6846,8 +6860,8 @@ function EntityPage({ view }: { view: EntityView }) {
 														sceneOutlineTree.items.map((item) => renderSceneOutlineItem(item))
 													) : (
 														<div className="loom-attendance-empty">
-															No branch structure in this scene yet — a nested heading tagged with{' '}
-															<code>= branch: &lt;id&gt;</code> right beneath it creates one.
+															{t('view.entity.script.noBranchStructurePre')}{' '}
+															<code>= branch: &lt;id&gt;</code>{t('view.entity.script.noBranchStructurePost')}
 														</div>
 													)}
 												</div>
@@ -6856,21 +6870,21 @@ function EntityPage({ view }: { view: EntityView }) {
 									);
 								})()
 							: (
-								<div className="loom-attendance-empty">This scene isn't in the script yet.</div>
+								<div className="loom-attendance-empty">{t('view.entity.script.sceneNotInScript')}</div>
 							)}
 					</div>
 				</>
 			) : isBeat ? (
 				<div className="loom-field loom-field-sep">
 					{sessionNotes.length > 0 ? (
-						<span className="loom-field-label">{ENTITY_META[anchorType].label} notes</span>
+						<span className="loom-field-label">{t('view.entity.common.anchorNotes', { anchor: entityLabel(anchorType) })}</span>
 					) : null}
 					<div className="loom-hub-add-row">
 						<button
 							className="loom-rel-add"
 							onClick={() => setSessionNotes([...sessionNotes, { session: '', text: '', places: [], involved: [], group: [], seq: Date.now(), idx: null }])}
 						>
-							+ Add a {anchorLabel} note
+							+ {t('view.list.addAnchorNote', { anchor: anchorLabel })}
 						</button>
 						{sessionNotes.length > 0 ? orderToggle : null}
 					</div>
@@ -6900,10 +6914,10 @@ function EntityPage({ view }: { view: EntityView }) {
 			    item. Chips (persistent entities), an "Add to …" search, remove only. */}
 			{showsItemHolders && project ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Characters</span>
+					<span className="loom-field-label">{entityPlural('character')}</span>
 					<div className="loom-hub-add-row">
 						<SearchableSelect
-							placeholder="Add to character…"
+							placeholder={t('view.entity.items.addToCharacterPlaceholder')}
 							options={plugin.indexer
 								.getAll('character', project.root)
 								.filter((c) => !holderCharacters.some((h) => h.path === c.path))
@@ -6924,7 +6938,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									record={c}
 									onOpen={() => view.openEntity(c.path)}
 									onRemove={() => removeItemFromHolder(c)}
-									removeLabel="Remove from this character"
+									removeLabel={t('view.entity.items.removeFromCharacter')}
 								/>
 							))}
 						</div>
@@ -6934,10 +6948,10 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{showsItemHolders && project ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Locations</span>
+					<span className="loom-field-label">{entityPlural('location')}</span>
 					<div className="loom-hub-add-row">
 						<SearchableSelect
-							placeholder="Add to location…"
+							placeholder={t('view.entity.items.addToLocationPlaceholder')}
 							options={plugin.indexer
 								.getAll('location', project.root)
 								.filter((l) => !holderLocations.some((h) => h.path === l.path))
@@ -6959,7 +6973,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									label={locationLabel(l, plugin)}
 									onOpen={() => view.openEntity(l.path)}
 									onRemove={() => removeItemFromHolder(l)}
-									removeLabel="Remove from this location"
+									removeLabel={t('view.entity.items.removeFromLocation')}
 								/>
 							))}
 						</div>
@@ -6974,7 +6988,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    vertical nesting rail beneath the faction chip. */}
 			{isLocation && locationFactionRows.length > 0 ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Factions</span>
+					<span className="loom-field-label">{entityPlural('faction')}</span>
 					{[...new Map(locationFactionRows.map((r) => [r.faction.path, r.faction])).values()].map(
 						(faction) => (
 							<div key={faction.path} className="loom-locnote-group loom-char-event-group">
@@ -7016,7 +7030,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    all work through the dedicated parentLocation key. */}
 			{isLocation && project ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Sublocations</span>
+					<span className="loom-field-label">{t('view.entity.location.sublocations')}</span>
 					<div className="loom-subloc-actions">
 						<button
 							className="loom-rel-add"
@@ -7034,7 +7048,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								}).open()
 							}
 						>
-							+ New sublocation
+							+ {t('project.createEntity.newSublocationTitle')}
 						</button>
 					</div>
 {sublocations.length > 0 ? (
@@ -7094,7 +7108,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									</button>
 									<button
 										className="loom-chip-remove"
-										aria-label="Detach sublocation"
+										aria-label={t('view.entity.location.detachSublocation')}
 										onClick={() => detachSublocation(s)}
 									>
 										✕
@@ -7115,7 +7129,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    page — a writer project has no Event type to show instead. */}
 			{isLocation && scriptMode && (locationScenes.length > 0 || inheritedSceneGroups.length > 0) ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Scenes</span>
+					<span className="loom-field-label">{entityPlural('scene')}</span>
 					{locationScenes.length > 0 ? (
 						<div className="loom-subloc-list">
 							{locationScenes.map((sc, i) => (
@@ -7132,7 +7146,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					) : null}
 					{inheritedSceneGroups.length > 0 ? (
 						<div className="loom-inherited-items">
-							<span className="loom-field-sublabel">Scenes in sublocations</span>
+							<span className="loom-field-sublabel">{t('view.entity.location.scenesInSublocations')}</span>
 							{inheritedSceneGroups.map((g) => (
 								<div key={g.holder.path} className="loom-locnote-group loom-char-event-group">
 									<div className="loom-tag-row loom-event-group-session">
@@ -7169,17 +7183,17 @@ function EntityPage({ view }: { view: EntityView }) {
 			    layer — add existing / create new / remove. */}
 			{isRegion && project ? (
 				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">Locations</span>
+					<span className="loom-field-label">{entityPlural('location')}</span>
 					<div className="loom-hub-add-row">
 						<SearchableSelect
-							placeholder="Add a location…"
+							placeholder={t('view.entity.location.addLocationPlaceholder')}
 							options={plugin.indexer
 								.getAll('location', project.root)
 								.filter((l) => !regionLocations.some((m) => m.path === l.path))
 								.sort((a, b) => locationLabel(a, plugin).localeCompare(locationLabel(b, plugin)))
 								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 							action={{
-								label: '+ New location',
+								label: t('view.entity.location.newLocationAction'),
 								onPick: () =>
 									new CreateEntityModal(plugin, 'location', project, {
 										onCreated: (created) => addRegionLocation(created.basename),
@@ -7198,7 +7212,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									label={locationLabel(l, plugin)}
 									onOpen={() => view.openEntity(l.path)}
 									onRemove={() => removeRegionLocation(l)}
-									removeLabel="Remove from this region"
+									removeLabel={t('view.entity.location.removeFromRegion')}
 								/>
 							))}
 						</div>
@@ -7213,17 +7227,17 @@ function EntityPage({ view }: { view: EntityView }) {
 			{eventsSection}
 
 			<div className="loom-field loom-field-sep">
-				<span className="loom-field-label">Relationships</span>
+				<span className="loom-field-label">{t('view.entity.relationships.sectionLabel')}</span>
 				<button
 					className="loom-rel-add"
 					onClick={() => setRelationships([...relationships, { type: '', target: '' }])}
 				>
-					Add relationship
+					{t('project.addRelationship.title')}
 				</button>
-{ENTITY_TYPES.filter((t) => relEntries.some((e) => e.entityType === t)).map((t) => (
-					<div key={t} className="loom-rel-group">
-						<span className="loom-rel-group-label">{ENTITY_META[t].plural}</span>
-						{relEntries.filter((e) => e.entityType === t).map((e) => relRow(e.rel, e.i))}
+{ENTITY_TYPES.filter((et) => relEntries.some((e) => e.entityType === et)).map((et) => (
+					<div key={et} className="loom-rel-group">
+						<span className="loom-rel-group-label">{entityPlural(et)}</span>
+						{relEntries.filter((e) => e.entityType === et).map((e) => relRow(e.rel, e.i))}
 					</div>
 				))}
 				{relEntries.some((e) => e.entityType === null) ? (

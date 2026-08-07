@@ -9,11 +9,12 @@ import {
 	TFile,
 	setIcon,
 } from 'obsidian';
-import { ENTITY_META, ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera } from './types';
-import { DEFAULT_PROJECT_KIND, PROJECT_KIND_META, PROJECT_KINDS, typesFor } from './project-kind';
+import { ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera, entityLabel, entityPlural } from './types';
+import { DEFAULT_PROJECT_KIND, PROJECT_KIND_META, PROJECT_KINDS, projectKindLabel, typesFor } from './project-kind';
 import { ConfirmModal } from './project';
 import { TimelineSettingsEditor } from './timeline-settings';
 import { POLAR_CHECKOUT_URL } from './license/polar-provider';
+import { t, LocaleCode, SUPPORTED_LOCALES } from './i18n';
 import type LoomLoomPlugin from './main';
 
 export type LoomTextSize = 'compact' | 'normal' | 'large';
@@ -57,17 +58,15 @@ export interface SavedGraphView {
 	pins: Record<string, { x: number; y: number }>;
 }
 
-export const TEXT_SIZES: [LoomTextSize, string][] = [
-	['compact', 'Compact'],
-	['normal', 'Normal'],
-	['large', 'Large'],
-];
-
 export interface LoomLoomSettings {
 	/** Legacy single-project root (pre-.loom-files); migrated on load, kept for that migration only. */
 	projectRoot: string;
 	/** Base text size of all plugin views (applied as a body class). */
 	textSize: LoomTextSize;
+	/** Interface language. 'auto' resolves via `resolveActiveLocale` to
+	 *  whichever language Obsidian itself is configured to display in, when
+	 *  supported, else English. */
+	locale: LocaleCode | 'auto';
 	/** Background colors for the built-in quest tags (main / important / side). */
 	questTagColors: { main: string; important: string; side: string };
 	/** Session page — how many previously-resolved quests to list in the Quests
@@ -148,6 +147,7 @@ export interface LoomLoomSettings {
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	projectRoot: '',
 	textSize: 'normal',
+	locale: 'auto',
 	questTagColors: { main: '#b48b0e', important: '#c95f5f', side: '#58b478' },
 	sessionResolvedQuests: 6,
 	subChipFullAncestry: true,
@@ -281,6 +281,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof data.projectRoot === 'string') base.projectRoot = data.projectRoot;
 	if (data.textSize === 'compact' || data.textSize === 'normal' || data.textSize === 'large') {
 		base.textSize = data.textSize;
+	}
+	if (data.locale === 'auto' || SUPPORTED_LOCALES.some((l) => l.code === data.locale)) {
+		base.locale = data.locale as LocaleCode | 'auto';
 	}
 	if (typeof data.graphCollapseThreshold === 'number' && data.graphCollapseThreshold >= 1) {
 		base.graphCollapseThreshold = Math.floor(data.graphCollapseThreshold);
@@ -427,7 +430,7 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
  * page's list here and the row covers it automatically.
  */
 const PAGE_SETTINGS_KEYS = {
-	general: ['textSize'] as (keyof LoomLoomSettings)[],
+	general: ['textSize', 'locale'] as (keyof LoomLoomSettings)[],
 	entities: [
 		'questTagColors',
 		'sessionResolvedQuests',
@@ -465,6 +468,7 @@ const PAGE_SETTINGS_KEYS = {
  */
 const REFRESH_VIEWS_PREFIXES = ['nodeColors.', 'nodeSizes.', 'questTagColors.'];
 const REFRESH_VIEWS_KEYS = new Set<string>([
+	'locale',
 	'groupColor',
 	'sessionResolvedQuests',
 	'subChipFullAncestry',
@@ -483,6 +487,12 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	 *  `this.update()` triggers (same reasoning as `timelineProjectRoot`
 	 *  above). Cleared at the start of every new attempt. */
 	private licenseDeactivateUnreachable = false;
+	/** Set when the Language row's `render:` block runs, so both that row's
+	 *  own dropdown AND the General page's "Restore defaults" button (a
+	 *  separate row entirely) can reveal the same "Relaunch" button after
+	 *  either changes `locale` — see that button's own creation site for why
+	 *  a reload prompt exists here at all instead of a live re-render. */
+	private languageRelaunchBtn?: ButtonComponent;
 
 	constructor(app: App, private plugin: LoomLoomPlugin) {
 		super(app, plugin);
@@ -535,6 +545,76 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		}
 	}
 
+	/** Every dropdown in this codebase needs this: Obsidian's native `<select>`
+	 *  resizes to match whichever option is CURRENTLY selected, and its open
+	 *  option list matches that same width — so a short selection (e.g.
+	 *  "English") leaves a longer one (e.g. "Auto (system language)") cramped
+	 *  the next time the list opens. A CSS class loses this fight against
+	 *  Obsidian's own `.dropdown` rule specificity, so the fix has to be an
+	 *  INLINE style via `setCssProps` (never raw `.style.width =`, which
+	 *  `eslint-plugin-obsidianmd`'s `no-static-styles-assignment` rule flags),
+	 *  sized to the LONGEST option's own text plus a little breathing room for
+	 *  the dropdown's arrow glyph — computed fresh from whatever options are
+	 *  actually passed in, never a hardcoded guess, so it's automatically
+	 *  right no matter how the option list changes later. This is the
+	 *  `control: { type: 'dropdown', … }` shorthand's one real gap: it has no
+	 *  hook onto the underlying `DropdownComponent`, so any dropdown that
+	 *  needs this fix has to be a `render:` block calling this helper instead
+	 *  — value read/write and the `REFRESH_VIEWS_KEYS` side effect still go
+	 *  through the exact same `getControlValue`/`setControlValue` pair a
+	 *  `control:` row would have used, so switching shapes changes nothing
+	 *  about how the setting is stored or reacted to. **One real behavior
+	 *  difference to compensate for**: a `control:` row's own change triggers
+	 *  the framework's automatic `visible` predicate re-evaluation on every
+	 *  OTHER row of the same page (documented above `loomButtonStyle`'s own
+	 *  conditional bg/icon rows) — a `render:` block's `dd.onChange` bypasses
+	 *  that entirely, since it never goes through the framework's own control
+	 *  wiring. Calling `refreshDomState()` after the write reproduces the
+	 *  same effect explicitly (its own doc comment: "re-evaluate every
+	 *  `visible`/`disabled` predicate… cheap, no re-render" — exactly this
+	 *  case), so a dropdown converted to this helper can't silently stop
+	 *  driving a sibling row's `visible` predicate. **Not `update()`** — that
+	 *  one WAS tried first here and caused a real bug: picking a new language
+	 *  from the `locale` dropdown blanked the whole settings page until
+	 *  reopened, because `update()` does a full structural re-render (it
+	 *  re-runs `getSettingDefinitions()` and rebuilds the DOM from scratch),
+	 *  and doing that while every `t()` string on the page is simultaneously
+	 *  changing language raced badly; `refreshDomState()` only toggles
+	 *  existing DOM in place and never rebuilds anything, so it's both the
+	 *  correct tool for a `visible` predicate per Obsidian's own docs AND the
+	 *  fix for that bug. The identical `longest + 6`ch formula is necessarily
+	 *  duplicated (no shared component to hang it on) in `project.ts`'s Set-up-project kind
+	 *  dropdown, `timeline-settings.ts`'s Date-format dropdown, and this
+	 *  file's own Graph-tab "Project" dropdown (`renderTimeline`) — those
+	 *  build a `Setting` by hand rather than through this declarative array,
+	 *  so they apply the same two lines directly instead of calling this.
+	 *  **`+6`, not `+3`**: an earlier pass here used `+3` and it clipped a
+	 *  7-character label ("Compact") — `ch` approximates the WIDEST digit
+	 *  glyph's width, not a typical letter's, so it underestimates a
+	 *  proportional font more the SHORTER the label is (the arrow glyph's own
+	 *  reserved width is a bigger fraction of a short label's total box); `+6`
+	 *  matches the number `project.ts`'s kind dropdown already needed after
+	 *  its own `+3`-equivalent (`14ch` for an 11-char longest label) also
+	 *  clipped. */
+	private renderFixedWidthDropdown(
+		setting: Setting,
+		key: string,
+		options: [string, string][],
+		onChanged?: () => void
+	): void {
+		setting.addDropdown((dd) => {
+			for (const [value, label] of options) dd.addOption(value, label);
+			const current = this.getControlValue(key);
+			dd.setValue(typeof current === 'string' ? current : '').onChange(async (value) => {
+				await this.setControlValue(key, value);
+				this.refreshDomState();
+				onChanged?.();
+			});
+			const longest = Math.max(...options.map(([, label]) => label.length));
+			dd.selectEl.setCssProps({ width: `${longest + 6}ch` });
+		});
+	}
+
 	getSettingDefinitions(): SettingDefinitionItem[] {
 		return [
 			// A plain heading above the General/Projects/Entities/Graph page
@@ -547,63 +627,99 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			// shared list container, whereas a group (even an empty one) is its
 			// own construct, heading rendered outside/above whatever content it
 			// holds, same as every group inside a page.
-			{ type: 'group', heading: 'Loom Loom! settings' },
+			{ type: 'group', heading: t('settings.root.title') },
 			{
 				type: 'page',
-				name: 'General',
+				name: t('settings.pages.general'),
 				items: [
 					{
 						type: 'group',
-						heading: 'License',
+						heading: t('settings.general.interfaceHeading'),
 						items: [
 							{
-								name: 'License',
-								aliases: ['license key', 'activate'],
-								render: (setting) => this.renderLicenseSection(setting),
+								name: t('settings.general.language.name'),
+								desc: t('settings.general.language.desc'),
+								// `t()` never live-retranslates already-rendered text (see
+								// `renderFixedWidthDropdown`'s own doc comment: calling
+								// `update()` to force that raced with the locale switch
+								// itself and blanked the settings page), and a plugin's
+								// ribbon/command text can't be retitled live at all through
+								// the public API regardless — Obsidian's own core Language
+								// setting has the identical limitation, so this mirrors its
+								// UI exactly: a `mod-cta` "Relaunch" button beside the
+								// dropdown (`addButton` before `addDropdown`, so it renders
+								// on the LEFT), hidden until `locale` actually changes.
+								// `languageRelaunchBtn` also lets the General page's
+								// "Restore defaults" button (a separate row) reveal this
+								// same button when IT resets `locale`.
+								render: (setting) => {
+									setting.addButton((btn) => {
+										this.languageRelaunchBtn = btn;
+										btn.setButtonText(t('settings.general.language.relaunch'));
+										btn.setCta();
+										btn.buttonEl.hide();
+										btn.onClick(() => location.reload());
+									});
+									this.renderFixedWidthDropdown(
+										setting,
+										'locale',
+										[
+											['auto', t('settings.general.language.auto')],
+											...SUPPORTED_LOCALES.map((l): [string, string] => [l.code, l.nativeName]),
+										],
+										() => this.languageRelaunchBtn?.buttonEl.show()
+									);
+								},
+							},
+							{
+								name: t('settings.general.textSize.name'),
+								desc: t('settings.general.textSize.desc'),
+								render: (setting) => this.renderFixedWidthDropdown(setting, 'textSize', [
+									['compact', t('settings.general.textSize.compact')],
+									['normal', t('settings.general.textSize.normal')],
+									['large', t('settings.general.textSize.large')],
+								]),
 							},
 						],
 					},
 					{
 						type: 'group',
-						heading: 'Interface',
+						heading: t('settings.license.heading'),
 						items: [
 							{
-								name: 'Text size',
-								desc: 'Base text size of all plugin views.',
-								control: {
-									type: 'dropdown',
-									key: 'textSize',
-									options: Object.fromEntries(TEXT_SIZES),
-									defaultValue: DEFAULT_SETTINGS.textSize,
-								},
+								name: t('settings.license.heading'),
+								aliases: [t('settings.license.aliasKey'), t('settings.license.aliasActivate')],
+								render: (setting) => this.renderLicenseSection(setting),
 							},
 						],
 					},
 					this.restoreDefaultsRow(
 						'general',
-						'Restore general defaults',
-						'Reset all general settings on this tab to their defaults.'
+						t('settings.general.restore.name'),
+						t('settings.general.restore.desc')
 					),
 				],
 			},
 			{
 				type: 'page',
-				name: 'Projects',
+				name: t('settings.pages.projects'),
 				items: [
 					{
 						type: 'group',
-						items: [{ name: 'Projects', render: (setting) => this.renderProjectsTable(setting) }],
+						items: [
+							{ name: t('settings.projects.heading'), render: (setting) => this.renderProjectsTable(setting) },
+						],
 					},
 				],
 			},
 			{
 				type: 'page',
-				name: 'Entities',
+				name: t('settings.pages.entities'),
 				items: this.entitiesItems(),
 			},
 			{
 				type: 'page',
-				name: 'Graph',
+				name: t('settings.pages.graph'),
 				items: this.graphItems(),
 			},
 		];
@@ -646,18 +762,15 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// controlled, consistent amount instead.
 		const textBlock = containerEl.createDiv({ cls: 'loom-license-text' });
 		const freeP = textBlock.createDiv({ cls: 'setting-item-description' });
-		freeP.createEl('strong', { text: 'Free:' });
-		freeP.appendText(
-			' one project of each kind (Player, Game Master, Writer) per vault, with every ' +
-				'feature available — no trial, no feature gating on the free tier beyond that project-count cap.'
-		);
+		freeP.createEl('strong', { text: t('settings.license.freeLabel') });
+		freeP.appendText(' ' + t('settings.license.freeDesc'));
 		textBlock.createDiv({
 			cls: 'setting-item-description',
-			text: 'A one-time purchase unlocks unlimited projects of every kind, activatable on up to 3 devices.',
+			text: t('settings.license.purchaseDesc'),
 		});
 		if (status.tier !== 'paid') {
 			const buyP = textBlock.createDiv({ cls: 'setting-item-description' });
-			buyP.createEl('a', { text: 'Get your license', href: POLAR_CHECKOUT_URL, cls: 'external-link' });
+			buyP.createEl('a', { text: t('settings.license.getLicense'), href: POLAR_CHECKOUT_URL, cls: 'external-link' });
 		}
 
 		// --- License key + activate/deactivate ----------------------------
@@ -673,10 +786,10 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// same box-model as those (no Setting-specific CSS in the way).
 		const keyBlock = containerEl.createDiv({ cls: 'loom-settings-divider loom-license-key-block' });
 		const keyLabel = keyBlock.createDiv({ cls: 'setting-item-name' });
-		keyLabel.createEl('strong', { text: 'License key' });
+		keyLabel.createEl('strong', { text: t('settings.license.keyLabel') });
 		const keyInput = keyBlock.createEl('input', {
 			type: 'text',
-			placeholder: 'Paste your license key',
+			placeholder: t('settings.license.keyPlaceholder'),
 			cls: 'loom-license-key-input',
 		});
 		keyInput.value = this.plugin.settings.licenseKey;
@@ -694,60 +807,64 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		const keyActions = keyBlock.createDiv({ cls: 'loom-license-key-actions' });
 		if (!status.activated) {
 			const activateBtn = new ButtonComponent(keyActions)
-				.setButtonText('Activate this device')
+				.setButtonText(t('settings.license.activate'))
 				.setCta()
 				.onClick(() =>
 					void (async () => {
 						const key = this.plugin.settings.licenseKey.trim();
 						if (key === '') {
-							new Notice('Enter a license key first.');
+							new Notice(t('settings.license.enterKeyFirst'));
 							return;
 						}
-						activateBtn.setDisabled(true).setButtonText('Activating…');
+						activateBtn.setDisabled(true).setButtonText(t('settings.license.activating'));
 						const result = await manager.activate(key);
 						new Notice(
 							result.ok
-								? 'License activated on this device.'
-								: (result.reason ?? 'Could not activate this license key.')
+								? t('settings.license.activated')
+								: (result.reason ?? t('settings.license.activateFailed'))
 						);
 						this.update();
 					})()
 				);
 		} else {
-			const deactivateBtn = new ButtonComponent(keyActions).setButtonText('Deactivate this device').onClick(() =>
-				void (async () => {
-					const key = this.plugin.settings.licenseKey.trim();
-					this.licenseDeactivateUnreachable = false;
-					deactivateBtn.setDisabled(true).setButtonText('Deactivating…');
-					const result = await manager.deactivateThisDevice(key);
-					if (result.ok) {
-						new Notice('Device deactivated.');
-					} else if (result.unreachable) {
-						this.licenseDeactivateUnreachable = true;
-					} else {
-						new Notice(result.reason ?? 'Could not deactivate this device.');
-					}
-					this.update();
-				})()
-			);
+			const deactivateBtn = new ButtonComponent(keyActions)
+				.setButtonText(t('settings.license.deactivate'))
+				.onClick(() =>
+					void (async () => {
+						const key = this.plugin.settings.licenseKey.trim();
+						this.licenseDeactivateUnreachable = false;
+						deactivateBtn.setDisabled(true).setButtonText(t('settings.license.deactivating'));
+						const result = await manager.deactivateThisDevice(key);
+						if (result.ok) {
+							new Notice(t('settings.license.deactivated'));
+						} else if (result.unreachable) {
+							this.licenseDeactivateUnreachable = true;
+						} else {
+							new Notice(result.reason ?? t('settings.license.deactivateFailed'));
+						}
+						this.update();
+					})()
+				);
 			if (this.licenseDeactivateUnreachable) {
-				keyBlock.createDiv({ cls: 'loom-license-warning', text: "Can't reach the server." });
+				keyBlock.createDiv({ cls: 'loom-license-warning', text: t('settings.license.unreachable') });
 			}
 		}
 
 		// --- Status -------------------------------------------------------
 		const info = containerEl.createDiv({ cls: 'loom-settings-divider loom-license-text' });
 		const tierP = info.createDiv({ cls: 'setting-item-description' });
-		tierP.createEl('strong', { text: 'Current tier:' });
-		tierP.appendText(` ${status.tier === 'paid' ? 'Paid — unlimited projects.' : 'Free — one project of each kind.'}`);
+		tierP.createEl('strong', { text: t('settings.license.currentTier') });
+		tierP.appendText(
+			` ${status.tier === 'paid' ? t('settings.license.tierPaid') : t('settings.license.tierFree')}`
+		);
 
 		const projectsP = info.createDiv({ cls: 'setting-item-description' });
-		projectsP.createEl('strong', { text: 'Projects:' });
+		projectsP.createEl('strong', { text: t('settings.license.projectsLabel') });
 		const projects = this.plugin.indexer.getProjects();
 		const cap = status.tier === 'paid' ? '∞' : '1';
 		const counts = PROJECT_KINDS.map((kind) => {
 			const n = projects.filter((p) => p.config.kind === kind).length;
-			return `${n}/${cap} ${PROJECT_KIND_META[kind].label}`;
+			return `${n}/${cap} ${projectKindLabel(kind)}`;
 		}).join(', ');
 		projectsP.appendText(` ${counts}`);
 	}
@@ -773,15 +890,15 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		const projects = this.plugin.indexer.getProjects();
 		if (projects.length === 0) {
 			containerEl.createEl('p', {
-				text: 'No Loom projects in this vault yet.',
+				text: t('settings.common.noProjects'),
 				cls: 'setting-item-description',
 			});
 			return;
 		}
 		const table = containerEl.createEl('table', { cls: 'loom-settings-table' });
 		const headRow = table.createEl('thead').createEl('tr');
-		headRow.createEl('th', { text: 'Title' });
-		headRow.createEl('th', { text: 'Type' });
+		headRow.createEl('th', { text: t('settings.projects.colTitle') });
+		headRow.createEl('th', { text: t('settings.projects.colType') });
 		const tbody = table.createEl('tbody');
 		for (const project of projects) {
 			const row = tbody.createEl('tr');
@@ -810,7 +927,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			});
 			const typeCell = row.createEl('td', { cls: 'loom-settings-table-type' });
 			setIcon(typeCell.createSpan(), PROJECT_KIND_META[project.config.kind].icon);
-			typeCell.createSpan({ text: PROJECT_KIND_META[project.config.kind].label });
+			typeCell.createSpan({ text: projectKindLabel(project.config.kind) });
 		}
 	}
 
@@ -825,10 +942,29 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		);
 		const shown = inUse.size > 0 ? inUse : new Set<EntityType>(typesFor(DEFAULT_PROJECT_KIND));
 
-		const colorSizeItems: SettingDefinition[] = [
+		// Each entity type gets its OWN box (a heading-less `type: 'group'` —
+		// Obsidian gives it the native boxed look for free, same trick
+		// `restoreDefaultsRow` already uses) rather than one shared box for
+		// every type: the declarative Settings API has no nested-group support
+		// (`SettingDefinitionGroup` items can't themselves be groups), which is
+		// what used to let a color+size PAIR nest visually under its own type
+		// in the pre-1.13 imperative UI — this is the closest equivalent now
+		// available. A row WITHIN one type's box still gets Obsidian's own
+		// native per-row separator (color → size, or color → size → tag colors
+		// for Quest); a type with only ONE row (Group) simply has nothing to
+		// separate. Every row's own name is now "Color: {label}"/"Size:
+		// {label}" rather than a bare type name, since a name-only row no
+		// longer has a heading above it to say which SECTION it belongs to.
+		const colorSizeBoxes: SettingDefinitionItem[] = [
+			{ type: 'group', heading: t('settings.entities.colorsHeading') },
 			{
-				name: 'Group',
-				control: { type: 'color', key: 'groupColor', defaultValue: DEFAULT_SETTINGS.groupColor },
+				type: 'group',
+				items: [
+					{
+						name: t('settings.entities.colorFor', { label: t('settings.entities.groupLabel') }),
+						control: { type: 'color', key: 'groupColor', defaultValue: DEFAULT_SETTINGS.groupColor },
+					},
+				],
 			},
 		];
 		for (const type of ENTITY_TYPES) {
@@ -836,27 +972,29 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			// Region has no color/size row — its color is auto-derived from the
 			// location color (a darker shade), and it isn't a map node.
 			if (type === 'region') continue;
-			colorSizeItems.push({
-				name: ENTITY_META[type].label,
-				control: { type: 'color', key: `nodeColors.${type}`, defaultValue: DEFAULT_SETTINGS.nodeColors[type] },
-			});
-			colorSizeItems.push({
-				name: `${ENTITY_META[type].label} size`,
-				control: {
-					type: 'slider',
-					key: `nodeSizes.${type}`,
-					min: NODE_SIZE_MIN,
-					max: NODE_SIZE_MAX,
-					step: 1,
-					defaultValue: DEFAULT_SETTINGS.nodeSizes[type],
+			const items: SettingDefinition[] = [
+				{
+					name: t('settings.entities.colorFor', { label: entityLabel(type) }),
+					control: { type: 'color', key: `nodeColors.${type}`, defaultValue: DEFAULT_SETTINGS.nodeColors[type] },
 				},
-			});
-			// Quest tag colors nest right under the quest entity (tags aren't
+				{
+					name: t('settings.entities.sizeFor', { label: entityLabel(type) }),
+					control: {
+						type: 'slider',
+						key: `nodeSizes.${type}`,
+						min: NODE_SIZE_MIN,
+						max: NODE_SIZE_MAX,
+						step: 1,
+						defaultValue: DEFAULT_SETTINGS.nodeSizes[type],
+					},
+				},
+			];
+			// Quest tag colors join the quest entity's own box (tags aren't
 			// nodes, so no size slider on them).
 			if (type === 'quest') {
 				for (const k of ['main', 'important', 'side'] as const) {
-					colorSizeItems.push({
-						name: `Quest tag — ${k[0].toUpperCase() + k.slice(1)}`,
+					items.push({
+						name: t('settings.entities.questTag', { name: t(`settings.entities.questTagNames.${k}`) }),
 						control: {
 							type: 'color',
 							key: `questTagColors.${k}`,
@@ -865,36 +1003,35 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 					});
 				}
 			}
+			colorSizeBoxes.push({ type: 'group', items });
 		}
 
 		return [
-			{ type: 'group', heading: 'Entities colors and node sizes', items: colorSizeItems },
+			...colorSizeBoxes,
 			{
 				type: 'group',
-				heading: 'Other colors',
+				heading: t('settings.entities.otherColorsHeading'),
 				items: [
 					{
-						name: 'Maps',
-						desc: 'Maps home-wheel button and the default new-zone fill color.',
+						name: t('settings.entities.maps.name'),
+						desc: t('settings.entities.maps.desc'),
 						control: { type: 'color', key: 'mapsColor', defaultValue: DEFAULT_SETTINGS.mapsColor },
 					},
 					{
-						name: 'Loom button',
-						desc: 'Background and icon colors of the home wheel’s central Loom button.',
-						control: {
-							type: 'dropdown',
-							key: 'loomButtonStyle',
-							options: { original: 'Loom original', custom: 'Custom' },
-							defaultValue: DEFAULT_SETTINGS.loomButtonStyle,
-						},
+						name: t('settings.entities.loomButton.name'),
+						desc: t('settings.entities.loomButton.desc'),
+						render: (setting) => this.renderFixedWidthDropdown(setting, 'loomButtonStyle', [
+							['original', t('settings.entities.loomButton.optOriginal')],
+							['custom', t('settings.entities.loomButton.optCustom')],
+						]),
 					},
 					{
-						name: 'Custom background',
+						name: t('settings.entities.customBg'),
 						visible: () => this.plugin.settings.loomButtonStyle === 'custom',
 						control: { type: 'color', key: 'loomButtonBg', defaultValue: DEFAULT_SETTINGS.loomButtonBg },
 					},
 					{
-						name: 'Custom icon',
+						name: t('settings.entities.customIcon'),
 						visible: () => this.plugin.settings.loomButtonStyle === 'custom',
 						control: { type: 'color', key: 'loomButtonIcon', defaultValue: DEFAULT_SETTINGS.loomButtonIcon },
 					},
@@ -902,39 +1039,44 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			},
 			{
 				type: 'group',
-				heading: 'Quests',
+				heading: t('settings.entities.questsHeading'),
 				items: [
 					{
-						name: 'Resolved quests shown on a session',
-						desc: 'How many previously-resolved quests a session page shows in its resolved-previously group (the most recent by outcome date).',
-						control: {
-							type: 'dropdown',
-							key: 'sessionResolvedQuests',
-							// Control values are strings; getControlValue/setControlValue
-							// coerce number <-> string for this one field below.
-							options: { '3': '3', '6': '6', '9': '9', '12': '12', '0': 'All' },
-							defaultValue: String(DEFAULT_SETTINGS.sessionResolvedQuests),
-						},
+						name: t('settings.entities.resolvedQuests.name'),
+						desc: t('settings.entities.resolvedQuests.desc'),
+						// getControlValue/setControlValue coerce number <-> string for
+						// this one field — see their own doc comments.
+						render: (setting) => this.renderFixedWidthDropdown(setting, 'sessionResolvedQuests', [
+							['3', '3'],
+							['6', '6'],
+							['9', '9'],
+							['12', '12'],
+							['0', t('settings.entities.resolvedQuests.optAll')],
+						]),
 					},
 				],
 			},
 			{
 				type: 'group',
-				heading: 'Locations',
+				heading: t('settings.entities.locationsHeading'),
 				items: [
 					{
-						name: 'Full ancestry on sublocation chips',
+						name: t('settings.entities.fullAncestry.name'),
 						render: (setting) => {
 							setting.setDesc(
 								createFragment((frag) => {
-									frag.appendText('Sublocation chips list every parent up the chain.');
-									const chain = ['Secret room', 'Tavern', 'City'];
+									frag.appendText(t('settings.entities.fullAncestry.desc'));
+									const chain = [
+										t('settings.entities.fullAncestry.exampleRoom'),
+										t('settings.entities.fullAncestry.exampleTavern'),
+										t('settings.entities.fullAncestry.exampleCity'),
+									];
 									const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
 									const on = ul.createEl('li');
-									on.appendText('On — ');
+									on.appendText(t('settings.entities.fullAncestry.on'));
 									on.createEl('code', { text: chain.join(', ') });
 									const off = ul.createEl('li');
-									off.appendText('Off — ');
+									off.appendText(t('settings.entities.fullAncestry.off'));
 									off.createEl('code', { text: chain[0] });
 								})
 							);
@@ -951,8 +1093,8 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			},
 			this.restoreDefaultsRow(
 				'entities',
-				'Restore entities defaults',
-				'Reset all settings on this tab to their defaults.'
+				t('settings.entities.restore.name'),
+				t('settings.entities.restore.desc')
 			),
 		];
 	}
@@ -963,11 +1105,11 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		return [
 			{
 				type: 'group',
-				heading: 'Main graph',
+				heading: t('settings.graph.mainHeading'),
 				items: [
 					{
-						name: 'Focus zoom',
-						desc: 'Zoom level when right-clicking a node to center on it — zooms in or out to reach it.',
+						name: t('settings.graph.focusZoom.name'),
+						desc: t('settings.graph.focusZoom.desc'),
 						control: {
 							type: 'slider',
 							key: 'graphFocusZoom',
@@ -978,32 +1120,28 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 						},
 					},
 					{
-						name: 'Drop-to-connect edits',
+						name: t('settings.graph.dropEdits.name'),
 						desc: createFragment((frag) => {
-							frag.appendText(
-								'Which note a node-on-node drop writes the relationship. When node A is dragged and dropped on B:'
-							);
+							frag.appendText(t('settings.graph.dropEdits.intro'));
 							const ul = frag.createEl('ul', { cls: 'loom-setting-list' });
 							const dragged = ul.createEl('li');
-							dragged.appendText('Dragged node — ');
+							dragged.appendText(t('settings.graph.dropEdits.draggedLabel'));
 							dragged.createEl('code', { text: 'A' });
 							const onto = ul.createEl('li');
-							onto.appendText('Node dropped onto — ');
+							onto.appendText(t('settings.graph.dropEdits.ontoLabel'));
 							onto.createEl('code', { text: 'B' });
-							frag.appendText('Field fills like ');
-							frag.createEl('code').appendText('quest giver');
-							frag.appendText(' always edit the field’s owner.');
+							frag.appendText(t('settings.graph.dropEdits.fieldFillsPre'));
+							frag.createEl('code').appendText(t('settings.graph.dropEdits.fieldFillsExample'));
+							frag.appendText(t('settings.graph.dropEdits.fieldFillsPost'));
 						}),
-						control: {
-							type: 'dropdown',
-							key: 'graphDropEdits',
-							options: { target: 'Node dropped onto', dragged: 'Dragged node' },
-							defaultValue: DEFAULT_SETTINGS.graphDropEdits,
-						},
+						render: (setting) => this.renderFixedWidthDropdown(setting, 'graphDropEdits', [
+							['target', t('settings.graph.dropEdits.optTarget')],
+							['dragged', t('settings.graph.dropEdits.optDragged')],
+						]),
 					},
 					{
-						name: 'Relationship arrow size',
-						desc: 'Size of the arrowheads showing which note declares a relationship.',
+						name: t('settings.graph.arrowSize.name'),
+						desc: t('settings.graph.arrowSize.desc'),
 						control: {
 							type: 'slider',
 							key: 'graphArrowSize',
@@ -1014,8 +1152,8 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 						},
 					},
 					{
-						name: 'Connection line spacing',
-						desc: 'Distance between parallel horizontal connection lines to avoid overlapping.',
+						name: t('settings.graph.lineGap.name'),
+						desc: t('settings.graph.lineGap.desc'),
 						control: {
 							type: 'slider',
 							key: 'graphLineGap',
@@ -1035,9 +1173,9 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			// than a separate row/section underneath it.
 			{
 				type: 'list',
-				heading: 'Entity layers',
+				heading: t('settings.graph.layersHeading'),
 				items: this.plugin.settings.globalLayerOrder.map((type, i) => ({
-					name: `${i + 1}. ${ENTITY_META[type].plural}`,
+					name: t('settings.graph.layerOrderRow', { n: i + 1, plural: entityPlural(type) }),
 				})),
 				onReorder: (oldIndex, newIndex) => {
 					const order = this.plugin.settings.globalLayerOrder;
@@ -1052,7 +1190,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 					(btn) =>
 						btn
 							.setIcon('rotate-ccw')
-							.setTooltip('Reset order')
+							.setTooltip(t('settings.graph.resetOrderTooltip'))
 							.onClick(() =>
 								void (async () => {
 									this.plugin.settings.globalLayerOrder = [...DEFAULT_SETTINGS.globalLayerOrder];
@@ -1064,11 +1202,11 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			},
 			{
 				type: 'group',
-				heading: 'Right side panel',
+				heading: t('settings.graph.sidePanelHeading'),
 				items: [
 					{
-						name: 'Panel collapse threshold',
-						desc: 'Connection sections in the graph side panel start collapsed when they have more entries than this.',
+						name: t('settings.graph.collapseThreshold.name'),
+						desc: t('settings.graph.collapseThreshold.desc'),
 						control: {
 							type: 'slider',
 							key: 'graphCollapseThreshold',
@@ -1082,18 +1220,16 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			},
 			{
 				type: 'group',
-				heading: 'Timeline',
-				items: [{ name: 'Timeline', render: (setting) => this.renderTimeline(setting) }],
+				heading: t('settings.graph.timelineHeading'),
+				items: [
+					{ name: t('settings.graph.timelineHeading'), render: (setting) => this.renderTimeline(setting) },
+				],
 			},
-			this.restoreDefaultsRow(
-				'graph',
-				'Restore defaults',
-				'Reset all settings on this tab to their defaults. Timeline settings belong to their project and are not affected.'
-			),
+			this.restoreDefaultsRow('graph', t('settings.graph.restore.name'), t('settings.graph.restore.desc')),
 		];
 	}
 
-	/** Per-project timeline settings (date format, in-game calendar), stored in the project's .loom file. */
+	/** Per-project timeline settings (date format, custom calendar), stored in the project's .loom file. */
 	private renderTimeline(setting: Setting): void {
 		const containerEl = setting.settingEl;
 		containerEl.empty();
@@ -1106,15 +1242,23 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// line in a tiny column, and "Project"/"Date format" land side by side
 		// instead of as their own stacked rows.
 		containerEl.addClass('loom-settings-block');
-		containerEl.createEl('p', {
-			text: 'Date display and in-game calendar for the timeline. These are per project and saved in its .loom file.',
-			cls: 'setting-item-description',
-		});
+		// A plain string `desc`/`text` can't carry a real line break — a raw
+		// `\n` collapses under `.setting-item-description`'s ordinary
+		// `white-space: normal` (confirmed against the real Obsidian CSS, not
+		// assumed), so the break point has to be an actual `<br>` element,
+		// which means building the paragraph in two translated halves around
+		// it rather than one interpolated string — same "Pre/Post" split this
+		// codebase already uses wherever translated text wraps a non-text
+		// element (e.g. `noBranchStructurePre`/`Post` around a `<code>` tag).
+		const timelineDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
+		timelineDescEl.appendText(t('settings.graph.timelineDescPre'));
+		timelineDescEl.createEl('br');
+		timelineDescEl.appendText(t('settings.graph.timelineDescPost'));
 
 		const projects = this.plugin.indexer.getProjects();
 		if (projects.length === 0) {
 			containerEl.createEl('p', {
-				text: 'No Loom projects in this vault yet.',
+				text: t('settings.common.noProjects'),
 				cls: 'setting-item-description',
 			});
 			return;
@@ -1122,7 +1266,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 
 		const project = projects.find((p) => p.root === this.timelineProjectRoot) ?? projects[0];
 		if (projects.length > 1) {
-			new Setting(containerEl).setName('Project').addDropdown((dd) => {
+			new Setting(containerEl).setName(t('settings.graph.timelineProjectLabel')).addDropdown((dd) => {
 				for (const p of projects) dd.addOption(p.root, p.name);
 				dd.setValue(project.root).onChange((root) => {
 					this.timelineProjectRoot = root;
@@ -1176,20 +1320,32 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 					desc,
 					render: (setting) => {
 						setting.addButton((btn) => {
-							btn.setButtonText('Restore defaults');
+							btn.setButtonText(t('settings.common.restoreButton'));
 							btn.buttonEl.addClass('loom-danger-btn');
 							btn.onClick(() =>
 								new ConfirmModal(
 									this.app,
-									`${name}?`,
-									`${desc.replace(/\.$/, '')}. This cannot be undone.`,
+									t('settings.common.confirmRestoreTitle', { name }),
+									t('settings.common.confirmRestoreBody', { desc: desc.replace(/\.$/, '') }),
 									async () => {
 										for (const key of PAGE_SETTINGS_KEYS[page]) this.resetKey(key);
 										await this.plugin.saveSettings();
 										this.plugin.indexer.refreshViews();
-										this.update();
+										// `update()` (full structural re-render) is unsafe the
+										// moment it coincides with a locale change — see
+										// `renderFixedWidthDropdown`'s own doc comment for the
+										// confirmed blank-page bug. Only the General page's
+										// restore touches `locale` (`PAGE_SETTINGS_KEYS.general`);
+										// every other page's restore never resets it, so `update()`
+										// stays safe there.
+										if (PAGE_SETTINGS_KEYS[page].includes('locale')) {
+											this.refreshDomState();
+											this.languageRelaunchBtn?.buttonEl.show();
+										} else {
+											this.update();
+										}
 									},
-									'Restore defaults'
+									t('settings.common.restoreButton')
 								).open()
 							);
 						});

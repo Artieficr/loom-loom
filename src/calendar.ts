@@ -5,7 +5,7 @@ import { DEFAULT_PROJECT_KIND, ProjectKind, isProjectKind } from './project-kind
  * Calendar & date-format model.
  *
  * Every project has a `ProjectConfig` (stored in its .loom file) holding the
- * display format and an optional custom in-game calendar. Sessions always
+ * display format and an optional custom calendar. Sessions always
  * track real-world (Gregorian) dates; events and everything else use the
  * project's calendar. A `LoomDate` carries its own `calendar` id so the
  * formatter always knows which month names apply.

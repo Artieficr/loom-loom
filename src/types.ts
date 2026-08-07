@@ -8,6 +8,8 @@
  * timeline and page code addresses them through `roleType`/`roleOf` and never
  * by name.
  */
+import { LocaleKey, t } from './i18n';
+
 export const ENTITY_TYPES = [
 	'character',
 	'location',
@@ -48,6 +50,28 @@ export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 	scene: { label: 'Scene', plural: 'Scenes', folder: 'Entities/Scenes', icon: 'clapperboard' },
 	chapter: { label: 'Chapter', plural: 'Chapters', folder: 'Entities/Chapters', icon: 'book-open' },
 };
+
+/** `ENTITY_META[type].label`/`.plural` are the English source strings — folder
+ *  names and other structural uses read those fields directly, but every
+ *  DISPLAY read of the type's noun should go through these instead, so the
+ *  whole plugin's entity-type vocabulary localizes from one place. */
+export function entityLabel(type: EntityType): string {
+	return t(`entityType.${type}.label`);
+}
+export function entityPlural(type: EntityType): string {
+	return t(`entityType.${type}.plural`);
+}
+/** "New {noun}" for an entity type's own creation button/menu item — a SEPARATE
+ *  key per type rather than one generic `t('… New {label}')` template, because
+ *  Russian (and most gendered languages) needs "New" itself declined to agree
+ *  with the noun's gender ("Новый персонаж" masc. / "Новая сессия" fem. /
+ *  "Новое событие" neut.) — a single template combining an invariant "New" with
+ *  a runtime-provided label can't do that. Scene/Chapter already have their own
+ *  dedicated `newSceneTitle`/`newChapterTitle` keys for the same reason and are
+ *  untouched by this — this covers every OTHER type. */
+export function newEntityTitle(type: EntityType): string {
+	return t(`entityType.${type}.newTitle`);
+}
 
 /**
  * Hardcoded per-type tag vocabulary (deliberately not user-configurable —
@@ -304,8 +328,17 @@ export interface FactionMemberDecl {
 	location: string | null;
 }
 
-/** Role shown (and stored as a plain link) when a membership has no explicit role. */
-export const DEFAULT_MEMBER_ROLE = 'Member';
+/** Role shown when a membership has no explicit role — never actually persisted to
+ *  frontmatter (a default-role membership is stored as a bare link, no `role` key at
+ *  all), so unlike `entityLabel`/`entityPlural` above this doesn't need a stored/
+ *  compared value to stay locale-independent: every comparison against it reads the
+ *  SAME live translation at the SAME instant, so a locale switch can't desync it
+ *  against something written earlier under a different language. Still a function,
+ *  not a module-level constant, for the same reason those two are — evaluated once at
+ *  import time would freeze it at whatever locale was active on load. */
+export function defaultMemberRole(): string {
+	return t('project.createEntity.memberDefault');
+}
 
 /** One quest objective as declared in the quest's `loomObjectives` frontmatter.
  *  Stored as `{ name, finishedOn?: "[[session]]" }`; an objective with a
@@ -494,6 +527,18 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 /** How a quest can end; '' in `questOutcome` means it's still active. */
 export const QUEST_OUTCOMES = ['completed', 'abandoned', 'failed'] as const;
 
+/** Display text for a `questOutcome` value — every render site used to build this
+ *  by capitalizing the raw English word (`o[0].toUpperCase() + o.slice(1)`), which
+ *  reads correctly in English but never localizes; one shared function instead of
+ *  six independent copies of the same capitalize hack. Takes a plain `string`
+ *  (matching `EntityRecord.questOutcome`'s own storage type) rather than the
+ *  narrower `QUEST_OUTCOMES` union — every call site already branches on `''`
+ *  (still active) before reaching this, so it's only ever called with one of
+ *  `QUEST_OUTCOMES`' real values in practice. */
+export function questOutcomeLabel(outcome: string): string {
+	return t(`entityType.quest.outcomes.${outcome}` as LocaleKey);
+}
+
 /**
  * GM planning state of a beat entity ('' = none, just something that happened).
  *
@@ -554,7 +599,9 @@ export const VIEW_SCRIPT = 'loom-loom-script';
  *  `Entities/` beside the entity-type folders — they belong to the project's
  *  content, not next to it. */
 export const MAPS_ICON = 'map';
-export const MAPS_LABEL = 'Maps';
+export function mapsLabel(): string {
+	return t('common.mapsLabel');
+}
 export const MAPS_FOLDER = 'Entities/Maps';
 export const MAPS_IMAGES_FOLDER = `${MAPS_FOLDER}/Images`;
 
@@ -570,7 +617,9 @@ export const MAPS_IMAGES_FOLDER = `${MAPS_FOLDER}/Images`;
  * `src/views/script-view.tsx`/`fountain-field.tsx` for the editor.
  */
 export const SCRIPT_EXTENSION = 'fountain';
-export const SCRIPT_LABEL = 'Script';
+export function scriptLabel(): string {
+	return t('common.scriptLabel');
+}
 export const SCRIPT_ICON = 'file-text';
 
 /** Comments and alternative-text bodies, keyed by the hidden `[[loom-comment:…]]`/

@@ -1,6 +1,7 @@
 import { Menu } from 'obsidian';
 import { MouseEvent as ReactMouseEvent, ReactElement, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { t } from '../i18n';
 import { CommentEntry } from './script-notes';
 import { Icon } from './common';
 
@@ -85,7 +86,7 @@ export function CommentPopover({
 		const menu = new Menu();
 		menu.addItem((item) =>
 			item
-				.setTitle('Edit')
+				.setTitle(t('view.script.comment.edit'))
 				.setIcon('square-pen')
 				.onClick(() => {
 					setEditingIndex(index);
@@ -94,7 +95,7 @@ export function CommentPopover({
 		);
 		menu.addItem((item) =>
 			item
-				.setTitle('Delete')
+				.setTitle(t('project.common.delete'))
 				.setIcon('trash-2')
 				.onClick(() => onDeleteEntry(index))
 		);
@@ -115,7 +116,7 @@ export function CommentPopover({
 							/>
 							<div className="loom-comment-popover-actions">
 								<button className="loom-rel-filter" onClick={() => setEditingIndex(null)}>
-									Cancel
+									{t('project.common.cancel')}
 								</button>
 								<button
 									className="mod-cta"
@@ -125,7 +126,7 @@ export function CommentPopover({
 										setEditingIndex(null);
 									}}
 								>
-									Save
+									{t('project.common.save')}
 								</button>
 							</div>
 						</>
@@ -147,9 +148,9 @@ export function CommentPopover({
 									aria-label={
 										entry.resolved
 											? entry.resolvedAt
-												? `Resolved on ${formatResolvedAt(entry.resolvedAt)}`
-												: 'Resolved'
-											: 'Resolve this comment'
+												? t('view.script.comment.resolvedOnAria', { date: formatResolvedAt(entry.resolvedAt) })
+												: t('view.script.comment.resolvedAria')
+											: t('view.script.comment.resolveThisAria')
 									}
 									onClick={() => onToggleResolvedEntry(i)}
 								>
@@ -157,7 +158,7 @@ export function CommentPopover({
 								</button>
 								<button
 									className="loom-comment-popover-icon-btn"
-									aria-label="Comment options"
+									aria-label={t('view.script.comment.optionsAria')}
 									onClick={(e) => openRowMenu(e, i)}
 								>
 									<Icon name="ellipsis-vertical" />
@@ -172,7 +173,7 @@ export function CommentPopover({
 					className="loom-comment-popover-text"
 					value={replyDraft}
 					onChange={(e) => setReplyDraft(e.target.value)}
-					placeholder="Leave a comment…"
+					placeholder={t('view.script.comment.leaveCommentPlaceholder')}
 					// Opening the popover IS the request to start typing — either the
 					// first comment on a brand-new marker, or the next reply.
 					autoFocus={entries.length === 0}
@@ -185,7 +186,7 @@ export function CommentPopover({
 						setReplyDraft('');
 					}}
 				>
-					+ Add
+					{t('view.script.comment.addReply')}
 				</button>
 			</div>
 		</div>,
