@@ -5069,14 +5069,14 @@ span.loom-row-caret {
 	gap: 0.5em;
 }
 
-.loom-view .loom-script-stat {
+.loom-view .loom-writer-stat {
 	color: var(--text-muted);
 	font-size: 0.85em;
 	white-space: nowrap;
 }
 
 /* Navigation panel beside the working area. */
-.loom-view .loom-script-layout {
+.loom-view .loom-writer-layout {
 	position: relative;
 	min-width: 0;
 }
@@ -5331,7 +5331,7 @@ span.loom-row-caret {
 	white-space: nowrap;
 }
 
-.loom-view .loom-script-main {
+.loom-view .loom-writer-main {
 	min-width: 0;
 }
 
@@ -5341,7 +5341,7 @@ span.loom-row-caret {
 	padding: 0.4em 0;
 }
 
-.loom-view .loom-script-tabs {
+.loom-view .loom-writer-tabs {
 	display: flex;
 	align-items: center;
 	margin: 0.5em 0;
@@ -5360,7 +5360,7 @@ span.loom-row-caret {
    of the Script/Pages pill (that pair is one toggle over the same document;
    this swaps in a management list instead) — same pill look, but with its
    own full border radius since it isn't connected to a sibling. */
-.loom-view .loom-script-acts-btn {
+.loom-view .loom-writer-outline-btn {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);
 	background: var(--background-primary);
@@ -5370,26 +5370,26 @@ span.loom-row-caret {
 	height: auto;
 }
 
-.loom-view .loom-script-acts-btn.loom-seg-on {
+.loom-view .loom-writer-outline-btn.loom-seg-on {
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
 }
 
-.loom-view .loom-script-acts-btn:hover:not(.loom-seg-on) {
+.loom-view .loom-writer-outline-btn:hover:not(.loom-seg-on) {
 	background: var(--background-modifier-hover);
 	border-color: var(--background-modifier-border-hover);
 }
 
-.loom-view .loom-script-acts-btn.loom-seg-on:hover {
+.loom-view .loom-writer-outline-btn.loom-seg-on:hover {
 	background: var(--interactive-accent-hover);
 }
 
 /* One page tall and scrolling inside itself, same limit as the raw editor
-   (.loom-script-editor) and the Pages preview (.loom-screenplay) — a script
+   (.loom-writer-editor) and the Pages preview (.loom-screenplay) — a script
    with dozens of acts previously had nothing to stop the outline from
    just running on past the bottom of the view and overlapping whatever
    followed it. */
-.loom-view .loom-script-outline {
+.loom-view .loom-writer-outline {
 	max-height: 70vh;
 	overflow-y: auto;
 	/* A little breathing room on the right, or a scrolled panel's own
@@ -5399,7 +5399,7 @@ span.loom-row-caret {
 	margin-bottom: 0.5em;
 }
 
-.loom-view .loom-script-outline-act {
+.loom-view .loom-writer-outline-act {
 	width: 100%;
 }
 
@@ -5407,11 +5407,11 @@ span.loom-row-caret {
    has children (no caret, no nested list) so the wrapper is just a plain
    width-100% box, matching the act wrapper's own sizing for consistent
    drag behavior. */
-.loom-view .loom-script-outline-pagebreak {
+.loom-view .loom-writer-outline-pagebreak {
 	width: 100%;
 }
 
-.loom-view .loom-script-outline-pagebreak-label {
+.loom-view .loom-writer-outline-pagebreak-label {
 	display: flex;
 	align-items: center;
 	gap: var(--size-2-1);
@@ -5421,7 +5421,7 @@ span.loom-row-caret {
 
 /* The Title page's own static row — first inside the list, right under the
    column headings, same width as every other row. */
-.loom-view .loom-script-outline-titlepage {
+.loom-view .loom-writer-outline-titlepage {
 	width: 100%;
 }
 
@@ -5429,7 +5429,7 @@ span.loom-row-caret {
    rows below (same row shape, so its cells land on the real columns). The
    expand/collapse-all toggle lives IN this row (the caret's own slot) —
    there's no separate row above it any more. */
-.loom-view .loom-script-outline-headrow {
+.loom-view .loom-writer-outline-headrow {
 	color: var(--text-faint);
 	font-size: 0.8em;
 	text-transform: uppercase;
@@ -5439,13 +5439,13 @@ span.loom-row-caret {
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.loom-view .loom-script-outline-headrow .loom-script-scene-head,
-.loom-view .loom-script-outline-headrow .loom-script-act-count {
+.loom-view .loom-writer-outline-headrow .loom-script-scene-head,
+.loom-view .loom-writer-outline-headrow .loom-writer-row-count {
 	color: inherit;
 	font-size: inherit;
 }
 
-.loom-view .loom-script-outline-headrow .loom-row-caret {
+.loom-view .loom-writer-outline-headrow .loom-row-caret {
 	color: inherit;
 }
 
@@ -5457,13 +5457,13 @@ span.loom-row-caret {
    continues down from the arrow that opens it rather than landing under an
    unrelated column. Scene rows themselves indent past that same point (grip
    + gap + caret + gap) so their own grip lands right after the rail. */
-.loom-view .loom-script-outline-scenes {
+.loom-view .loom-writer-outline-children {
 	position: relative;
 	margin-top: var(--size-2-1);
 	margin-left: calc(var(--icon-s) + 0.5em + var(--size-4-4) + 0.5em);
 }
 
-.loom-view .loom-script-outline-scenes::before {
+.loom-view .loom-writer-outline-children::before {
 	content: '';
 	position: absolute;
 	left: calc(-1px - 0.5em - var(--size-4-4) / 2);
@@ -5477,7 +5477,7 @@ span.loom-row-caret {
 /* Highlights the act a dragged scene is currently hovering over, when
    that's a DIFFERENT act than the one it started in — dropping here
    moves the scene there instead of just reordering it in place. */
-.loom-view .loom-script-outline-drop-target > .loom-script-scene-row {
+.loom-view .loom-writer-outline-drop-target > .loom-writer-outline-row {
 	background: var(--background-modifier-hover);
 	border-radius: var(--radius-s);
 }
@@ -5488,13 +5488,13 @@ span.loom-row-caret {
    floating right after wherever the (also shrink-wrapped) name text happens
    to end — so it still moved row to row. Stretching the row to the list's
    full width restores the usual flex-grow/flex-basis split. */
-.loom-view .loom-script-outline .loom-script-scene-row {
+.loom-view .loom-writer-outline .loom-writer-outline-row {
 	width: 100%;
 }
 
 /* Fixed width, not sized to its own text — otherwise a longer "N scenes"
    count shifts its own left edge (and so its start position) row to row. */
-.loom-view .loom-script-outline .loom-script-act-count {
+.loom-view .loom-writer-outline .loom-writer-row-count {
 	flex: 0 0 6em;
 	text-align: right;
 	color: var(--text-muted);
@@ -5506,16 +5506,16 @@ span.loom-row-caret {
    winning that fight, so `text-align: left` alone wasn't enough. Making the
    button itself a flex container and aligning on `justify-content` sidesteps
    `text-align` entirely — a completely different property nothing else here
-   overrides. Also no longer flex-grow: `.loom-script-scene-row .loom-subloc-link`
+   overrides. Also no longer flex-grow: `.loom-writer-outline-row .loom-subloc-link`
    (below, in the shared scene-row block) sets `flex: 1 1 auto` at the SAME
-   3-class specificity as a plain `.loom-script-outline .loom-subloc-link`
+   3-class specificity as a plain `.loom-writer-outline .loom-subloc-link`
    selector would carry, so which one won came down to source order rather
    than intent — the leader was getting no room to grow, landing hard
    against the count instead of right after the title. Matching
-   `.loom-script-scene-row` explicitly here (4 classes) makes the win
+   `.loom-writer-outline-row` explicitly here (4 classes) makes the win
    unconditional regardless of where either rule sits in the file. */
-.loom-view .loom-script-outline .loom-script-scene-row .loom-subloc-link,
-.loom-view .loom-script-outline .loom-script-scene-row .loom-script-scene-head {
+.loom-view .loom-writer-outline .loom-writer-outline-row .loom-subloc-link,
+.loom-view .loom-writer-outline .loom-writer-outline-row .loom-script-scene-head {
 	display: flex;
 	flex: 0 1 auto;
 	justify-content: flex-start;
@@ -5528,19 +5528,19 @@ span.loom-row-caret {
    leaving a ragged ever-different gap. The header row reuses the same
    spacer for column alignment but without the dashed line (nothing to
    "lead" between two column labels). */
-.loom-view .loom-script-outline-leader {
+.loom-view .loom-writer-outline-leader {
 	flex: 1 1 0;
 	min-width: 0.75em;
 }
 
-.loom-view .loom-script-outline-leader-dashed {
+.loom-view .loom-writer-outline-leader-dashed {
 	align-self: center;
 	height: 0;
 	margin: 0 0.5em;
 	border-bottom: 1px dashed var(--background-modifier-border);
 }
 
-.loom-view .loom-script-toolbar {
+.loom-view .loom-writer-toolbar {
 	display: flex;
 	align-items: center;
 	gap: 0.4em;
@@ -5550,7 +5550,7 @@ span.loom-row-caret {
 /* Fixed rather than flex:1 — Script and Pages preview carry different sets of
    sibling controls in the toolbar, so a flexible search box changed width
    switching between them, breaking the illusion that it's the same element. */
-.loom-view .loom-script-search {
+.loom-view .loom-writer-search {
 	flex: none;
 	width: 21em;
 }
@@ -5616,9 +5616,9 @@ span.loom-row-caret {
 /* The raw editor: one page tall and scrolling inside itself, so the view's own
    scroll position doesn't jump around a long script. Monospace because
    screenplay formatting is column-based. */
-.loom-view .loom-script-editor::-webkit-scrollbar,
-.loom-view .loom-script-editor::-webkit-scrollbar-thumb,
-.loom-view .loom-script-editor::-webkit-scrollbar-track,
+.loom-view .loom-writer-editor::-webkit-scrollbar,
+.loom-view .loom-writer-editor::-webkit-scrollbar-thumb,
+.loom-view .loom-writer-editor::-webkit-scrollbar-track,
 .loom-view .loom-screenplay::-webkit-scrollbar,
 .loom-view .loom-screenplay::-webkit-scrollbar-thumb,
 .loom-view .loom-screenplay::-webkit-scrollbar-track,
@@ -5629,7 +5629,7 @@ span.loom-row-caret {
 	cursor: default;
 }
 
-.loom-view .loom-script-editor {
+.loom-view .loom-writer-editor {
 	width: 100%;
 	height: 11in;
 	max-height: 70vh;
@@ -5642,7 +5642,7 @@ span.loom-row-caret {
 }
 
 /* Live-preview Fountain editor (fountain-field.tsx). The wrapper
-   (.loom-script-editor above) owns the resize handle and outer scrollbar;
+   (.loom-writer-editor above) owns the resize handle and outer scrollbar;
    the CM6 editor just fills it — no second scrollbar. Background is a fixed
    white/black pair, not theme tokens — same reasoning as the Pages preview's
    `.loom-screenplay-page`: this is meant to read as a sheet of paper, not as
@@ -5921,6 +5921,70 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 	right: 1in;
 }
 
+/* Book Preview's own "sheet of paper" — same visual language as
+   `.loom-screenplay-page` (white/black, drop shadow, `.loom-screenplay`
+   scroller) but book-typeset, not screenplay-typeset: a normal reading font
+   instead of Courier. `min-height` (not a fixed `height` — prose isn't
+   paginated the way a screenplay export is, so this still grows past it for
+   a real chapter), same 11in as the screenplay page: without it, a short
+   chapter's page card came out squat and wide instead of reading as a
+   sheet — 1in top/bottom padding against almost no text left barely any
+   visible height at all. */
+.loom-view .loom-book-page {
+	position: relative;
+	background: #fff;
+	color: #000;
+	width: 8.5in;
+	max-width: 100%;
+	min-height: 11in;
+	box-sizing: border-box;
+	padding: 1in 1.25in;
+	font-family: var(--font-text, Georgia, serif);
+	font-size: 12pt;
+	line-height: 1.6;
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+	flex: none;
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+/* Every chapter inside the page reads as plain flowing text, not a boxed
+   input field — `markdown-field.tsx`'s own `.cm-editor` chrome (background/
+   border/padding) is otherwise an ordinary form-field look, which is
+   exactly what made Preview mode look like the Editor. Mirrors
+   `.loom-note-text-plain`'s identical "no input chrome" treatment. */
+.loom-view .loom-book-page .loom-md-field .cm-editor {
+	background: transparent;
+	border: none;
+	padding: 0;
+	color: inherit;
+}
+
+.loom-view .loom-book-page .loom-md-field .cm-content {
+	color: inherit;
+}
+
+.loom-view .loom-book-page .loom-field-label {
+	color: inherit;
+}
+
+/* Editor mode's own fixed white/black background — the Prose raw editor
+   (`.loom-writer-editor` in the whole-Book view, `.loom-scene-script` in the
+   Act/Chapter pages' own embedded sections) is meant to read as the same
+   "sheet of paper" as Preview mode above and as Script's own
+   `.loom-fountain-field .cm-editor`, not as an ordinary theme-colored
+   form-field input regardless of the vault's color scheme. */
+.loom-writer-editor .loom-md-field .cm-editor,
+.loom-scene-script .loom-md-field .cm-editor {
+	background: #fff;
+	color: #000;
+}
+
+.loom-writer-editor .loom-md-field .cm-content,
+.loom-scene-script .loom-md-field .cm-content {
+	color: inherit;
+}
+
 /* NOT the `margin` shorthand: that sets all four sides at once, so it was
    silently forcing margin-left/-right back to 0 (and margin-bottom back to
    1em) on EVERY element below with its own competing declaration — the
@@ -6056,7 +6120,7 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
    on an external grid-template it doesn't have here) so a row never shifts
    depending on how many digits its number has, and INT./EXT. sits in its
    native reading position, before the title. */
-.loom-view .loom-script-scene-row {
+.loom-view .loom-writer-outline-row {
 	display: flex;
 	align-items: baseline;
 	gap: 0.5em;
@@ -6064,7 +6128,7 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 	min-width: 0;
 }
 
-.loom-view .loom-scene-row-num {
+.loom-view .loom-writer-row-num {
 	flex: 0 0 3ch;
 	text-align: right;
 	color: var(--text-faint);
@@ -6080,7 +6144,7 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 	white-space: nowrap;
 }
 
-.loom-view .loom-script-scene-row .loom-subloc-link {
+.loom-view .loom-writer-outline-row .loom-subloc-link {
 	flex: 1 1 auto;
 	min-width: 0;
 	overflow: hidden;
@@ -6089,7 +6153,7 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 	text-align: left;
 }
 
-.loom-view .loom-script-scene-row .loom-row-desc {
+.loom-view .loom-writer-outline-row .loom-row-desc {
 	flex: 0 0 auto;
 	color: var(--text-muted);
 	font-size: 0.85em;
@@ -6141,6 +6205,19 @@ div.loom-scene-script {
 	width: 100%;
 	height: 210mm;
 	overflow-y: auto;
+}
+
+/* `MarkdownField` (unlike `FountainField`, which mounts its `.cm-editor`
+   straight into `.loom-scene-script`) wraps its own CM6 view in a
+   `.loom-md-field` div that has no height of its own — a Writer/Prose
+   Chapter/Act page's embedded editor was filling the OUTER box's fixed
+   210mm height with its plain background, while the actual editor content
+   inside stayed shrunk to a couple of lines. Scoped to `.loom-scene-script`
+   specifically, not the base `.loom-md-field` rule — every ordinary Notes/
+   Description field elsewhere relies on that staying auto-height. */
+.loom-scene-script .loom-md-field,
+.loom-scene-script .loom-md-field .cm-editor {
+	height: 100%;
 }
 
 /* Scene page's own Pages preview: same `.loom-screenplay`/`.loom-sp-*` look
@@ -6270,15 +6347,18 @@ div.loom-scene-script {
    (`PagesPreviewBody` in script-view.tsx, via `wrapAnnotationMarkersForDisplay`
    in fountain.ts, `.loom-sp-annotation-span-*`). */
 .loom-fountain-annotation-span,
-.loom-view .loom-sp-annotation-span {
+.loom-view .loom-sp-annotation-span,
+.loom-view .loom-md-annotation-span {
 	background-image: repeating-linear-gradient(to right, var(--text-faint) 0 3px, transparent 3px 6px);
 	background-position: bottom;
 	background-size: 100% 2px;
 	background-repeat: no-repeat;
+	cursor: pointer;
 }
 
 .loom-fountain-annotation-span-alt,
-.loom-view .loom-sp-annotation-span-alt {
+.loom-view .loom-sp-annotation-span-alt,
+.loom-view .loom-md-annotation-span-alt {
 	background-image: repeating-linear-gradient(to right, var(--interactive-accent) 0 3px, transparent 3px 6px);
 }
 
@@ -6290,7 +6370,8 @@ div.loom-scene-script {
    `background-image` too, which would silently erase the dashes above. It
    paints BEHIND `background-image` by spec, so both show together. */
 .loom-fountain-annotation-span-unresolved,
-.loom-view .loom-sp-annotation-span-unresolved {
+.loom-view .loom-sp-annotation-span-unresolved,
+.loom-view .loom-md-annotation-span-unresolved {
 	background-color: color-mix(in srgb, var(--color-yellow, #d8b13c) 18%, transparent);
 }
 
@@ -6300,7 +6381,8 @@ div.loom-scene-script {
    `background-image` with a solid one instead of trying to make a gradient
    "look solid." */
 .loom-fountain-annotation-span-highlight,
-.loom-view .loom-sp-annotation-span-highlight {
+.loom-view .loom-sp-annotation-span-highlight,
+.loom-view .loom-md-annotation-span-highlight {
 	background-image: linear-gradient(var(--interactive-accent), var(--interactive-accent));
 	background-position: bottom;
 	background-size: 100% 2px;

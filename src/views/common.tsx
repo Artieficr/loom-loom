@@ -28,6 +28,7 @@ import {
 import { formatLoomDate, groupNameOf } from '../calendar';
 import { features, projectTypes, roleOf } from '../project-kind';
 import { createScriptFile, scriptFilePath as scriptPathOf } from './script-view';
+import { createBookFile, findBookFile } from './book-view';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
 import { LocaleKey, t } from '../i18n';
@@ -576,8 +577,14 @@ export function NavRail({
 				<RailButton
 					icon={BOOK_ICON}
 					label={bookLabel()}
-					active={active === 'chapter'}
-					onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: 'chapter' })}
+					active={active === 'book'}
+					onClick={() => {
+						// Created on demand: a project switched to Writer/Prose after
+						// setup has no Book file yet — mirrors the Script button above.
+						const bookFile = findBookFile(navigator.plugin, project);
+						if (bookFile) navigator.openLoomFile(bookFile.path);
+						else void createBookFile(navigator.plugin, project).then((f) => navigator.openLoomFile(f.path));
+					}}
 				/>
 			) : null}
 			{/* The Group is the party — present only in kinds that have one. */}

@@ -65,6 +65,7 @@
 			"allEntities": "All entities",
 			"noDescription": "(No description)",
 			"descriptionExisting": "Description (existing event)",
+			"sessionNoteLabel": "Session note",
 			"relationship": "Relationship",
 			"relationshipDesc": "How the new {type} relates to {target}.",
 			"identifierPlaceholder": "Identifier",
@@ -421,9 +422,12 @@
 				"noMatches": "No matches",
 				"matchCount": "{current} of {total}",
 				"newSceneAction": "+ New scene",
+				"newChapterAction": "+ New chapter",
 				"noScenesYetPre": "No scenes yet — a heading under this ",
 				"noScenesYetPost": " section in the script creates them.",
 				"actNotInScript": "This act isn't in the script yet.",
+				"noChaptersYetPre": "No chapters yet — a heading under this ",
+				"noChaptersYetPost": " section in the book creates them.",
 				"noBranchStructurePre": "No branch structure in this scene yet — a nested heading tagged with",
 				"noBranchStructurePost": " right beneath it creates one.",
 				"sceneNotInScript": "This scene isn't in the script yet."
@@ -653,6 +657,8 @@
 			"outlineNoActsPost": " line starts one.",
 			"expandScenesAria": "Expand scenes",
 			"collapseScenesAria": "Collapse scenes",
+			"expandChaptersAria": "Expand chapters",
+			"collapseChaptersAria": "Collapse chapters",
 			"outlineLinksHeading": "Outline links ({count})",
 			"outlineNoScenesPre": "No scenes yet — a heading like ",
 			"outlineNoScenesPost": " starts one.",
@@ -662,6 +668,11 @@
 			"scenesWithoutActHintPost": " line above these.",
 			"scenesNoLongerInScript": "Scenes no longer in the script",
 			"scenesNoLongerHint": "Their headings are gone from the script. Nothing is deleted automatically — open one to keep or remove it.",
+			"noActsYetBook": "No acts yet — use the toolbar above to add one.",
+			"chaptersWithoutAct": "Chapters without an act",
+			"chaptersWithoutActHint": "A chapter belongs to the act it sits under in the Book. Move it there, or add an act first.",
+			"chaptersNoLongerInBook": "Acts and chapters no longer in the Book",
+			"chaptersNoLongerHint": "Their headings are gone from the Book. Nothing is deleted automatically — open one to keep or remove it.",
 			"creditDefault": "Written by",
 			"titlePageField": {
 				"credit": "Credit",
@@ -910,6 +921,9 @@
 			"maps": {
 				"name": "Maps",
 				"desc": "Maps home-wheel button and the default new-zone fill color."
+			},
+			"groupScriptBook": {
+				"desc": "The virtual Group's home-wheel button and the writer project's whole-document one (Script in Script mode, Book in Prose mode)."
 			},
 			"loomButton": {
 				"name": "Loom button",

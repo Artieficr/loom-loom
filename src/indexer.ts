@@ -124,6 +124,7 @@ const HIDDEN_LINK_KEYS = [
 	'loomitemowner',
 	'loomobjectives',
 	'loomscenebranch',
+	'loomdailynote',
 	'attendance',
 	'deathsession',
 	'sublocationorder',

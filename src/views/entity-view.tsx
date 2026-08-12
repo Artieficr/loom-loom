@@ -38,6 +38,7 @@ import {
 	TextInputModal,
 	createEntity,
 	createItemCopy,
+	dailyNoteLink,
 	entityFileName,
 	purgeEntityReferences,
 	renameEntityRecord,
@@ -83,13 +84,14 @@ import {
 	type NavNode,
 	type ScriptSearchMatch,
 } from './script-view';
-import { editBookAndSync, useBookText } from './book-view';
+import { ActChapterBlocks, editBookAndSync, useBookAnnotations, useBookText } from './book-view';
 import {
 	chapterBookText,
 	moveBookChapterToAct,
 	renameBookActTitle,
 	renameBookChapterTitle,
 	replaceBookChapterBody,
+	reorderBookChaptersInAct,
 } from '../prose';
 import { AltTextEntry, CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
 import { CommentPopover } from './annotation-popover';
@@ -338,8 +340,54 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  role `scriptText` plays for Script mode, unused by every other
 	 *  entity type. */
 	const bookText = useBookText(plugin, project);
+	/** Comments/alternative-text for the Book — shared by the Chapter and Act
+	 *  (Prose) sections below via `useBookAnnotations` (book-view.tsx), same
+	 *  hook `BookView` itself uses, so an id resolves identically wherever
+	 *  it's opened from. */
+	const bookAnnotations = useBookAnnotations(plugin, project);
+	/** Session page's own event hub: the bottom "+ Add" button (mirrors the
+	 *  top one, added so a long play session doesn't need scrolling back up
+	 *  every time) only shows once the TOP button has scrolled out of view —
+	 *  otherwise both would be on screen at once, redundant. Tracked via
+	 *  IntersectionObserver rather than a scroll listener, so it costs
+	 *  nothing while the top button is in view (the common case). */
+	const topAddEventBtnRef = useRef<HTMLButtonElement | null>(null);
+	const [topAddEventBtnVisible, setTopAddEventBtnVisible] = useState(true);
+	useEffect(() => {
+		const el = topAddEventBtnRef.current;
+		if (!el) return;
+		const observer = new IntersectionObserver(([entry]) => setTopAddEventBtnVisible(entry.isIntersecting), {
+			threshold: 0,
+		});
+		observer.observe(el);
+		return () => observer.disconnect();
+	}, [record?.path]);
 	const [chapterEditorMode, setChapterEditorMode] = useState<'editor' | 'preview'>('editor');
 	const [chapterSearchQuery, setChapterSearchQuery] = useState('');
+	/** Scrolls the tabs row into view on every click — mirrors Script-mode's
+	 *  own `clickActTab`/`scrollTabsIntoView`, even a re-click of the pane
+	 *  already active. */
+	const chapterTabsRef = useRef<HTMLDivElement | null>(null);
+	const clickChapterTab = (next: 'editor' | 'preview') => {
+		setChapterEditorMode(next);
+		window.requestAnimationFrame(() => {
+			chapterTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		});
+	};
+	/** Act (Prose) page's own Editor/Preview/Outline pill + search — sibling
+	 *  of the Chapter section's own state just above, kept separate from
+	 *  `actScriptMode`/`actScriptQuery` (Script-mode Act, a different feature
+	 *  entirely) even though the two never render at once (`bookMode` and
+	 *  `scriptMode` are mutually exclusive per project). */
+	const [actBookMode, setActBookMode] = useState<'editor' | 'preview' | 'outline'>('editor');
+	const [actBookQuery, setActBookQuery] = useState('');
+	const actBookTabsRef = useRef<HTMLDivElement | null>(null);
+	const clickActBookTab = (next: 'editor' | 'preview' | 'outline') => {
+		setActBookMode(next);
+		window.requestAnimationFrame(() => {
+			actBookTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		});
+	};
 	/** Comment bodies + alt-text option lists — same project-level sidecar
 	 *  the main Script view reads/writes, kept live the same way. Unused by
 	 *  every entity type but Scene/Act, same as `scriptText` above. */
@@ -1457,6 +1505,12 @@ function EntityPage({ view }: { view: EntityView }) {
 		.getAll('scene', record.project)
 		.filter((sc) => sc.sceneAct !== '' && plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === record.path)
 		.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+	/** Prose Act page: the chapters pointing at this act, in book order —
+	 *  mirrors `actScenes` above. */
+	const actChapters = plugin.indexer
+		.getAll('chapter', record.project)
+		.filter((c) => c.chapterAct !== '' && plugin.indexer.resolve(c.chapterAct, c.path)?.path === record.path)
+		.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
 	const isSession = roleOf(record.type) === 'anchor';
 	const isBeat = roleOf(record.type) === 'beat';
 	const vocab = ENTITY_TAGS[record.type];
@@ -1520,13 +1574,9 @@ function EntityPage({ view }: { view: EntityView }) {
 			await editBookAndSync(plugin, project, (raw) => renameBookChapterTitle(raw, record.chapterId, entered));
 			return;
 		}
-		await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-			setLoomKey(fm, FM.name, entered);
-			const aliases: unknown[] = Array.isArray(fm.aliases)
-				? (fm.aliases as unknown[]).filter((a) => a !== record.name && a !== entered)
-				: [];
-			fm.aliases = [entered, ...aliases];
-		});
+		// Checked BEFORE the frontmatter write below, not after: a collision
+		// must abort the rename entirely, never leave the note's displayed
+		// name changed while its file name silently stays behind.
 		const parentName =
 			record.type === 'location' && record.parentLocation !== null
 				? plugin.indexer.resolve(record.parentLocation, record.path)?.name
@@ -1534,11 +1584,19 @@ function EntityPage({ view }: { view: EntityView }) {
 		const base = entityFileName(project, record.type, entered, parentName);
 		const parent = file.parent?.path ?? '';
 		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
-		if (newPath === file.path) return;
-		if (plugin.app.vault.getAbstractFileByPath(newPath)) {
+		if (newPath !== file.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
 			new Notice(t('project.common.nameExists'));
+			setName(record.name);
 			return;
 		}
+		await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+			setLoomKey(fm, FM.name, entered);
+			const aliases: unknown[] = Array.isArray(fm.aliases)
+				? (fm.aliases as unknown[]).filter((a) => a !== record.name && a !== entered)
+				: [];
+			fm.aliases = [entered, ...aliases];
+		});
+		if (newPath === file.path) return;
 		await plugin.app.fileManager.renameFile(file, newPath);
 	};
 
@@ -1587,6 +1645,13 @@ function EntityPage({ view }: { view: EntityView }) {
 		const value = raw.trim();
 		writeFm((fm) => {
 			setLoomKey(fm, FM.date, value);
+			// Native-graph link to the day's daily note — see `FM.dailyNote`'s
+			// own doc comment; re-derived on every date edit, not just at
+			// creation, so it never points at the wrong day after a change.
+			if (record.type === 'session') {
+				const link = value !== '' ? dailyNoteLink(plugin.app, value) : null;
+				setLoomKey(fm, FM.dailyNote, link ?? '');
+			}
 		});
 		if (record.type === 'session' && project && value !== '') {
 			const base = sessionFileName(project, value);
@@ -2183,7 +2248,31 @@ function EntityPage({ view }: { view: EntityView }) {
 	const isRegion = record.type === 'region';
 	// Regions available to pick as a location's "Part of region".
 	const regions = (isLocation || isRegion) && project ? plugin.indexer.getAll('region', project.root) : [];
-	const currentRegion = isLocation && record.region ? plugin.indexer.resolve(record.region, record.path) : null;
+	// A sublocation never owns its own `region` — it's inherited from
+	// whichever main (top-level) location it ultimately sits under, walking
+	// the `parentLocation` chain. `region` is only ever WRITTEN on a main
+	// location's own frontmatter (both here and the creation modal) — never
+	// on a sublocation's — which is also what keeps a sublocation from ever
+	// drawing its own region graph edge (only location->region and
+	// sublocation->location edges are wanted; see `FM.region`'s own doc
+	// comment for the full reasoning).
+	const isSublocationPage = isLocation && record.parentLocation !== null;
+	const effectiveRegionOwner = (() => {
+		if (!isLocation) return null;
+		let cur: EntityRecord = record;
+		const seen = new Set<string>([record.path]);
+		for (let guard = 0; guard < 20 && cur.parentLocation !== null; guard++) {
+			const parent = plugin.indexer.resolve(cur.parentLocation, cur.path);
+			if (!parent || parent.type !== 'location' || seen.has(parent.path)) break;
+			cur = parent;
+			seen.add(parent.path);
+		}
+		return cur;
+	})();
+	const currentRegion =
+		effectiveRegionOwner?.region && effectiveRegionOwner.region !== ''
+			? plugin.indexer.resolve(effectiveRegionOwner.region, effectiveRegionOwner.path)
+			: null;
 	const setLocationRegion = (target: string) => {
 		const f = plugin.app.vault.getFileByPath(record.path);
 		if (!f) return;
@@ -3010,10 +3099,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	 * (`sceneOutlineTree`, bounded to just this scene's line span and
 	 * numbered against `sceneExcerptParsed` so `sceneOutlinePageRange` lines
 	 * up), rendered with the SAME row shape the Script view's and Act
-	 * page's own Outlines use (`.loom-script-scene-row` grip/caret placeholder
+	 * page's own Outlines use (`.loom-writer-outline-row` grip/caret placeholder
 	 * + num placeholder + title + dashed leader + page-range count, each row
-	 * wrapped in a `.loom-script-outline-act`-shaped box so children hang
-	 * off the shared `.loom-script-outline-scenes` nesting rail) rather than
+	 * wrapped in a `.loom-writer-outline-act`-shaped box so children hang
+	 * off the shared `.loom-writer-outline-children` nesting rail) rather than
 	 * the read-only nav panel's plain `loom-script-nav-branchpoint` labels.
 	 * Only a `branchPoint`'s own children — the branches sharing that ONE
 	 * decision point's identifier — are draggable (`reorderBranchGroup`,
@@ -3031,17 +3120,17 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (item.kind === 'section') {
 			const hasChildren = item.node.items.length > 0;
 			return (
-				<div key={`sec-${item.node.line}`} className="loom-script-outline-act">
-					<div className="loom-script-scene-row">
+				<div key={`sec-${item.node.line}`} className="loom-writer-outline-act">
+					<div className="loom-writer-outline-row">
 						<span className="loom-subloc-grip-static" aria-hidden="true" />
 						<span className="loom-row-caret" aria-hidden="true" />
-						<span className="loom-scene-row-num" aria-hidden="true" />
+						<span className="loom-writer-row-num" aria-hidden="true" />
 						<span className="loom-script-scene-head">{item.node.title}</span>
-						<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-						<span className="loom-script-act-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(item.node) })}</span>
+						<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+						<span className="loom-writer-row-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(item.node) })}</span>
 					</div>
 					{hasChildren ? (
-						<div className="loom-script-outline-scenes">
+						<div className="loom-writer-outline-children">
 							{item.node.items.map((child) => renderSceneOutlineItem(child))}
 						</div>
 					) : null}
@@ -3053,24 +3142,24 @@ function EntityPage({ view }: { view: EntityView }) {
 			(x): x is Extract<NavItem, { kind: 'section' }> => x.kind === 'section'
 		);
 		return (
-			<div key={`bp-${item.id}`} className="loom-script-outline-act">
-				<div className="loom-script-scene-row">
+			<div key={`bp-${item.id}`} className="loom-writer-outline-act">
+				<div className="loom-writer-outline-row">
 					<span className="loom-subloc-grip-static" aria-hidden="true" />
 					<span className="loom-row-caret" aria-hidden="true" />
-					<span className="loom-scene-row-num" aria-hidden="true" />
-					<span className="loom-script-outline-pagebreak-label">
+					<span className="loom-writer-row-num" aria-hidden="true" />
+					<span className="loom-writer-outline-pagebreak-label">
 						<Icon name="git-branch" fallback="split" /> {item.id}
 					</span>
-					<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-					<span className="loom-script-act-count">
+					<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+					<span className="loom-writer-row-count">
 						{tn('view.entity.script.branchCount', branches.length)}
 					</span>
 				</div>
 				<div
 					className={
 						seqDrag?.group === group
-							? 'loom-subloc-list loom-subloc-dragging loom-script-outline-scenes'
-							: 'loom-subloc-list loom-script-outline-scenes'
+							? 'loom-subloc-list loom-subloc-dragging loom-writer-outline-children'
+							: 'loom-subloc-list loom-writer-outline-children'
 					}
 				>
 					{branches.map((b, i) => {
@@ -3081,13 +3170,13 @@ function EntityPage({ view }: { view: EntityView }) {
 								key={b.node.loomId ?? b.node.line}
 								className={
 									grabbed
-										? 'loom-script-outline-act loom-subloc-row-slide loom-subloc-row-dragging'
-										: 'loom-script-outline-act loom-subloc-row-slide'
+										? 'loom-writer-outline-act loom-subloc-row-slide loom-subloc-row-dragging'
+										: 'loom-writer-outline-act loom-subloc-row-slide'
 								}
 								style={seqRowStyle(group, i)}
 								data-seq-row=""
 							>
-								<div className="loom-script-scene-row">
+								<div className="loom-writer-outline-row">
 									{branchGrip(group, i, branches.length, (from, over) => {
 										if (!project) return;
 										const ids = branches
@@ -3099,13 +3188,13 @@ function EntityPage({ view }: { view: EntityView }) {
 										void editScriptAndSync(plugin, project, (raw) => reorderBranchGroup(raw, item.id, next));
 									})}
 									<span className="loom-row-caret" aria-hidden="true" />
-									<span className="loom-scene-row-num">{i + 1}</span>
+									<span className="loom-writer-row-num">{i + 1}</span>
 									<span className="loom-script-scene-head">{b.node.title}</span>
-									<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-									<span className="loom-script-act-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(b.node) })}</span>
+									<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+									<span className="loom-writer-row-count">{t('view.entity.script.pageAbbrev', { range: sceneOutlinePageRange(b.node) })}</span>
 								</div>
 								{hasChildren ? (
-									<div className="loom-script-outline-scenes">
+									<div className="loom-writer-outline-children">
 										{b.node.items.map((grandchild) => renderSceneOutlineItem(grandchild))}
 									</div>
 								) : null}
@@ -4682,9 +4771,31 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{/* Part of region — a grouping layer above locations (every location,
-			    sublocations included; shown right after "Sublocation of"). */}
-			{isLocation ? (
+			{/* Part of region — a grouping layer above locations, shown right after
+			    "Sublocation of". A sublocation shows this READ-ONLY, inherited
+			    from whichever main location it ultimately sits under — it never
+			    picks its own (see `currentRegion`'s own doc comment for why). */}
+			{isSublocationPage ? (
+				<div className="loom-field">
+					<span className="loom-field-label">{t('project.createEntity.partOfRegion')}</span>
+					{/* `.loom-field` is a column flex container (`align-items: stretch`
+					    by default), which is what was stretching a bare chip to the
+					    full field width — `.loom-region-pick` (a ROW flex container,
+					    same wrapper the editable picker below already uses) makes the
+					    chip a row item instead, shrink-wrapping to its own text. */}
+					<div className="loom-region-pick">
+						{currentRegion ? (
+							<EntityChip
+								plugin={plugin}
+								record={currentRegion}
+								onOpen={() => view.openEntity(currentRegion.path)}
+							/>
+						) : (
+							<span className="loom-field-hint">{t('common.notSpecified')}</span>
+						)}
+					</div>
+				</div>
+			) : isLocation ? (
 				<div className="loom-field">
 					<span className="loom-field-label">{t('project.createEntity.partOfRegion')}</span>
 					{!record.region || editingRegion ? (
@@ -5641,7 +5752,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								};
 								return (
 									<>
-										<div className="loom-script-tabs" ref={actScriptTabsRef}>
+										<div className="loom-writer-tabs" ref={actScriptTabsRef}>
 											<div className="loom-seg">
 												<button
 													className={
@@ -5681,24 +5792,24 @@ function EntityPage({ view }: { view: EntityView }) {
 											<div className="loom-shell-spacer" />
 											{/* Deliberately NOT part of the Script/Pages pill — same
 											    reasoning as the main Script view's own standalone
-											    Outline button (`.loom-script-acts-btn`). */}
+											    Outline button (`.loom-writer-outline-btn`). */}
 											<button
 												className={
 													actScriptMode === 'outline'
-														? 'loom-script-acts-btn loom-seg-on'
-														: 'loom-script-acts-btn'
+														? 'loom-writer-outline-btn loom-seg-on'
+														: 'loom-writer-outline-btn'
 												}
 												onClick={() => clickActTab('outline')}
 											>
 												{t('view.entity.script.outline')}
 											</button>
 										</div>
-										<div className="loom-script-toolbar">
+										<div className="loom-writer-toolbar">
 											{actScriptMode !== 'outline' ? (
 												<>
 											<div className="loom-search-wrap">
 												<input
-													className="loom-script-search"
+													className="loom-writer-search"
 													type="search"
 													placeholder={t('view.entity.script.searchThisAct')}
 													value={actScriptQuery}
@@ -5743,7 +5854,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											>
 												<Icon name="chevron-down" />
 											</button>
-											<span className="loom-script-stat">
+											<span className="loom-writer-stat">
 												{actScriptQuery.trim() === ''
 													? ''
 													: actMatches.length === 0
@@ -5841,8 +5952,8 @@ function EntityPage({ view }: { view: EntityView }) {
 											<div
 												className={
 													seqDrag?.group === 'act-scenes'
-														? 'loom-subloc-list loom-subloc-dragging loom-script-outline'
-														: 'loom-subloc-list loom-script-outline'
+														? 'loom-subloc-list loom-subloc-dragging loom-writer-outline'
+														: 'loom-subloc-list loom-writer-outline'
 												}
 											>
 												{actScenes.length === 0 ? (
@@ -5857,8 +5968,8 @@ function EntityPage({ view }: { view: EntityView }) {
 																key={sc.path}
 																className={
 																	grabbed
-																		? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
-																		: 'loom-script-scene-row loom-subloc-row-slide'
+																		? 'loom-writer-outline-row loom-subloc-row-slide loom-subloc-row-dragging'
+																		: 'loom-writer-outline-row loom-subloc-row-slide'
 																}
 																style={seqRowStyle('act-scenes', i)}
 																data-seq-row=""
@@ -5873,12 +5984,12 @@ function EntityPage({ view }: { view: EntityView }) {
 																		)
 																	);
 																})}
-																<span className="loom-scene-row-num">{i + 1}</span>
+																<span className="loom-writer-row-num">{i + 1}</span>
 																<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
 																	{actExcerptParsed?.scenes[i]?.heading ?? sc.name}
 																</button>
-																<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-																<span className="loom-script-act-count">{t('view.entity.script.pageAbbrev', { range: actScenePageRange(i) })}</span>
+																<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+																<span className="loom-writer-row-count">{t('view.entity.script.pageAbbrev', { range: actScenePageRange(i) })}</span>
 															</div>
 														);
 													})
@@ -5892,16 +6003,154 @@ function EntityPage({ view }: { view: EntityView }) {
 							<div className="loom-attendance-empty">{t('view.entity.script.actNotInScript')}</div>
 						)}
 				</div>
+			) : record.type === 'act' && bookMode && project ? (
+				<div className="loom-field loom-field-sep">
+					<div className="loom-writer-tabs" ref={actBookTabsRef}>
+						<div className="loom-seg">
+							<button
+								className={actBookMode === 'editor' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
+								onClick={() => clickActBookTab('editor')}
+							>
+								{t('view.entity.script.editorLabel')}
+							</button>
+							<button
+								className={actBookMode === 'preview' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
+								onClick={() => clickActBookTab('preview')}
+							>
+								{t('view.entity.script.pagesPreview')}
+							</button>
+						</div>
+						<div className="loom-script-side-toggles">
+							{/* No browse-all panel yet — same as the Chapter section above;
+							    comments/alt-text spans inside each chapter block below are
+							    already live (click to open/cycle). */}
+							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseComments')}>
+								<Icon name="message-square" />
+							</button>
+							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseAlternatives')}>
+								<Icon name="repeat" fallback="arrow-right-left" />
+							</button>
+						</div>
+						<div className="loom-shell-spacer" />
+						{/* Deliberately NOT part of the Editor/Preview pill — same
+						    reasoning as Script-mode Act's own standalone Outline button. */}
+						<button
+							className={actBookMode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
+							onClick={() => clickActBookTab('outline')}
+						>
+							{t('view.entity.script.outline')}
+						</button>
+					</div>
+					{actBookMode !== 'outline' ? (
+						<input
+							type="search"
+							className="loom-writer-search"
+							placeholder={t('project.common.searchPlaceholder')}
+							value={actBookQuery}
+							onChange={(e) => setActBookQuery(e.target.value)}
+							onKeyDown={(e) => {
+								if (e.key === 'Enter') {
+									(window as unknown as { find?: (s: string) => boolean }).find?.(actBookQuery);
+								}
+							}}
+						/>
+					) : null}
+					{actBookMode === 'outline' ? (
+						<div
+							className={
+								seqDrag?.group === 'act-chapters'
+									? 'loom-subloc-list loom-subloc-dragging loom-writer-outline'
+									: 'loom-subloc-list loom-writer-outline'
+							}
+						>
+							{actChapters.length === 0 ? (
+								<div className="loom-attendance-empty">
+									{t('view.entity.script.noChaptersYetPre')}<code># {record.name}</code>{t('view.entity.script.noChaptersYetPost')}
+								</div>
+							) : (
+								actChapters.map((ch, i) => {
+									const grabbed = seqDrag?.group === 'act-chapters' && seqDrag.from === i;
+									return (
+										<div
+											key={ch.path}
+											className={
+												grabbed
+													? 'loom-writer-outline-row loom-subloc-row-slide loom-subloc-row-dragging'
+													: 'loom-writer-outline-row loom-subloc-row-slide'
+											}
+											style={seqRowStyle('act-chapters', i)}
+											data-seq-row=""
+										>
+											{seqGrip('act-chapters', i, actChapters, (reordered) => {
+												void editBookAndSync(plugin, project, (raw) =>
+													reorderBookChaptersInAct(
+														raw,
+														record.actId,
+														reordered.map((r) => r.chapterId)
+													)
+												);
+											})}
+											<span className="loom-writer-row-num">{i + 1}</span>
+											<button className="loom-subloc-link" onClick={() => view.openEntity(ch.path)}>
+												{ch.name}
+											</button>
+											<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+										</div>
+									);
+								})
+							)}
+						</div>
+					) : (
+						(() => {
+							const blocks = (
+								<ActChapterBlocks
+									plugin={plugin}
+									project={project}
+									bookText={bookText}
+									chapters={actChapters}
+									mode={actBookMode === 'preview' ? 'preview' : 'editor'}
+									names={linkNames}
+									onOpenLink={openLinkTarget}
+									onCreateEntity={createLinkEntity}
+									onOpenChapter={(path) => view.openEntity(path)}
+									emptyMessage={
+										<div className="loom-attendance-empty">
+											{t('view.entity.script.noChaptersYetPre')}<code># {record.name}</code>{t('view.entity.script.noChaptersYetPost')}
+										</div>
+									}
+									annotations={bookAnnotations}
+								/>
+							);
+							// Same fixed-height (non-resizable) treatment Script-mode's own
+							// embedded Act/Scene sections use (`.loom-scene-script`/
+							// `.loom-scene-pages`) — a nested page section, not the main
+							// BookView, so it gets the smaller capped box, not the full
+							// resizable `.loom-writer-editor`.
+							return actBookMode === 'preview' ? (
+								<div className="loom-screenplay loom-scene-pages">
+									<div className="loom-book-page">{blocks}</div>
+								</div>
+							) : (
+								<div className="loom-scene-script">{blocks}</div>
+							);
+						})()
+					)}
+				</div>
 			) : null}
 
 			{isSession && !scriptMode && project ? (
-				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">{entityPlural(beatType)}</span>
-					{/* Creation first, as always. The modal's Name field searches
-					    existing beats — picking one pins it here instead of
-					    creating a duplicate. */}
-					<div className="loom-hub-add-row">
+				(() => {
+					const hubTypes = ENTITY_TYPES.filter((et) => hubEntries.some((e) => e.owner.type === et));
+					// One group whose type is already the section's own label
+					// (in practice always just Events, since quests no longer
+					// author session notes) — printing that type's own group
+					// label too would just repeat "Events" underneath "Events".
+					// A future second type sharing this hub would still get its
+					// own label, same as today.
+					const showGroupLabel = hubTypes.length > 1 || (hubTypes.length === 1 && hubTypes[0] !== beatType);
+					const addEventBtn = (ref?: (el: HTMLButtonElement | null) => void) => (
 						<button
+							ref={ref}
 							className="loom-rel-add"
 							onClick={() =>
 								new CreateEntityModal(plugin, beatType, project, {
@@ -5912,44 +6161,60 @@ function EntityPage({ view }: { view: EntityView }) {
 						>
 							+ {t('view.list.addBeatTitle', { article: /^[aeiou]/.test(beatLabel) ? 'an' : 'a', beat: beatLabel })}
 						</button>
-					</div>
-					{ENTITY_TYPES.filter((et) => hubEntries.some((e) => e.owner.type === et)).map((et) => {
-						const entries = hubEntries.filter((e) => e.owner.type === et);
-						// Event and quest notes are drag-reorderable by loomSeq (events
-						// share it with the timeline); other hub groups keep note order.
-						if (roleOf(et) !== 'beat' && et !== 'quest') {
-							return (
-								<div key={et} className="loom-hub-section">
-									<span className="loom-rel-group-label">{entityPlural(et)}</span>
-									{entries.map((en) => hubEntryRow(en))}
-								</div>
-							);
-						}
-						const ordered = entries
-							.slice()
-							.sort((a, b) => (a.owner.seq ?? a.owner.created) - (b.owner.seq ?? b.owner.created));
-						const owners = ordered.map((e) => e.owner);
-						return (
-							<div
-								key={et}
-								className={
-									seqDrag?.group === et ? 'loom-hub-section loom-subloc-dragging' : 'loom-hub-section'
+					);
+					return (
+						<div className="loom-field loom-field-sep">
+							<span className="loom-field-label">{entityPlural(beatType)}</span>
+							{/* Creation first, as always. The modal's Name field searches
+							    existing beats — picking one pins it here instead of
+							    creating a duplicate. */}
+							<div className="loom-hub-add-row">{addEventBtn((el) => (topAddEventBtnRef.current = el))}</div>
+							{hubTypes.map((et) => {
+								const entries = hubEntries.filter((e) => e.owner.type === et);
+								// Event and quest notes are drag-reorderable by loomSeq (events
+								// share it with the timeline); other hub groups keep note order.
+								if (roleOf(et) !== 'beat' && et !== 'quest') {
+									return (
+										<div key={et} className="loom-hub-section">
+											{showGroupLabel ? <span className="loom-rel-group-label">{entityPlural(et)}</span> : null}
+											{entries.map((en) => hubEntryRow(en))}
+										</div>
+									);
 								}
-							>
-								<span className="loom-rel-group-label">{entityPlural(et)}</span>
-								{ordered.map((en, i) =>
-									hubEntryRow(
-										en,
-										seqGrip(et, i, owners),
-										seqRowStyle(et, i),
-										seqDrag?.group === et && seqDrag.from === i,
-										i
-									)
-								)}
-							</div>
-						);
-					})}
-				</div>
+								const ordered = entries
+									.slice()
+									.sort((a, b) => (a.owner.seq ?? a.owner.created) - (b.owner.seq ?? b.owner.created));
+								const owners = ordered.map((e) => e.owner);
+								return (
+									<div
+										key={et}
+										className={
+											seqDrag?.group === et ? 'loom-hub-section loom-subloc-dragging' : 'loom-hub-section'
+										}
+									>
+										{showGroupLabel ? <span className="loom-rel-group-label">{entityPlural(et)}</span> : null}
+										{ordered.map((en, i) =>
+											hubEntryRow(
+												en,
+												seqGrip(et, i, owners),
+												seqRowStyle(et, i),
+												seqDrag?.group === et && seqDrag.from === i,
+												i
+											)
+										)}
+									</div>
+								);
+							})}
+							{/* Mirrors the top button once it's scrolled out of view — added
+							    so recording events live doesn't mean scrolling back up for
+							    every one; hidden while the top button is still visible so
+							    the two are never both on screen at once. */}
+							{hubEntries.length > 0 && !topAddEventBtnVisible ? (
+								<div className="loom-hub-add-row">{addEventBtn()}</div>
+							) : null}
+						</div>
+					);
+				})()
 			) : null}
 
 
@@ -6355,8 +6620,8 @@ function EntityPage({ view }: { view: EntityView }) {
 																	key={sc.path}
 																	className={
 																		grabbed
-																			? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
-																			: 'loom-script-scene-row loom-subloc-row-slide'
+																			? 'loom-writer-outline-row loom-subloc-row-slide loom-subloc-row-dragging'
+																			: 'loom-writer-outline-row loom-subloc-row-slide'
 																	}
 																	style={seqRowStyle('scene-move', i)}
 																	data-seq-row=""
@@ -6369,7 +6634,7 @@ function EntityPage({ view }: { view: EntityView }) {
 																				setMovePlaceAt(idx);
 																			})
 																		: <span className="loom-subloc-grip loom-subloc-grip-static" />}
-																	<span className="loom-scene-row-num">{i + 1}</span>
+																	<span className="loom-writer-row-num">{i + 1}</span>
 																	<span className={isSelf ? 'loom-subloc-link loom-hub-name-static' : ''}>
 																		{sc.name}
 																	</span>
@@ -6775,7 +7040,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												)}
 												{headingParts.timeOfDay ? ` - ${headingParts.timeOfDay}` : ''}
 											</div>
-											<div className="loom-script-tabs" ref={sceneScriptTabsRef}>
+											<div className="loom-writer-tabs" ref={sceneScriptTabsRef}>
 												<div className="loom-seg">
 													<button
 														className={
@@ -6819,20 +7084,20 @@ function EntityPage({ view }: { view: EntityView }) {
 												<button
 													className={
 														sceneScriptMode === 'outline'
-															? 'loom-script-acts-btn loom-seg-on'
-															: 'loom-script-acts-btn'
+															? 'loom-writer-outline-btn loom-seg-on'
+															: 'loom-writer-outline-btn'
 													}
 													onClick={() => clickSceneTab('outline')}
 												>
 													{t('view.entity.script.outline')}
 												</button>
 											</div>
-											<div className="loom-script-toolbar">
+											<div className="loom-writer-toolbar">
 												{sceneScriptMode === 'outline' ? null : (
 												<>
 												<div className="loom-search-wrap">
 													<input
-														className="loom-script-search"
+														className="loom-writer-search"
 														type="search"
 														placeholder={t('view.entity.script.searchThisScene')}
 														value={sceneScriptQuery}
@@ -6875,7 +7140,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												>
 													<Icon name="chevron-down" />
 												</button>
-												<span className="loom-script-stat">
+												<span className="loom-writer-stat">
 													{sceneScriptQuery.trim() === ''
 														? ''
 														: sceneMatches.length === 0
@@ -6954,7 +7219,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													/>
 												</div>
 											) : (
-												<div className="loom-subloc-list loom-script-outline">
+												<div className="loom-subloc-list loom-writer-outline">
 													{sceneOutlineTree && sceneOutlineTree.items.length > 0 ? (
 														sceneOutlineTree.items.map((item) => renderSceneOutlineItem(item))
 													) : (
@@ -6975,58 +7240,69 @@ function EntityPage({ view }: { view: EntityView }) {
 				</>
 			) : isBeat && bookMode && record.type === 'chapter' ? (
 				<div className="loom-field loom-field-sep">
-					<div className="loom-scene-act-left">
-						<span className="loom-field-label">{entityLabel(anchorType)}</span>
-						<div className="loom-tag-row">
-							{chapterActRecord ? (
-								<EntityChip
-									plugin={plugin}
-									record={chapterActRecord}
-									onOpen={() => view.openEntity(chapterActRecord.path)}
+					{/* `.loom-scene-act-left`'s own `flex: 1 1 60%` is meant for a
+					    HORIZONTAL two-column split inside `.loom-scene-act-grid` (the
+					    Scene page's own usage, which has a right column) — without that
+					    row-flex wrapper, that same rule flex-GREW this box vertically
+					    inside the page's own column layout instead (`.loom-field` is a
+					    column flex container), leaving a large blank gap below "Move to
+					    another act…" before the tabs. The "solo" variant (no right
+					    column) is exactly this case. */}
+					<div className="loom-scene-act-grid loom-scene-act-grid-solo">
+						<div className="loom-scene-act-left">
+							<span className="loom-field-label">{entityLabel(anchorType)}</span>
+							<div className="loom-tag-row">
+								{chapterActRecord ? (
+									<EntityChip
+										plugin={plugin}
+										record={chapterActRecord}
+										onOpen={() => view.openEntity(chapterActRecord.path)}
+									/>
+								) : null}
+							</div>
+							{project ? (
+								<SearchableSelect
+									placeholder={
+										chapterActRecord
+											? t('view.entity.scene.moveToAnother', { anchor: anchorLabel })
+											: t('project.createEntity.pickAnchor', { anchor: anchorLabel })
+									}
+									options={plugin.indexer
+										.getAll('act', record.project)
+										.filter((a) => a.path !== chapterActRecord?.path)
+										.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+										.map((a) => ({ value: a.path, label: a.name }))}
+									onPick={(path) => {
+										const target = plugin.indexer.get(path);
+										if (!target || target.actId === '') return;
+										void editBookAndSync(plugin, project, (raw) =>
+											moveBookChapterToAct(raw, record.chapterId, target.actId)
+										);
+									}}
 								/>
 							) : null}
 						</div>
-						{project ? (
-							<SearchableSelect
-								placeholder={
-									chapterActRecord
-										? t('view.entity.scene.moveToAnother', { anchor: anchorLabel })
-										: t('project.createEntity.pickAnchor', { anchor: anchorLabel })
-								}
-								options={plugin.indexer
-									.getAll('act', record.project)
-									.filter((a) => a.path !== chapterActRecord?.path)
-									.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
-									.map((a) => ({ value: a.path, label: a.name }))}
-								onPick={(path) => {
-									const target = plugin.indexer.get(path);
-									if (!target || target.actId === '') return;
-									void editBookAndSync(plugin, project, (raw) =>
-										moveBookChapterToAct(raw, record.chapterId, target.actId)
-									);
-								}}
-							/>
-						) : null}
 					</div>
-					<div className="loom-script-tabs">
+					<div className="loom-writer-tabs" ref={chapterTabsRef}>
 						<div className="loom-seg">
 							<button
 								className={chapterEditorMode === 'editor' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-								onClick={() => setChapterEditorMode('editor')}
+								onClick={() => clickChapterTab('editor')}
 							>
 								{t('view.entity.script.editorLabel')}
 							</button>
 							<button
 								className={chapterEditorMode === 'preview' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-								onClick={() => setChapterEditorMode('preview')}
+								onClick={() => clickChapterTab('preview')}
 							>
 								{t('view.entity.script.pagesPreview')}
 							</button>
 						</div>
 						<div className="loom-script-side-toggles">
-							{/* Comments/alternative-text aren't wired to the Book yet — the
-							    icons are present so the toolbar's final shape is already in
-							    place, lighting up once that follow-up pass lands. */}
+							{/* No browse-all panel yet (listing every unresolved
+							    comment/undecided alternative) — comments/alt-text
+							    themselves ARE live below: click a dashed-underlined span
+							    to open/cycle it. */}
 							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseComments')}>
 								<Icon name="message-square" />
 							</button>
@@ -7036,8 +7312,8 @@ function EntityPage({ view }: { view: EntityView }) {
 						</div>
 					</div>
 					<input
-						type="text"
-						className="loom-script-search"
+						type="search"
+						className="loom-writer-search"
 						placeholder={t('project.common.searchPlaceholder')}
 						value={chapterSearchQuery}
 						onChange={(e) => setChapterSearchQuery(e.target.value)}
@@ -7051,28 +7327,44 @@ function EntityPage({ view }: { view: EntityView }) {
 					/>
 					{chapterExcerpt !== null ? (
 						chapterEditorMode === 'editor' ? (
-							<MarkdownField
-								app={plugin.app}
-								value={chapterExcerpt}
-								names={linkNames}
-								onOpenLink={openLinkTarget}
-								onCreateEntity={createLinkEntity}
-								onChange={(v) => {
-									if (!project) return;
-									void editBookAndSync(plugin, project, (raw) =>
-										replaceBookChapterBody(raw, record.chapterId, v)
-									);
-								}}
-							/>
+							<div className="loom-scene-script">
+								<MarkdownField
+									app={plugin.app}
+									value={chapterExcerpt}
+									names={linkNames}
+									onOpenLink={openLinkTarget}
+									onCreateEntity={createLinkEntity}
+									onChange={(v) => {
+										if (!project) return;
+										void editBookAndSync(plugin, project, (raw) =>
+											replaceBookChapterBody(raw, record.chapterId, v)
+										);
+									}}
+									comments={bookAnnotations.comments}
+									altText={bookAnnotations.altText}
+									onCreateComment={bookAnnotations.handleCreateComment}
+									onCreateAlt={bookAnnotations.handleCreateAlt}
+									onOpenComment={bookAnnotations.handleOpenComment}
+									onCycleAlt={bookAnnotations.handleCycleAlt}
+									onOpenAltMenu={bookAnnotations.handleOpenAltMenu}
+								/>
+							</div>
 						) : (
-							<MarkdownField
-								app={plugin.app}
-								value={chapterExcerpt}
-								names={linkNames}
-								onOpenLink={openLinkTarget}
-								readOnly
-								onChange={() => {}}
-							/>
+							<div className="loom-screenplay loom-scene-pages">
+								<div className="loom-book-page">
+									<MarkdownField
+										app={plugin.app}
+										value={chapterExcerpt}
+										names={linkNames}
+										onOpenLink={openLinkTarget}
+										readOnly
+										onChange={() => {}}
+										comments={bookAnnotations.comments}
+										altText={bookAnnotations.altText}
+										onOpenComment={bookAnnotations.handleOpenComment}
+									/>
+								</div>
+							</div>
 						)
 					) : (
 						<div className="loom-attendance-empty">{t('view.entity.script.sceneNotInScript')}</div>
@@ -7337,8 +7629,8 @@ function EntityPage({ view }: { view: EntityView }) {
 					{locationScenes.length > 0 ? (
 						<div className="loom-subloc-list">
 							{locationScenes.map((sc, i) => (
-								<div key={sc.path} className="loom-script-scene-row">
-									<span className="loom-scene-row-num">{i + 1}</span>
+								<div key={sc.path} className="loom-writer-outline-row">
+									<span className="loom-writer-row-num">{i + 1}</span>
 									<span className="loom-scene-row-intext">{sc.sceneIntExt}</span>
 									<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
 										{sc.name}
@@ -7363,8 +7655,8 @@ function EntityPage({ view }: { view: EntityView }) {
 									</div>
 									<div className="loom-event-nest loom-locfac-nest loom-subloc-list">
 										{g.scenes.map((sc, i) => (
-											<div key={sc.path} className="loom-script-scene-row">
-												<span className="loom-scene-row-num">{i + 1}</span>
+											<div key={sc.path} className="loom-writer-outline-row">
+												<span className="loom-writer-row-num">{i + 1}</span>
 												<span className="loom-scene-row-intext">{sc.sceneIntExt}</span>
 												<button className="loom-subloc-link" onClick={() => view.openEntity(sc.path)}>
 													{sc.name}
@@ -7393,6 +7685,10 @@ function EntityPage({ view }: { view: EntityView }) {
 							placeholder={t('view.entity.location.addLocationPlaceholder')}
 							options={plugin.indexer
 								.getAll('location', project.root)
+								// Main locations only — a sublocation inherits its region
+								// from its parent (see `currentRegion`'s own doc comment)
+								// rather than ever being a direct region member itself.
+								.filter((l) => l.parentLocation === null)
 								.filter((l) => !regionLocations.some((m) => m.path === l.path))
 								.sort((a, b) => locationLabel(a, plugin).localeCompare(locationLabel(b, plugin)))
 								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
@@ -7468,6 +7764,21 @@ function EntityPage({ view }: { view: EntityView }) {
 					onClose={handleCloseComment}
 				/>
 			) : null}
+			{bookAnnotations.openComment ? (
+				<CommentPopover
+					anchorRect={bookAnnotations.openComment.rect}
+					entries={bookAnnotations.comments[bookAnnotations.openComment.id] ?? []}
+					onSaveEntry={(index, text) =>
+						bookAnnotations.handleSaveCommentEntry(bookAnnotations.openComment!.id, index, text)
+					}
+					onToggleResolvedEntry={(index) =>
+						bookAnnotations.handleToggleCommentResolved(bookAnnotations.openComment!.id, index)
+					}
+					onDeleteEntry={(index) => bookAnnotations.handleDeleteCommentEntry(bookAnnotations.openComment!.id, index)}
+					onAddEntry={(text) => bookAnnotations.handleAddCommentReply(bookAnnotations.openComment!.id, text)}
+					onClose={bookAnnotations.handleCloseComment}
+				/>
+			) : null}
 		</div>
 	);
-}										
+}

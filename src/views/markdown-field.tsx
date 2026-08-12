@@ -1,4 +1,4 @@
-import { EditorState, Prec } from '@codemirror/state';
+import { EditorState, Prec, StateEffect } from '@codemirror/state';
 import {
 	Decoration,
 	DecorationSet,
@@ -16,9 +16,11 @@ import {
 	autocompletion,
 	completionKeymap,
 } from '@codemirror/autocomplete';
-import { App, Scope } from 'obsidian';
+import { App, Menu, Scope } from 'obsidian';
 import { useEffect, useRef } from 'react';
 import { t } from '../i18n';
+import { findAnnotationSpans, newSceneId } from '../fountain';
+import type { AltTextEntry, CommentEntry } from './script-notes';
 import type { LinkOption } from './link-textarea';
 
 /**
@@ -35,6 +37,19 @@ import type { LinkOption } from './link-textarea';
  *   styled with hidden markers.
  * - `# ` … `###### ` headings, `> ` blockquotes, `-`/`*`/`+` bullets, `1.`
  *   ordered lists, and `---` separators render like Obsidian's live preview.
+ *
+ * Optionally also renders comments/alternative-text spans — the same hidden
+ * `[[loom-comment:<id>]]`/`[[loom-alt:<id>]]` marker convention
+ * `fountain-field.tsx` uses, reusing `findAnnotationSpans` (fountain.ts)
+ * directly rather than a second implementation (it's a pure regex scan over
+ * raw text, no Fountain grammar involved). Deliberately simpler than
+ * `fountain-field.tsx`'s version: no gutter (this field has none to begin
+ * with, and is often too narrow for one) and no draggable comment-boundary
+ * handles — the dashed-underlined CONTENT itself is the click target
+ * (left-click a comment opens its popover, left-click an alt-text span
+ * cycles it, right-click an alt-text span opens its option picker), and
+ * every annotation prop is optional/undefined-safe so ordinary Notes/
+ * Description fields (which never contain these markers) are unaffected.
  */
 
 interface InlineToken {
@@ -128,6 +143,32 @@ class HrWidget extends WidgetType {
 		return el;
 	}
 }
+
+/** True when `[from, to)` partially overlaps `[sFrom, sTo)` — neither
+ *  disjoint, nested inside it, nor fully surrounding it. Mirrors
+ *  `fountain-field.tsx`'s own helper of the same name/purpose — small and
+ *  self-contained enough to duplicate rather than share across the two
+ *  independent CM6 fields. */
+function partiallyOverlaps(from: number, to: number, sFrom: number, sTo: number): boolean {
+	const disjoint = to <= sFrom || from >= sTo;
+	const nestedIn = from >= sFrom && to <= sTo;
+	const surrounds = from <= sFrom && to >= sTo;
+	return !(disjoint || nestedIn || surrounds);
+}
+
+/** A comment span is "unresolved" (needs attention, gets the persistent
+ *  tint) when its thread has anything not yet checked off, or no replies at
+ *  all — alt-text spans have no resolved concept. Mirrors
+ *  `fountain-field.tsx`'s own helper. */
+function isUnresolvedComment(kind: 'comment' | 'alt', entries: CommentEntry[]): boolean {
+	return kind === 'comment' && !(entries.length > 0 && entries.every((e) => e.resolved));
+}
+
+/** Dispatched (as a no-op transaction's sole effect) whenever the
+ *  `comments`/`altText`/`highlightedAnnotationId` props change without a
+ *  document edit (e.g. a comment's resolved state toggling in the popover) —
+ *  mirrors `fountain-field.tsx`'s own effect of the same name. */
+const refreshAnnotations = StateEffect.define<null>();
 
 function buildDecorations(view: EditorView): DecorationSet {
 	const entries: { from: number; to: number; deco: Decoration }[] = [];
@@ -516,6 +557,14 @@ export function MarkdownField({
 	onOpenLink,
 	onCreateEntity,
 	readOnly,
+	comments,
+	altText,
+	onCreateComment,
+	onCreateAlt,
+	onOpenComment,
+	onCycleAlt,
+	onOpenAltMenu,
+	highlightedAnnotationId,
 }: {
 	/** Needed to outrank Obsidian's global Ctrl+B/I hotkeys while focused. */
 	app: App;
@@ -524,13 +573,39 @@ export function MarkdownField({
 	names: LinkOption[];
 	placeholder?: string;
 	/** Live-preview but not editable (e.g. an "Original description" spoiler);
-	 *  clicking rendered links still works. */
+	 *  clicking rendered links still works, and an existing comment's popover
+	 *  can still be opened read-only — only creating/cycling is disabled. */
 	readOnly?: boolean;
 	/** Opens a clicked rendered wikilink (raw target; `newTab` on middle-click). */
 	onOpenLink: (target: string, newTab?: boolean) => void;
 	/** Offered as "+ Create …" in the [[ completion: create an entity from the
 	 *  typed short name, then call back with the link text to insert. */
 	onCreateEntity?: (name: string, insert: (linkInsert: string) => void) => void;
+	/** Comment bodies keyed by marker id — read here only to know whether a
+	 *  span's icon/tint should show as resolved or not; the actual text/
+	 *  editing lives in the caller's own `CommentPopover`. Comments/alt-text
+	 *  are entirely opt-in: omitting all of these props (as every ordinary
+	 *  Notes/Description field does) leaves this field exactly as before. */
+	comments?: Record<string, CommentEntry[]>;
+	/** Alt-text entries keyed by marker id. */
+	altText?: Record<string, AltTextEntry>;
+	/** A new comment marker pair was just inserted around the (former)
+	 *  selection — the caller persists the sidecar entry. */
+	onCreateComment?: (id: string, selectedText: string) => void;
+	/** A new alt-text marker pair was just inserted. */
+	onCreateAlt?: (id: string, selectedText: string) => void;
+	/** A comment span was left-clicked — open its popover anchored to the
+	 *  given screen rect. Also called in `readOnly` mode (pure read). */
+	onOpenComment?: (id: string, anchorRect: DOMRect) => void;
+	/** An alt-text span was left-clicked — cycle to the next option. Not
+	 *  called in `readOnly` mode. */
+	onCycleAlt?: (id: string) => void;
+	/** An alt-text span was right-clicked — open its option picker
+	 *  (`AltTextModal`, project.ts). Not called in `readOnly` mode. */
+	onOpenAltMenu?: (id: string) => void;
+	/** A marker id a search match currently points at — its span gets a
+	 *  highlight class without touching the document. */
+	highlightedAnnotationId?: string | null;
 }) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
 	const viewRef = useRef<EditorView | null>(null);
@@ -542,6 +617,29 @@ export function MarkdownField({
 	onOpenRef.current = onOpenLink;
 	const onCreateRef = useRef(onCreateEntity);
 	onCreateRef.current = onCreateEntity;
+	const commentsRef = useRef(comments ?? {});
+	commentsRef.current = comments ?? {};
+	const altTextRef = useRef(altText ?? {});
+	altTextRef.current = altText ?? {};
+	const onCreateCommentRef = useRef(onCreateComment);
+	onCreateCommentRef.current = onCreateComment;
+	const onCreateAltRef = useRef(onCreateAlt);
+	onCreateAltRef.current = onCreateAlt;
+	const onOpenCommentRef = useRef(onOpenComment);
+	onOpenCommentRef.current = onOpenComment;
+	const onCycleAltRef = useRef(onCycleAlt);
+	onCycleAltRef.current = onCycleAlt;
+	const onOpenAltMenuRef = useRef(onOpenAltMenu);
+	onOpenAltMenuRef.current = onOpenAltMenu;
+	const highlightedAnnotationIdRef = useRef(highlightedAnnotationId ?? null);
+	highlightedAnnotationIdRef.current = highlightedAnnotationId ?? null;
+
+	// A doc-less prop change (resolved toggle, search highlight) doesn't touch
+	// the CM6 document, but the annotation decorations still need to redraw —
+	// mirrors `fountain-field.tsx`'s own `refreshAnnotations` dispatch.
+	useEffect(() => {
+		viewRef.current?.dispatch({ effects: refreshAnnotations.of(null) });
+	}, [comments, altText, highlightedAnnotationId]);
 
 	useEffect(() => {
 		if (!hostRef.current) return;
@@ -574,10 +672,44 @@ export function MarkdownField({
 				scopePushed = false;
 			}
 		};
-		// Left opens a rendered link in place; middle opens it in a new tab.
-		const openLinkOnMousedown = (event: MouseEvent): boolean => {
+		// Left clicks an annotation span first (open a comment, cycle an
+		// alt-text option), then a rendered wikilink; middle opens a link in a
+		// new tab. A comment can still be OPENED read-only; alt-text cycling
+		// is edit-only and simply doesn't fire when `readOnly`. Cycling swaps
+		// the document text itself right here (this field has no imperative
+		// handle a caller could dispatch through, unlike `fountain-field.tsx`'s
+		// `replaceAltContent`) — the resulting `onChange` is what actually
+		// persists the new active wording into the chapter body; `onCycleAlt`
+		// is called purely so the caller can update the sidecar's own
+		// `activeIndex`/`acceptedIndex`.
+		const openLinkOnMousedown = (event: MouseEvent, view: EditorView): boolean => {
 			if (event.button !== 0 && event.button !== 1) return false;
 			const target = event.target instanceof HTMLElement ? event.target : null;
+			const annotation = event.button === 0 ? target?.closest('[data-loom-annotation-content]') : null;
+			if (annotation instanceof HTMLElement) {
+				const id = annotation.dataset.loomAnnotationContent;
+				const kind = annotation.dataset.loomAnnotationKind;
+				if (id && kind === 'comment' && onOpenCommentRef.current) {
+					event.preventDefault();
+					onOpenCommentRef.current(id, annotation.getBoundingClientRect());
+					return true;
+				}
+				if (id && kind === 'alt' && !readOnly && onCycleAltRef.current) {
+					event.preventDefault();
+					const entry = altTextRef.current[id];
+					if (entry && entry.options.length > 1) {
+						const nextIndex = (entry.activeIndex + 1) % entry.options.length;
+						const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'alt' && s.id === id);
+						if (span) {
+							view.dispatch({
+								changes: { from: span.contentFrom, to: span.contentTo, insert: entry.options[nextIndex] },
+							});
+						}
+					}
+					onCycleAltRef.current(id);
+					return true;
+				}
+			}
 			const link = target?.closest('[data-loom-link]');
 			if (link instanceof HTMLElement && link.dataset.loomLink) {
 				event.preventDefault();
@@ -586,6 +718,117 @@ export function MarkdownField({
 			}
 			return false;
 		};
+		/** Wraps `range` in a fresh comment/alt-text marker pair — mirrors
+		 *  `fountain-field.tsx`'s `insertMarkerPair`. */
+		const insertMarkerPair = (view: EditorView, kind: 'comment' | 'alt', from: number, to: number) => {
+			const id = newSceneId();
+			const open = `[[loom-${kind}:${id}]]`;
+			const close = `[[/loom-${kind}:${id}]]`;
+			const selectedText = view.state.sliceDoc(from, to);
+			view.dispatch({
+				changes: [
+					{ from, insert: open },
+					{ from: to, insert: close },
+				],
+				selection: { anchor: from + open.length, head: to + open.length },
+			});
+			if (kind === 'comment') onCreateCommentRef.current?.(id, selectedText);
+			else onCreateAltRef.current?.(id, selectedText);
+		};
+		/** Right-click: an existing alt-text span opens its option picker;
+		 *  otherwise, a non-empty selection not partially crossing an existing
+		 *  span offers "Comment"/"Alternative text…". Never fires when
+		 *  `readOnly`, or when neither creation callback is provided (every
+		 *  ordinary Notes/Description field falls straight through to
+		 *  Obsidian's/the browser's own context menu). */
+		const onAnnotationContextMenu = (event: MouseEvent, view: EditorView): boolean => {
+			const target = event.target instanceof HTMLElement ? event.target : null;
+			const annotation = target?.closest('[data-loom-annotation-content]');
+			if (annotation instanceof HTMLElement) {
+				const id = annotation.dataset.loomAnnotationContent;
+				const kind = annotation.dataset.loomAnnotationKind;
+				if (id && kind === 'alt' && onOpenAltMenuRef.current) {
+					event.preventDefault();
+					onOpenAltMenuRef.current(id);
+					return true;
+				}
+				return false;
+			}
+			if (!onCreateCommentRef.current && !onCreateAltRef.current) return false;
+			const range = view.state.selection.main;
+			if (range.empty) return false;
+			const text = view.state.doc.toString();
+			const overlaps = findAnnotationSpans(text).some((s) => partiallyOverlaps(range.from, range.to, s.contentFrom, s.contentTo));
+			if (overlaps) return false;
+			event.preventDefault();
+			const menu = new Menu();
+			if (onCreateCommentRef.current) {
+				menu.addItem((item) =>
+					item.setTitle(t('view.script.contextMenu.comment')).onClick(() => insertMarkerPair(view, 'comment', range.from, range.to))
+				);
+			}
+			if (onCreateAltRef.current) {
+				menu.addItem((item) =>
+					item
+						.setTitle(t('view.script.contextMenu.altText'))
+						.onClick(() => insertMarkerPair(view, 'alt', range.from, range.to))
+				);
+			}
+			menu.showAtMouseEvent(event);
+			return true;
+		};
+		/** Hides every `findAnnotationSpans` marker token and marks the wrapped
+		 *  content with a persistent dashed-underline (plus an unresolved tint
+		 *  for a comment with anything still unchecked, or a highlight when a
+		 *  search match currently points here) — mirrors the equivalent pass in
+		 *  `fountain-field.tsx`'s own `buildDecorations`, kept separate here so
+		 *  it can be its own ViewPlugin closing over this field's own refs
+		 *  (the shared, module-level `livePreview` plugin below has no way to
+		 *  read per-instance props). */
+		function buildAnnotationDecorations(view: EditorView): DecorationSet {
+			const text = view.state.doc.toString();
+			const entries: { from: number; to: number; deco: Decoration }[] = [];
+			for (const span of findAnnotationSpans(text)) {
+				entries.push({ from: span.from, to: span.contentFrom, deco: Decoration.replace({}) });
+				entries.push({ from: span.contentTo, to: span.to, deco: Decoration.replace({}) });
+				if (span.contentFrom < span.contentTo) {
+					const commentEntries = span.kind === 'comment' ? (commentsRef.current[span.id] ?? []) : [];
+					const unresolved = isUnresolvedComment(span.kind, commentEntries);
+					const highlighted = span.id === highlightedAnnotationIdRef.current;
+					const cls =
+						`loom-md-annotation-span loom-md-annotation-span-${span.kind}` +
+						(unresolved ? ' loom-md-annotation-span-unresolved' : '') +
+						(highlighted ? ' loom-md-annotation-span-highlight' : '');
+					entries.push({
+						from: span.contentFrom,
+						to: span.contentTo,
+						deco: Decoration.mark({
+							class: cls,
+							attributes: { 'data-loom-annotation-content': span.id, 'data-loom-annotation-kind': span.kind },
+						}),
+					});
+				}
+			}
+			entries.sort((a, b) => a.from - b.from);
+			return Decoration.set(
+				entries.map((e) => e.deco.range(e.from, e.to)),
+				true
+			);
+		}
+		const annotationDecorations = ViewPlugin.fromClass(
+			class {
+				decorations: DecorationSet;
+				constructor(view: EditorView) {
+					this.decorations = buildAnnotationDecorations(view);
+				}
+				update(update: ViewUpdate) {
+					if (update.docChanged || update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations)))) {
+						this.decorations = buildAnnotationDecorations(update.view);
+					}
+				}
+			},
+			{ decorations: (v) => v.decorations }
+		);
 		const view = new EditorView({
 			parent: hostRef.current,
 			state: EditorState.create({
@@ -601,6 +844,7 @@ export function MarkdownField({
 							EditorView.lineWrapping,
 							cmPlaceholder(placeholder ?? ''),
 							livePreview,
+							annotationDecorations,
 							keymap.of(defaultKeymap),
 							EditorView.domEventHandlers({
 								mousedown: openLinkOnMousedown,
@@ -621,6 +865,7 @@ export function MarkdownField({
 							EditorView.lineWrapping,
 							cmPlaceholder(placeholder ?? ''),
 							livePreview,
+							annotationDecorations,
 							bracketPairing,
 							pairDeletion,
 							formatContinuation,
@@ -655,6 +900,7 @@ export function MarkdownField({
 									event.stopPropagation();
 									return true;
 								},
+								contextmenu: onAnnotationContextMenu,
 							}),
 						],
 			}),
