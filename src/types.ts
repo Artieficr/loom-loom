@@ -250,6 +250,15 @@ export const FM = {
 	created: 'loomCreated',
 	/** Loom-managed modification timestamp (ISO 8601), stamped on every edit. */
 	modified: 'loomModified',
+	/** Sessions only: `[[<daily note name>]]` for the calendar day this
+	 *  session happened — a real link (ghost note if it doesn't exist yet),
+	 *  so Obsidian's own native graph connects a session to its daily note
+	 *  automatically. Formatted from the vault's configured Daily Notes date
+	 *  format (falling back to Obsidian's own default, `YYYY-MM-DD`, if the
+	 *  core plugin isn't enabled) — never assume every vault uses the same
+	 *  format. Hidden from Loom's OWN graph/connections (`HIDDEN_LINK_KEYS`,
+	 *  indexer.ts) — this is for Obsidian's native graph specifically. */
+	dailyNote: 'loomDailyNote',
 } as const;
 
 /** Legacy spelling(s) of a loom frontmatter key, still read and migrated. */

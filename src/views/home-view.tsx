@@ -25,6 +25,7 @@ import { Icon } from './common';
 import { useIndexVersion } from './hooks';
 import { countMapPages, mapsFilePath } from './map-view';
 import { createScriptFile, scriptFilePath } from './script-view';
+import { createBookFile, findBookFile } from './book-view';
 import { t } from '../i18n';
 import type LoomLoomPlugin from '../main';
 
@@ -127,7 +128,7 @@ function Home({ view }: { view: HomeView }) {
 						key: 'script',
 						icon: SCRIPT_ICON,
 						label: scriptLabel(),
-						color: plugin.settings.nodeColors.scene,
+						color: plugin.settings.groupColor,
 						// No count: a project has exactly one script, so "1" is noise.
 						open: () => {
 							const path = scriptFilePath(project);
@@ -149,8 +150,14 @@ function Home({ view }: { view: HomeView }) {
 						key: 'book',
 						icon: BOOK_ICON,
 						label: bookLabel(),
-						color: plugin.settings.nodeColors.chapter,
-						open: () => openList('chapter'),
+						color: plugin.settings.groupColor,
+						// No count: a project has exactly one Book, so "1" is noise —
+						// same reasoning as Script's own entry above.
+						open: () => {
+							const bookFile = findBookFile(plugin, project);
+							if (bookFile) view.openLoomFile(bookFile.path);
+							else void createBookFile(plugin, project).then((f) => view.openLoomFile(f.path));
+						},
 					},
 				]
 			: []),

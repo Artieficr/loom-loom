@@ -747,7 +747,7 @@ function Script({ view }: { view: ScriptView }) {
 		if (mode !== 'script' || !file) return;
 		const editor = editorWrapperRef.current;
 		if (!editor) return;
-		const key = `loom-script-editor-height:${file.path}`;
+		const key = `loom-writer-editor-height:${file.path}`;
 		const saved = window.localStorage.getItem(key);
 		if (saved) editor.style.height = saved;
 		const observer = new ResizeObserver(() => {
@@ -2259,7 +2259,7 @@ function Script({ view }: { view: ScriptView }) {
 			railActive="script"
 			titleExtra={
 				<div className="loom-script-actions">
-					<span className="loom-script-stat">
+					<span className="loom-writer-stat">
 						{tn('view.script.sceneCount', parsed.scenes.length)} · {tn('view.script.pageCountLabel', pageCount)}
 					</span>
 					<button className="loom-rel-filter" aria-label={t('view.script.scriptActionsAria')} onClick={actionMenu}>
@@ -2268,8 +2268,8 @@ function Script({ view }: { view: ScriptView }) {
 				</div>
 			}
 		>
-			<div className="loom-script-layout">
-				<div className="loom-script-main">
+			<div className="loom-writer-layout">
+				<div className="loom-writer-main">
 					<details className="loom-script-section" ref={titleDetailsRef}>
 						<summary>{t('view.script.titlePage')}</summary>
 						<div className="loom-field-group">
@@ -2288,7 +2288,7 @@ function Script({ view }: { view: ScriptView }) {
 						</div>
 					</details>
 
-					<div className="loom-script-tabs" ref={tabsRef}>
+					<div className="loom-writer-tabs" ref={tabsRef}>
 						<div className="loom-seg">
 							<button
 								className={mode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
@@ -2330,19 +2330,19 @@ function Script({ view }: { view: ScriptView }) {
 						    in a management list (act/scene order), so it gets its own
 						    standalone button on the far side of the row. */}
 						<button
-							className={mode === 'outline' ? 'loom-script-acts-btn loom-seg-on' : 'loom-script-acts-btn'}
+							className={mode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
 							onClick={() => clickTab('outline')}
 						>
 							{t('view.entity.script.outline')}
 						</button>
 					</div>
 
-					<div className="loom-script-toolbar">
+					<div className="loom-writer-toolbar">
 						{mode !== 'outline' ? (
 							<>
 								<div className="loom-search-wrap">
 									<input
-										className="loom-script-search"
+										className="loom-writer-search"
 										type="search"
 										placeholder={t('view.script.searchPlaceholder')}
 										value={query}
@@ -2387,7 +2387,7 @@ function Script({ view }: { view: ScriptView }) {
 								</button>
 								{/* After the buttons, not before — so their position doesn't
 								    shift when this text appears/disappears/changes length. */}
-								<span className="loom-script-stat">
+								<span className="loom-writer-stat">
 									{query.trim() === ''
 										? ''
 										: matches.length === 0
@@ -2426,7 +2426,7 @@ function Script({ view }: { view: ScriptView }) {
 									}}
 									onBlur={() => setPageDraft(null)}
 								/>
-								<span className="loom-script-stat">{t('view.script.ofCount', { count: pageCount })}</span>
+								<span className="loom-writer-stat">{t('view.script.ofCount', { count: pageCount })}</span>
 								<button
 									className="loom-rel-filter"
 									aria-label={t('view.script.nextPage')}
@@ -2472,7 +2472,7 @@ function Script({ view }: { view: ScriptView }) {
 					</div>
 
 					{mode === 'outline' ? (
-						<div className="loom-script-outline" ref={outlineRef}>
+						<div className="loom-writer-outline" ref={outlineRef}>
 							{/* Column headings — same row shape as the act rows below
 							    (grip/caret placeholders reserve their gutters) so "Title"
 							    and "Scenes" land exactly over their real columns; the
@@ -2481,7 +2481,7 @@ function Script({ view }: { view: ScriptView }) {
 							    "this one acts on every row". Always shown (not just once
 							    there's an act) since the Title page row below needs it
 							    too. */}
-							<div className="loom-script-scene-row loom-script-outline-headrow">
+							<div className="loom-writer-outline-row loom-writer-outline-headrow">
 								<span className="loom-subloc-grip-static" aria-hidden="true" />
 								<button
 									className="loom-row-caret"
@@ -2493,10 +2493,10 @@ function Script({ view }: { view: ScriptView }) {
 										fallback={allActsCollapsed ? 'chevrons-up-down' : 'chevrons-down-up'}
 									/>
 								</button>
-								<span className="loom-scene-row-num">#</span>
+								<span className="loom-writer-row-num">#</span>
 								<span className="loom-script-scene-head">{t('project.createEntity.titleLabel')}</span>
-								<span className="loom-script-outline-leader" aria-hidden="true" />
-								<span className="loom-script-act-count">{entityPlural('scene')}</span>
+								<span className="loom-writer-outline-leader" aria-hidden="true" />
+								<span className="loom-writer-row-count">{entityPlural('scene')}</span>
 							</div>
 							<div
 								className={
@@ -2507,15 +2507,15 @@ function Script({ view }: { view: ScriptView }) {
 									    (no `data-seq-row`, so the drag machinery never sees it),
 									    just a shortcut into the same `<details>` the Script/Pages
 									    tabs render above regardless of mode. */}
-									<div className="loom-script-scene-row loom-script-outline-titlepage">
+									<div className="loom-writer-outline-row loom-writer-outline-titlepage">
 										<span className="loom-subloc-grip-static" aria-hidden="true" />
 										<span className="loom-row-caret" aria-hidden="true" />
-										<span className="loom-scene-row-num" aria-hidden="true" />
+										<span className="loom-writer-row-num" aria-hidden="true" />
 										<button className="loom-subloc-link" onClick={jumpToTitlePage}>
 											{t('view.script.titlePage')}
 										</button>
-										<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-										<span className="loom-script-act-count">
+										<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+										<span className="loom-writer-row-count">
 											{titleFirst ? t('view.entity.script.pageAbbrev', { range: '1' }) : '—'}
 										</span>
 									</div>
@@ -2536,8 +2536,8 @@ function Script({ view }: { view: ScriptView }) {
 													key={row.id}
 													className={
 														grabbed
-															? 'loom-script-outline-pagebreak loom-subloc-row-slide loom-subloc-row-dragging'
-															: 'loom-script-outline-pagebreak loom-subloc-row-slide'
+															? 'loom-writer-outline-pagebreak loom-subloc-row-slide loom-subloc-row-dragging'
+															: 'loom-writer-outline-pagebreak loom-subloc-row-slide'
 													}
 													style={outlineRowStyle('acts', i)}
 													data-seq-row=""
@@ -2561,15 +2561,15 @@ function Script({ view }: { view: ScriptView }) {
 														menu.showAtMouseEvent(e.nativeEvent);
 													}}
 												>
-													<div className="loom-script-scene-row">
+													<div className="loom-writer-outline-row">
 														{outlineGrip('acts', i, topLevelRows.length, commitTopLevelOrder)}
 														<span className="loom-row-caret" aria-hidden="true" />
-														<span className="loom-scene-row-num" aria-hidden="true" />
-														<span className="loom-script-outline-pagebreak-label">
+														<span className="loom-writer-row-num" aria-hidden="true" />
+														<span className="loom-writer-outline-pagebreak-label">
 															<Icon name="separator-horizontal" fallback="minus" /> {t('view.script.pageBreakLabel')}
 														</span>
-														<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-														<span className="loom-script-act-count">
+														<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+														<span className="loom-writer-row-count">
 															{t('view.entity.script.pageAbbrev', { range: pageBreakPage(row.line) })}
 														</span>
 													</div>
@@ -2591,7 +2591,7 @@ function Script({ view }: { view: ScriptView }) {
 											<div
 												key={sec.loomId}
 												className={[
-													dropTarget ? 'loom-script-outline-act loom-script-outline-drop-target' : 'loom-script-outline-act',
+													dropTarget ? 'loom-writer-outline-act loom-writer-outline-drop-target' : 'loom-writer-outline-act',
 													grabbed ? 'loom-subloc-row-slide loom-subloc-row-dragging' : 'loom-subloc-row-slide',
 												]
 													.filter(Boolean)
@@ -2600,7 +2600,7 @@ function Script({ view }: { view: ScriptView }) {
 												data-seq-row=""
 												data-act-id={sec.loomId}
 											>
-												<div className="loom-script-scene-row">
+												<div className="loom-writer-outline-row">
 													{outlineGrip('acts', i, topLevelRows.length, commitTopLevelOrder)}
 													{scenes.length > 0 ? (
 														<button
@@ -2613,7 +2613,7 @@ function Script({ view }: { view: ScriptView }) {
 													) : (
 														<span className="loom-row-caret" aria-hidden="true" />
 													)}
-													<span className="loom-scene-row-num">{actNum}</span>
+													<span className="loom-writer-row-num">{actNum}</span>
 													{note ? (
 														<button className="loom-subloc-link" onClick={() => view.openEntity(note.path)}>
 															{sec.text.trim()}
@@ -2624,11 +2624,11 @@ function Script({ view }: { view: ScriptView }) {
 													{/* A dashed leader — flex-grow — fills whatever's left
 													    between the title and the count, adapting to title
 													    length automatically instead of leaving a ragged gap. */}
-													<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
+													<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
 													{/* Its own fixed-width column, not sized to its own text —
 													    a two-digit count previously nudged this whole cell
 													    (and thus its left edge) sideways row to row. */}
-													<span className="loom-script-act-count">
+													<span className="loom-writer-row-count">
 														{tn('view.script.sceneCount', scenes.length)}
 													</span>
 												</div>
@@ -2636,8 +2636,8 @@ function Script({ view }: { view: ScriptView }) {
 													<div
 														className={
 															outlineDrag?.group === sceneGroup
-																? 'loom-subloc-list loom-subloc-dragging loom-script-outline-scenes'
-																: 'loom-subloc-list loom-script-outline-scenes'
+																? 'loom-subloc-list loom-subloc-dragging loom-writer-outline-children'
+																: 'loom-subloc-list loom-writer-outline-children'
 														}
 													>
 														{scenes.map((scene, si) => {
@@ -2648,8 +2648,8 @@ function Script({ view }: { view: ScriptView }) {
 																	key={scene.loomId ?? scene.line}
 																	className={
 																		sceneGrabbed
-																			? 'loom-script-scene-row loom-subloc-row-slide loom-subloc-row-dragging'
-																			: 'loom-script-scene-row loom-subloc-row-slide'
+																			? 'loom-writer-outline-row loom-subloc-row-slide loom-subloc-row-dragging'
+																			: 'loom-writer-outline-row loom-subloc-row-slide'
 																	}
 																	style={outlineRowStyle(sceneGroup, si)}
 																	data-seq-row=""
@@ -2659,7 +2659,7 @@ function Script({ view }: { view: ScriptView }) {
 																	    the title reads better than preserving strict column
 																	    alignment with the act row above. */}
 																	{outlineGrip(sceneGroup, si, scenes.length, commitSceneOrder(sec, scenes), sec.loomId)}
-																	<span className="loom-scene-row-num">{si + 1}</span>
+																	<span className="loom-writer-row-num">{si + 1}</span>
 																	{note2 ? (
 																		<button
 																			className="loom-subloc-link"
@@ -2670,8 +2670,8 @@ function Script({ view }: { view: ScriptView }) {
 																	) : (
 																		<span className="loom-script-scene-head">{scene.heading}</span>
 																	)}
-																	<span className="loom-script-outline-leader loom-script-outline-leader-dashed" aria-hidden="true" />
-																	<span className="loom-script-act-count">
+																	<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+																	<span className="loom-writer-row-count">
 																		{t('view.entity.script.pageAbbrev', { range: scenePages(scene) })}
 																	</span>
 																</div>
@@ -2726,7 +2726,7 @@ function Script({ view }: { view: ScriptView }) {
 							/>
 						</div>
 					) : (
-						<div className="loom-script-editor" ref={editorWrapperRef}>
+						<div className="loom-writer-editor" ref={editorWrapperRef}>
 							{navPanel}
 							<FountainField
 								ref={fountainFieldRef}

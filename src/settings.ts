@@ -9,7 +9,7 @@ import {
 	TFile,
 	setIcon,
 } from 'obsidian';
-import { ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera, entityLabel, entityPlural } from './types';
+import { ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera, bookLabel, entityLabel, entityPlural, scriptLabel } from './types';
 import { DEFAULT_PROJECT_KIND, PROJECT_KIND_META, PROJECT_KINDS, projectKindLabel, typesFor } from './project-kind';
 import { ConfirmModal } from './project';
 import { TimelineSettingsEditor } from './timeline-settings';
@@ -106,8 +106,17 @@ export interface LoomLoomSettings {
 	nodeColors: Record<EntityType, string>;
 	/** Graph node radius (px) per entity type. */
 	nodeSizes: Record<EntityType, number>;
-	/** Color of the virtual Group — its chips, home-wheel button, page header.
-	 *  Its own entity color, distinct from factions. */
+	/** Color of the virtual Group (its chips, home-wheel button, page header)
+	 *  AND the Writer project's whole-document 12-o'clock home-wheel
+	 *  satellite (Script in Script mode, Book in Prose mode — mutually
+	 *  exclusive per project, so one color covers both) — all three share
+	 *  this ONE color deliberately: none of them is a real entity type (no
+	 *  note, no graph node for Script/Book; Group has a page but no backing
+	 *  note either), so none belongs in `nodeColors`, and they read as one
+	 *  family of "virtual, whole-project-scope" UI, distinct from any real
+	 *  entity's own color — including the Scene/Chapter/Event BEAT color,
+	 *  which this is NOT the same as (see `nodeColors.chapter`'s own doc
+	 *  comment for that separate, unrelated sharing). */
 	groupColor: string;
 	/** Color of the Maps feature — its home-wheel button and default new-zone fill. */
 	mapsColor: string;
@@ -167,16 +176,25 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	confirmTimelineMove: true,
 	notesNewestFirst: true,
 	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location', 'region'],
+	// Colors are shared by STRUCTURAL ROLE, not per entity type: every
+	// ANCHOR (Session, Act — owns a timeline/graph column) shares one color,
+	// every BEAT (Event, Scene, Chapter — stacks beneath an anchor) shares
+	// another — across kinds, not just within Writer's own two sub-modes.
+	// `event`/`chapter` are NOT independently configurable — they always
+	// mirror `scene` (the beat group's canonical key); `session` always
+	// mirrors `act` (the anchor group's canonical key) — enforced on every
+	// `mergeSettings` call and live in `setControlValue` (see
+	// `entitiesItems`'s `ANCHOR_GROUP`/`BEAT_GROUP`). These are genuinely
+	// different entity types (a session has a date and attendance; an act
+	// has a manual order and a display title) but the same structural role,
+	// so they're wired to the same color deliberately, not by coincidence.
+	// Node SIZE stays independently configurable per type.
 	nodeColors: {
 		session: '#7c5cff',
 		event: '#e08e45',
-		// Writer/Script projects hold Acts/Scenes, Writer/Prose holds just
-		// Chapters, where player and GM ones hold Sessions/Events — same
-		// anchor structural role, so they start from the same color and can
-		// be tuned apart.
 		act: '#7c5cff',
 		scene: '#e08e45',
-		chapter: '#7c5cff',
+		chapter: '#e08e45',
 		character: '#58b478',
 		location: '#4aa3d8',
 		// Region is not user-configurable — always kept as a darker shade of the
@@ -191,7 +209,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		event: 20,
 		act: 26,
 		scene: 20,
-		chapter: 26,
+		chapter: 20,
 		character: 17,
 		location: 17,
 		region: 17,
@@ -357,6 +375,21 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			}
 		}
 	}
+	// `event`/`chapter`'s colors are not independently stored — they always
+	// mirror `scene` (the shared BEAT color); `session`'s mirrors `act` (the
+	// shared ANCHOR color) — see `entitiesItems`'s `ANCHOR_GROUP`/`BEAT_GROUP`
+	// and `nodeColors`'s own doc comment. Enforced unconditionally on every
+	// load rather than as a one-time migration, since `setControlValue` also
+	// keeps each group in sync live on every edit — hand-editing a running
+	// Obsidian's `data.json` directly doesn't stick anyway, since the
+	// in-memory settings object overwrites it again on next save, so a
+	// one-time-only correction risks the exact trap an earlier version of
+	// this fix hit (shipped correctly, but needed a real rebuild+reload
+	// before it visibly took effect). Node SIZE stays independently
+	// configurable per type — only color is meant to be shared.
+	base.nodeColors.event = base.nodeColors.scene;
+	base.nodeColors.chapter = base.nodeColors.scene;
+	base.nodeColors.session = base.nodeColors.act;
 	base.groupColor = parseHexColor(data.groupColor, base.groupColor);
 	base.mapsColor = parseHexColor(data.mapsColor, base.mapsColor);
 	if (data.loomButtonStyle === 'original' || data.loomButtonStyle === 'custom') {
@@ -552,6 +585,17 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		}
 		// Region tracks the location color — never stored independently.
 		if (key === 'nodeColors.location') syncRegionColor(this.plugin.settings);
+		// Event/Chapter's colors are not independently stored — they always
+		// mirror Scene's (the shared BEAT color); Session's mirrors Act's (the
+		// shared ANCHOR color) — see `nodeColors`'s own doc comment and
+		// `entitiesItems`'s `ANCHOR_GROUP`/`BEAT_GROUP`. This keeps each group
+		// in sync the moment its shared row is edited, not just on next reload
+		// (`mergeSettings` also enforces it, as a backstop).
+		if (key === 'nodeColors.scene') {
+			this.plugin.settings.nodeColors.event = value as string;
+			this.plugin.settings.nodeColors.chapter = value as string;
+		}
+		if (key === 'nodeColors.act') this.plugin.settings.nodeColors.session = value as string;
 		await this.plugin.saveSettings();
 		if (REFRESH_VIEWS_KEYS.has(key) || REFRESH_VIEWS_PREFIXES.some((p) => key.startsWith(p))) {
 			this.plugin.indexer.refreshViews();
@@ -988,13 +1032,59 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	// --- Entities ---------------------------------------------------------
 
 	private entitiesItems(): SettingDefinitionItem[] {
-		// Only the types the vault's projects actually hold: a vault with no
-		// writer project has no reason to show Act and Scene rows (and vice
-		// versa). With no projects yet, fall back to the default kind's set.
+		// Only the types the vault's projects actually hold — a vault with no
+		// player/GM/writer project of ANY kind has no reason to show most rows.
+		// The chronology types (Session/Event/Act/Scene/Chapter, below) are the
+		// exception: they're always shown regardless of which (if any)
+		// project kinds currently exist, same as Group's own row — a user
+		// picking colors ahead of creating a project shouldn't be blocked on
+		// project state, and their color is shared ACROSS kinds anyway (see
+		// `ANCHOR_GROUP`/`BEAT_GROUP`), so there's no single kind whose
+		// presence would even be the right gate. With no projects yet, the
+		// rest fall back to the default kind's set.
 		const inUse = new Set<EntityType>(
 			this.plugin.indexer.getProjects().flatMap((p) => [...typesFor(p.config.kind, p.config.writerMode)])
 		);
 		const shown = inUse.size > 0 ? inUse : new Set<EntityType>(typesFor(DEFAULT_PROJECT_KIND));
+		// The chronological ANCHOR types (Session, Act — own a timeline/graph
+		// column) share one color; the BEAT types (Event, Scene, Chapter —
+		// stack beneath an anchor) share a different one — same structural
+		// role across kinds, same color, regardless of the genuinely
+		// different fields each type otherwise carries. `nodeColors.act`/
+		// `.scene` are the two canonical keys these mirror onto (enforced in
+		// `mergeSettings` and live in `setControlValue`) — arbitrary which
+		// key in each pair is canonical, just has to be consistent everywhere.
+		const ANCHOR_GROUP: readonly EntityType[] = ['session', 'act'];
+		const BEAT_GROUP: readonly EntityType[] = ['event', 'scene', 'chapter'];
+		const sizeItem = (type: EntityType): SettingDefinition => ({
+			name: t('settings.entities.sizeFor', { label: entityLabel(type) }),
+			control: {
+				type: 'slider',
+				key: `nodeSizes.${type}`,
+				min: NODE_SIZE_MIN,
+				max: NODE_SIZE_MAX,
+				step: 1,
+				defaultValue: DEFAULT_SETTINGS.nodeSizes[type],
+			},
+		});
+		/** One shared-color box for an anchor/beat group: a single combined
+		 *  color row (bound to the group's canonical `nodeColors` key) plus
+		 *  each member's own separate node-SIZE row — size stays
+		 *  independently configurable per type, only color is forced shared. */
+		const sharedColorBox = (group: readonly EntityType[], colorKey: EntityType): SettingDefinitionItem => ({
+			type: 'group',
+			items: [
+				{
+					name: t('settings.entities.colorFor', { label: group.map((m) => entityLabel(m)).join(', ') }),
+					control: {
+						type: 'color',
+						key: `nodeColors.${colorKey}`,
+						defaultValue: DEFAULT_SETTINGS.nodeColors[colorKey],
+					},
+				},
+				...group.map(sizeItem),
+			],
+		});
 
 		// Each entity type gets its OWN box (a heading-less `type: 'group'` —
 		// Obsidian gives it the native boxed look for free, same trick
@@ -1005,43 +1095,37 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// in the pre-1.13 imperative UI — this is the closest equivalent now
 		// available. A row WITHIN one type's box still gets Obsidian's own
 		// native per-row separator (color → size, or color → size → tag colors
-		// for Quest); a type with only ONE row (Group) simply has nothing to
-		// separate. Every row's own name is now "Color: {label}"/"Size:
+		// for Quest). Every row's own name is now "Color: {label}"/"Size:
 		// {label}" rather than a bare type name, since a name-only row no
 		// longer has a heading above it to say which SECTION it belongs to.
-		const colorSizeBoxes: SettingDefinitionItem[] = [
-			{ type: 'group', heading: t('settings.entities.colorsHeading') },
-			{
-				type: 'group',
-				items: [
-					{
-						name: t('settings.entities.colorFor', { label: t('settings.entities.groupLabel') }),
-						control: { type: 'color', key: 'groupColor', defaultValue: DEFAULT_SETTINGS.groupColor },
-					},
-				],
-			},
-		];
+		// Group has no box here at all — it's a virtual entity (no backing
+		// note), so its color lives with Script/Book's in "Other colors"
+		// below instead (see `groupColor`'s own doc comment for why all
+		// three share it).
+		const colorSizeBoxes: SettingDefinitionItem[] = [{ type: 'group', heading: t('settings.entities.colorsHeading') }];
 		for (const type of ENTITY_TYPES) {
-			if (!shown.has(type)) continue;
 			// Region has no color/size row — its color is auto-derived from the
 			// location color (a darker shade), and it isn't a map node.
 			if (type === 'region') continue;
+			// Act/Scene/Chapter are emitted together with Session/Act below,
+			// at the group's first-encountered member (Event, then Session) —
+			// skip their own individual slot in this loop.
+			if (type === 'act' || type === 'scene' || type === 'chapter') continue;
+			if (type === 'event') {
+				colorSizeBoxes.push(sharedColorBox(BEAT_GROUP, 'scene'));
+				continue;
+			}
+			if (type === 'session') {
+				colorSizeBoxes.push(sharedColorBox(ANCHOR_GROUP, 'act'));
+				continue;
+			}
+			if (!shown.has(type)) continue;
 			const items: SettingDefinition[] = [
 				{
 					name: t('settings.entities.colorFor', { label: entityLabel(type) }),
 					control: { type: 'color', key: `nodeColors.${type}`, defaultValue: DEFAULT_SETTINGS.nodeColors[type] },
 				},
-				{
-					name: t('settings.entities.sizeFor', { label: entityLabel(type) }),
-					control: {
-						type: 'slider',
-						key: `nodeSizes.${type}`,
-						min: NODE_SIZE_MIN,
-						max: NODE_SIZE_MAX,
-						step: 1,
-						defaultValue: DEFAULT_SETTINGS.nodeSizes[type],
-					},
-				},
+				sizeItem(type),
 			];
 			// Quest tag colors join the quest entity's own box (tags aren't
 			// nodes, so no size slider on them).
@@ -1070,6 +1154,13 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 						name: t('settings.entities.maps.name'),
 						desc: t('settings.entities.maps.desc'),
 						control: { type: 'color', key: 'mapsColor', defaultValue: DEFAULT_SETTINGS.mapsColor },
+					},
+					{
+						name: t('settings.entities.colorFor', {
+							label: `${t('settings.entities.groupLabel')}, ${scriptLabel()}, ${bookLabel()}`,
+						}),
+						desc: t('settings.entities.groupScriptBook.desc'),
+						control: { type: 'color', key: 'groupColor', defaultValue: DEFAULT_SETTINGS.groupColor },
 					},
 					{
 						name: t('settings.entities.loomButton.name'),

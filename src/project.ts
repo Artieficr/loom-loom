@@ -11,10 +11,23 @@ import {
 	TextComponent,
 	TFile,
 	TFolder,
+	moment as momentImport,
 	normalizePath,
 	setIcon,
 } from 'obsidian';
+
+/** `obsidian`'s own re-exported `moment` loses its call signature under this
+ *  project's `isolatedModules` TS setting — a known interop quirk with
+ *  `import * as X` re-exporting a CommonJS `export =` module (moment.js's
+ *  own typings). Cast once, narrowly, to the exact callable shape this file
+ *  actually uses, rather than fighting the full `moment.Moment` type surface. */
+const moment = momentImport as unknown as (
+	input?: string,
+	format?: string,
+	strict?: boolean
+) => { isValid(): boolean; format(fmt: string): string };
 import {
+	BOOK_EXTENSION,
 	defaultMemberRole,
 	ENTITY_META,
 	ENTITY_TAGS,
@@ -67,6 +80,14 @@ import {
 	reorderTopSections,
 	setSceneHeadingParts,
 } from './fountain';
+import {
+	appendBookAct,
+	appendBookChapter,
+	moveBookChapterToAct,
+	parseBook,
+	reorderBookActs,
+	reorderBookChaptersInAct,
+} from './prose';
 import type LoomLoomPlugin from './main';
 
 /** Folders scaffolded for a new project: only the entity types its kind (and,
@@ -166,6 +187,10 @@ export interface NewEntityFields {
 	tag: string;
 	date: string;
 	description?: string;
+	/** Session only: `[[<daily note name>]]` for `date`, computed by
+	 *  `createEntity` (needs `app` to read the vault's Daily Notes format) and
+	 *  passed in so `buildEntityContent` itself stays a pure string builder. */
+	dailyNote?: string;
 	/** When set, the new note declares this relationship in its frontmatter. */
 	relationship?: { type: string; target: string };
 	/** Location only: parent location name — the new location is its sublocation. */
@@ -195,8 +220,66 @@ export interface NewEntityFields {
 	members?: { character: string; role: string; location: string }[];
 }
 
+/**
+ * The vault's configured Daily Notes date format, falling back to Obsidian's
+ * own default (`YYYY-MM-DD`) when the core Daily Notes plugin isn't enabled/
+ * configured. `internalPlugins` has no public typings — every daily-note-
+ * aware community plugin reaches into this same undocumented shape, hence
+ * the casts; wrapped in a `try` since that shape is Obsidian's own internal
+ * detail, not a contract, and could change across versions.
+ */
+function dailyNoteFormat(app: App): string {
+	const DEFAULT_FORMAT = 'YYYY-MM-DD';
+	try {
+		const internalPlugins = (
+			app as unknown as {
+				internalPlugins: {
+					plugins: Record<string, { enabled: boolean; instance?: { options?: { format?: string } } }>;
+				};
+			}
+		).internalPlugins;
+		const daily = internalPlugins?.plugins?.['daily-notes'];
+		if (daily?.enabled && daily.instance?.options?.format) return daily.instance.options.format;
+	} catch (e) {
+		console.error('Loom Loom: could not read the Daily Notes format, using the default', e);
+	}
+	return DEFAULT_FORMAT;
+}
+
+/**
+ * `[[<daily note name>]]` for a raw `YYYY-MM-DD` date string (a Session's own
+ * date is always Gregorian, stored exactly this way — see calendar.ts) — a
+ * real wikilink, so Obsidian's own native graph connects the session to its
+ * daily note even before that note exists (a ghost note, same as any other
+ * unresolved `[[link]]`). `null` for an unparseable/empty date.
+ */
+export function dailyNoteLink(app: App, raw: string): string | null {
+	if (raw.trim() === '') return null;
+	const parsed = moment(raw.trim(), 'YYYY-MM-DD', true);
+	if (!parsed.isValid()) return null;
+	return `[[${parsed.format(dailyNoteFormat(app))}]]`;
+}
+
 export function buildEntityContent(type: EntityType, fields: NewEntityFields): string {
 	const rels = fields.relationship ? [fields.relationship] : [];
+	// A starting session note carries the birth session and/or the involved
+	// entities. Involvement without a session (a lore event) writes a
+	// session-less note — involved links still connect (relType `involved`).
+	const involved = fields.involved ?? [];
+	const group = fields.group ?? [];
+	const places = fields.places ?? [];
+	const hasSessionNote =
+		(fields.noteSession && fields.noteSession !== '') || involved.length > 0 || group.length > 0 || places.length > 0;
+	// An Event's own creation modal writes its "Description" field into the
+	// starting session note's `text` instead of `loomDescription` whenever
+	// that note actually exists — the note is what's immediately visible
+	// (the session page, or the involved entities' own Events sections),
+	// where `loomDescription` is only ever seen by opening the event's own
+	// page. No session note (a bare event with none of noteSession/involved/
+	// group/places set) has nowhere to put it, so it falls back to
+	// `loomDescription` rather than silently dropping what was typed. Every
+	// other entity type is unaffected — this only branches for the beat role.
+	const descriptionToSessionNote = roleOf(type) === 'beat' && hasSessionNote;
 	const lines = [
 		'---',
 		`${FM.type}: ${type}`,
@@ -208,7 +291,7 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 			? [`${FM.name}: ${yamlQuote(fields.name)}`, `aliases: [${yamlQuote(fields.name)}]`]
 			: []),
 		`${FM.tags}: [${fields.tag === '' ? '' : yamlQuote(fields.tag)}]`,
-		`${FM.description}: ${yamlQuote(fields.description ?? '')}`,
+		`${FM.description}: ${yamlQuote(descriptionToSessionNote ? '' : (fields.description ?? ''))}`,
 		...(rels.length > 0
 			? [
 					`${FM.relationships}:`,
@@ -219,24 +302,13 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 				]
 			: [`${FM.relationships}: []`]),
 	];
-	// A starting session note carries the birth session and/or the involved
-	// entities. Involvement without a session (a lore event) writes a
-	// session-less note — involved links still connect (relType `involved`).
-	const involved = fields.involved ?? [];
-	const group = fields.group ?? [];
-	const places = fields.places ?? [];
-	if (
-		(fields.noteSession && fields.noteSession !== '') ||
-		involved.length > 0 ||
-		group.length > 0 ||
-		places.length > 0
-	) {
+	if (hasSessionNote) {
 		lines.push(
 			`${FM.sessionNotes}:`,
 			`  - session: ${
 				fields.noteSession && fields.noteSession !== '' ? yamlQuote(`[[${fields.noteSession}]]`) : '""'
 			}`,
-			'    text: ""',
+			`    text: ${yamlQuote(descriptionToSessionNote ? (fields.description ?? '') : '')}`,
 			`    seq: ${Date.now()}`
 		);
 		if (involved.length > 0) {
@@ -278,7 +350,10 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	}
 	if (type === 'character') lines.push(`${FM.alive}: true`);
 	if (type === 'event' || type === 'session') lines.push(`${FM.date}: ${yamlQuote(fields.date)}`);
-	if (type === 'session') lines.push(`${FM.attendance}: []`);
+	if (type === 'session') {
+		lines.push(`${FM.attendance}: []`);
+		if (fields.dailyNote) lines.push(`${FM.dailyNote}: ${yamlQuote(fields.dailyNote)}`);
+	}
 	// Acts aren't dated — they carry a manual order (stamped on the first
 	// reorder) and the title that goes into the exported script.
 	if (type === 'act') lines.push(`${FM.displayTitle}: ""`);
@@ -1050,6 +1125,9 @@ export async function createEntity(
 	for (let i = 2; plugin.app.vault.getAbstractFileByPath(path) !== null; i++) {
 		path = normalizePath(`${folder}/${base} ${i}.md`);
 	}
+	if (type === 'session' && !fields.dailyNote) {
+		fields = { ...fields, dailyNote: dailyNoteLink(plugin.app, fields.date) ?? undefined };
+	}
 	return plugin.app.vault.create(path, buildEntityContent(type, fields));
 }
 
@@ -1069,6 +1147,29 @@ async function editScriptFile(
 	const fullPath = project.root === '' ? path : normalizePath(`${project.root}/${path}`);
 	const file = plugin.app.vault.getFileByPath(fullPath);
 	if (!file) return null;
+	const raw = await plugin.app.vault.read(file);
+	const next = apply(raw);
+	if (next !== raw) await plugin.app.vault.modify(file, next);
+	return next;
+}
+
+/**
+ * Reads/rewrites the project's Book file — the same small job `editBook`
+ * (book-view.tsx) does, duplicated here for the same import-cycle reason as
+ * `editScriptFile` above (book-view.tsx already imports `createEntity`/
+ * `entityFileName` FROM this module). Unlike Script, a Prose project has no
+ * Book file scaffolded at project setup, so this creates one on first write
+ * rather than returning null when it's missing — mirrors `createBookFile`.
+ */
+async function editBookFile(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	apply: (text: string) => string
+): Promise<string> {
+	const base = `${project.name}.${BOOK_EXTENSION}`;
+	const fullPath = normalizePath(project.root === '' ? base : `${project.root}/${base}`);
+	let file = plugin.app.vault.getFileByPath(fullPath);
+	if (!file) file = await plugin.app.vault.create(fullPath, '');
 	const raw = await plugin.app.vault.read(file);
 	const next = apply(raw);
 	if (next !== raw) await plugin.app.vault.modify(file, next);
@@ -1875,34 +1976,14 @@ export class CreateEntityModal extends Modal {
 			if (pickedParent) this.fields.parentLocation = linkTargetOf(pickedParent);
 			const parentSetting = new Setting(this.contentEl).setName(t('project.createEntity.sublocationOf'));
 			const parentEl = parentSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
-			const refreshParent = () => {
-				parentEl.empty();
-				if (pickedParent) {
-					this.renderChip(parentEl, pickedParent, pickedParent.name, () => {
-						pickedParent = null;
-						this.fields.parentLocation = '';
-						refreshParent();
-					});
-				} else {
-					const input = parentEl.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.optionalPlaceholder') },
-					});
-					new RecordInputSuggest(
-						this.app,
-						input,
-						() => locations,
-						(r) => {
-							pickedParent = r;
-							this.fields.parentLocation = linkTargetOf(r);
-							refreshParent();
-						},
-						(r) => this.locLabel(r)
-					);
-				}
-			};
-			refreshParent();
-			// Part of region (optional) — a grouping layer above main locations.
+			// Part of region (optional, MAIN locations only) — a grouping layer
+			// above locations. A sublocation inherits its region from whichever
+			// main location it sits under (computed on its own page, never its
+			// own field — see `FM.region`'s doc comment for why: a directly-set
+			// sublocation region would also draw its own graph edge, which isn't
+			// wanted, only location->region and sublocation->location are), so
+			// the picker below is a MAIN-location-only field and hides the
+			// moment a parent gets picked here.
 			const regions = this.plugin.indexer
 				.getAll('region', this.project.root)
 				.sort((a, b) => a.name.localeCompare(b.name));
@@ -1911,6 +1992,7 @@ export class CreateEntityModal extends Modal {
 			const regionSetting = new Setting(this.contentEl).setName(t('project.createEntity.partOfRegion'));
 			const regionEl = regionSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 			const refreshRegion = () => {
+				regionSetting.settingEl.style.display = pickedParent ? 'none' : '';
 				regionEl.empty();
 				if (pickedRegion) {
 					this.renderChip(regionEl, pickedRegion, pickedRegion.name, () => {
@@ -1936,7 +2018,38 @@ export class CreateEntityModal extends Modal {
 					);
 				}
 			};
-			refreshRegion();
+			const refreshParent = () => {
+				parentEl.empty();
+				if (pickedParent) {
+					this.renderChip(parentEl, pickedParent, pickedParent.name, () => {
+						pickedParent = null;
+						this.fields.parentLocation = '';
+						refreshParent();
+					});
+				} else {
+					const input = parentEl.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.optionalPlaceholder') },
+					});
+					new RecordInputSuggest(
+						this.app,
+						input,
+						() => locations,
+						(r) => {
+							pickedParent = r;
+							this.fields.parentLocation = linkTargetOf(r);
+							// A sublocation's region is inherited, never picked here.
+							pickedRegion = null;
+							this.fields.region = '';
+							refreshParent();
+							refreshRegion();
+						},
+						(r) => this.locLabel(r)
+					);
+				}
+				refreshRegion();
+			};
+			refreshParent();
 			const locDesc = new Setting(this.contentEl)
 				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
@@ -1951,9 +2064,21 @@ export class CreateEntityModal extends Modal {
 		}
 
 		if (roleOf(this.type) === 'beat') {
+			// Born with a session (from a session page — the common case this
+			// covers), this field writes into the STARTING session note's own
+			// text (`buildEntityContent`'s `descriptionToSessionNote`) rather than
+			// `loomDescription`, so what's typed here is immediately visible on
+			// the session page instead of only from the event's own page. Labeled
+			// accordingly — a session-less event (opened without `noteSession`)
+			// keeps the plain "Description" label, since whether one ends up
+			// created here depends on live Involved/Locations picks made further
+			// up the form, not something worth relabeling dynamically for.
 			// When an existing event is picked (session-page add), its description
 			// is shown read-only — you're adding it to the session, not editing it.
-			const evDesc = new Setting(this.contentEl).setName(t('project.createEntity.description'));
+			const bornWithSession = this.options.noteSession !== undefined;
+			const evDesc = new Setting(this.contentEl).setName(
+				bornWithSession ? t('project.createEntity.sessionNoteLabel') : t('project.createEntity.description')
+			);
 			evDesc.setClass('loom-modal-wide');
 			const roEl = evDesc.controlEl.createDiv({ cls: 'loom-modal-existing-desc' });
 			let ta: TextAreaComponent | null = null;
@@ -1969,7 +2094,11 @@ export class CreateEntityModal extends Modal {
 					roEl.setText(existing.description !== '' ? existing.description : t('project.createEntity.noDescription'));
 				}
 				evDesc.setName(
-					existing ? t('project.createEntity.descriptionExisting') : t('project.createEntity.description')
+					existing
+						? t('project.createEntity.descriptionExisting')
+						: bornWithSession
+							? t('project.createEntity.sessionNoteLabel')
+							: t('project.createEntity.description')
 				);
 			};
 			this.refreshDesc();
@@ -2596,6 +2725,7 @@ export class CreateEntityModal extends Modal {
 
 		let displayTitleInput: TextComponent | null = null;
 		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
+			text.setPlaceholder(t('project.createEntity.newActTitle'));
 			text.onChange((v) => {
 				title = v;
 				orderPicker.setPhantomLabel(v.trim() === '' ? t('project.createEntity.newActTitle') : v.trim());
@@ -2733,11 +2863,12 @@ export class CreateEntityModal extends Modal {
 	/**
 	 * Act creation (Writer/Prose): just Title, an Append-to-the-end-of-the-book
 	 * toggle (same `buildOrderPicker` reorder-when-off UI Script's own Act
-	 * modal uses), and Notes — no Display title (that marker only matters for
-	 * the printed/exported Fountain page) and no script write, since there's
-	 * no Book file to write into yet. Stamps `loomSeq` directly, restamping
-	 * later siblings, the same "no script to splice yet" pattern
-	 * `submitChapter` uses.
+	 * modal uses), and Notes — no Display title field (that marker only
+	 * matters for the printed/exported Fountain page, which Prose has no
+	 * equivalent of). Writes the Book file first (`editBookFile`/
+	 * `appendBookAct`, creating it if this is the project's first act) and
+	 * stamps the note from what that write actually produced — mirrors
+	 * `submitAct`.
 	 */
 	private renderProseActModal(): void {
 		this.setTitle(t('project.createEntity.newActTitle'));
@@ -2749,6 +2880,7 @@ export class CreateEntityModal extends Modal {
 			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
 
 		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
+			text.setPlaceholder(t('project.createEntity.newActTitle'));
 			text.onChange((v) => {
 				title = v;
 				orderPicker.setPhantomLabel(v.trim() === '' ? t('project.createEntity.newActTitle') : v.trim());
@@ -2803,21 +2935,34 @@ export class CreateEntityModal extends Modal {
 			new Notice(t('project.createEntity.titleRequired'));
 			return;
 		}
-		const insertAt = fields.appendToEnd
-			? fields.existingActs.length
-			: Math.max(0, Math.min(fields.insertIndex, fields.existingActs.length));
-		const seq = insertAt + 1;
-		// Siblings from the insertion point on shift down one slot — same idea
-		// `submitChapter` applies, directly on frontmatter since there's no
-		// script to splice for an act in Prose mode.
-		for (let i = insertAt; i < fields.existingActs.length; i++) {
-			const sibling = fields.existingActs[i];
-			const file = this.plugin.app.vault.getFileByPath(sibling.path);
-			if (!file) continue;
-			await this.plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, FM.seq, i + 2);
-			});
+
+		// Write the Book FIRST, same "one creation surface, the book owns
+		// names" principle Script's own `submitAct` follows — the note is
+		// stamped from what the write actually produced, not computed
+		// independently and hoped to match.
+		let newId: string | null = null;
+		const nextText = await editBookFile(this.plugin, this.project, (raw) => {
+			let text = appendBookAct(raw, title);
+			const parsed = parseBook(text);
+			const last = [...parsed.acts].reverse().find((a) => a.loomId !== null);
+			newId = last?.loomId ?? null;
+			if (!newId) return text;
+			if (!fields.appendToEnd) {
+				const order = fields.existingActs.map((c) => c.actId);
+				const clamped = Math.max(0, Math.min(fields.insertIndex, order.length));
+				order.splice(clamped, 0, newId);
+				text = reorderBookActs(text, order) ?? text;
+			}
+			return text;
+		});
+		if (!newId) {
+			new Notice(t('project.createEntity.actWriteFailed'));
+			return;
 		}
+		const acts = parseBook(nextText)
+			.acts.filter((a) => a.loomId !== null)
+			.sort((a, b) => a.line - b.line);
+		const seq = acts.findIndex((a) => a.loomId === newId) + 1;
 
 		try {
 			const created = await createEntity(this.plugin, this.project, 'act', {
@@ -2827,6 +2972,7 @@ export class CreateEntityModal extends Modal {
 				description: '',
 			});
 			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.actId, newId);
 				setLoomKey(fm, FM.seq, seq);
 			});
 			await writeNotesBody(this.plugin, created, fields.notes);
@@ -2835,6 +2981,7 @@ export class CreateEntityModal extends Modal {
 				path: created.path,
 				name: title,
 				type: 'act',
+				actId: newId,
 				seq,
 			};
 			this.close();
@@ -2861,15 +3008,12 @@ export class CreateEntityModal extends Modal {
 	 * where to insert it — append to the end (default) or drag it to a
 	 * specific spot among the picked act's existing chapters, same
 	 * `buildOrderPicker` the Act modal uses — and a Notes field. No Involved/
-	 * Locations/Date/Description fields: once the Book parser exists those
-	 * derive from `@[...]`-style mentions in the chapter's own text, the same
-	 * way a Scene's cast/factions/items/mentioned-locations already do from
-	 * the script — not something to hand-pick at creation time. Currently
-	 * stamps `chapterAct`/`loomSeq` directly (no Book file to write into
-	 * yet — see ROADMAP's Prose-support entry); the reorder-on-creation math
-	 * below restamps sibling chapters' `loomSeq` directly for the same
-	 * reason, rather than splicing a script the way `submitScene`/`submitAct`
-	 * do.
+	 * Locations/Date/Description fields: prose has no `@[...]`-style inline
+	 * entity-link derivation yet (a Fountain-only feature so far), so there's
+	 * nothing to hand-pick at creation time either way. Writes the Book file
+	 * first (`editBookFile`/`appendBookChapter`/`moveBookChapterToAct`/
+	 * `reorderBookChaptersInAct`) and stamps the note from what that write
+	 * actually produced — mirrors `submitScene`.
 	 */
 	private renderChapterModal(): void {
 		this.setTitle(newEntityTitle('chapter'));
@@ -2883,6 +3027,7 @@ export class CreateEntityModal extends Modal {
 		let refreshChapterOrderItems: () => void = () => {};
 
 		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
+			text.setPlaceholder(newEntityTitle('chapter'));
 			text.onChange((v) => {
 				name = v;
 				chapterOrderPicker.setPhantomLabel(v.trim() === '' ? newEntityTitle('chapter') : v.trim());
@@ -3005,27 +3150,48 @@ export class CreateEntityModal extends Modal {
 			return;
 		}
 		const act = fields.pickedAct;
-		const existingChapters = this.plugin.indexer
-			.getAll('chapter', this.project.root)
-			.filter((ch) => ch.chapterAct !== '' && this.plugin.indexer.resolve(ch.chapterAct, ch.path)?.path === act.path)
-			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+		// Read before the Book write below — same query the modal's own
+		// position picker used to build its list, so the index it returned
+		// lines up with this order.
+		const existingChapterIds =
+			act.actId !== ''
+				? this.plugin.indexer
+						.getAll('chapter', this.project.root)
+						.filter(
+							(ch) =>
+								ch.chapterAct !== '' &&
+								this.plugin.indexer.resolve(ch.chapterAct, ch.path)?.path === act.path
+						)
+						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+						.map((ch) => ch.chapterId)
+				: [];
 
-		const insertAt = fields.chapterAppendToEnd
-			? existingChapters.length
-			: Math.max(0, Math.min(fields.insertIndex, existingChapters.length));
-		const seq = insertAt + 1;
-		// Siblings from the insertion point on shift down one slot — same
-		// "restamp everything after the gap" idea `reorderScenesInSection`
-		// applies to a script, just directly on frontmatter here since
-		// there's no script to splice for a chapter yet.
-		for (let i = insertAt; i < existingChapters.length; i++) {
-			const sibling = existingChapters[i];
-			const file = this.plugin.app.vault.getFileByPath(sibling.path);
-			if (!file) continue;
-			await this.plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, FM.seq, i + 2);
-			});
+		let newId: string | null = null;
+		const nextText = await editBookFile(this.plugin, this.project, (raw) => {
+			let text = appendBookChapter(raw, name);
+			const parsed = parseBook(text);
+			const created = parsed.chapters[parsed.chapters.length - 1];
+			newId = created?.loomId ?? null;
+			if (!newId) return text;
+			if (act.actId !== '') {
+				text = moveBookChapterToAct(text, newId, act.actId) ?? text;
+				if (!fields.chapterAppendToEnd) {
+					const order = [...existingChapterIds];
+					const clamped = Math.max(0, Math.min(fields.insertIndex, order.length));
+					order.splice(clamped, 0, newId);
+					text = reorderBookChaptersInAct(text, act.actId, order) ?? text;
+				}
+			}
+			return text;
+		});
+		if (!newId) {
+			new Notice(t('project.createEntity.actWriteFailed'));
+			return;
 		}
+		const chapters = parseBook(nextText)
+			.chapters.filter((c) => c.loomId !== null)
+			.sort((a, b) => a.line - b.line);
+		const seq = chapters.findIndex((c) => c.loomId === newId) + 1;
 
 		try {
 			const created = await createEntity(this.plugin, this.project, 'chapter', {
@@ -3035,6 +3201,7 @@ export class CreateEntityModal extends Modal {
 				description: '',
 			});
 			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.chapterId, newId);
 				setLoomKey(fm, FM.chapterAct, `[[${linkTargetOf(act)}]]`);
 				setLoomKey(fm, FM.seq, seq);
 			});

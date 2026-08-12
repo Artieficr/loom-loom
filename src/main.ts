@@ -1,5 +1,6 @@
 import { ItemView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
 import {
+	BOOK_EXTENSION,
 	EntityOrigin,
 	FM,
 	LOOM_EXTENSION,
@@ -10,6 +11,7 @@ import {
 	VIEW_HOME,
 	VIEW_LIST,
 	VIEW_MAP,
+	VIEW_PROSE,
 	VIEW_SCRIPT,
 } from './types';
 import { DEFAULT_SETTINGS, LoomLoomSettingTab, LoomLoomSettings, mergeSettings } from './settings';
@@ -28,6 +30,7 @@ import { EntityView } from './views/entity-view';
 import { GroupView } from './views/group-view';
 import { MapView } from './views/map-view';
 import { ScriptView } from './views/script-view';
+import { BookView } from './views/book-view';
 import { LicenseManager } from './license/manager';
 import { POLAR_ORGANIZATION_ID, PolarLicenseProvider } from './license/polar-provider';
 import { resolveActiveLocale, setLocale, t } from './i18n';
@@ -68,6 +71,7 @@ export default class LoomLoomPlugin extends Plugin {
 		this.registerView(VIEW_GROUP, (leaf) => new GroupView(leaf, this));
 		this.registerView(VIEW_MAP, (leaf) => new MapView(leaf, this));
 		this.registerView(VIEW_SCRIPT, (leaf) => new ScriptView(leaf, this));
+		this.registerView(VIEW_PROSE, (leaf) => new BookView(leaf, this));
 		// Project home files show up in the file explorer like .canvas/.base
 		// files and open straight into the plugin.
 		this.registerExtensions([LOOM_EXTENSION], VIEW_HOME);
@@ -76,6 +80,10 @@ export default class LoomLoomPlugin extends Plugin {
 		// script out of markdown is what stops Obsidian indexing every
 		// non-exporting script note as a wikilink.
 		this.registerExtensions([SCRIPT_EXTENSION], VIEW_SCRIPT);
+		// The Prose Book file needs the same treatment — its own hidden
+		// `[[loom:<id>]]`/`[[loom-comment:…]]` markers would otherwise pollute
+		// Obsidian's wikilink index if it were plain markdown.
+		this.registerExtensions([BOOK_EXTENSION], VIEW_PROSE);
 
 		this.addRibbonIcon('dices', t('command.ribbonTooltip'), () => this.openHome());
 

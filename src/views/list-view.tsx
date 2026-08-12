@@ -908,6 +908,9 @@ function EntityList({
 							plugin.app,
 							plugin.indexer
 								.getAll('location', project.root)
+								// Main locations only — a sublocation inherits its region
+								// from its parent rather than ever being a direct member.
+								.filter((l) => l.parentLocation === null)
 								.filter((l) => plugin.indexer.resolve(l.region ?? '', l.path)?.path !== r.path)
 								.sort((a, b) => a.name.localeCompare(b.name)),
 							(l) => writeFmOf(l, (fm) => setLoomKey(fm, FM.region, `[[${linkTargetOf(r)}]]`)),
@@ -1376,7 +1379,7 @@ function EntityList({
 					)
 				) : null}
 				{r.type === 'scene' || r.type === 'act' ? (
-					<span className="loom-scene-row-num">{scriptOrder.get(r.path)}</span>
+					<span className="loom-writer-row-num">{scriptOrder.get(r.path)}</span>
 				) : null}
 				{/* Always reserved (even blank) so the title's start position
 				    doesn't shift for a forced heading with no INT./EXT. */}
