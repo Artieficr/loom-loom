@@ -1,4 +1,4 @@
-import { EditorState, Prec, StateEffect } from '@codemirror/state';
+import { EditorState, Facet, Prec, StateEffect } from '@codemirror/state';
 import {
 	Decoration,
 	DecorationSet,
@@ -22,6 +22,7 @@ import { App, Menu, Notice, Scope, setIcon } from 'obsidian';
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { t } from '../i18n';
 import { findAnnotationSpans, newSceneId } from '../fountain';
+import { CLICK_TO_OPEN_ATTRS } from '../types';
 import type { AltTextEntry, CommentEntry } from './script-notes';
 import type { LinkOption } from './link-textarea';
 
@@ -82,11 +83,26 @@ const INLINE_RULES: {
 
 const WIKILINK_RE = /\[\[([^[\]\n|]+)(?:\|([^[\]\n]*))?\]\]/g;
 
+/** Opt-in per-instance flag (`MarkdownField`'s `plainLinks` prop) — a
+ *  wikilink renders as inert plain text, not a colored/clickable span, the
+ *  same "just text" treatment Script's own Pages preview already gives its
+ *  `@[...]` entity links (stripped to plain display text, never a click
+ *  target there). Used by Book/Act/Chapter's read-only Preview fields only —
+ *  every other `readOnly` consumer (the Group page's read-only note rows,
+ *  an item's read-only "Original description" spoiler) keeps ordinary
+ *  clickable/colored links, so this can't be folded into `readOnly` itself. */
+const plainLinksFacet = Facet.define<boolean, boolean>({ combine: (values) => values.some(Boolean) });
+
 /** Prose/Book's hidden Act/Chapter identity marker (`prose.ts`/`fountain.ts`'s
  *  `[[loom:<id>]]` convention) — never a real wikilink, so it's excluded from
  *  `lineTokens` below and hidden outright by `buildDecorations`'s own pass,
- *  same non-exporting-note treatment `fountain-field.tsx` gives it. */
-const LOOM_ID_RE = /\[\[loom:[A-Za-z0-9]+\]\]/g;
+ *  same non-exporting-note treatment `fountain-field.tsx` gives it. Leading
+ *  `\s*` consumes the single space `ensureBookIds` (prose.ts) always inserts
+ *  before the marker too — mirrors that file's own `LOOM_ID_RE_G` exactly;
+ *  without it, hiding only the bracket pair left a trailing space genuinely
+ *  present (and, once heading hover-underline was added, visibly stretching
+ *  the underline a character past the title text). */
+const LOOM_ID_RE = /\s*\[\[loom:[A-Za-z0-9]+\]\]/g;
 
 /** Matches a `[[loom:<id>]]` identity marker OR a `[[loom-comment:<id>]]`/
  *  `[[loom-alt:<id>]]`/`[[/loom-comment:<id>]]`/`[[/loom-alt:<id>]]`
@@ -250,6 +266,7 @@ function buildDecorations(view: EditorView): DecorationSet {
 	const revealRaw = !view.state.readOnly && view.hasFocus;
 	const touches = (from: number, to: number) =>
 		revealRaw && sel.ranges.some((r) => r.from <= to && r.to >= from);
+	const plainLinks = view.state.facet(plainLinksFacet);
 
 	for (const range of view.visibleRanges) {
 		let pos = range.from;
@@ -301,10 +318,19 @@ function buildDecorations(view: EditorView): DecorationSet {
 			const heading = /^(#{1,6})\s/.exec(text);
 			if (heading) {
 				const level = heading[1].length;
+				// A level-1/2 heading carrying Prose's own `[[loom:<id>]]` Act/
+				// Chapter identity marker is Ctrl/Cmd-clickable (`onOpenHeading`'s
+				// own gate, mirrored here) — an ordinary Notes/Description field's
+				// heading never carries this marker, so this doesn't need to know
+				// whether the caller actually passed `onOpenHeading` at all.
+				const headingClickable = level <= 2 && /\[\[loom:[A-Za-z0-9]+\]\]/.test(text);
 				entries.push({
 					from: line.from,
 					to: line.from,
-					deco: Decoration.line({ class: `loom-md-h${level}` }),
+					deco: Decoration.line({
+						class: `loom-md-h${level}`,
+						attributes: headingClickable ? CLICK_TO_OPEN_ATTRS : undefined,
+					}),
 				});
 				if (!lineActive) {
 					// Hide the "# " markers (the styled text stays; inline tokens
@@ -358,12 +384,17 @@ function buildDecorations(view: EditorView): DecorationSet {
 					entries.push({ from: h.from, to: h.to, deco: Decoration.replace({}) });
 				}
 				if (token.content.to > token.content.from) {
+					const link = token.link;
 					entries.push({
 						from: token.content.from,
 						to: token.content.to,
 						deco: Decoration.mark({
-							class: token.content.cls,
-							attributes: token.link !== undefined ? { 'data-loom-link': token.link } : undefined,
+							class: link !== undefined && plainLinks ? 'loom-md-link-plain' : token.content.cls,
+							// No `data-loom-link` attribute in plain mode — the click
+							// handler (`openLinkOnMousedown`) resolves purely off this
+							// attribute, so omitting it makes the span genuinely inert,
+							// not just uncolored.
+							attributes: link !== undefined && !plainLinks ? { 'data-loom-link': link } : undefined,
 						}),
 					});
 				}
@@ -657,6 +688,12 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	 *  clicking rendered links still works, and an existing comment's popover
 	 *  can still be opened read-only — only creating/cycling is disabled. */
 	readOnly?: boolean;
+	/** A wikilink renders as inert plain text — no color, no cursor, no click
+	 *  — the same "just text" treatment Script's own Pages preview already
+	 *  gives its `@[...]` entity links. Book/Act/Chapter's read-only Preview
+	 *  fields opt into this; every other `readOnly` consumer leaves it unset
+	 *  and keeps ordinary clickable/colored links. */
+	plainLinks?: boolean;
 	/** Opens a clicked rendered wikilink (raw target; `newTab` on middle-click). */
 	onOpenLink: (target: string, newTab?: boolean) => void;
 	/** Offered as "+ Create …" in the [[ completion: create an entity from the
@@ -718,6 +755,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	onOpenLink,
 	onCreateEntity,
 	readOnly,
+	plainLinks,
 	comments,
 	altText,
 	onCreateComment,
@@ -1178,7 +1216,34 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 			}
 
 			sync() {
+				// Mirrors the guard `fountain-field.tsx`'s own `sync()` needed for a
+				// real, reported leak: `scheduleSync`'s callback already checks
+				// `destroyed`, but this field's `fountain-field.tsx` counterpart is
+				// also called directly from an OUTLIVING `document`-level scroll
+				// listener, which could still fire after `destroy()` had already run
+				// and re-create handle spans nothing would ever clean up again. This
+				// field has no such external caller today, but the check costs
+				// nothing and keeps the two implementations' safety invariants in
+				// sync, same as everywhere else they're deliberately mirrored.
+				if (this.destroyed) return;
 				const view = this.view;
+				// Mirrors `fountain-field.tsx`'s own two extra `sync()` guards (see
+				// that file's doc comment on this same spot for the full
+				// reasoning): a view whose DOM was permanently removed without
+				// `destroy()` firing gets cleaned up now; a view that's merely in a
+				// currently-BACKGROUND tab (Obsidian keeps it in the DOM, just
+				// hidden — `offsetParent` goes `null`) gets its handles hidden
+				// rather than left positioned at stale coordinates, since these
+				// `position: fixed` elements sit on `document.body` and aren't
+				// clipped by a hidden ancestor at all.
+				if (!view.dom.isConnected) {
+					this.destroy();
+					return;
+				}
+				if (view.dom.offsetParent === null) {
+					for (const el of this.els.values()) el.setCssProps({ display: 'none' });
+					return;
+				}
 				const text = view.state.doc.toString();
 				const spans = findAnnotationSpans(text).filter((s) => s.kind === 'comment' && s.contentFrom < s.contentTo);
 				const wanted = new Set<string>();
@@ -1240,14 +1305,27 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 			parent: hostRef.current,
 			state: EditorState.create({
 				doc: value,
-				// Read-only fields stay contenteditable (only `readOnly` blocks
-				// edits): the browser then owns selection and fires a real `copy`
-				// event — rewritten below to the display text — where a
-				// non-editable view would leave the native selection empty and
-				// Ctrl+C a no-op. All editing extensions are simply absent.
+				// A real, reported bug in the ORIGINAL version of this comment's
+				// own reasoning: `EditorState.readOnly` (blocks EDITS/transactions)
+				// and `EditorView.editable` (controls whether the DOM itself is
+				// `contenteditable`) are two SEPARATE CM6 facets — this used to set
+				// only the former, leaving the content DOM genuinely
+				// `contenteditable="true"`, which is what drew a blinking
+				// text-input caret and let one be PLACED by clicking, even though
+				// typing into it did nothing (`readOnly` silently ate the
+				// transaction). Preview is meant to read like Script's own Pages
+				// preview — plain text you can select and copy, never something
+				// that visually invites typing. `EditorView.editable.of(false)`
+				// closes that gap; CM6 documents this exact split ("not editable,
+				// but the content will still be selectable"), so the native
+				// selection/`copy`-event handling below is UNAFFECTED — neither
+				// depends on `contenteditable`, only on the browser's ordinary
+				// text-selection machinery, which works the same on any DOM text.
 				extensions: readOnly
 					? [
 							EditorState.readOnly.of(true),
+							EditorView.editable.of(false),
+							plainLinksFacet.of(plainLinks ?? false),
 							EditorView.lineWrapping,
 							cmPlaceholder(placeholder ?? ''),
 							livePreview,
@@ -1321,6 +1399,18 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 		viewRef.current = view;
 		return () => {
 			popScope();
+			// Explicit, not relying solely on `destroy()` triggering CM6's own
+			// `focusChanged` update via the native DOM blur a detached
+			// contentEditable normally fires — a real, reported bug: a caller
+			// that buffers locally and commits only on blur (Book/Act's unified
+			// editor, via `onBlur`) could unmount WITHOUT that teardown blur ever
+			// reaching `onBlurRef`, silently losing whatever was still buffered
+			// (e.g. an in-progress Act/Chapter title edit) the moment the field
+			// went away — reopening then showed the pre-edit text again, since
+			// nothing had ever actually written it. Guaranteeing the flush here,
+			// independent of CM6's own event plumbing, closes that gap; a no-op
+			// when nothing is pending (every ordinary Notes/Description field).
+			if (view.hasFocus) onBlurRef.current?.();
 			view.destroy();
 			viewRef.current = null;
 		};

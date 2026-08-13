@@ -30,7 +30,7 @@ import {
 	readLoomId,
 } from '../fountain';
 import { AltTextEntry, CommentEntry } from './script-notes';
-import { EntityType, entityLabel } from '../types';
+import { CLICK_TO_OPEN_ATTRS, EntityType, entityLabel } from '../types';
 
 /**
  * Live-preview editor for the Fountain script. Deliberately NOT
@@ -156,7 +156,7 @@ function scanEntityLinks(
 		if (touches(link.from, link.to)) continue;
 		const path = byName.get(link.name.toLowerCase());
 		const attributes = path
-			? { 'data-loom-fountain-entity': path, title: 'Ctrl/Cmd+click to open' }
+			? { 'data-loom-fountain-entity': path, ...CLICK_TO_OPEN_ATTRS }
 			: undefined;
 		// The visible "@" (kept, not hidden) and the visible display text are
 		// two separate mark ranges around the hidden `[`/`Name|`/`]` pieces.
@@ -662,7 +662,42 @@ export const FountainField = forwardRef(function FountainField(
 			}
 
 			sync() {
+				// Guards `onAnyScroll`'s own deferred `view.plugin(...)?.sync()` call
+				// below (a `document`-level capture listener outliving THIS specific
+				// view, unlike every other trigger which already funnels through
+				// `scheduleSync`'s own `destroyed` check): a real, reported leak — a
+				// scroll event queued right as the field tears down still fired its
+				// `setTimeout` callback AFTER `destroy()` had already run, and this
+				// method had no guard of its own, so it went ahead and re-created
+				// fresh handle spans on `document.body` that nothing was left to ever
+				// remove (`destroy()` doesn't run twice) — two small accent bars stuck
+				// at a fixed screen position for the rest of the session, visible on
+				// every subsequent page regardless of which view was open.
+				if (this.destroyed) return;
 				const view = this.view;
+				// This view's DOM was permanently removed without `destroy()` ever
+				// firing on it — `destroyed` alone can't catch that. Clean up for
+				// good rather than positioning handles for a view nobody can ever
+				// see again.
+				if (!view.dom.isConnected) {
+					this.destroy();
+					return;
+				}
+				// A DIFFERENT, real leak vector with the SAME symptom: Obsidian
+				// keeps a background tab's DOM around, just hidden (`offsetParent`
+				// goes `null` — the standard "is this actually rendered right now"
+				// check) — not detached, so the check above doesn't catch it. These
+				// handles are `position: fixed` on `document.body`, which a hidden
+				// ANCESTOR doesn't clip at all, so leaving them at their last-
+				// computed screen coordinates showed them floating over WHATEVER
+				// tab the user actually switched to. Hide rather than destroy —
+				// this tab isn't gone, just not the active one right now, and
+				// `sync()` repositions them normally the next time it runs while
+				// visible again.
+				if (view.dom.offsetParent === null) {
+					for (const el of this.els.values()) el.setCssProps({ display: 'none' });
+					return;
+				}
 				const text = view.state.doc.toString();
 				const spans = findAnnotationSpans(text).filter((s) => s.kind === 'comment' && s.contentFrom < s.contentTo);
 				const wanted = new Set<string>();
@@ -782,7 +817,7 @@ export const FountainField = forwardRef(function FountainField(
 							to: docLine.to,
 							deco: Decoration.mark({
 								class: 'loom-fountain-char-link',
-								attributes: { 'data-loom-fountain-char': element.text, title: 'Ctrl/Cmd+click to open this character' },
+								attributes: { 'data-loom-fountain-char': element.text, ...CLICK_TO_OPEN_ATTRS },
 							}),
 						});
 					}
@@ -798,7 +833,7 @@ export const FountainField = forwardRef(function FountainField(
 						to: docLine.to,
 						deco: Decoration.mark({
 							class: 'loom-fountain-scene-link',
-							attributes: { 'data-loom-fountain-scene': loomId, title: 'Ctrl/Cmd+click to open this scene’s location' },
+							attributes: { 'data-loom-fountain-scene': loomId, ...CLICK_TO_OPEN_ATTRS },
 						}),
 					});
 				}
@@ -812,7 +847,7 @@ export const FountainField = forwardRef(function FountainField(
 						to: docLine.to,
 						deco: Decoration.mark({
 							class: 'loom-fountain-act-link',
-							attributes: { 'data-loom-fountain-act': loomId, title: 'Ctrl/Cmd+click to open this act' },
+							attributes: { 'data-loom-fountain-act': loomId, ...CLICK_TO_OPEN_ATTRS },
 						}),
 					});
 				}
@@ -1331,6 +1366,13 @@ export const FountainField = forwardRef(function FountainField(
 		document.addEventListener('scroll', onAnyScroll, true);
 		return () => {
 			document.removeEventListener('scroll', onAnyScroll, true);
+			// Explicit, not relying solely on `destroy()` triggering CM6's own
+			// `focusChanged` update via the native DOM blur a detached
+			// contentEditable normally fires — mirrors the identical fix in
+			// `markdown-field.tsx` (see that file's own doc comment on this same
+			// spot for the reported bug it closes): a caller that commits only on
+			// blur could otherwise unmount without ever flushing what's pending.
+			if (view.hasFocus) onBlurRef.current?.();
 			view.destroy();
 			viewRef.current = null;
 		};

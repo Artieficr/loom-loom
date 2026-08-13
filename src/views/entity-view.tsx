@@ -398,9 +398,18 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  why blur rather than every keystroke. */
 	const actBookDraftRef = useRef<string | null>(null);
 	const actBookCommitQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+	/** Same fix as `book-view.tsx`'s `queueBookEdit` (see its own doc comment
+	 *  — a straight port of `script-view.tsx`'s `commit`'s `.catch`
+	 *  reasoning): without swallowing a failed run's rejection on the queue
+	 *  itself, one throwing `editBookAndSync` call would silently wedge
+	 *  every edit queued after it on this Act page for the rest of its
+	 *  lifetime. */
 	const queueActBookEdit = (apply: (text: string) => string | null) => {
 		if (!project) return;
-		actBookCommitQueueRef.current = actBookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
+		const run = actBookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
+		actBookCommitQueueRef.current = run.catch((e) => {
+			console.error('Loom Loom: could not commit an act book edit', e);
+		});
 	};
 	const commitActBookDraft = () => {
 		const draft = actBookDraftRef.current;
@@ -1394,6 +1403,23 @@ function EntityPage({ view }: { view: EntityView }) {
 	const sceneMentionedLocationRecords = record.sceneMentionedLocations
 		.map((lp) => plugin.indexer.resolve(lp, record.path))
 		.filter((r): r is EntityRecord => r != null);
+	/** Book-recognized cast/factions/items/mentioned-locations — `loomChapterCast`
+	 *  etc., derived from a plain `[[...]]` wikilink anywhere in the chapter's
+	 *  own text by `syncActsChapters`, shown read-only (same "the writing
+	 *  itself is the source" reasoning as `sceneCastRecords`, just reading
+	 *  Prose's native wikilink syntax instead of Fountain's `@[...]`). */
+	const chapterCastRecords = record.chapterCast
+		.map((lp) => plugin.indexer.resolve(lp, record.path))
+		.filter((r): r is EntityRecord => r != null);
+	const chapterFactionRecords = record.chapterFactions
+		.map((lp) => plugin.indexer.resolve(lp, record.path))
+		.filter((r): r is EntityRecord => r != null);
+	const chapterItemRecords = record.chapterItems
+		.map((lp) => plugin.indexer.resolve(lp, record.path))
+		.filter((r): r is EntityRecord => r != null);
+	const chapterMentionedLocationRecords = record.chapterMentionedLocations
+		.map((lp) => plugin.indexer.resolve(lp, record.path))
+		.filter((r): r is EntityRecord => r != null);
 	const sceneExcerpt = sceneScriptText(scriptText, record.sceneId);
 	/** This scene's own mini nav panel: whatever `##`+ (branch or ordinary)
 	 *  sections exist inside its own line span, using the exact same
@@ -1608,61 +1634,93 @@ function EntityPage({ view }: { view: EntityView }) {
 			});
 	};
 
+	/** Guards `commitName`/`commitActTitle` against firing twice concurrently
+	 *  (Enter then blur) — see those functions' own doc comments. */
+	const commitNameInFlightRef = useRef(false);
+
 	/** Renames the file to its managed name and stores the entered display
-	 *  name (`loomName` + a native alias so [[…]] autocomplete finds it). */
+	 *  name (`loomName` + a native alias so [[…]] autocomplete finds it).
+	 *
+	 *  Guarded against re-entrant calls (`commitNameInFlightRef`): the Name
+	 *  input commits on BOTH Enter (below) and blur, and pressing Enter then
+	 *  clicking/tabbing away fires both in quick succession — a real,
+	 *  reported bug for Chapter/Act (whose commit cascades into
+	 *  `editBookAndSync` → `syncActsChapters`, itself several awaited
+	 *  `processFrontMatter`/`renameFile` calls across multiple notes): two
+	 *  unqueued, concurrent runs of that cascade could race on the SAME
+	 *  files — one run's `renameFile` landing while the other's own
+	 *  `existingChapters` snapshot (read once at that run's own start) still
+	 *  pointed at the pre-rename path, silently dropping that run's write
+	 *  and leaving the title looking reverted once the dust settled. */
 	const commitName = async () => {
+		if (commitNameInFlightRef.current) return;
 		const entered = name.trim();
 		if (entered === '' || entered === record.name || !project) {
 			setName(record.name);
 			return;
 		}
-		// A Chapter's title is Book-owned once a Book exists, same reasoning as
-		// an Act's — write the `##` heading and let `syncActsChapters` rename
-		// the note, rather than racing a direct frontmatter rename against it.
-		if (record.type === 'chapter' && bookMode) {
-			await editBookAndSync(plugin, project, (raw) => renameBookChapterTitle(raw, record.chapterId, entered));
-			return;
+		commitNameInFlightRef.current = true;
+		try {
+			// A Chapter's title is Book-owned once a Book exists, same reasoning as
+			// an Act's — write the `##` heading and let `syncActsChapters` rename
+			// the note, rather than racing a direct frontmatter rename against it.
+			if (record.type === 'chapter' && bookMode) {
+				await editBookAndSync(plugin, project, (raw) => renameBookChapterTitle(raw, record.chapterId, entered));
+				return;
+			}
+			// Checked BEFORE the frontmatter write below, not after: a collision
+			// must abort the rename entirely, never leave the note's displayed
+			// name changed while its file name silently stays behind.
+			const parentName =
+				record.type === 'location' && record.parentLocation !== null
+					? plugin.indexer.resolve(record.parentLocation, record.path)?.name
+					: undefined;
+			const base = entityFileName(project, record.type, entered, parentName);
+			const parent = file.parent?.path ?? '';
+			const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+			if (newPath !== file.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
+				new Notice(t('project.common.nameExists'));
+				setName(record.name);
+				return;
+			}
+			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+				setLoomKey(fm, FM.name, entered);
+				const aliases: unknown[] = Array.isArray(fm.aliases)
+					? (fm.aliases as unknown[]).filter((a) => a !== record.name && a !== entered)
+					: [];
+				fm.aliases = [entered, ...aliases];
+			});
+			if (newPath === file.path) return;
+			await plugin.app.fileManager.renameFile(file, newPath);
+		} finally {
+			commitNameInFlightRef.current = false;
 		}
-		// Checked BEFORE the frontmatter write below, not after: a collision
-		// must abort the rename entirely, never leave the note's displayed
-		// name changed while its file name silently stays behind.
-		const parentName =
-			record.type === 'location' && record.parentLocation !== null
-				? plugin.indexer.resolve(record.parentLocation, record.path)?.name
-				: undefined;
-		const base = entityFileName(project, record.type, entered, parentName);
-		const parent = file.parent?.path ?? '';
-		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
-		if (newPath !== file.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
-			new Notice(t('project.common.nameExists'));
-			setName(record.name);
-			return;
-		}
-		await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-			setLoomKey(fm, FM.name, entered);
-			const aliases: unknown[] = Array.isArray(fm.aliases)
-				? (fm.aliases as unknown[]).filter((a) => a !== record.name && a !== entered)
-				: [];
-			fm.aliases = [entered, ...aliases];
-		});
-		if (newPath === file.path) return;
-		await plugin.app.fileManager.renameFile(file, newPath);
 	};
 
 	/** Act page's Title field: writes straight into the script's `#`
 	 *  section line — the note itself is updated by the sync that follows,
-	 *  not directly here, so the script stays the one place that authors it. */
+	 *  not directly here, so the script stays the one place that authors it.
+	 *  Guarded by the SAME `commitNameInFlightRef` as `commitName` — the
+	 *  Name input's Enter/blur handlers call whichever of the two applies,
+	 *  never both, so sharing one flag is safe and avoids a second ref for
+	 *  the identical race. */
 	const commitActTitle = async () => {
+		if (commitNameInFlightRef.current) return;
 		const entered = name.trim();
 		if (entered === '' || entered === record.name || !project || record.type !== 'act') {
 			setName(record.name);
 			return;
 		}
-		if (bookMode) {
-			await editBookAndSync(plugin, project, (raw) => renameBookActTitle(raw, record.actId, entered));
-			return;
+		commitNameInFlightRef.current = true;
+		try {
+			if (bookMode) {
+				await editBookAndSync(plugin, project, (raw) => renameBookActTitle(raw, record.actId, entered));
+				return;
+			}
+			await editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, record.actId, entered));
+		} finally {
+			commitNameInFlightRef.current = false;
 		}
-		await editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, record.actId, entered));
 	};
 
 	// Aliases live in Obsidian's native `aliases` frontmatter — that's what
@@ -6165,7 +6223,6 @@ function EntityPage({ view }: { view: EntityView }) {
 									chapters={actChapters}
 									names={linkNames}
 									onOpenLink={openLinkTarget}
-									onOpenChapter={(path) => view.openEntity(path)}
 									emptyMessage={
 										<div className="loom-attendance-empty">
 											{t('view.entity.script.noChaptersYetPre')}<code># {record.name}</code>{t('view.entity.script.noChaptersYetPost')}
@@ -7325,7 +7382,17 @@ function EntityPage({ view }: { view: EntityView }) {
 					    column flex container), leaving a large blank gap below "Move to
 					    another act…" before the tabs. The "solo" variant (no right
 					    column) is exactly this case. */}
-					<div className="loom-scene-act-grid loom-scene-act-grid-solo">
+					<div
+						className={
+							chapterCastRecords.length +
+								chapterFactionRecords.length +
+								chapterMentionedLocationRecords.length +
+								chapterItemRecords.length ===
+							0
+								? 'loom-scene-act-grid loom-scene-act-grid-solo'
+								: 'loom-scene-act-grid'
+						}
+					>
 						<div className="loom-scene-act-left">
 							<span className="loom-field-label">{entityLabel(anchorType)}</span>
 							<div className="loom-tag-row">
@@ -7359,6 +7426,39 @@ function EntityPage({ view }: { view: EntityView }) {
 								/>
 							) : null}
 						</div>
+						{chapterCastRecords.length +
+							chapterFactionRecords.length +
+							chapterMentionedLocationRecords.length +
+							chapterItemRecords.length ===
+						0 ? null : (
+							<div className="loom-scene-act-right">
+								<span className="loom-field-label">{t('view.entity.scene.entitiesInChapter')}</span>
+								{(
+									[
+										['character', chapterCastRecords],
+										['faction', chapterFactionRecords],
+										['location', chapterMentionedLocationRecords],
+										['item', chapterItemRecords],
+									] as const
+								).map(([type, records]) =>
+									records.length === 0 ? null : (
+										<div key={type} className="loom-scene-entity-group">
+											<span className="loom-field-sublabel">{entityPlural(type)}</span>
+											<div className="loom-tag-row">
+												{records.map((r) => (
+													<EntityChip
+														key={r.path}
+														plugin={plugin}
+														record={r}
+														onOpen={() => view.openEntity(r.path)}
+													/>
+												))}
+											</div>
+										</div>
+									)
+								)}
+							</div>
+						)}
 					</div>
 					<div className="loom-writer-tabs" ref={chapterTabsRef}>
 						<div className="loom-seg">
@@ -7436,6 +7536,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										names={linkNames}
 										onOpenLink={openLinkTarget}
 										readOnly
+										plainLinks
 										onChange={() => {}}
 										comments={bookAnnotations.comments}
 										altText={bookAnnotations.altText}

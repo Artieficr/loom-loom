@@ -220,6 +220,29 @@ function trimTrailingBlankLines(block: string[]): string[] {
 	return clean;
 }
 
+const WIKILINK_MENTION_RE = /\[\[([^[\]\n|]+)(?:\|[^[\]\n]*)?\]\]/g;
+
+/** Every plain `[[Name]]`/`[[Name|Display]]` wikilink target named anywhere
+ *  in `text` — the Prose analogue of `fountain.ts`'s `findEntityLinks`, just
+ *  reading the SAME plain-wikilink syntax the Book editor already renders
+ *  everywhere else instead of a second `@[...]` convention: Fountain needed
+ *  `@[...]` because `[[...]]` was already its own non-exporting Note syntax
+ *  reserved for scene/section ids, but nothing in Prose reserves `[[...]]`
+ *  beyond the specific marker targets excluded below, so an ordinary
+ *  wikilink IS the mention. Excludes Prose's own hidden `[[loom:<id>]]`
+ *  identity marker and `[[loom-comment:<id>]]`/`[[loom-alt:<id>]]`
+ *  annotation markers — never a real entity reference. */
+export function findChapterMentions(text: string): string[] {
+	const out: string[] = [];
+	WIKILINK_MENTION_RE.lastIndex = 0;
+	for (const m of text.matchAll(WIKILINK_MENTION_RE)) {
+		const target = m[1].trim();
+		if (/^\/?loom(-comment|-alt)?:/.test(target)) continue;
+		out.push(target);
+	}
+	return out;
+}
+
 /** A chapter's own body text — everything after its `##` heading up to the
  *  next chapter/act heading (or EOF), heading-stripped. Mirrors
  *  `sceneScriptText`. */

@@ -2174,6 +2174,19 @@ span.loom-row-caret {
 	   `getBoundingClientRect`, silently drifting CM6's click/arrow-key
 	   position map for every line after it). */
 	padding-bottom: 0.3em;
+	/* Ctrl/Cmd+click opens the Act/Chapter note (`onOpenHeading`) — hover
+	   affordance mirrors `fountain-field.tsx`'s own scene/act-heading link
+	   treatment (`.loom-fountain-char-link` etc.): cursor + underline only
+	   on hover, since the line is also real editable title text the rest of
+	   the time. */
+	cursor: var(--cursor-link);
+}
+
+.loom-book-writer-editor .loom-md-field .cm-line.loom-md-h1:hover,
+.loom-book-writer-editor .loom-md-field .cm-line.loom-md-h2:hover,
+.loom-scene-script .loom-md-field .cm-line.loom-md-h1:hover,
+.loom-scene-script .loom-md-field .cm-line.loom-md-h2:hover {
+	text-decoration: underline;
 }
 
 .loom-md-field .cm-line.loom-md-h3 {
@@ -6052,13 +6065,31 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 	color: inherit;
 }
 
+/* `MarkdownField`'s `plainLinks` prop (Book/Act/Chapter Preview's own
+   MarkdownField instances) renders a wikilink with this class instead of
+   `.loom-md-link` — same "just text" treatment Script's Pages preview
+   already gives its own `@[...]` entity links: no color, no click target
+   (the field omits the `data-loom-link` attribute the click handler keys
+   off, so this is genuinely inert, not just uncolored). */
+.loom-md-link-plain {
+	color: inherit;
+}
+
 /* Act/Chapter titles in Preview read as centered, bold headings — matching
-   the live Editor's own centered `.loom-md-h1`/`h2` styling — not as left-
-   aligned accent-colored links, even though they're still real click-to-
-   open buttons (`onOpenChapter`/the Act's own `onClick`) underneath. Two
-   different selectors distinguish the two: an Act's own title is the ONLY
-   thing inside its `.loom-field-label` wrapper span (`Book`'s own Preview
-   loop, book-view.tsx); a Chapter's title is the FIRST child of its own
+   the live Editor's own centered `.loom-md-h1`/`h2` styling. Plain `<span>`s
+   now (book-view.tsx), not `<button>`s — Preview is meant to read as inert
+   text throughout, same as Script's own Pages preview; these used to be
+   real click-to-open buttons, a real reported inconsistency once a
+   wikilink IN the body text became plain/inert (`plainLinks`) but the
+   title above it was still the one thing still behaving like a link. Since
+   `.loom-subloc-link`'s own accent-color/cursor-pointer/hover-underline
+   rules are all scoped to `button.loom-subloc-link` specifically, switching
+   the element type alone was enough to drop those for free — `color:
+   inherit` below is the one property that still needed restating, since
+   nothing else colors a bare `<span>`. Two different selectors distinguish
+   the two: an Act's own title is the ONLY thing inside its
+   `.loom-field-label` wrapper span (`Book`'s own Preview loop,
+   book-view.tsx); a Chapter's title is the FIRST child of its own
    `[data-chapter-id]` block (`ActChapterBlocks`), a SIBLING of that
    chapter's own `MarkdownField`, never nested inside one — so this can't
    accidentally match a wikilink rendered WITHIN a chapter's own body text. */
@@ -6068,14 +6099,43 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 	width: 100%;
 	text-align: center;
 	font-weight: var(--font-bold, 700);
+	color: inherit;
 }
 
 .loom-view .loom-book-page .loom-field-label > .loom-subloc-link {
 	font-size: 1.6em;
 }
 
+/* Reported bug: an Act's title read closer to the top separator than the
+   bottom one — `.loom-field-sep > .loom-field-label`'s global
+   `margin-bottom` (styles.css, "Section headings breathe before their first
+   entry") lands right below the Act title, stacking with the label's own
+   flex gap and pushing the title UP off-center before the first chapter's
+   own `.loom-field-sep` border-top (the line that reads as the Act's
+   "bottom separator", even though structurally it belongs to the chapter
+   block, not the Act's). Zeroing it here re-centers the title between the
+   two lines using its own `padding-top` (unchanged) on both sides; the
+   removed space is added back as extra `padding-top` on the very next
+   `.loom-field-sep` (the adjacent-sibling chapter block) instead, so the
+   room now shows up AFTER that separator, before "Chapter 1", rather than
+   before it. */
+.loom-view .loom-book-page .loom-field-label {
+	margin-bottom: 0;
+}
+
+.loom-view .loom-book-page .loom-field-label + .loom-field-sep {
+	padding-top: calc(var(--size-4-4) + var(--size-4-3));
+}
+
 .loom-view .loom-book-page [data-chapter-id] > .loom-subloc-link {
 	font-size: 1.4em;
+	/* Breathing room below a chapter title before its own body text — the
+	   generic `.loom-field-sep > .loom-field-label` "breathe" rule doesn't
+	   apply here (a chapter's title button isn't wrapped in a
+	   `.loom-field-label` span), so without this the only space came from
+	   `.loom-field`'s own small flex `gap`, reading as the title and its
+	   first line of prose almost touching. */
+	margin-bottom: var(--size-4-3);
 }
 
 /* Editor mode's own fixed white/black background — the Prose raw editor
