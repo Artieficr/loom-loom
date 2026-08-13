@@ -84,6 +84,19 @@ export function buildFocusLayout(
 		if (roleOf(r.type) !== 'beat') continue;
 		for (const c of plugin.indexer.getConnections(r.path)) keep.add(c.record.path);
 	}
+	// An anchor's (Session/Act) mini graph also surfaces the faction(s) of every
+	// present character, even when the faction has no direct connection of its
+	// own to the anchor or its beats — visibility only, via the character's real
+	// membership edge, not a fabricated relationship.
+	const focusRecord = plugin.indexer.get(focusId);
+	if (focusRecord && roleOf(focusRecord.type) === 'anchor') {
+		for (const p of [...keep]) {
+			if (plugin.indexer.get(p)?.type !== 'character') continue;
+			for (const c of plugin.indexer.getConnections(p)) {
+				if (c.record.type === 'faction') keep.add(c.record.path);
+			}
+		}
+	}
 	const real = plugin.indexer;
 	const sub = {
 		getAll: (type?: Parameters<LoomIndexer['getAll']>[0], root?: string) =>
