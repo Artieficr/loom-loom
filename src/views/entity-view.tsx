@@ -84,12 +84,14 @@ import {
 	type NavNode,
 	type ScriptSearchMatch,
 } from './script-view';
-import { ActChapterBlocks, editBookAndSync, useBookAnnotations, useBookText } from './book-view';
+import { ActChapterBlocks, deleteBookEntity, editBookAndSync, useBookAnnotations, useBookText } from './book-view';
 import {
+	actBookText,
 	chapterBookText,
 	moveBookChapterToAct,
 	renameBookActTitle,
 	renameBookChapterTitle,
+	replaceBookActBody,
 	replaceBookChapterBody,
 	reorderBookChaptersInAct,
 } from '../prose';
@@ -387,6 +389,25 @@ function EntityPage({ view }: { view: EntityView }) {
 		window.requestAnimationFrame(() => {
 			actBookTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 		});
+	};
+	/** Act (Prose) page's own unified Editor — one `MarkdownField` over the
+	 *  act's whole `actBookText` excerpt (chapter `##` headings included, so
+	 *  they render inline instead of as separate boxes), mirroring the same
+	 *  buffer-locally/commit-on-blur pattern `BookView`'s own top-level editor
+	 *  uses (book-view.tsx's `Book`) — see that component's doc comment for
+	 *  why blur rather than every keystroke. */
+	const actBookDraftRef = useRef<string | null>(null);
+	const actBookCommitQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+	const queueActBookEdit = (apply: (text: string) => string | null) => {
+		if (!project) return;
+		actBookCommitQueueRef.current = actBookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
+	};
+	const commitActBookDraft = () => {
+		const draft = actBookDraftRef.current;
+		actBookDraftRef.current = null;
+		if (draft === null || record?.type !== 'act') return;
+		const actId = record.actId;
+		queueActBookEdit((raw) => replaceBookActBody(raw, actId, draft));
 	};
 	/** Comment bodies + alt-text option lists — same project-level sidecar
 	 *  the main Script view reads/writes, kept live the same way. Unused by
@@ -1257,6 +1278,20 @@ function EntityPage({ view }: { view: EntityView }) {
 		else void plugin.app.workspace.openLinkText(target, record.path, newTab ? 'tab' : false);
 	};
 
+	/** Ctrl/Cmd+click on a Chapter heading inline in the Act page's own
+	 *  unified book editor (`MarkdownField`'s `onOpenHeading`) — mirrors
+	 *  `Book`'s own `openBookHeading` (book-view.tsx). Only level-2 headings
+	 *  ever appear in `actBookExcerpt` (the act's own `#` heading is excluded
+	 *  from its excerpt), but resolves either level defensively. */
+	const openBookHeading = (loomId: string, level: number) => {
+		if (!record) return;
+		const type = level === 1 ? 'act' : 'chapter';
+		const found = plugin.indexer
+			.getAll(type, record.project)
+			.find((r) => (type === 'act' ? r.actId : r.chapterId) === loomId);
+		if (found) view.openEntity(found.path);
+	};
+
 	/** "+ Create …" from a [[ completion: type picker → creation modal with
 	 *  the short name prefilled; the finished entity links back in place. */
 	const createLinkEntity = (entered: string, insert: (linkInsert: string) => void) => {
@@ -1315,6 +1350,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** Named by the script rather than here — see the Name field. */
 	const scriptNamed =
 		scriptMode && (record.type === 'act' ? record.actId !== '' : record.sceneId !== '');
+	/** Named by the Book rather than here, Prose's own counterpart to
+	 *  `scriptNamed` — an Act/Chapter note IS its stretch of the
+	 *  `.loomprose` file the same way a Scene/Act note is its stretch of the
+	 *  script. */
+	const bookNamed =
+		bookMode &&
+		(record.type === 'act' ? record.actId !== '' : record.type === 'chapter' ? record.chapterId !== '' : false);
 	const sceneActRecord =
 		record.sceneAct !== '' ? plugin.indexer.resolve(record.sceneAct, record.path) : null;
 	const chapterActRecord =
@@ -1327,6 +1369,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	const chapterExcerpt =
 		record.type === 'chapter' && bookText !== null && record.chapterId !== ''
 			? chapterBookText(bookText, record.chapterId)
+			: null;
+	/** This act's own stretch of the Book — heading-stripped (chapter `##`
+	 *  headings included, so they render inline in the unified field below),
+	 *  mirrors `actScriptText`'s use on the Script-mode Act page. */
+	const actBookExcerpt =
+		record.type === 'act' && bookMode && bookText !== null && record.actId !== ''
+			? actBookText(bookText, record.actId)
 			: null;
 	/** Script-recognized cast — `loomSceneCast`, derived from the script's own
 	 *  character cues by `syncScenes`, shown read-only (editing a scene's cast
@@ -4543,12 +4592,18 @@ function EntityPage({ view }: { view: EntityView }) {
 							// note while leaving the writing behind would just resurrect it
 							// on the next parse, so the two go together. Deleting an act
 							// also takes its scenes' notes with it (their headings live in
-							// the act's own script block, which is about to go too).
+							// the act's own script block, which is about to go too). An
+							// Act/Chapter in a Prose project is the identical story one
+							// level over, against the Book instead of the script.
 							scriptNamed
 								? record.type === 'act'
 									? t('view.list.deleteMessageAct')
 									: t('view.list.deleteMessageScene')
-								: t('view.list.deleteMessageGeneral'),
+								: bookNamed
+									? record.type === 'act'
+										? t('view.list.deleteMessageBookAct')
+										: t('view.list.deleteMessageBookChapter')
+									: t('view.list.deleteMessageGeneral'),
 							() => {
 								// Leave the page first so the view never sits on a
 								// trashed file, then delete.
@@ -4559,6 +4614,8 @@ function EntityPage({ view }: { view: EntityView }) {
 								}
 								if (scriptNamed && project) {
 									void deleteScriptEntity(plugin, project, record);
+								} else if (bookNamed && project) {
+									void deleteBookEntity(plugin, project, record);
 								} else {
 									void purgeEntityReferences(plugin, record.path, record.project).finally(() =>
 										plugin.app.fileManager.trashFile(file)
@@ -6082,12 +6139,8 @@ function EntityPage({ view }: { view: EntityView }) {
 											data-seq-row=""
 										>
 											{seqGrip('act-chapters', i, actChapters, (reordered) => {
-												void editBookAndSync(plugin, project, (raw) =>
-													reorderBookChaptersInAct(
-														raw,
-														record.actId,
-														reordered.map((r) => r.chapterId)
-													)
+												queueActBookEdit((raw) =>
+													reorderBookChaptersInAct(raw, record.actId, reordered.map((r) => r.chapterId))
 												);
 											})}
 											<span className="loom-writer-row-num">{i + 1}</span>
@@ -6100,18 +6153,18 @@ function EntityPage({ view }: { view: EntityView }) {
 								})
 							)}
 						</div>
-					) : (
-						(() => {
-							const blocks = (
+					) : actBookMode === 'preview' ? (
+						// Same fixed-height (non-resizable) treatment Script-mode's own
+						// embedded Act/Scene sections use (`.loom-scene-pages`) — a
+						// nested page section, not the main BookView.
+						<div className="loom-screenplay loom-scene-pages">
+							<div className="loom-book-page">
 								<ActChapterBlocks
 									plugin={plugin}
-									project={project}
 									bookText={bookText}
 									chapters={actChapters}
-									mode={actBookMode === 'preview' ? 'preview' : 'editor'}
 									names={linkNames}
 									onOpenLink={openLinkTarget}
-									onCreateEntity={createLinkEntity}
 									onOpenChapter={(path) => view.openEntity(path)}
 									emptyMessage={
 										<div className="loom-attendance-empty">
@@ -6120,20 +6173,44 @@ function EntityPage({ view }: { view: EntityView }) {
 									}
 									annotations={bookAnnotations}
 								/>
-							);
-							// Same fixed-height (non-resizable) treatment Script-mode's own
-							// embedded Act/Scene sections use (`.loom-scene-script`/
-							// `.loom-scene-pages`) — a nested page section, not the main
-							// BookView, so it gets the smaller capped box, not the full
-							// resizable `.loom-writer-editor`.
-							return actBookMode === 'preview' ? (
-								<div className="loom-screenplay loom-scene-pages">
-									<div className="loom-book-page">{blocks}</div>
-								</div>
+							</div>
+						</div>
+					) : (
+						// A single unified field over the act's own excerpt (chapter `##`
+						// headings included) — mirrors the Scene/Act Script sections'
+						// own `.loom-scene-script` box, same fixed-height (non-resizable)
+						// treatment as those, not the main BookView's own resizable one.
+						<div className="loom-scene-script">
+							{actBookExcerpt !== null ? (
+								<MarkdownField
+									app={plugin.app}
+									value={actBookExcerpt}
+									names={linkNames}
+									onOpenLink={openLinkTarget}
+									onCreateEntity={createLinkEntity}
+									onChange={(v) => {
+										actBookDraftRef.current = v;
+									}}
+									onBlur={commitActBookDraft}
+									comments={bookAnnotations.comments}
+									altText={bookAnnotations.altText}
+									onCreateComment={bookAnnotations.handleCreateComment}
+									onCreateAlt={bookAnnotations.handleCreateAlt}
+									onOpenComment={bookAnnotations.handleOpenComment}
+									onCycleAlt={bookAnnotations.handleCycleAlt}
+									onOpenAltMenu={(id) => {
+										// Flush any not-yet-committed draft first — see
+										// `Book`'s own identical guard in book-view.tsx.
+										commitActBookDraft();
+										bookAnnotations.handleOpenAltMenu(id);
+									}}
+									onOpenHeading={openBookHeading}
+									annotationGutter
+								/>
 							) : (
-								<div className="loom-scene-script">{blocks}</div>
-							);
-						})()
+								<div className="loom-attendance-empty">{t('view.entity.script.actNotInScript')}</div>
+							)}
+						</div>
 					)}
 				</div>
 			) : null}
@@ -7347,6 +7424,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									onOpenComment={bookAnnotations.handleOpenComment}
 									onCycleAlt={bookAnnotations.handleCycleAlt}
 									onOpenAltMenu={bookAnnotations.handleOpenAltMenu}
+									annotationGutter
 								/>
 							</div>
 						) : (
@@ -7362,6 +7440,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										comments={bookAnnotations.comments}
 										altText={bookAnnotations.altText}
 										onOpenComment={bookAnnotations.handleOpenComment}
+										annotationGutter
 									/>
 								</div>
 							</div>

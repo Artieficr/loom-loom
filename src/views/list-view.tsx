@@ -60,6 +60,7 @@ import {
 } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
 import { deleteScriptEntity, useScriptText } from './script-view';
+import { deleteBookEntity } from './book-view';
 import { liveActIds, liveSceneIds, parseFountain } from '../fountain';
 
 type SortMode = 'name' | 'created' | 'modified' | 'date' | 'order' | 'appearance';
@@ -763,18 +764,38 @@ function EntityList({
 	// A scene/act IS its stretch of the script — deleting the note while
 	// leaving the writing behind would just resurrect it on the next parse, so
 	// the two go together; deleting an act also takes its scenes' notes
-	// with it (`deleteScriptEntity`, script-view.tsx).
+	// with it (`deleteScriptEntity`, script-view.tsx). An Act/Chapter in a
+	// Prose project is the identical story one level over, against the Book
+	// instead of the script (`deleteBookEntity`, book-view.tsx). Both gated on
+	// the PROJECT's own kind, not just the record's own `actId`/`sceneId`/
+	// `chapterId` — an Act record always carries an `actId` regardless of
+	// which sub-mode the project is in, so checking that alone would route a
+	// Prose project's Act through the Fountain-only `deleteScriptEntity`
+	// (which no-ops against a script that doesn't exist there) instead of
+	// `deleteBookEntity`.
 	const scriptBacked = (r: EntityRecord): boolean =>
-		(r.type === 'act' && r.actId !== '') || (r.type === 'scene' && r.sceneId !== '');
+		features(project?.config).script &&
+		((r.type === 'act' && r.actId !== '') || (r.type === 'scene' && r.sceneId !== ''));
+	const bookBacked = (r: EntityRecord): boolean =>
+		features(project?.config).book &&
+		((r.type === 'act' && r.actId !== '') || (r.type === 'chapter' && r.chapterId !== ''));
 	const deleteMessage = (r: EntityRecord): string =>
 		scriptBacked(r)
 			? r.type === 'act'
 				? t('view.list.deleteMessageAct')
 				: t('view.list.deleteMessageScene')
-			: t('view.list.deleteMessageGeneral');
+			: bookBacked(r)
+				? r.type === 'act'
+					? t('view.list.deleteMessageBookAct')
+					: t('view.list.deleteMessageBookChapter')
+				: t('view.list.deleteMessageGeneral');
 	const deleteRow = (r: EntityRecord): void => {
 		if (scriptBacked(r)) {
 			void deleteScriptEntity(plugin, project, r);
+			return;
+		}
+		if (bookBacked(r)) {
+			void deleteBookEntity(plugin, project, r);
 			return;
 		}
 		const file = plugin.app.vault.getFileByPath(r.path);
