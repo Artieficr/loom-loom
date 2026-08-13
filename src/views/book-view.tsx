@@ -1,4 +1,4 @@
-import { normalizePath, TFile } from 'obsidian';
+import { Menu, normalizePath, TFile } from 'obsidian';
 import { CSSProperties, ReactElement, useEffect, useMemo, useRef, useState } from 'react';
 import {
 	BOOK_EXTENSION,
@@ -14,20 +14,31 @@ import {
 	ParsedBook,
 	appendBookAct,
 	appendBookChapter,
+	appendBookPageBreak,
 	chapterBookText,
 	ensureBookIds,
 	liveBookActIds,
 	liveBookChapterIds,
 	parseBook,
-	reorderBookActs,
+	removeBookAct,
+	removeBookChapter,
+	removeBookPageBreak,
 	reorderBookChaptersInAct,
-	replaceBookChapterBody,
+	reorderBookTopLevelEntries,
 } from '../prose';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { setLoomKey } from '../fm';
-import { AltTextModal, CreateEntityModal, EntityTypeSuggestModal, createEntity, entityFileName } from '../project';
+import {
+	AltTextModal,
+	CreateEntityModal,
+	EntityTypeSuggestModal,
+	TextInputModal,
+	createEntity,
+	entityFileName,
+	purgeEntityReferences,
+} from '../project';
 import { LoomFileReactView } from './react-view';
-import { MarkdownField } from './markdown-field';
+import { MarkdownField, MarkdownFieldHandle } from './markdown-field';
 import { Icon, ViewShell } from './common';
 import { useIndexVersion } from './hooks';
 import { t } from '../i18n';
@@ -255,6 +266,50 @@ export async function editBookAndSync(
 	return changed;
 }
 
+/**
+ * Trashes an Act or Chapter note AND removes its backing block from the
+ * Book — mirrors `deleteScriptEntity` (script-view.tsx) exactly, one level
+ * over for Prose: an Act/Chapter note IS its stretch of the `.loomprose`
+ * file, so a note deleted without also removing that stretch left the raw
+ * text behind (still shown in Editor mode, still absent from Preview/
+ * Ctrl+click-to-open — those key off the now-gone indexed record, not the
+ * text) instead of resurrecting cleanly as an orphan. Deleting an Act
+ * cascades onto every Chapter note that pointed at it (`chapterAct`): the
+ * act's own book block held their headings too, so once it's gone those
+ * notes have nothing left to reflect and are trashed rather than left as
+ * permanent orphans.
+ */
+export async function deleteBookEntity(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	record: EntityRecord
+): Promise<void> {
+	if (record.type === 'chapter' && record.chapterId !== '') {
+		const chapterId = record.chapterId;
+		await editBook(plugin, project, (raw) => removeBookChapter(raw, chapterId));
+	} else if (record.type === 'act' && record.actId !== '') {
+		const actId = record.actId;
+		const chapters = plugin.indexer
+			.getAll('chapter', record.project)
+			.filter(
+				(ch) =>
+					ch.chapterAct !== '' &&
+					plugin.indexer.resolve(ch.chapterAct, ch.path)?.path === record.path
+			);
+		await editBook(plugin, project, (raw) => removeBookAct(raw, actId));
+		for (const ch of chapters) {
+			const f = plugin.app.vault.getFileByPath(ch.path);
+			if (!f) continue;
+			await purgeEntityReferences(plugin, ch.path, ch.project);
+			await plugin.app.fileManager.trashFile(f);
+		}
+	}
+	const file = plugin.app.vault.getFileByPath(record.path);
+	if (!file) return;
+	await purgeEntityReferences(plugin, record.path, record.project);
+	await plugin.app.fileManager.trashFile(file);
+}
+
 /** Act/Chapter loom ids currently orphaned — backed by a note but no
  *  matching heading in the Book any more. Never auto-deleted, surfaced to
  *  the caller only. Mirrors the orphan surfacing `script-view.tsx` does for
@@ -328,6 +383,28 @@ async function replaceAltContentInBook(plugin: LoomLoomPlugin, project: ProjectD
 	});
 }
 
+/** Strips ONE marker pair by id, leaving its wrapped content untouched —
+ *  the whole-Book-text counterpart of `fountain-field.tsx`'s imperative
+ *  `removeAnnotationMarkers` (a CM6 transaction dispatched through one known
+ *  live view). `useBookAnnotations` has no such single view to dispatch
+ *  through — same reasoning `replaceAltContentInBook` above already
+ *  documents — so this works the same way that one does: find the span
+ *  across the WHOLE Book text via `editBookAndSync`, regardless of which
+ *  chapter holds it. Safe to call from a caller whose relevant field has
+ *  ALREADY lost focus by the time this runs (every call site here is
+ *  triggered from `CommentPopover`/`AltTextModal`/a menu action — none of
+ *  which can be clicked without first moving focus OFF the CM6 field, so its
+ *  own "sync external value only while unfocused" effect picks the change up
+ *  normally); calling it while the field is still actively focused and
+ *  mid-edit is not something any current call site does. */
+async function stripAnnotationMarkerInBook(plugin: LoomLoomPlugin, project: ProjectDef, id: string): Promise<void> {
+	await editBookAndSync(plugin, project, (raw) => {
+		const span = findAnnotationSpans(raw).find((s) => s.id === id);
+		if (!span) return null;
+		return raw.slice(0, span.from) + raw.slice(span.contentFrom, span.contentTo) + raw.slice(span.to);
+	});
+}
+
 /**
  * Comments/alternative-text data + handlers for the Book, shared by the
  * Chapter/Act entity page sections and `BookView` itself — one hook rather
@@ -343,26 +420,86 @@ async function replaceAltContentInBook(plugin: LoomLoomPlugin, project: ProjectD
 export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef | null) {
 	const scriptNotes = useScriptNotes(plugin, project);
 	const [openComment, setOpenComment] = useState<{ id: string; rect: DOMRect } | null>(null);
+	/** Marker ids that have had a reply added THIS session — mirrors
+	 *  `script-view.tsx`'s own `commentsWithNewEntryRef`: `scriptNotes` only
+	 *  catches up once the sidecar's `vault.modify` + file-watch round trip
+	 *  completes, so `handleCloseComment` below checks this instead of
+	 *  trusting `scriptNotes.comments[id]` alone, which could still read
+	 *  stale-empty for a reply added moments ago. */
+	const commentsWithNewEntryRef = useRef<Set<string>>(new Set());
 
-	const handleCreateComment = (id: string) => {
-		if (!project) return;
-		const entry: CommentEntry = { id, text: '', resolved: false, createdAt: Date.now(), updatedAt: Date.now(), resolvedAt: null };
-		void mutateScriptNotes(plugin.app, project, (file) => ({
-			...file,
-			comments: { ...file.comments, [id]: [entry] },
-		}));
-	};
+	/** A new comment marker was just inserted — mirrors `script-view.tsx`'s
+	 *  own `handleCreateComment` exactly: writes NOTHING to the sidecar.
+	 *  `MarkdownField`'s own `insertMarkerPair` (markdown-field.tsx) already
+	 *  opens the popover on its own right after calling this; the FIRST real
+	 *  `CommentEntry` only gets created once the user actually types a reply
+	 *  and submits (`handleAddCommentReply`, below), same as every reply
+	 *  after it. This used to pre-create an EMPTY entry here, which made the
+	 *  popover open showing an "existing" (blank) comment to edit instead of
+	 *  a clean compose box — the exact bug this now avoids. */
+	const handleCreateComment = (_id: string) => {};
 
+	/** A new alt-text marker was just inserted, wrapping the selection as
+	 *  option 0. Immediately prompts for a SECOND option via `TextInputModal`
+	 *  — mirrors `script-view.tsx`'s own `handleCreateAlt` exactly (same "the
+	 *  menu item that created this should open something to type into"
+	 *  expectation), the same modal the right-click picker's own "Add
+	 *  alternative…" uses. Cancelling backs the WHOLE creation out, same as
+	 *  Script: drops the sidecar entry AND strips the just-inserted marker
+	 *  pair (`stripAnnotationMarkerInBook`), rather than leaving it behind as
+	 *  a dead, uninteractive span. */
 	const handleCreateAlt = (id: string, selectedText: string) => {
 		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (file) => ({
 			...file,
 			altText: { ...file.altText, [id]: { id, options: [selectedText], activeIndex: 0, acceptedIndex: null } },
 		}));
+		new TextInputModal(plugin.app, {
+			title: t('view.entity.altText.addWordingTitle'),
+			placeholder: selectedText,
+			cta: t('project.common.add'),
+			multiline: true,
+			onSubmit: (value) => {
+				if (!project) return;
+				void mutateScriptNotes(plugin.app, project, (file) => {
+					const cur = file.altText[id];
+					if (!cur) return file;
+					return { ...file, altText: { ...file.altText, [id]: { ...cur, options: [...cur.options, value] } } };
+				});
+			},
+			onCancel: () => {
+				if (!project) return;
+				void mutateScriptNotes(plugin.app, project, (file) => {
+					const { [id]: _dropped, ...rest } = file.altText;
+					return { ...file, altText: rest };
+				}).then(() => stripAnnotationMarkerInBook(plugin, project, id));
+			},
+		}).open();
 	};
 
 	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
-	const handleCloseComment = () => setOpenComment(null);
+
+	/** Closing the popover with nothing ever added to the thread abandons the
+	 *  whole comment creation, mirroring `handleCreateAlt`'s own cancel and
+	 *  `script-view.tsx`'s own `handleCloseComment` exactly — a freshly
+	 *  inserted marker pair backed by no `comments[id]` entry (only
+	 *  `handleAddCommentReply` ever creates one) would otherwise sit in the
+	 *  document forever as a permanently-unresolved, un-openable orphan span.
+	 *  Checks BOTH `scriptNotes` (an existing comment, reopened) and
+	 *  `commentsWithNewEntryRef` (a reply just added this session, ahead of
+	 *  the sidecar's own async round trip) — only when neither shows a reply
+	 *  does the span get torn back out. */
+	const handleCloseComment = () => {
+		if (
+			project &&
+			openComment &&
+			!commentsWithNewEntryRef.current.has(openComment.id) &&
+			!scriptNotes.comments[openComment.id]
+		) {
+			void stripAnnotationMarkerInBook(plugin, project, openComment.id);
+		}
+		setOpenComment(null);
+	};
 
 	const handleSaveCommentEntry = (id: string, index: number, text: string) => {
 		if (!project) return;
@@ -387,6 +524,13 @@ export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef |
 		});
 	};
 
+	/** Removes ONE reply from the thread — if that empties it, the whole
+	 *  `comments[id]` key goes too (an empty thread is the same as none), AND
+	 *  the marker pair itself has to come out of the document — mirrors
+	 *  `script-view.tsx`'s own `handleDeleteCommentEntry` exactly; otherwise
+	 *  an orphaned marker with no sidecar data behind it keeps rendering as a
+	 *  live (permanently "unresolved," since there's nothing to check "all
+	 *  resolved" against) span with no way to open it back up. */
 	const handleDeleteCommentEntry = (id: string, index: number) => {
 		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (file) => {
@@ -397,11 +541,21 @@ export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef |
 			if (next.length === 0) delete comments[id];
 			else comments[id] = next;
 			return { ...file, comments };
+		}).then((next) => {
+			if (!next.comments[id]) {
+				void stripAnnotationMarkerInBook(plugin, project, id);
+				// The marker pair (and so the whole span) is gone — a reply
+				// typed into the now-empty popover's box would have nothing
+				// left in the document to attach to, so close it rather than
+				// leave a dead end.
+				setOpenComment((prev) => (prev && prev.id === id ? null : prev));
+			}
 		});
 	};
 
 	const handleAddCommentReply = (id: string, text: string) => {
 		if (!project) return;
+		commentsWithNewEntryRef.current.add(id);
 		void mutateScriptNotes(plugin.app, project, (file) => {
 			const entries = file.comments[id] ?? [];
 			const entry: CommentEntry = { id, text, resolved: false, createdAt: Date.now(), updatedAt: Date.now(), resolvedAt: null };
@@ -463,9 +617,35 @@ export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef |
 					return { ...file, altText: { ...file.altText, [id]: { ...e, options: [...e.options, text] } } };
 				});
 			},
+			// Deleting down to exactly one remaining option is a real action,
+			// not just another edit — mirrors `script-view.tsx`'s own
+			// `handleDeleteAltOption` exactly: an alt-text span with a single
+			// option has nothing left to alternate BETWEEN, so (same as a
+			// comment thread's own "delete the last reply strips the
+			// markers" behavior) the whole `[[loom-alt:<id>]]` wrapper comes
+			// OUT of the document, leaving the survivor's wording as ordinary
+			// text, and the sidecar entry is dropped entirely rather than
+			// left describing a permanently single-option span. `undefined`
+			// tells `AltTextModal` to close itself — there's nothing left for
+			// it to show.
 			onDeleteOption: async (index) => {
 				if (entry.options.length <= 1) return undefined;
 				const options = entry.options.filter((_, i) => i !== index);
+				if (options.length <= 1) {
+					const survivor = options[0] ?? '';
+					await mutateScriptNotes(plugin.app, project, (file) => {
+						const { [id]: _dropped, ...rest } = file.altText;
+						return { ...file, altText: rest };
+					});
+					// The surviving option's text has to actually BE the live
+					// document content before the wrapper markers come out, or
+					// stripping would leave whichever text happened to be
+					// active (possibly the just-deleted option's) instead of
+					// the survivor's.
+					await replaceAltContentInBook(plugin, project, id, survivor);
+					await stripAnnotationMarkerInBook(plugin, project, id);
+					return undefined;
+				}
 				let activeIndex = entry.activeIndex;
 				let acceptedIndex = entry.acceptedIndex;
 				if (index === activeIndex) activeIndex = Math.min(activeIndex, options.length - 1);
@@ -503,37 +683,34 @@ export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef |
 }
 
 /**
- * Renders every chapter under one act as a stacked sequence of blocks —
- * heading + a `MarkdownField` scoped to that chapter's own body
- * (`chapterBookText`), Preview using the field's `readOnly` mode instead of
- * a separate paginated view (no pagination for prose — see this feature's
- * plan). Shared by the Act entity page's own Editor section
- * (`entity-view.tsx`) and `BookView` below (which calls this once per act in
- * the whole book) — the two differ only in how MANY acts' worth of chapters
- * they show, never in how one act's own chapters render.
+ * Renders every chapter under one act as a stacked sequence of read-only
+ * blocks — heading + a `chapterBookText`-scoped `MarkdownField` in `readOnly`
+ * mode, instead of a separate paginated view (no pagination for prose — see
+ * this feature's plan). Preview-only: the Editor side (whole-Book and Act
+ * pages alike) is a single unified `MarkdownField` over the raw text instead
+ * (see `Book`'s own doc comment) — chopping it into one field per chapter is
+ * exactly the "reads like separate boxes, not one document" look that
+ * approach was replaced for. Shared by the Act entity page's own Preview
+ * section (`entity-view.tsx`) and `BookView` below (which calls this once
+ * per act in the whole book) — the two differ only in how MANY acts' worth
+ * of chapters they show.
  */
 export function ActChapterBlocks({
 	plugin,
-	project,
 	bookText,
 	chapters,
-	mode,
 	names,
 	onOpenLink,
-	onCreateEntity,
 	onOpenChapter,
 	emptyMessage,
 	annotations,
 	highlightedAnnotationId,
 }: {
 	plugin: LoomLoomPlugin;
-	project: ProjectDef;
 	bookText: string | null;
 	chapters: EntityRecord[];
-	mode: 'editor' | 'preview';
 	names: LinkOption[];
 	onOpenLink: (target: string, newTab?: boolean) => void;
-	onCreateEntity?: (name: string, insert: (linkInsert: string) => void) => void;
 	onOpenChapter: (path: string) => void;
 	emptyMessage: ReactElement;
 	/** Comments/alternative-text — optional, same as `MarkdownField`'s own
@@ -552,41 +729,19 @@ export function ActChapterBlocks({
 						<button className="loom-subloc-link" onClick={() => onOpenChapter(ch.path)}>
 							{ch.name}
 						</button>
-						{mode === 'editor' ? (
-							<MarkdownField
-								app={plugin.app}
-								value={excerpt}
-								names={names}
-								onOpenLink={onOpenLink}
-								onCreateEntity={onCreateEntity}
-								onChange={(v) => {
-									void editBookAndSync(plugin, project, (raw) =>
-										replaceBookChapterBody(raw, ch.chapterId, v)
-									);
-								}}
-								comments={annotations?.comments}
-								altText={annotations?.altText}
-								onCreateComment={annotations?.handleCreateComment}
-								onCreateAlt={annotations?.handleCreateAlt}
-								onOpenComment={annotations?.handleOpenComment}
-								onCycleAlt={annotations?.handleCycleAlt}
-								onOpenAltMenu={annotations?.handleOpenAltMenu}
-								highlightedAnnotationId={highlightedAnnotationId}
-							/>
-						) : (
-							<MarkdownField
-								app={plugin.app}
-								value={excerpt}
-								names={names}
-								onOpenLink={onOpenLink}
-								readOnly
-								onChange={() => {}}
-								comments={annotations?.comments}
-								altText={annotations?.altText}
-								onOpenComment={annotations?.handleOpenComment}
-								highlightedAnnotationId={highlightedAnnotationId}
-							/>
-						)}
+						<MarkdownField
+							app={plugin.app}
+							value={excerpt}
+							names={names}
+							onOpenLink={onOpenLink}
+							readOnly
+							onChange={() => {}}
+							comments={annotations?.comments}
+							altText={annotations?.altText}
+							onOpenComment={annotations?.handleOpenComment}
+							highlightedAnnotationId={highlightedAnnotationId}
+							annotationGutter
+						/>
 					</div>
 				);
 			})}
@@ -617,20 +772,31 @@ export class BookView extends LoomFileReactView {
 }
 
 /**
- * The whole-book view: every Act in order, each showing its own Chapters via
- * `ActChapterBlocks` (Editor/Preview), or a drag-reorder Outline tree.
+ * The whole-book view: Editor is a SINGLE unified `MarkdownField` over the
+ * raw whole-book text (Act/Chapter `#`/`##` headings render inline via that
+ * field's own heading decoration, same as any other markdown heading — no
+ * per-chapter boxes, no per-act dividers), mirroring `ScriptView`'s own one
+ * continuous `FountainField`. Preview and Outline still show every Act in
+ * order with its own Chapters (`ActChapterBlocks` for Preview's read-only
+ * blocks; a drag-reorder tree for Outline) — Preview's per-chapter framing
+ * reads fine there since nothing is being edited, and Outline is a
+ * structural tree, not prose.
  *
- * No single CM6 buffer and no commit queue, unlike `ScriptView` — each
- * chapter's `MarkdownField` (inside `ActChapterBlocks`) already reads/writes
- * its own excerpt independently via `editBookAndSync`, so there's no shared
- * "current text" state here to race across a mode switch the way Script's
- * one big buffer does. Structural edits (create/reorder) go through the
- * same `editBookAndSync`/`appendActToBook`/`appendChapterToBook` helpers
- * every other Book-touching surface uses.
+ * Typing only updates the CM6 buffer and `bookDraftRef` — never the vault —
+ * and the actual write happens on blur (`commitBookDraft`, fired on a real
+ * blur AND on the teardown blur when Editor unmounts switching to Preview/
+ * Outline), queued through `bookCommitQueueRef`/`queueBookEdit` so a
+ * structural edit (Outline reorder) can't land out of order against a
+ * still-in-flight draft commit. Mirrors `ScriptView`'s own
+ * `text`/`onBlur`/`commitQueue` exactly — the reason THAT design commits on
+ * blur rather than every keystroke (performance and race-avoidance over a
+ * whole document, not just one small excerpt) applies here too now that
+ * Editor is one buffer instead of many small independent ones.
  *
- * Cross-act chapter dragging is deliberately NOT supported — same "v1 ships
- * same-act reorder only" scope call as the Act page's own Outline. Acts
- * reorder at the top level; a chapter reorders within its own act.
+ * Cross-act chapter dragging is deliberately NOT supported (Outline mode) —
+ * same "v1 ships same-act reorder only" scope call as the Act page's own
+ * Outline. Acts reorder at the top level; a chapter reorders within its own
+ * act.
  */
 function Book({ view }: { view: BookView }): ReactElement {
 	const plugin = view.plugin;
@@ -640,6 +806,27 @@ function Book({ view }: { view: BookView }): ReactElement {
 	const bookText = useBookText(plugin, project ?? null);
 	const parsed = useMemo(() => (bookText !== null ? parseBook(bookText) : null), [bookText]);
 	const annotations = useBookAnnotations(plugin, project ?? null);
+
+	/** The whole-book unified editor's own commit plumbing — mirrors Script's
+	 *  `text`/`onBlur`/`commitQueue` (script-view.tsx): typing only updates the
+	 *  live CM6 buffer (via `MarkdownField`'s own "sync external value only
+	 *  while unfocused" effect) and this ref, never the vault; the actual
+	 *  write happens on blur (including the blur teardown fires on every
+	 *  Editor→Preview/Outline switch), queued so an overlapping structural
+	 *  edit (Outline reorder, "+ New act") lands in request order instead of
+	 *  racing a still-in-flight commit. */
+	const bookDraftRef = useRef<string | null>(null);
+	const bookCommitQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+	const queueBookEdit = (apply: (text: string) => string | null) => {
+		if (!project) return;
+		bookCommitQueueRef.current = bookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
+	};
+	const commitBookDraft = () => {
+		const draft = bookDraftRef.current;
+		bookDraftRef.current = null;
+		if (draft === null) return;
+		queueBookEdit(() => draft);
+	};
 
 	const [mode, setMode] = useState<'editor' | 'preview' | 'outline'>(() => {
 		const saved = file ? window.localStorage.getItem(`loom-book-mode:${file.path}`) : null;
@@ -667,6 +854,12 @@ function Book({ view }: { view: BookView }): ReactElement {
 	 *  mechanism), restored before the ResizeObserver starts watching so its
 	 *  own first callback doesn't immediately overwrite what was just set. */
 	const editorWrapperRef = useRef<HTMLDivElement | null>(null);
+	/** The unified Editor field's own imperative handle — used by the
+	 *  comment/alt-text search's `gotoMatch` to scroll a match into view
+	 *  BEFORE looking up its rendered DOM element, since CM6 only renders
+	 *  `visibleRanges`: a match currently scrolled out of view otherwise has
+	 *  no DOM element yet for that lookup to find. */
+	const bookFieldRef = useRef<MarkdownFieldHandle | null>(null);
 	useEffect(() => {
 		if (mode !== 'editor' || !file) return;
 		const editor = editorWrapperRef.current;
@@ -725,8 +918,12 @@ function Book({ view }: { view: BookView }): ReactElement {
 	// --- generic loomSeq drag-reorder, mirrors entity-view.tsx's own seqGrip
 	// (a third independent copy of this pattern, same as script-view.tsx's
 	// `outlineGrip` — this codebase doesn't share it across files, only the
-	// shape). Two groups: 'book-acts' (top level) and
-	// `book-chapters:<actId>` (one act's own chapters).
+	// shape). Three groups: 'book-top-level' (acts AND page breaks,
+	// interleaved) and `book-chapters:<actId>` (one act's own chapters).
+	// Generic over the dragged item's own type — neither function below ever
+	// reads a field off `records`/`reordered`, just index math — so the SAME
+	// pair serves both the `EntityRecord[]` chapter lists and the mixed
+	// act/page-break top-level list.
 	const [seqDrag, setSeqDrag] = useState<{ group: string; from: number; over: number; dy: number } | null>(null);
 	const seqDragRef = useRef<{ startY: number; slot: number; mids: number[] } | null>(null);
 	const seqShift = (group: string, i: number): number => {
@@ -744,12 +941,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 		const sh = seqShift(group, i);
 		return sh !== 0 ? { transform: `translateY(${sh * slot}px)` } : undefined;
 	};
-	const endSeqDrag = (
-		group: string,
-		records: EntityRecord[],
-		commit: boolean,
-		onCommit: (reordered: EntityRecord[]) => void
-	) => {
+	const endSeqDrag = <T,>(group: string, records: T[], commit: boolean, onCommit: (reordered: T[]) => void) => {
 		seqDragRef.current = null;
 		const drag = seqDrag;
 		setSeqDrag(null);
@@ -759,7 +951,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 		next.splice(drag.over, 0, moved);
 		onCommit(next);
 	};
-	const seqGrip = (group: string, i: number, records: EntityRecord[], onCommit: (reordered: EntityRecord[]) => void) => (
+	const seqGrip = <T,>(group: string, i: number, records: T[], onCommit: (reordered: T[]) => void) => (
 		<span
 			className="loom-subloc-grip"
 			onPointerDown={(e) => {
@@ -818,6 +1010,21 @@ function Book({ view }: { view: BookView }): ReactElement {
 		else void plugin.app.workspace.openLinkText(target, file.path, newTab ? 'tab' : false);
 	};
 
+	/** Ctrl/Cmd+click on an Act (`level === 1`)/Chapter (`level === 2`)
+	 *  heading in the unified editor (`MarkdownField`'s own `onOpenHeading`)
+	 *  — resolves the heading's `[[loom:<id>]]` marker to its backing note
+	 *  and opens it, restoring the click-to-open affordance the old per-
+	 *  chapter `ActChapterBlocks` Editor blocks had via their heading
+	 *  buttons. */
+	const openBookHeading = (loomId: string, level: number) => {
+		if (!project) return;
+		const type = level === 1 ? 'act' : 'chapter';
+		const record = plugin.indexer
+			.getAll(type, project.root)
+			.find((r) => (type === 'act' ? r.actId : r.chapterId) === loomId);
+		if (record) view.openEntity(record.path);
+	};
+
 	const createLinkEntity = (entered: string, insert: (linkInsert: string) => void) => {
 		if (!project) return;
 		new EntityTypeSuggestModal(
@@ -852,6 +1059,53 @@ function Book({ view }: { view: BookView }): ReactElement {
 		.filter((c) => c.chapterAct === '' || !plugin.indexer.resolve(c.chapterAct, c.path));
 	const orphans = parsed ? orphanedBookEntities(plugin, project, parsed) : { acts: [], chapters: [] };
 
+	/** The Outline's own top-level list — every Act AND every act-boundary
+	 *  page break, interleaved in document order, mirrors `topLevelRows`
+	 *  (script-view.tsx). Only acts already backed by an indexed note are
+	 *  included (an id-less/not-yet-synced one has nothing to show). */
+	type BookTopLevelRow =
+		| { kind: 'act'; id: string; line: number; act: EntityRecord }
+		| { kind: 'page-break'; id: string; line: number };
+	const topLevelRows: BookTopLevelRow[] = (() => {
+		if (!parsed) return [];
+		const actByLoomId = new Map(acts.map((a) => [a.actId, a]));
+		const rows: BookTopLevelRow[] = [];
+		for (const a of parsed.acts) {
+			if (a.loomId === null) continue;
+			const rec = actByLoomId.get(a.loomId);
+			if (rec) rows.push({ kind: 'act', id: a.loomId, line: a.line, act: rec });
+		}
+		for (const pb of parsed.pageBreaks) {
+			if (pb.loomId === null) continue;
+			rows.push({ kind: 'page-break', id: pb.loomId, line: pb.line });
+		}
+		return rows.sort((a, b) => a.line - b.line);
+	})();
+	/** The "manual page" a top-level line falls under — 1 + however many page
+	 *  breaks sit before it. Prose has no real pagination (see prose.ts's own
+	 *  doc comment), so this is a much simpler stand-in than Script's actual
+	 *  typeset page ranges: a plain count of `===` markers crossed so far,
+	 *  shared by an act row and every one of its own chapter rows (a chapter
+	 *  never has its own page break — only acts do). */
+	const pageOfLine = (line: number): number =>
+		1 + (parsed ? parsed.pageBreaks.filter((pb) => pb.line < line).length : 0);
+	/** Preview mode's own act groups, split at every page break — each group
+	 *  renders in its OWN `.loom-book-page` sheet, so a page break actually
+	 *  reads as a page break there (a fresh sheet, `.loom-screenplay`'s own
+	 *  `gap`/box-shadow already visually separating them) instead of every
+	 *  act sharing one continuous sheet regardless of any `===` markers.
+	 *  Derived straight from `topLevelRows` (already in document order) —
+	 *  no page breaks anywhere in the book collapses back to the original
+	 *  single-group behavior. */
+	const previewPageGroups: EntityRecord[][] = (() => {
+		const groups: EntityRecord[][] = [[]];
+		for (const row of topLevelRows) {
+			if (row.kind === 'page-break') groups.push([]);
+			else groups[groups.length - 1].push(row.act);
+		}
+		return groups.filter((g) => g.length > 0);
+	})();
+
 	type BookAnnotationMatch = { kind: 'comment' | 'altOption'; id: string };
 	const bookMatches: BookAnnotationMatch[] = [];
 	if (query.trim() !== '' && bookText !== null) {
@@ -883,6 +1137,16 @@ function Book({ view }: { view: BookView }): ReactElement {
 		setMatchIndex(next);
 		const m = bookMatches[next];
 		setHighlightedAnnotationId(m.kind === 'altOption' ? m.id : null);
+		// Editor mode is ONE unified CM6 buffer over the whole book now — it
+		// only renders `visibleRanges`, so a match currently scrolled out of
+		// view has no DOM element yet for the query below to find. Scroll the
+		// field itself to the match's real document position FIRST (Preview
+		// mode still renders every chapter's own small field in full, so this
+		// never applies there).
+		if (mode === 'editor' && bookText !== null) {
+			const span = findAnnotationSpans(bookText).find((s) => s.id === m.id);
+			if (span) bookFieldRef.current?.scrollToPos(span.contentFrom);
+		}
 		window.requestAnimationFrame(() => {
 			const el = contentRef.current?.querySelector(`[data-loom-annotation-content="${m.id}"]`);
 			if (!(el instanceof HTMLElement)) return;
@@ -1014,29 +1278,81 @@ function Book({ view }: { view: BookView }): ReactElement {
 						<button className="loom-rel-add" onClick={() => new CreateEntityModal(plugin, 'act', project, {}).open()}>
 							{t('project.newActStub')}
 						</button>
+						{/* Page breaks are an Outline-only concept — the Editor already
+						    writes a bare `===` by hand, and this button exists so a
+						    manually-placed one isn't the only way onto the drag list.
+						    Mirrors Script's own row (script-view.tsx). */}
+						{mode === 'outline' ? (
+							<button className="loom-rel-add" onClick={() => queueBookEdit((raw) => appendBookPageBreak(raw))}>
+								{t('view.script.newPageBreakAction')}
+							</button>
+						) : null}
 					</div>
 					{mode === 'outline' ? (
 						<div className={seqDrag ? 'loom-subloc-list loom-subloc-dragging loom-writer-outline' : 'loom-subloc-list loom-writer-outline'}>
-							{acts.length === 0 ? (
+							{topLevelRows.length === 0 ? (
 								<div className="loom-attendance-empty">{t('view.script.noActsYetBook')}</div>
 							) : (
-								acts.map((act, i) => {
+								topLevelRows.map((row, i) => {
+									const grabbed = seqDrag?.group === 'book-top-level' && seqDrag.from === i;
+									if (row.kind === 'page-break') {
+										return (
+											<div
+												key={row.id}
+												className={
+													grabbed
+														? 'loom-writer-outline-pagebreak loom-subloc-row-slide loom-subloc-row-dragging'
+														: 'loom-writer-outline-pagebreak loom-subloc-row-slide'
+												}
+												style={seqRowStyle('book-top-level', i)}
+												data-seq-row=""
+												// Right-click only — deleting a page break isn't
+												// destructive enough for a confirm modal (one line,
+												// trivially retyped), mirrors Script's own row.
+												onContextMenu={(e) => {
+													e.preventDefault();
+													const menu = new Menu();
+													menu.addItem((item) =>
+														item
+															.setTitle(t('project.common.delete'))
+															.setIcon('trash-2')
+															.setWarning(true)
+															.onClick(() => queueBookEdit((raw) => removeBookPageBreak(raw, row.id)))
+													);
+													menu.showAtMouseEvent(e.nativeEvent);
+												}}
+											>
+												<div className="loom-writer-outline-row">
+													{seqGrip('book-top-level', i, topLevelRows, (reordered) => {
+														queueBookEdit((raw) => reorderBookTopLevelEntries(raw, reordered.map((r) => r.id)));
+													})}
+													<span className="loom-row-caret" aria-hidden="true" />
+													<span className="loom-writer-outline-pagebreak-label">
+														<Icon name="separator-horizontal" fallback="minus" /> {t('view.script.pageBreakLabel')}
+													</span>
+													<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+													<span className="loom-writer-row-count">
+														{t('view.entity.script.pageAbbrev', { range: String(pageOfLine(row.line) + 1) })}
+													</span>
+												</div>
+											</div>
+										);
+									}
+									const act = row.act;
 									const chapters = chaptersOf(act);
 									const collapsed = collapsedActs.has(act.actId);
-									const grabbed = seqDrag?.group === 'book-acts' && seqDrag.from === i;
+									const page = pageOfLine(row.line);
 									return (
 										<div
 											key={act.path}
 											className="loom-writer-outline-act"
 											data-act-id={act.actId}
 											data-seq-row=""
-											style={seqRowStyle('book-acts', i)}
+											style={seqRowStyle('book-top-level', i)}
 										>
 											<div className={grabbed ? 'loom-writer-outline-row loom-subloc-row-slide loom-subloc-row-dragging' : 'loom-writer-outline-row loom-subloc-row-slide'}>
-												{seqGrip('book-acts', i, acts, (reordered) => {
-													void editBookAndSync(plugin, project, (raw) =>
-														reorderBookActs(raw, reordered.map((a) => a.actId))
-													);
+												{seqGrip('book-top-level', i, topLevelRows, (reordered) => {
+													queueBookEdit((raw) => reorderBookTopLevelEntries(raw, reordered.map((r) => r.id)));
 												})}
 												{chapters.length > 0 ? (
 													<button
@@ -1053,7 +1369,9 @@ function Book({ view }: { view: BookView }): ReactElement {
 													{act.name}
 												</button>
 												<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
-												<span className="loom-writer-row-count">{chapters.length}</span>
+												<span className="loom-writer-row-count">
+													{chapters.length} · {t('view.entity.script.pageAbbrev', { range: String(page) })}
+												</span>
 											</div>
 											{!collapsed ? (
 												<div className="loom-writer-outline-children">
@@ -1072,12 +1390,8 @@ function Book({ view }: { view: BookView }): ReactElement {
 																	data-seq-row=""
 																>
 																	{seqGrip(`book-chapters:${act.actId}`, j, chapters, (reordered) => {
-																		void editBookAndSync(plugin, project, (raw) =>
-																			reorderBookChaptersInAct(
-																				raw,
-																				act.actId,
-																				reordered.map((c) => c.chapterId)
-																			)
+																		queueBookEdit((raw) =>
+																			reorderBookChaptersInAct(raw, act.actId, reordered.map((c) => c.chapterId))
 																		);
 																	})}
 																	<span className="loom-writer-row-num">{j + 1}</span>
@@ -1085,6 +1399,9 @@ function Book({ view }: { view: BookView }): ReactElement {
 																		{ch.name}
 																	</button>
 																	<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+																	<span className="loom-writer-row-count">
+																		{t('view.entity.script.pageAbbrev', { range: String(page) })}
+																	</span>
 																</div>
 															);
 														})
@@ -1097,74 +1414,79 @@ function Book({ view }: { view: BookView }): ReactElement {
 							)}
 						</div>
 					) : mode === 'editor' ? (
-						<div className="loom-writer-editor" ref={editorWrapperRef}>
-							{acts.length === 0 ? (
+						<div className="loom-writer-editor loom-book-writer-editor" ref={editorWrapperRef}>
+							{bookText === null ? (
 								<div className="loom-attendance-empty">{t('view.script.noActsYetBook')}</div>
 							) : (
-								acts.map((act) => (
-									<div key={act.path} className="loom-field loom-field-sep">
-										<span className="loom-field-label">
-											<button className="loom-subloc-link" onClick={() => view.openEntity(act.path)}>
-												{act.name}
-											</button>
-										</span>
-										<ActChapterBlocks
-											plugin={plugin}
-											project={project}
-											bookText={bookText}
-											chapters={chaptersOf(act)}
-											mode="editor"
-											names={linkNames}
-											onOpenLink={openLinkTarget}
-											onCreateEntity={createLinkEntity}
-											onOpenChapter={(path) => view.openEntity(path)}
-											emptyMessage={
-												<div className="loom-attendance-empty">
-													{t('view.entity.script.noChaptersYetPre')}<code># {act.name}</code>{t('view.entity.script.noChaptersYetPost')}
-												</div>
-											}
-											annotations={annotations}
-											highlightedAnnotationId={highlightedAnnotationId}
-										/>
-									</div>
-								))
+								<MarkdownField
+									ref={bookFieldRef}
+									app={plugin.app}
+									value={bookText}
+									names={linkNames}
+									onOpenLink={openLinkTarget}
+									onCreateEntity={createLinkEntity}
+									onChange={(v) => {
+										bookDraftRef.current = v;
+									}}
+									onBlur={commitBookDraft}
+									comments={annotations.comments}
+									altText={annotations.altText}
+									onCreateComment={annotations.handleCreateComment}
+									onCreateAlt={annotations.handleCreateAlt}
+									onOpenComment={annotations.handleOpenComment}
+									onCycleAlt={annotations.handleCycleAlt}
+									onOpenAltMenu={(id) => {
+										// `AltTextModal`'s Draft/Accept/edit-option callbacks read
+										// the CURRENT on-disk text (`replaceAltContentInBook`) — flush
+										// any not-yet-committed draft first, or a modal action taken
+										// right after typing could read stale text and have its own
+										// write clobbered back out by the draft's own (later-queued)
+										// commit.
+										commitBookDraft();
+										annotations.handleOpenAltMenu(id);
+									}}
+									highlightedAnnotationId={highlightedAnnotationId}
+									onOpenHeading={openBookHeading}
+									annotationGutter
+								/>
 							)}
 						</div>
 					) : (
 						<div className="loom-screenplay" ref={previewWrapperRef}>
-							<div className="loom-book-page">
-								{acts.length === 0 ? (
+							{acts.length === 0 ? (
+								<div className="loom-book-page">
 									<div className="loom-attendance-empty">{t('view.script.noActsYetBook')}</div>
-								) : (
-									acts.map((act) => (
-										<div key={act.path} className="loom-field loom-field-sep">
-											<span className="loom-field-label">
-												<button className="loom-subloc-link" onClick={() => view.openEntity(act.path)}>
-													{act.name}
-												</button>
-											</span>
-											<ActChapterBlocks
-												plugin={plugin}
-												project={project}
-												bookText={bookText}
-												chapters={chaptersOf(act)}
-												mode="preview"
-												names={linkNames}
-												onOpenLink={openLinkTarget}
-												onCreateEntity={createLinkEntity}
-												onOpenChapter={(path) => view.openEntity(path)}
-												emptyMessage={
-													<div className="loom-attendance-empty">
-														{t('view.entity.script.noChaptersYetPre')}<code># {act.name}</code>{t('view.entity.script.noChaptersYetPost')}
-													</div>
-												}
-												annotations={annotations}
-												highlightedAnnotationId={highlightedAnnotationId}
-											/>
-										</div>
-									))
-								)}
-							</div>
+								</div>
+							) : (
+								previewPageGroups.map((group, gi) => (
+									<div className="loom-book-page" key={gi}>
+										{group.map((act) => (
+											<div key={act.path} className="loom-field loom-field-sep">
+												<span className="loom-field-label">
+													<button className="loom-subloc-link" onClick={() => view.openEntity(act.path)}>
+														{act.name}
+													</button>
+												</span>
+												<ActChapterBlocks
+													plugin={plugin}
+													bookText={bookText}
+													chapters={chaptersOf(act)}
+													names={linkNames}
+													onOpenLink={openLinkTarget}
+													onOpenChapter={(path) => view.openEntity(path)}
+													emptyMessage={
+														<div className="loom-attendance-empty">
+															{t('view.entity.script.noChaptersYetPre')}<code># {act.name}</code>{t('view.entity.script.noChaptersYetPost')}
+														</div>
+													}
+													annotations={annotations}
+													highlightedAnnotationId={highlightedAnnotationId}
+												/>
+											</div>
+										))}
+									</div>
+								))
+							)}
 						</div>
 					)}
 					{actlessChapters.length > 0 ? (

@@ -2148,6 +2148,34 @@ span.loom-row-caret {
 	font-weight: var(--font-bold, 700);
 }
 
+/* Prose Book/Act's unified editor (book-view.tsx's `Book`, entity-view.tsx's
+   Act section): Act (`#`/h1) and Chapter (`##`/h2) titles read as centered
+   headings, not left-aligned body text — `.loom-book-writer-editor`/
+   `.loom-scene-script` only ever wrap a Prose field in a Writer project
+   (Fountain's own Scene/Act script excerpts use a completely different CM6
+   field, `.loom-fountain-field`, so this can't collide with that). */
+.loom-book-writer-editor .loom-md-field .cm-line.loom-md-h1,
+.loom-book-writer-editor .loom-md-field .cm-line.loom-md-h2,
+.loom-scene-script .loom-md-field .cm-line.loom-md-h1,
+.loom-scene-script .loom-md-field .cm-line.loom-md-h2 {
+	text-align: center;
+	/* Extra breathing room below the title, on top of whatever the blank
+	   line right after it (`replaceBookActBody`/`replaceBookChapterBody`,
+	   prose.ts) already gives — deliberately NOT trying to hide/shrink that
+	   blank line at all: it's left as a perfectly ordinary editable line,
+	   same as any blank line anywhere else, which is what a plain-text
+	   live-preview editor is expected to have. Two earlier attempts at
+	   removing/shrinking it either crashed the editor outright (a
+	   `Decoration.replace` spanning that line's own newline — CM6 requires
+	   `block: true` for that, which a plain inline replace isn't) or left an
+	   odd sliver-sized clickable line behind (a tiny `font-size` on it).
+	   `padding`, never `margin` (per `fountain-field.tsx`'s own documented
+	   CM6 height-map gotcha — a margin sits outside a line's own measured
+	   `getBoundingClientRect`, silently drifting CM6's click/arrow-key
+	   position map for every line after it). */
+	padding-bottom: 0.3em;
+}
+
 .loom-md-field .cm-line.loom-md-h3 {
 	font-size: 1.2em;
 	font-weight: var(--font-semibold, 600);
@@ -5641,6 +5669,27 @@ span.loom-row-caret {
 	tab-size: 4;
 }
 
+/* BookView's own unified whole-book editor: the same "matte frame" padding/
+   background `.loom-scene-script` gives the Act/Chapter pages' own embedded
+   editor (`div.loom-scene-script` further down), so the top-level Book page
+   reads with the same margins — a SEPARATE class rather than folding these
+   properties into `.loom-writer-editor` itself, which Script's own
+   `FountainField` also uses and must stay unaffected. */
+.loom-view .loom-book-writer-editor {
+	padding: 0.6em 0.8em;
+	background: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+/* Same `.loom-md-field` auto-height fix `.loom-scene-script` needs further
+   down — `MarkdownField` wraps its CM6 view in a `.loom-md-field` div with
+   no height of its own, which otherwise left the field shrunk to a couple
+   of lines inside this box's own fixed/resizable height. */
+.loom-book-writer-editor .loom-md-field,
+.loom-book-writer-editor .loom-md-field .cm-editor {
+	height: 100%;
+}
+
 /* Live-preview Fountain editor (fountain-field.tsx). The wrapper
    (.loom-writer-editor above) owns the resize handle and outer scrollbar;
    the CM6 editor just fills it — no second scrollbar. Background is a fixed
@@ -5836,6 +5885,41 @@ body.loom-follow-theme-color .loom-view .loom-screenplay u {
 	color: var(--text-accent);
 }
 
+/* `markdown-field.tsx`'s own live-preview decoration classes (every Notes/
+   Description field app-wide, Prose's Book/Act/Chapter editors included) —
+   same opt-in "Follow theme text coloring" toggle and the same
+   `--loom-measured-*` custom properties `measureThemeTextColors()` (main.ts)
+   already populates for the Fountain rules above; this field was never
+   wired to the setting at all before, so it stayed plain regardless of the
+   toggle. `.loom-md-h5`/`h6` reuse the measured H4 as their closest fit,
+   same "one level deeper than what's actually measured" reasoning the
+   Fountain scene-heading rule above already uses. Selectors match the base
+   (non-themed) rules' own specificity exactly (`.loom-md-field .cm-line.loom-md-h1`,
+   three classes) plus the body class, so this wins without `!important`. */
+body.loom-follow-theme-color .loom-md-field .cm-line.loom-md-h1 {
+	color: var(--loom-measured-h1, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-md-field .cm-line.loom-md-h2 {
+	color: var(--loom-measured-h2, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-md-field .cm-line.loom-md-h3 {
+	color: var(--loom-measured-h3, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-md-field .cm-line.loom-md-h4,
+body.loom-follow-theme-color .loom-md-field .cm-line.loom-md-h5,
+body.loom-follow-theme-color .loom-md-field .cm-line.loom-md-h6 {
+	color: var(--loom-measured-h4, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-md-bold {
+	color: var(--loom-measured-bold, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-md-italic {
+	color: var(--loom-measured-italic, var(--text-accent));
+}
+body.loom-follow-theme-color .loom-md-underline {
+	color: var(--text-accent);
+}
+
 /* The setting row's own live example ("# H1 Heading, Bold, Italic,
    Underline") — same plain-by-default split as the real editors above, and
    the SAME measured-color mapping when the setting is on, so the preview
@@ -5968,6 +6052,32 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 	color: inherit;
 }
 
+/* Act/Chapter titles in Preview read as centered, bold headings — matching
+   the live Editor's own centered `.loom-md-h1`/`h2` styling — not as left-
+   aligned accent-colored links, even though they're still real click-to-
+   open buttons (`onOpenChapter`/the Act's own `onClick`) underneath. Two
+   different selectors distinguish the two: an Act's own title is the ONLY
+   thing inside its `.loom-field-label` wrapper span (`Book`'s own Preview
+   loop, book-view.tsx); a Chapter's title is the FIRST child of its own
+   `[data-chapter-id]` block (`ActChapterBlocks`), a SIBLING of that
+   chapter's own `MarkdownField`, never nested inside one — so this can't
+   accidentally match a wikilink rendered WITHIN a chapter's own body text. */
+.loom-view .loom-book-page .loom-field-label > .loom-subloc-link,
+.loom-view .loom-book-page [data-chapter-id] > .loom-subloc-link {
+	display: block;
+	width: 100%;
+	text-align: center;
+	font-weight: var(--font-bold, 700);
+}
+
+.loom-view .loom-book-page .loom-field-label > .loom-subloc-link {
+	font-size: 1.6em;
+}
+
+.loom-view .loom-book-page [data-chapter-id] > .loom-subloc-link {
+	font-size: 1.4em;
+}
+
 /* Editor mode's own fixed white/black background — the Prose raw editor
    (`.loom-writer-editor` in the whole-Book view, `.loom-scene-script` in the
    Act/Chapter pages' own embedded sections) is meant to read as the same
@@ -5983,6 +6093,19 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 .loom-writer-editor .loom-md-field .cm-content,
 .loom-scene-script .loom-md-field .cm-content {
 	color: inherit;
+}
+
+/* Same "sheet of paper", but with real page margins — text reads inset from
+   every edge (top included) rather than flush against the box's own border,
+   matching `.loom-book-page`'s own generous inset above. Only scopes the
+   Prose Book/Act unified editors specifically (`.loom-book-writer-editor`,
+   the Book page's own top-level box; `.loom-scene-script`, shared with the
+   Act page's embedded one AND the Fountain Scene/Act Script sections — but
+   the latter mount a completely different field, `.loom-fountain-field`, so
+   there's no `.loom-md-field` inside it to match here regardless of kind). */
+.loom-book-writer-editor .loom-md-field .cm-editor,
+.loom-scene-script .loom-md-field .cm-editor {
+	padding: 2em 3em;
 }
 
 /* NOT the `margin` shorthand: that sets all four sides at once, so it was
@@ -6273,6 +6396,49 @@ div.loom-scene-script {
 	height: 0.85em;
 }
 
+/* `markdown-field.tsx`'s own right-side gutter (`annotationGutter` prop) —
+   same shape/behavior as the Fountain one above, reused for Prose's Book/
+   Act/Chapter editors AND their Preview mode (`.loom-book-page`), both of
+   which are the white/black "sheet of paper" look this hover treatment
+   assumes, same as Fountain's own. */
+.loom-md-field .cm-gutters {
+	background: transparent;
+	border: none;
+	min-width: 2em;
+}
+
+.loom-md-gutter-icons {
+	display: flex;
+	gap: 2px;
+	padding-left: 0.3em;
+}
+
+.loom-md-gutter-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.1em;
+	height: 1.1em;
+	color: var(--text-faint);
+	cursor: pointer;
+	border-radius: var(--radius-s);
+}
+
+.loom-md-gutter-icon:hover {
+	color: #000;
+	background: rgba(0, 0, 0, 0.08);
+}
+
+.loom-md-gutter-icon.loom-md-gutter-icon-highlight {
+	color: var(--text-on-accent);
+	background: var(--interactive-accent);
+}
+
+.loom-md-gutter-icon svg {
+	width: 0.85em;
+	height: 0.85em;
+}
+
 /* Pages-preview margin icons (`PagesPreviewBody`, script-view.tsx): each
    element's `<p>` is wrapped in one `.loom-sp-line-wrap` (a plain block with
    no margin/padding of its own, so the `<p>`'s normal margins still collapse
@@ -6400,7 +6566,8 @@ div.loom-scene-script {
    rest (this is a fiddly editing affordance, not something that should
    visually compete with the script text), brightening on hover/drag to
    confirm it's grabbable. */
-.loom-fountain-annotation-handle {
+.loom-fountain-annotation-handle,
+.loom-md-annotation-handle {
 	position: fixed;
 	display: none;
 	width: 4px;
@@ -6412,14 +6579,18 @@ div.loom-scene-script {
 	z-index: var(--layer-menu);
 }
 
-.loom-fountain-annotation-handle:hover {
+.loom-fountain-annotation-handle:hover,
+.loom-md-annotation-handle:hover {
 	opacity: 1;
 }
 
 /* The live preview bar shown while dragging a handle — plain fixed-position
    DOM, not a CM6 decoration, so it can track the pointer every frame with no
-   document-rebuild cost; removed the moment the drag ends. */
-.loom-fountain-annotation-drag-preview {
+   document-rebuild cost; removed the moment the drag ends. Shared by
+   `markdown-field.tsx`'s own port of this same overlay (see that file's own
+   `AnnotationHandlesOverlay`/`startAnnotationHandleDrag`). */
+.loom-fountain-annotation-drag-preview,
+.loom-md-annotation-drag-preview {
 	position: fixed;
 	width: 2px;
 	background: var(--interactive-accent);

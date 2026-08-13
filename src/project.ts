@@ -83,6 +83,7 @@ import {
 import {
 	appendBookAct,
 	appendBookChapter,
+	ensureBookIds,
 	moveBookChapterToAct,
 	parseBook,
 	reorderBookActs,
@@ -1160,6 +1161,13 @@ async function editScriptFile(
  * `entityFileName` FROM this module). Unlike Script, a Prose project has no
  * Book file scaffolded at project setup, so this creates one on first write
  * rather than returning null when it's missing — mirrors `createBookFile`.
+ * Also runs `ensureBookIds` on the result, mirroring `editBookAndSync`'s own
+ * chain — this is the ONE write path a Chapter/Act creation modal uses, so
+ * without this here too, the blank-line normalization `ensureBookIds` now
+ * does (see its own doc comment) would only apply on the NEXT edit through
+ * `editBookAndSync`, not at creation time itself — which is exactly when a
+ * freshly appended/moved chapter or act picks up its own unwanted blank
+ * line in the first place.
  */
 async function editBookFile(
 	plugin: LoomLoomPlugin,
@@ -1171,7 +1179,7 @@ async function editBookFile(
 	let file = plugin.app.vault.getFileByPath(fullPath);
 	if (!file) file = await plugin.app.vault.create(fullPath, '');
 	const raw = await plugin.app.vault.read(file);
-	const next = apply(raw);
+	const next = ensureBookIds(apply(raw)).text;
 	if (next !== raw) await plugin.app.vault.modify(file, next);
 	return next;
 }

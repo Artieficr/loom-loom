@@ -3,9 +3,11 @@ import {
 	Decoration,
 	DecorationSet,
 	EditorView,
+	GutterMarker,
 	ViewPlugin,
 	ViewUpdate,
 	WidgetType,
+	gutter,
 	keymap,
 	placeholder as cmPlaceholder,
 } from '@codemirror/view';
@@ -16,8 +18,8 @@ import {
 	autocompletion,
 	completionKeymap,
 } from '@codemirror/autocomplete';
-import { App, Menu, Scope } from 'obsidian';
-import { useEffect, useRef } from 'react';
+import { App, Menu, Notice, Scope, setIcon } from 'obsidian';
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { t } from '../i18n';
 import { findAnnotationSpans, newSceneId } from '../fountain';
 import type { AltTextEntry, CommentEntry } from './script-notes';
@@ -80,6 +82,26 @@ const INLINE_RULES: {
 
 const WIKILINK_RE = /\[\[([^[\]\n|]+)(?:\|([^[\]\n]*))?\]\]/g;
 
+/** Prose/Book's hidden Act/Chapter identity marker (`prose.ts`/`fountain.ts`'s
+ *  `[[loom:<id>]]` convention) — never a real wikilink, so it's excluded from
+ *  `lineTokens` below and hidden outright by `buildDecorations`'s own pass,
+ *  same non-exporting-note treatment `fountain-field.tsx` gives it. */
+const LOOM_ID_RE = /\[\[loom:[A-Za-z0-9]+\]\]/g;
+
+/** Matches a `[[loom:<id>]]` identity marker OR a `[[loom-comment:<id>]]`/
+ *  `[[loom-alt:<id>]]`/`[[/loom-comment:<id>]]`/`[[/loom-alt:<id>]]`
+ *  annotation marker's TARGET (the part between `[[` and `]]`, no alias) —
+ *  shared by the WIKILINK_RE skip below (none of these are ever a real
+ *  wikilink) and any future check needing the same test. The annotation half
+ *  matters here specifically because `buildAnnotationDecorations` (this
+ *  field's own per-instance plugin, further down) already hides these
+ *  markers and marks their wrapped content — without this exclusion,
+ *  WIKILINK_RE independently matched the SAME token as an ordinary link
+ *  (hiding only `[[`/`]]`, leaving `loom-comment:<id>` itself rendered as
+ *  clickable link text), a second, conflicting decoration over the exact
+ *  span the annotation pass was already hiding/styling. */
+const LOOM_MARKER_TARGET_RE = /^\/?loom(-comment|-alt)?:[A-Za-z0-9]+$/;
+
 /** Inline tokens of one line, non-overlapping (first match wins). */
 function lineTokens(text: string, lineFrom: number): InlineToken[] {
 	const tokens: InlineToken[] = [];
@@ -91,6 +113,7 @@ function lineTokens(text: string, lineFrom: number): InlineToken[] {
 		const from = lineFrom + m.index;
 		const to = from + m[0].length;
 		const target = m[1];
+		if (m[2] === undefined && LOOM_MARKER_TARGET_RE.test(target)) continue;
 		const hasAlias = m[2] !== undefined;
 		// Hide `[[target|` (or just `[[`) and the closing `]]`.
 		const contentFrom = hasAlias ? from + 2 + target.length + 1 : from + 2;
@@ -170,6 +193,52 @@ function isUnresolvedComment(kind: 'comment' | 'alt', entries: CommentEntry[]): 
  *  mirrors `fountain-field.tsx`'s own effect of the same name. */
 const refreshAnnotations = StateEffect.define<null>();
 
+/** One gutter row's worth of comment/alt-text icons — `MarkdownField`'s
+ *  opt-in `annotationGutter` prop. Mirrors `fountain-field.tsx`'s own
+ *  `AnnotationGutterItem`/`AnnotationGutterMarker` exactly (same shape, same
+ *  icon choices), duplicated here rather than shared since the two fields'
+ *  CM6 setups are otherwise independent. */
+interface AnnotationGutterItem {
+	kind: 'comment' | 'alt';
+	id: string;
+	unresolved: boolean;
+	highlighted: boolean;
+}
+
+class AnnotationGutterMarker extends GutterMarker {
+	constructor(private items: AnnotationGutterItem[]) {
+		super();
+	}
+	eq(other: GutterMarker): boolean {
+		if (!(other instanceof AnnotationGutterMarker)) return false;
+		if (other.items.length !== this.items.length) return false;
+		return this.items.every((it, i) => {
+			const o = other.items[i];
+			return o.kind === it.kind && o.id === it.id && o.unresolved === it.unresolved && o.highlighted === it.highlighted;
+		});
+	}
+	toDOM(view: EditorView): Node {
+		// `view.dom.doc.body` (not the bare global `document`) — pop-out-window
+		// safe, mirrors this file's own widgets and `fountain-field.tsx`'s
+		// identical gutter marker; detached before returning since it's never
+		// meant to live under `<body>` itself.
+		const wrap = view.dom.doc.body.createSpan({ cls: 'loom-md-gutter-icons' });
+		wrap.detach();
+		for (const it of this.items) {
+			const btn = wrap.createSpan({
+				cls: it.highlighted ? 'loom-md-gutter-icon loom-md-gutter-icon-highlight' : 'loom-md-gutter-icon',
+			});
+			btn.dataset.loomAnnotationId = it.id;
+			btn.dataset.loomAnnotationKind = it.kind;
+			setIcon(
+				btn,
+				it.kind === 'comment' ? (it.unresolved ? 'message-square-dot' : 'message-square') : 'arrow-right-left'
+			);
+		}
+		return wrap;
+	}
+}
+
 function buildDecorations(view: EditorView): DecorationSet {
 	const entries: { from: number; to: number; deco: Decoration }[] = [];
 	const sel = view.state.selection;
@@ -188,6 +257,17 @@ function buildDecorations(view: EditorView): DecorationSet {
 			const line = view.state.doc.lineAt(pos);
 			const text = line.text;
 			const lineActive = touches(line.from, line.to);
+
+			// Always hidden, never revealed at the cursor — a Prose Book's Act/
+			// Chapter identity marker (see `LOOM_ID_RE` above), not user content.
+			LOOM_ID_RE.lastIndex = 0;
+			for (let m = LOOM_ID_RE.exec(text); m; m = LOOM_ID_RE.exec(text)) {
+				entries.push({
+					from: line.from + m.index,
+					to: line.from + m.index + m[0].length,
+					deco: Decoration.replace({}),
+				});
+			}
 
 			const hr = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.exec(text);
 			if (hr && text.trim() !== '') {
@@ -312,7 +392,8 @@ function displayTextOf(text: string): string {
 			let out = line
 				.replace(/^#{1,6}\s/, '')
 				.replace(/^((?:\s*>\s?)+)/, '')
-				.replace(/^(\s*)([-*+])\s/, '$1• ');
+				.replace(/^(\s*)([-*+])\s/, '$1• ')
+				.replace(LOOM_ID_RE, '');
 			out = out.replace(WIKILINK_RE, (_m, target: string, alias?: string) =>
 				alias !== undefined && alias !== '' ? alias : target
 			);
@@ -548,28 +629,28 @@ function linkCompletion(
 	};
 }
 
-export function MarkdownField({
-	app,
-	value,
-	onChange,
-	names,
-	placeholder,
-	onOpenLink,
-	onCreateEntity,
-	readOnly,
-	comments,
-	altText,
-	onCreateComment,
-	onCreateAlt,
-	onOpenComment,
-	onCycleAlt,
-	onOpenAltMenu,
-	highlightedAnnotationId,
-}: {
+/** Imperative handle for a caller that needs to move the view without going
+ *  through DOM queries — currently just `scrollToPos`, used by Book's own
+ *  comment/alt-text search-jump (`gotoMatch`, book-view.tsx) so a match in a
+ *  large unified document that's scrolled out of CM6's `visibleRanges`
+ *  actually scrolls into view first, rather than the DOM lookup silently
+ *  finding nothing. Mirrors `FountainField`'s own handle, minus the several
+ *  Fountain-specific methods this field has no equivalent need for. */
+export interface MarkdownFieldHandle {
+	scrollToPos: (pos: number) => void;
+}
+
+export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	/** Needed to outrank Obsidian's global Ctrl+B/I hotkeys while focused. */
 	app: App;
 	value: string;
 	onChange: (value: string) => void;
+	/** The field lost focus (blur, or teardown on unmount — CM6 fires the same
+	 *  DOM blur either way). Optional: a caller that commits every keystroke
+	 *  (every ordinary Notes/Description field) has no use for it; one that
+	 *  buffers locally and commits only here (a whole-document editor, e.g.
+	 *  Prose's unified Book/Act editor) does. */
+	onBlur?: () => void;
 	names: LinkOption[];
 	placeholder?: string;
 	/** Live-preview but not editable (e.g. an "Original description" spoiler);
@@ -606,13 +687,56 @@ export function MarkdownField({
 	/** A marker id a search match currently points at — its span gets a
 	 *  highlight class without touching the document. */
 	highlightedAnnotationId?: string | null;
-}) {
+	/** Ctrl/Cmd+click on a `#`/`##` heading line carrying a `[[loom:<id>]]`
+	 *  marker (Prose's Act/Chapter identity marker — see `LOOM_ID_RE` above)
+	 *  — the caller resolves the id to an entity and opens it. Ctrl/Cmd-gated
+	 *  rather than a plain click, mirroring `fountain-field.tsx`'s own
+	 *  scene/act heading links: the heading LINE is real editable text (its
+	 *  own title), so a plain click has to fall through to normal caret
+	 *  placement. Optional — every consumer but Book/Act's unified editors
+	 *  leaves it unset and is unaffected (no heading in their text carries
+	 *  this marker anyway). */
+	onOpenHeading?: (loomId: string, level: number) => void;
+	/** Renders a right-side CM6 gutter (mirrors `fountain-field.tsx`'s own
+	 *  `annotationGutter`) — one icon per comment/alt-text span that STARTS
+	 *  on a given line, click opens/cycles it, right-click opens an alt-text
+	 *  span's picker, same as the dashed-underlined CONTENT itself already
+	 *  does. Opt-in and off by default: most `MarkdownField` consumers are
+	 *  narrow Notes/Description boxes with no room for a gutter (the
+	 *  original reason this field never had one at all); Book/Act/Chapter's
+	 *  Prose editors are wide enough now and are the only callers that pass
+	 *  it. Works in `readOnly` mode too (Preview) — same reasoning as the
+	 *  content click already being read-only-safe for opening a comment. */
+	annotationGutter?: boolean;
+}>(function MarkdownField({
+	app,
+	value,
+	onChange,
+	onBlur,
+	names,
+	placeholder,
+	onOpenLink,
+	onCreateEntity,
+	readOnly,
+	comments,
+	altText,
+	onCreateComment,
+	onCreateAlt,
+	onOpenComment,
+	onCycleAlt,
+	onOpenAltMenu,
+	highlightedAnnotationId,
+	onOpenHeading,
+	annotationGutter: showAnnotationGutter,
+}, ref) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
 	const viewRef = useRef<EditorView | null>(null);
 	const namesRef = useRef(names);
 	namesRef.current = names;
 	const onChangeRef = useRef(onChange);
 	onChangeRef.current = onChange;
+	const onBlurRef = useRef(onBlur);
+	onBlurRef.current = onBlur;
 	const onOpenRef = useRef(onOpenLink);
 	onOpenRef.current = onOpenLink;
 	const onCreateRef = useRef(onCreateEntity);
@@ -633,6 +757,8 @@ export function MarkdownField({
 	onOpenAltMenuRef.current = onOpenAltMenu;
 	const highlightedAnnotationIdRef = useRef(highlightedAnnotationId ?? null);
 	highlightedAnnotationIdRef.current = highlightedAnnotationId ?? null;
+	const onOpenHeadingRef = useRef(onOpenHeading);
+	onOpenHeadingRef.current = onOpenHeading;
 
 	// A doc-less prop change (resolved toggle, search highlight) doesn't touch
 	// the CM6 document, but the annotation decorations still need to redraw —
@@ -672,44 +798,66 @@ export function MarkdownField({
 				scopePushed = false;
 			}
 		};
-		// Left clicks an annotation span first (open a comment, cycle an
-		// alt-text option), then a rendered wikilink; middle opens a link in a
-		// new tab. A comment can still be OPENED read-only; alt-text cycling
-		// is edit-only and simply doesn't fire when `readOnly`. Cycling swaps
-		// the document text itself right here (this field has no imperative
-		// handle a caller could dispatch through, unlike `fountain-field.tsx`'s
-		// `replaceAltContent`) — the resulting `onChange` is what actually
-		// persists the new active wording into the chapter body; `onCycleAlt`
-		// is called purely so the caller can update the sidecar's own
-		// `activeIndex`/`acceptedIndex`.
-		const openLinkOnMousedown = (event: MouseEvent, view: EditorView): boolean => {
-			if (event.button !== 0 && event.button !== 1) return false;
-			const target = event.target instanceof HTMLElement ? event.target : null;
-			const annotation = event.button === 0 ? target?.closest('[data-loom-annotation-content]') : null;
-			if (annotation instanceof HTMLElement) {
-				const id = annotation.dataset.loomAnnotationContent;
-				const kind = annotation.dataset.loomAnnotationKind;
-				if (id && kind === 'comment' && onOpenCommentRef.current) {
-					event.preventDefault();
-					onOpenCommentRef.current(id, annotation.getBoundingClientRect());
-					return true;
-				}
-				if (id && kind === 'alt' && !readOnly && onCycleAltRef.current) {
-					event.preventDefault();
-					const entry = altTextRef.current[id];
-					if (entry && entry.options.length > 1) {
-						const nextIndex = (entry.activeIndex + 1) % entry.options.length;
-						const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'alt' && s.id === id);
-						if (span) {
-							view.dispatch({
-								changes: { from: span.contentFrom, to: span.contentTo, insert: entry.options[nextIndex] },
-							});
-						}
-					}
-					onCycleAltRef.current(id);
-					return true;
+		/** Cycles an alt-text span to its next option IN PLACE — shared by the
+		 *  content click (`openLinkOnMousedown`, below) and the gutter icon
+		 *  click (`annotationGutterExt`'s own `domEventHandlers.click`), which
+		 *  both need to do the exact same "swap the document, then tell the
+		 *  caller to persist the new `activeIndex`" work. This field has no
+		 *  imperative handle a caller could dispatch through the way
+		 *  `fountain-field.tsx`'s `replaceAltContent` lets `script-view.tsx`'s
+		 *  own `handleCycleAlt` do it from OUTSIDE the field — so the swap
+		 *  happens right here instead, and `onCycleAlt` is called purely so
+		 *  the caller persists the sidecar's new `activeIndex`. No-ops (but
+		 *  still reports the click as handled) when there's only one option —
+		 *  nothing to cycle TO — or in `readOnly` mode. */
+		const cycleAltInPlace = (view: EditorView, id: string) => {
+			if (readOnly) return;
+			const entry = altTextRef.current[id];
+			if (entry && entry.options.length > 1) {
+				const nextIndex = (entry.activeIndex + 1) % entry.options.length;
+				const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'alt' && s.id === id);
+				if (span) {
+					view.dispatch({
+						changes: { from: span.contentFrom, to: span.contentTo, insert: entry.options[nextIndex] },
+					});
 				}
 			}
+			onCycleAltRef.current?.(id);
+		};
+		// Rendered wikilink click, then Ctrl/Cmd+click on a heading — middle
+		// opens a link in a new tab. **Deliberately NOT a click target for
+		// comment/alt-text spans** — this used to open a comment/cycle an
+		// alt-text option on a plain content click, which `fountain-field.tsx`
+		// has NEVER done: confirmed directly against that file, its own
+		// content click handling is Ctrl/Cmd-gated char/scene/act/entity links
+		// ONLY, nothing about `[data-loom-annotation-content]` at all —
+		// comments/alt-text are GUTTER-ICON-ONLY there, on purpose, so a plain
+		// click or the START of a drag-select landing on/inside an already-
+		// annotated span (e.g. extending a selection past it, or just
+		// clicking to place a cursor to edit the wrapped text) never gets
+		// hijacked into opening a popover. The dashed-underline/tint mark on
+		// the content stays purely visual now — `annotationGutter`'s own icon
+		// is the sole interactive entry point, matching Script exactly.
+		const openLinkOnMousedown = (event: MouseEvent, view: EditorView): boolean => {
+			if (event.button !== 0 && event.button !== 1) return false;
+			// Ctrl/Cmd+click on a `#`/`##` heading line carrying a `[[loom:<id>]]`
+			// marker (see `onOpenHeading`'s own doc comment) — checked before
+			// anything else, since the heading's own click target is the whole
+			// LINE, not a marked span the way a wikilink is.
+			if (event.button === 0 && (event.ctrlKey || event.metaKey) && onOpenHeadingRef.current) {
+				const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+				if (pos !== null) {
+					const line = view.state.doc.lineAt(pos);
+					const heading = /^(#{1,2})\s(.*)$/.exec(line.text);
+					const idMatch = heading ? /\[\[loom:([A-Za-z0-9]+)\]\]/.exec(heading[2]) : null;
+					if (heading && idMatch) {
+						event.preventDefault();
+						onOpenHeadingRef.current(idMatch[1], heading[1].length);
+						return true;
+					}
+				}
+			}
+			const target = event.target instanceof HTMLElement ? event.target : null;
 			const link = target?.closest('[data-loom-link]');
 			if (link instanceof HTMLElement && link.dataset.loomLink) {
 				event.preventDefault();
@@ -719,7 +867,17 @@ export function MarkdownField({
 			return false;
 		};
 		/** Wraps `range` in a fresh comment/alt-text marker pair — mirrors
-		 *  `fountain-field.tsx`'s `insertMarkerPair`. */
+		 *  `fountain-field.tsx`'s `insertMarkerPair`. A freshly created COMMENT
+		 *  immediately opens its own popover so there's somewhere to actually
+		 *  type into (mirrors `script-view.tsx`'s own `handleCreateComment`,
+		 *  which does the identical "find the just-rendered icon, open its
+		 *  popover" on a deferred frame — done HERE rather than left to the
+		 *  caller, since this field already has direct `view` access in scope
+		 *  and Script's reason for doing it in the caller instead — no single
+		 *  imperative handle to dispatch through — doesn't apply to this
+		 *  field). Alt-text creation has no equivalent single "open this" step
+		 *  here (the CALLER, `useBookAnnotations`'s `handleCreateAlt`, prompts
+		 *  for a second wording itself, mirroring Script's own flow). */
 		const insertMarkerPair = (view: EditorView, kind: 'comment' | 'alt', from: number, to: number) => {
 			const id = newSceneId();
 			const open = `[[loom-${kind}:${id}]]`;
@@ -732,45 +890,53 @@ export function MarkdownField({
 				],
 				selection: { anchor: from + open.length, head: to + open.length },
 			});
-			if (kind === 'comment') onCreateCommentRef.current?.(id, selectedText);
-			else onCreateAltRef.current?.(id, selectedText);
-		};
-		/** Right-click: an existing alt-text span opens its option picker;
-		 *  otherwise, a non-empty selection not partially crossing an existing
-		 *  span offers "Comment"/"Alternative text…". Never fires when
-		 *  `readOnly`, or when neither creation callback is provided (every
-		 *  ordinary Notes/Description field falls straight through to
-		 *  Obsidian's/the browser's own context menu). */
-		const onAnnotationContextMenu = (event: MouseEvent, view: EditorView): boolean => {
-			const target = event.target instanceof HTMLElement ? event.target : null;
-			const annotation = target?.closest('[data-loom-annotation-content]');
-			if (annotation instanceof HTMLElement) {
-				const id = annotation.dataset.loomAnnotationContent;
-				const kind = annotation.dataset.loomAnnotationKind;
-				if (id && kind === 'alt' && onOpenAltMenuRef.current) {
-					event.preventDefault();
-					onOpenAltMenuRef.current(id);
-					return true;
-				}
-				return false;
+			if (kind === 'comment') {
+				onCreateCommentRef.current?.(id, selectedText);
+				window.requestAnimationFrame(() => {
+					const el = view.dom.querySelector(`[data-loom-annotation-content="${id}"], [data-loom-annotation-id="${id}"]`);
+					if (el instanceof HTMLElement) onOpenCommentRef.current?.(id, el.getBoundingClientRect());
+				});
+			} else {
+				onCreateAltRef.current?.(id, selectedText);
 			}
+		};
+		/** Right-click: offers "Comment"/"Alternative text…" on a non-empty
+		 *  selection — mirrors `fountain-field.tsx`'s own `openContextMenu`
+		 *  exactly, including showing the menu with both items DISABLED (plus
+		 *  a `Notice`) rather than silently not opening at all when the
+		 *  selection partially crosses an existing marked span (nesting fully
+		 *  inside or sitting fully outside one is fine — only a true partial
+		 *  cross is rejected). **No "existing span" branch here** — right-
+		 *  clicking an existing alt-text span's OWN picker is gutter-icon-only
+		 *  (`annotationGutterExt`'s own `contextmenu` handler), matching
+		 *  Script, where the equivalent body-content handler has never had
+		 *  one either. Never fires when `readOnly`, or when neither creation
+		 *  callback is provided (every ordinary Notes/Description field falls
+		 *  straight through to Obsidian's/the browser's own context menu). */
+		const onAnnotationContextMenu = (event: MouseEvent, view: EditorView): boolean => {
 			if (!onCreateCommentRef.current && !onCreateAltRef.current) return false;
 			const range = view.state.selection.main;
 			if (range.empty) return false;
-			const text = view.state.doc.toString();
-			const overlaps = findAnnotationSpans(text).some((s) => partiallyOverlaps(range.from, range.to, s.contentFrom, s.contentTo));
-			if (overlaps) return false;
 			event.preventDefault();
+			const text = view.state.doc.toString();
+			const overlaps = findAnnotationSpans(text).some((s) => partiallyOverlaps(range.from, range.to, s.from, s.to));
+			if (overlaps) new Notice(t('view.script.overlapNotice.create'));
 			const menu = new Menu();
 			if (onCreateCommentRef.current) {
 				menu.addItem((item) =>
-					item.setTitle(t('view.script.contextMenu.comment')).onClick(() => insertMarkerPair(view, 'comment', range.from, range.to))
+					item
+						.setTitle(t('view.script.contextMenu.comment'))
+						.setIcon('message-square')
+						.setDisabled(overlaps)
+						.onClick(() => insertMarkerPair(view, 'comment', range.from, range.to))
 				);
 			}
 			if (onCreateAltRef.current) {
 				menu.addItem((item) =>
 					item
 						.setTitle(t('view.script.contextMenu.altText'))
+						.setIcon('arrow-right-left')
+						.setDisabled(overlaps)
 						.onClick(() => insertMarkerPair(view, 'alt', range.from, range.to))
 				);
 			}
@@ -829,6 +995,247 @@ export function MarkdownField({
 			},
 			{ decorations: (v) => v.decorations }
 		);
+
+		/** The right-side gutter itself — `side: 'after'` puts it past the
+		 *  content (no CSS reordering needed), one marker per line a span
+		 *  STARTS on. Mirrors `fountain-field.tsx`'s own `annotationGutter`
+		 *  build, including the doc-identity cache (`lineMarker` runs once per
+		 *  visible line per recompute; re-parsing the whole document inside it
+		 *  would redo that parse once per line on screen). `null` when the
+		 *  prop is off — spread into the extensions arrays below only then. */
+		let annotationSpansCache: { doc: EditorState['doc']; spans: ReturnType<typeof findAnnotationSpans> } | null = null;
+		const annotationSpansFor = (v: EditorView) => {
+			if (annotationSpansCache?.doc !== v.state.doc) {
+				annotationSpansCache = { doc: v.state.doc, spans: findAnnotationSpans(v.state.doc.toString()) };
+			}
+			return annotationSpansCache.spans;
+		};
+		const annotationGutterExt = showAnnotationGutter
+			? gutter({
+					class: 'loom-md-annotation-gutter',
+					side: 'after',
+					lineMarker: (gutterView, line) => {
+						const spans = annotationSpansFor(gutterView);
+						const lineNo = gutterView.state.doc.lineAt(line.from).number;
+						const onThisLine = spans.filter((s) => gutterView.state.doc.lineAt(s.from).number === lineNo);
+						if (onThisLine.length === 0) return null;
+						const items: AnnotationGutterItem[] = onThisLine.map((s) => {
+							const commentEntries = s.kind === 'comment' ? (commentsRef.current[s.id] ?? []) : [];
+							return {
+								kind: s.kind,
+								id: s.id,
+								unresolved: isUnresolvedComment(s.kind, commentEntries),
+								highlighted: s.id === highlightedAnnotationIdRef.current,
+							};
+						});
+						return new AnnotationGutterMarker(items);
+					},
+					lineMarkerChange: (update) =>
+						update.docChanged || update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations))),
+					initialSpacer: () => new AnnotationGutterMarker([]),
+					domEventHandlers: {
+						click: (gutterView, line, event) => {
+							const target = event.target instanceof Element ? event.target : null;
+							const el = target?.closest('[data-loom-annotation-id]');
+							if (!(el instanceof HTMLElement) || !el.dataset.loomAnnotationId) return false;
+							const id = el.dataset.loomAnnotationId;
+							if (el.dataset.loomAnnotationKind === 'comment') {
+								onOpenCommentRef.current?.(id, el.getBoundingClientRect());
+							} else if (!readOnly) {
+								cycleAltInPlace(gutterView, id);
+							}
+							return true;
+						},
+						contextmenu: (gutterView, line, event) => {
+							if (readOnly) return false;
+							const target = event.target instanceof Element ? event.target : null;
+							const el = target?.closest('[data-loom-annotation-id][data-loom-annotation-kind="alt"]');
+							if (!(el instanceof HTMLElement) || !el.dataset.loomAnnotationId) return false;
+							event.preventDefault();
+							onOpenAltMenuRef.current?.(el.dataset.loomAnnotationId);
+							return true;
+						},
+					},
+				})
+			: null;
+
+		/** Drags one edge of an EXISTING comment span to relocate it — ported
+		 *  directly from `fountain-field.tsx`'s own `startAnnotationHandleDrag`
+		 *  (see that function's doc comment for the full design rationale: a
+		 *  live fixed-position preview bar tracks the pointer, the actual
+		 *  document edit happens once on drop, dropping back on the start
+		 *  position or somewhere that would partially overlap a DIFFERENT span
+		 *  is a no-op with a `Notice` in the overlap case). Alt-text spans
+		 *  never get a handle (see `AnnotationHandlesOverlay` below) — this
+		 *  only ever runs for `kind === 'comment'`. */
+		function startAnnotationHandleDrag(view: EditorView, id: string, edge: 'start' | 'end', handleEl: HTMLElement) {
+			const preview = view.dom.doc.body.createDiv({ cls: 'loom-md-annotation-drag-preview' });
+			let lastTarget: number | null = null;
+
+			const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'comment' && s.id === id);
+			if (!span) return;
+
+			const clampTarget = (raw: number) =>
+				edge === 'start'
+					? Math.max(0, Math.min(raw, span.contentTo - 1))
+					: Math.max(span.contentFrom + 1, Math.min(raw, view.state.doc.length));
+
+			const onMove = (e: PointerEvent) => {
+				const raw = view.posAtCoords({ x: e.clientX, y: e.clientY });
+				if (raw == null) return;
+				const target = clampTarget(raw);
+				lastTarget = target;
+				const coords = view.coordsAtPos(target);
+				if (!coords) {
+					preview.setCssProps({ display: 'none' });
+					return;
+				}
+				preview.setCssProps({ display: 'block' });
+				preview.style.left = `${coords.left}px`;
+				preview.style.top = `${coords.top}px`;
+				preview.style.height = `${coords.bottom - coords.top}px`;
+			};
+
+			const finish = (commit: boolean) => {
+				handleEl.removeEventListener('pointermove', onMove);
+				handleEl.removeEventListener('pointerup', onUp);
+				handleEl.removeEventListener('pointercancel', onCancel);
+				preview.remove();
+				if (!commit || lastTarget == null) return;
+				const target = lastTarget;
+				const markerFrom = edge === 'start' ? span.from : span.contentTo;
+				const markerTo = edge === 'start' ? span.contentFrom : span.to;
+				if (target === markerFrom) return; // dropped back where it started
+				const text = view.state.doc.toString();
+				const markerText = text.slice(markerFrom, markerTo);
+				const newContentFrom = edge === 'start' ? target : span.contentFrom;
+				const newContentTo = edge === 'end' ? target : span.contentTo;
+				const overlaps = findAnnotationSpans(text).some((s) => {
+					if (s.kind === 'comment' && s.id === id) return false;
+					return partiallyOverlaps(newContentFrom, newContentTo, s.contentFrom, s.contentTo);
+				});
+				if (overlaps) {
+					new Notice(t('view.script.overlapNotice.resize'));
+					return;
+				}
+				view.dispatch({
+					changes: [
+						{ from: markerFrom, to: markerTo, insert: '' },
+						{ from: target, insert: markerText },
+					],
+				});
+			};
+			const onUp = () => finish(true);
+			const onCancel = () => finish(false);
+			handleEl.addEventListener('pointermove', onMove);
+			handleEl.addEventListener('pointerup', onUp);
+			handleEl.addEventListener('pointercancel', onCancel);
+		}
+
+		/** Comment-span drag handles, ported directly from `fountain-field.tsx`'s
+		 *  own `AnnotationHandlesOverlay` (see that class's doc comment for why
+		 *  it's a `position: fixed` plain-DOM overlay — positioned via
+		 *  `coordsAtPos` — rather than a `Decoration.widget`: even a zero-width
+		 *  inline widget occupies real space in CM6's content flow, and one
+		 *  sitting exactly at a span's edge corrupted CM6's own line-layout
+		 *  measurement badly enough to break click-to-caret on that paragraph's
+		 *  later wrapped lines). **`scheduleSync`'s `setTimeout` (never
+		 *  `requestAnimationFrame`) and the `try/catch` around `coordsAtPos`
+		 *  are load-bearing, not stylistic** — `fountain-field.tsx`'s own doc
+		 *  comment on this documents a REAL crash ("Reading the editor layout
+		 *  isn't allowed during an update") that `requestAnimationFrame` alone
+		 *  did not fix, because CM6 schedules its own internal measure work via
+		 *  rAF too; only a genuinely separate macrotask (`setTimeout`) reliably
+		 *  lands outside CM6's own forbidden-to-read-layout window. Do not
+		 *  "simplify" this back to rAF or a synchronous call. */
+		class AnnotationHandlesOverlay {
+			private els = new Map<string, HTMLElement>();
+			private destroyed = false;
+			private syncQueued = false;
+
+			constructor(private view: EditorView) {
+				this.scheduleSync();
+			}
+
+			update(update: ViewUpdate) {
+				if (
+					update.docChanged ||
+					update.viewportChanged ||
+					update.geometryChanged ||
+					update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations)))
+				) {
+					this.scheduleSync();
+				}
+			}
+
+			private scheduleSync() {
+				if (this.syncQueued) return;
+				this.syncQueued = true;
+				this.view.dom.win.setTimeout(() => {
+					this.syncQueued = false;
+					if (!this.destroyed) this.sync();
+				}, 0);
+			}
+
+			sync() {
+				const view = this.view;
+				const text = view.state.doc.toString();
+				const spans = findAnnotationSpans(text).filter((s) => s.kind === 'comment' && s.contentFrom < s.contentTo);
+				const wanted = new Set<string>();
+				for (const span of spans) {
+					for (const edge of ['start', 'end'] as const) {
+						const key = `${span.id}:${edge}`;
+						wanted.add(key);
+						let el = this.els.get(key);
+						if (!el) {
+							el = view.dom.doc.body.createSpan({
+								cls: `loom-md-annotation-handle loom-md-annotation-handle-${edge}`,
+							});
+							el.dataset.loomAnnotationHandleId = span.id;
+							el.dataset.loomAnnotationHandleEdge = edge;
+							const { id } = span;
+							const handleEl = el;
+							handleEl.addEventListener('pointerdown', (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								handleEl.setPointerCapture(e.pointerId);
+								startAnnotationHandleDrag(view, id, edge, handleEl);
+							});
+							this.els.set(key, handleEl);
+						}
+						const pos = edge === 'start' ? span.contentFrom : span.contentTo;
+						let coords: { left: number; top: number; bottom: number } | null = null;
+						try {
+							coords = view.coordsAtPos(pos, edge === 'start' ? 1 : -1);
+						} catch (e) {
+							console.error('Loom Loom: annotation handle could not read layout this frame', e);
+						}
+						if (coords) {
+							el.setCssProps({ display: 'block' });
+							el.style.left = `${coords.left}px`;
+							el.style.top = `${coords.top}px`;
+							el.style.height = `${coords.bottom - coords.top}px`;
+						} else {
+							el.setCssProps({ display: 'none' });
+						}
+					}
+				}
+				for (const [key, el] of this.els) {
+					if (!wanted.has(key)) {
+						el.remove();
+						this.els.delete(key);
+					}
+				}
+			}
+
+			destroy() {
+				this.destroyed = true;
+				for (const el of this.els.values()) el.remove();
+				this.els.clear();
+			}
+		}
+		const annotationHandlesOverlay = ViewPlugin.fromClass(AnnotationHandlesOverlay);
+
 		const view = new EditorView({
 			parent: hostRef.current,
 			state: EditorState.create({
@@ -845,6 +1252,7 @@ export function MarkdownField({
 							cmPlaceholder(placeholder ?? ''),
 							livePreview,
 							annotationDecorations,
+							...(annotationGutterExt ? [annotationGutterExt] : []),
 							keymap.of(defaultKeymap),
 							EditorView.domEventHandlers({
 								mousedown: openLinkOnMousedown,
@@ -866,6 +1274,8 @@ export function MarkdownField({
 							cmPlaceholder(placeholder ?? ''),
 							livePreview,
 							annotationDecorations,
+							...(annotationGutterExt ? [annotationGutterExt] : []),
+							annotationHandlesOverlay,
 							bracketPairing,
 							pairDeletion,
 							formatContinuation,
@@ -885,7 +1295,10 @@ export function MarkdownField({
 								if (update.docChanged) onChangeRef.current(update.state.doc.toString());
 								if (update.focusChanged) {
 									if (update.view.hasFocus) pushScope();
-									else popScope();
+									else {
+										popScope();
+										onBlurRef.current?.();
+									}
 								}
 							}),
 							EditorView.domEventHandlers({
@@ -926,5 +1339,17 @@ export function MarkdownField({
 		}
 	}, [value]);
 
+	useImperativeHandle(
+		ref,
+		() => ({
+			scrollToPos: (pos: number) => {
+				const view = viewRef.current;
+				if (!view) return;
+				view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'center' }) });
+			},
+		}),
+		[]
+	);
+
 	return <div className={readOnly ? 'loom-md-field loom-md-readonly' : 'loom-md-field'} ref={hostRef} />;
-}
+});

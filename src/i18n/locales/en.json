@@ -193,6 +193,8 @@
 			"pickItem": "Pick the item…",
 			"deleteMessageAct": "The note is moved to the trash, this act is removed from the script, and its scenes' notes are trashed too.",
 			"deleteMessageScene": "The note is moved to the trash, and this scene is removed from the script.",
+			"deleteMessageBookAct": "The note is moved to the trash, this act is removed from the book, and its chapters' notes are trashed too.",
+			"deleteMessageBookChapter": "The note is moved to the trash, and this chapter is removed from the book.",
 			"deleteMessageGeneral": "The note is moved to the trash.",
 			"rename": "Rename",
 			"renameTitle": "Rename \"{name}\"",
