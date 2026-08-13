@@ -17,6 +17,7 @@ import {
 	appendBookPageBreak,
 	chapterBookText,
 	ensureBookIds,
+	findChapterMentions,
 	liveBookActIds,
 	liveBookChapterIds,
 	parseBook,
@@ -124,7 +125,20 @@ export async function editBook(
  * removed from the Book leaves its note behind as an orphan rather than
  * silently destroying whatever was written on it.
  */
-export async function syncActsChapters(plugin: LoomLoomPlugin, project: ProjectDef, parsed: ParsedBook): Promise<void> {
+export async function syncActsChapters(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	parsed: ParsedBook,
+	text: string
+): Promise<void> {
+	// The book file itself is the resolve() source path for every chapter's
+	// own `[[...]]` mentions below — any real file in the vault works as
+	// context for `getFirstLinkpathDest`, and every chapter's mentions live
+	// in this one file regardless of which chapter holds them.
+	const bookPath = findBookFile(plugin, project)?.path ?? '';
+	const dedupeRecords = (records: EntityRecord[]) => [...new Map(records.map((r) => [r.path, r])).values()];
+	const sameLinks = (existingLinks: string[], records: EntityRecord[]) =>
+		existingLinks.length === records.length && records.every((r, i) => existingLinks[i] === linkTargetOf(r));
 	const existingActs = new Map<string, EntityRecord>();
 	for (const record of plugin.indexer.getAll('act', project.root)) {
 		if (record.actId !== '') existingActs.set(record.actId, record);
@@ -140,6 +154,16 @@ export async function syncActsChapters(plugin: LoomLoomPlugin, project: ProjectD
 		const seq = i + 1;
 		const found = existingActs.get(act.loomId);
 		if (found) {
+			// A chapter matched below (`actById`) links via `linkTargetOf`, which
+			// reads the record's own `.path` — so a rename here has to be
+			// reflected into what gets stored for THIS pass, not just written to
+			// disk, or a chapter renamed in the SAME sync as its act would link
+			// to the act's now-stale (already-renamed-away) file name. `found`
+			// itself is the indexer's own cached record; mutating it directly
+			// isn't this codebase's pattern (the "create a new act" branch below
+			// already builds a fresh object instead), so `synced` is a shallow
+			// copy carrying whatever actually landed.
+			let synced = found;
 			if (found.seq !== seq || found.name !== act.title) {
 				const file = plugin.app.vault.getFileByPath(found.path);
 				if (file) {
@@ -165,10 +189,11 @@ export async function syncActsChapters(plugin: LoomLoomPlugin, project: ProjectD
 								console.error('Loom Loom: act rename failed', e);
 							}
 						}
+						synced = { ...found, path: file.path, name: act.title };
 					}
 				}
 			}
-			actById.set(act.loomId, found);
+			actById.set(act.loomId, synced);
 			continue;
 		}
 		const created = await createEntity(plugin, project, 'act', {
@@ -194,10 +219,31 @@ export async function syncActsChapters(plugin: LoomLoomPlugin, project: ProjectD
 		const chapter = chaptersWithIds[i];
 		const seq = i + 1;
 		const act = chapter.actId !== null ? actById.get(chapter.actId) : undefined;
+
+		// Entities named via a plain `[[...]]` wikilink anywhere in the
+		// chapter's own body text — resolution-only, same as Fountain's
+		// `@[...]` scene mentions (an unresolved name is just inert text,
+		// never auto-created).
+		const body = chapterBookText(text, chapter.loomId) ?? '';
+		const resolved = findChapterMentions(body)
+			.map((target) => plugin.indexer.resolve(target, bookPath))
+			.filter((r): r is EntityRecord => r !== null);
+		const cast = dedupeRecords(resolved.filter((r) => r.type === 'character'));
+		const factionsHere = dedupeRecords(resolved.filter((r) => r.type === 'faction'));
+		const itemsHere = dedupeRecords(resolved.filter((r) => r.type === 'item'));
+		const mentionedLocations = dedupeRecords(resolved.filter((r) => r.type === 'location'));
+
 		const found = existingChapters.get(chapter.loomId);
 		if (found) {
 			const sameAct = found.chapterAct === (act ? linkTargetOf(act) : '');
-			const clean = found.name === chapter.title && sameAct && found.seq === seq;
+			const clean =
+				found.name === chapter.title &&
+				sameAct &&
+				found.seq === seq &&
+				sameLinks(found.chapterCast, cast) &&
+				sameLinks(found.chapterFactions, factionsHere) &&
+				sameLinks(found.chapterItems, itemsHere) &&
+				sameLinks(found.chapterMentionedLocations, mentionedLocations);
 			if (clean) continue;
 			const file = plugin.app.vault.getFileByPath(found.path);
 			if (!file) continue;
@@ -205,6 +251,26 @@ export async function syncActsChapters(plugin: LoomLoomPlugin, project: ProjectD
 			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 				setLoomKey(fm, FM.chapterAct, act ? `[[${linkTargetOf(act)}]]` : '');
 				setLoomKey(fm, FM.seq, seq);
+				setLoomKey(
+					fm,
+					FM.chapterCast,
+					cast.map((c) => `[[${linkTargetOf(c)}]]`)
+				);
+				setLoomKey(
+					fm,
+					FM.chapterFactions,
+					factionsHere.map((f) => `[[${linkTargetOf(f)}]]`)
+				);
+				setLoomKey(
+					fm,
+					FM.chapterItems,
+					itemsHere.map((it) => `[[${linkTargetOf(it)}]]`)
+				);
+				setLoomKey(
+					fm,
+					FM.chapterMentionedLocations,
+					mentionedLocations.map((l) => `[[${linkTargetOf(l)}]]`)
+				);
 				if (renamed) {
 					setLoomKey(fm, FM.name, chapter.title);
 					fm.aliases = [chapter.title];
@@ -237,6 +303,26 @@ export async function syncActsChapters(plugin: LoomLoomPlugin, project: ProjectD
 			setLoomKey(fm, FM.chapterId, chapter.loomId);
 			setLoomKey(fm, FM.chapterAct, act ? `[[${linkTargetOf(act)}]]` : '');
 			setLoomKey(fm, FM.seq, seq);
+			setLoomKey(
+				fm,
+				FM.chapterCast,
+				cast.map((c) => `[[${linkTargetOf(c)}]]`)
+			);
+			setLoomKey(
+				fm,
+				FM.chapterFactions,
+				factionsHere.map((f) => `[[${linkTargetOf(f)}]]`)
+			);
+			setLoomKey(
+				fm,
+				FM.chapterItems,
+				itemsHere.map((it) => `[[${linkTargetOf(it)}]]`)
+			);
+			setLoomKey(
+				fm,
+				FM.chapterMentionedLocations,
+				mentionedLocations.map((l) => `[[${linkTargetOf(l)}]]`)
+			);
 		});
 	}
 }
@@ -260,7 +346,7 @@ export async function editBookAndSync(
 		const file = findBookFile(plugin, project);
 		if (file) {
 			const raw = await plugin.app.vault.read(file);
-			await syncActsChapters(plugin, project, parseBook(raw));
+			await syncActsChapters(plugin, project, parseBook(raw), raw);
 		}
 	}
 	return changed;
@@ -701,7 +787,6 @@ export function ActChapterBlocks({
 	chapters,
 	names,
 	onOpenLink,
-	onOpenChapter,
 	emptyMessage,
 	annotations,
 	highlightedAnnotationId,
@@ -711,7 +796,6 @@ export function ActChapterBlocks({
 	chapters: EntityRecord[];
 	names: LinkOption[];
 	onOpenLink: (target: string, newTab?: boolean) => void;
-	onOpenChapter: (path: string) => void;
 	emptyMessage: ReactElement;
 	/** Comments/alternative-text — optional, same as `MarkdownField`'s own
 	 *  props (omitting it leaves every chapter's field exactly as before). */
@@ -726,15 +810,18 @@ export function ActChapterBlocks({
 				if (excerpt === null) return null;
 				return (
 					<div key={ch.path} className="loom-field loom-field-sep" data-chapter-id={ch.chapterId}>
-						<button className="loom-subloc-link" onClick={() => onOpenChapter(ch.path)}>
-							{ch.name}
-						</button>
+						{/* Plain, non-interactive text — Preview reads like Script's own
+						    Pages preview (a wikilink in the body is already inert via
+						    `plainLinks`; a click-to-open button here was the one thing
+						    still behaving like a link, a real reported inconsistency). */}
+						<span className="loom-subloc-link">{ch.name}</span>
 						<MarkdownField
 							app={plugin.app}
 							value={excerpt}
 							names={names}
 							onOpenLink={onOpenLink}
 							readOnly
+							plainLinks
 							onChange={() => {}}
 							comments={annotations?.comments}
 							altText={annotations?.altText}
@@ -817,9 +904,22 @@ function Book({ view }: { view: BookView }): ReactElement {
 	 *  racing a still-in-flight commit. */
 	const bookDraftRef = useRef<string | null>(null);
 	const bookCommitQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+	/** A real, confirmed gap against `script-view.tsx`'s own `commit` (see
+	 *  that function's doc comment — this is a straight port of its `.catch`
+	 *  reasoning, which this file never had): without swallowing a failed
+	 *  run's rejection ON THE QUEUE ITSELF, `bookCommitQueueRef.current`
+	 *  stays a REJECTED promise the moment any single `editBookAndSync` call
+	 *  throws (e.g. `processFrontMatter` racing another write) — and since
+	 *  `.then()` on an already-rejected promise never runs its callback, that
+	 *  one failure would silently wedge EVERY edit queued after it for the
+	 *  rest of this `Book` component's lifetime, with nothing visible to the
+	 *  user beyond "my edits stopped landing." */
 	const queueBookEdit = (apply: (text: string) => string | null) => {
 		if (!project) return;
-		bookCommitQueueRef.current = bookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
+		const run = bookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
+		bookCommitQueueRef.current = run.catch((e) => {
+			console.error('Loom Loom: could not commit a book edit', e);
+		});
 	};
 	const commitBookDraft = () => {
 		const draft = bookDraftRef.current;
@@ -1463,9 +1563,9 @@ function Book({ view }: { view: BookView }): ReactElement {
 										{group.map((act) => (
 											<div key={act.path} className="loom-field loom-field-sep">
 												<span className="loom-field-label">
-													<button className="loom-subloc-link" onClick={() => view.openEntity(act.path)}>
-														{act.name}
-													</button>
+													{/* Plain, non-interactive text — see `ActChapterBlocks`'s own
+													    chapter-title span for the full reasoning. */}
+													<span className="loom-subloc-link">{act.name}</span>
 												</span>
 												<ActChapterBlocks
 													plugin={plugin}
@@ -1473,7 +1573,6 @@ function Book({ view }: { view: BookView }): ReactElement {
 													chapters={chaptersOf(act)}
 													names={linkNames}
 													onOpenLink={openLinkTarget}
-													onOpenChapter={(path) => view.openEntity(path)}
 													emptyMessage={
 														<div className="loom-attendance-empty">
 															{t('view.entity.script.noChaptersYetPre')}<code># {act.name}</code>{t('view.entity.script.noChaptersYetPost')}

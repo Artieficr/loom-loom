@@ -8,7 +8,48 @@
  * timeline and page code addresses them through `roleType`/`roleOf` and never
  * by name.
  */
+import { Platform } from 'obsidian';
 import { LocaleKey, t } from './i18n';
+
+/** The Ctrl/Cmd+click-to-open hint shown on script/prose CM6 decorations
+ *  (`fountain-field.tsx`'s scene/act/character/entity links,
+ *  `markdown-field.tsx`'s Book Act/Chapter heading links) — one shared
+ *  string rather than a different sentence per entity kind, and `Platform.
+ *  isMacOS` (the API's own documented use case: "detect whether to use
+ *  command-based hotkeys vs ctrl-based hotkeys") picks the modifier name
+ *  that's actually on the user's keyboard instead of always spelling out
+ *  both. Lives here rather than common.tsx specifically to avoid a real
+ *  import cycle: common.tsx already imports script-view.tsx/book-view.tsx,
+ *  which import fountain-field.tsx/markdown-field.tsx — a constant those
+ *  two fields needed would have closed the loop back through common.tsx.
+ *
+ *  These land as a plain HTML attribute on a CM6 `Decoration.mark`, not a
+ *  real DOM element `setTooltip` could be called on directly — but
+ *  Obsidian's `setTooltip`/`Component.setTooltip` don't do anything magic
+ *  per element either: confirmed against the real `app.js`, they just set
+ *  `aria-label` (+ optional `data-tooltip-*` position/delay attributes),
+ *  and a single delegated `pointerover`/`pointerout` listener registered on
+ *  `document.body` at startup (matching `[aria-label]`) shows the styled
+ *  tooltip for ANY element carrying that attribute, application-wide. So
+ *  each call site just sets `'aria-label': CLICK_TO_OPEN_TOOLTIP` directly
+ *  in its own decoration attributes — instead of the browser-native
+ *  `title`, which renders its own unstyled tooltip that bypasses this
+ *  mechanism entirely — and picks up the plugin's normal tooltip styling
+ *  for free, no imperative DOM-walking needed. */
+export const CLICK_TO_OPEN_TOOLTIP = t('common.clickToOpen', { key: Platform.isMacOS ? 'Cmd' : 'Ctrl' });
+
+/** Every call site above spreads this instead of writing `'aria-label':
+ *  CLICK_TO_OPEN_TOOLTIP` alone — `data-tooltip-delay` is the OTHER half of
+ *  the same real `app.js` mechanism (`Ev`/`bv`, see the doc comment on
+ *  `CLICK_TO_OPEN_TOOLTIP`): Obsidian's own default hover delay is a flat
+ *  `1e3` (1000ms, confirmed against `app.js`'s own `lv` constant) — fine
+ *  for a rarely-needed tooltip, but this ONE fires on every scene/act/
+ *  character/entity link a script or book is full of, so half the wait
+ *  (500ms) reads as noticeably snappier without going so low it flickers
+ *  open on an incidental pass-through. Value is a STRING — it lands as a
+ *  literal HTML attribute, and `Ev`'s own read does `parseInt(...)` on
+ *  whatever's there. */
+export const CLICK_TO_OPEN_ATTRS = { 'aria-label': CLICK_TO_OPEN_TOOLTIP, 'data-tooltip-delay': '500' };
 
 export const ENTITY_TYPES = [
 	'character',
@@ -243,6 +284,23 @@ export const FM = {
 	 *  section line — the Writer/Prose analogue of `sceneId`. Ties this note
 	 *  to its slice of the Book file, surviving a rename/reorder. */
 	chapterId: 'loomChapterId',
+	/** Chapters only: links to the Characters named via a plain `[[...]]`
+	 *  wikilink anywhere in this chapter's own text — the Writer/Prose
+	 *  analogue of `sceneCast`, just reading Prose's own native wikilink
+	 *  syntax instead of Fountain's `@[...]`. Visible, so the cast connects
+	 *  in the graph. */
+	chapterCast: 'loomChapterCast',
+	/** Chapters only: links to the Factions named via `[[...]]` in this
+	 *  chapter's text. Visible, so they connect in the graph. */
+	chapterFactions: 'loomChapterFactions',
+	/** Chapters only: links to the Items named via `[[...]]` in this
+	 *  chapter's text. Visible, so they connect in the graph. */
+	chapterItems: 'loomChapterItems',
+	/** Chapters only: links to Locations named via `[[...]]` in this
+	 *  chapter's text — unlike a Scene, a Chapter has no heading location of
+	 *  its own to exclude, so every linked location is a "mention". Visible,
+	 *  so they connect in the graph. */
+	chapterMentionedLocations: 'loomChapterMentionedLocations',
 	/** Timeline definition files. */
 	timelineTypes: 'loomTypes',
 	/** Loom-managed creation timestamp (ISO 8601). Authoritative over the
@@ -496,6 +554,19 @@ export interface EntityRecord {
 	chapterAct: string;
 	/** Chapters: the `[[loom:<id>]]` marker on their Book section line. */
 	chapterId: string;
+	/** Chapters: linkpaths of the Characters named via a plain `[[...]]`
+	 *  wikilink anywhere in this chapter's text. Visible links, so the cast
+	 *  connects in the graph. */
+	chapterCast: string[];
+	/** Chapters: linkpaths of the Factions named via `[[...]]` in this
+	 *  chapter's text. Visible links, so they connect in the graph. */
+	chapterFactions: string[];
+	/** Chapters: linkpaths of the Items named via `[[...]]` in this chapter's
+	 *  text. Visible links, so they connect in the graph. */
+	chapterItems: string[];
+	/** Chapters: linkpaths of Locations named via `[[...]]` in this
+	 *  chapter's text. Visible links, so they connect in the graph. */
+	chapterMentionedLocations: string[];
 	created: number;
 	modified: number;
 }
@@ -550,6 +621,10 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		actId: '',
 		chapterAct: '',
 		chapterId: '',
+		chapterCast: [],
+		chapterFactions: [],
+		chapterItems: [],
+		chapterMentionedLocations: [],
 		created: 0,
 		modified: 0,
 	};
