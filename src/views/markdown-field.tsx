@@ -1,9 +1,8 @@
-import { EditorState, Facet, Prec, StateEffect } from '@codemirror/state';
+import { EditorState, Facet, Prec } from '@codemirror/state';
 import {
 	Decoration,
 	DecorationSet,
 	EditorView,
-	GutterMarker,
 	ViewPlugin,
 	ViewUpdate,
 	WidgetType,
@@ -18,13 +17,21 @@ import {
 	autocompletion,
 	completionKeymap,
 } from '@codemirror/autocomplete';
-import { App, Menu, Notice, Scope, setIcon } from 'obsidian';
+import { App, Menu, Notice, Scope } from 'obsidian';
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { t } from '../i18n';
 import { findAnnotationSpans, newSceneId } from '../fountain';
 import { CLICK_TO_OPEN_ATTRS } from '../types';
 import type { AltTextEntry, CommentEntry } from './script-notes';
 import type { LinkOption } from './link-textarea';
+import {
+	AnnotationGutterItem,
+	AnnotationGutterMarker,
+	isUnresolvedComment,
+	partiallyOverlaps,
+	refreshAnnotations,
+	scrollWithinEditor,
+} from './annotation-cm6';
 
 /**
  * Obsidian-flavored live-preview field for the Notes/Description boxes: a
@@ -180,78 +187,6 @@ class HrWidget extends WidgetType {
 		const el = view.dom.doc.body.createEl('hr', { cls: 'loom-md-hr' });
 		el.detach();
 		return el;
-	}
-}
-
-/** True when `[from, to)` partially overlaps `[sFrom, sTo)` — neither
- *  disjoint, nested inside it, nor fully surrounding it. Mirrors
- *  `fountain-field.tsx`'s own helper of the same name/purpose — small and
- *  self-contained enough to duplicate rather than share across the two
- *  independent CM6 fields. */
-function partiallyOverlaps(from: number, to: number, sFrom: number, sTo: number): boolean {
-	const disjoint = to <= sFrom || from >= sTo;
-	const nestedIn = from >= sFrom && to <= sTo;
-	const surrounds = from <= sFrom && to >= sTo;
-	return !(disjoint || nestedIn || surrounds);
-}
-
-/** A comment span is "unresolved" (needs attention, gets the persistent
- *  tint) when its thread has anything not yet checked off, or no replies at
- *  all — alt-text spans have no resolved concept. Mirrors
- *  `fountain-field.tsx`'s own helper. */
-function isUnresolvedComment(kind: 'comment' | 'alt', entries: CommentEntry[]): boolean {
-	return kind === 'comment' && !(entries.length > 0 && entries.every((e) => e.resolved));
-}
-
-/** Dispatched (as a no-op transaction's sole effect) whenever the
- *  `comments`/`altText`/`highlightedAnnotationId` props change without a
- *  document edit (e.g. a comment's resolved state toggling in the popover) —
- *  mirrors `fountain-field.tsx`'s own effect of the same name. */
-const refreshAnnotations = StateEffect.define<null>();
-
-/** One gutter row's worth of comment/alt-text icons — `MarkdownField`'s
- *  opt-in `annotationGutter` prop. Mirrors `fountain-field.tsx`'s own
- *  `AnnotationGutterItem`/`AnnotationGutterMarker` exactly (same shape, same
- *  icon choices), duplicated here rather than shared since the two fields'
- *  CM6 setups are otherwise independent. */
-interface AnnotationGutterItem {
-	kind: 'comment' | 'alt';
-	id: string;
-	unresolved: boolean;
-	highlighted: boolean;
-}
-
-class AnnotationGutterMarker extends GutterMarker {
-	constructor(private items: AnnotationGutterItem[]) {
-		super();
-	}
-	eq(other: GutterMarker): boolean {
-		if (!(other instanceof AnnotationGutterMarker)) return false;
-		if (other.items.length !== this.items.length) return false;
-		return this.items.every((it, i) => {
-			const o = other.items[i];
-			return o.kind === it.kind && o.id === it.id && o.unresolved === it.unresolved && o.highlighted === it.highlighted;
-		});
-	}
-	toDOM(view: EditorView): Node {
-		// `view.dom.doc.body` (not the bare global `document`) — pop-out-window
-		// safe, mirrors this file's own widgets and `fountain-field.tsx`'s
-		// identical gutter marker; detached before returning since it's never
-		// meant to live under `<body>` itself.
-		const wrap = view.dom.doc.body.createSpan({ cls: 'loom-md-gutter-icons' });
-		wrap.detach();
-		for (const it of this.items) {
-			const btn = wrap.createSpan({
-				cls: it.highlighted ? 'loom-md-gutter-icon loom-md-gutter-icon-highlight' : 'loom-md-gutter-icon',
-			});
-			btn.dataset.loomAnnotationId = it.id;
-			btn.dataset.loomAnnotationKind = it.kind;
-			setIcon(
-				btn,
-				it.kind === 'comment' ? (it.unresolved ? 'message-square-dot' : 'message-square') : 'arrow-right-left'
-			);
-		}
-		return wrap;
 	}
 }
 
@@ -716,8 +651,16 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	 *  given screen rect. Also called in `readOnly` mode (pure read). */
 	onOpenComment?: (id: string, anchorRect: DOMRect) => void;
 	/** An alt-text span was left-clicked — cycle to the next option. Not
-	 *  called in `readOnly` mode. */
-	onCycleAlt?: (id: string) => void;
+	 *  called in `readOnly` mode. `outgoingLiveText` is whatever the currently
+	 *  active option's span actually contains in the LIVE document at the
+	 *  moment of the swap — the active option's wording is ordinarily edited
+	 *  by hand directly in the text (see fountain.ts's own architecture note),
+	 *  and this field has no imperative handle a caller could otherwise use to
+	 *  read it back before the swap discards it; only differs from the
+	 *  sidecar's own stored text for that option when such a hand-edit hasn't
+	 *  been persisted yet, mirroring `script-view.tsx`'s own
+	 *  `syncOutgoingAltOption`/`liveAltSpanText` pair for the same reason. */
+	onCycleAlt?: (id: string, outgoingLiveText: string) => void;
 	/** An alt-text span was right-clicked — open its option picker
 	 *  (`AltTextModal`, project.ts). Not called in `readOnly` mode. */
 	onOpenAltMenu?: (id: string) => void;
@@ -855,12 +798,24 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 				const nextIndex = (entry.activeIndex + 1) % entry.options.length;
 				const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'alt' && s.id === id);
 				if (span) {
+					// Read the CURRENTLY active option's live text before swapping
+					// away from it — a hand-edit typed straight into it is real
+					// document text the sidecar may not have caught up with, and
+					// the swap below is about to overwrite it with the next
+					// option's wording. `onCycleAlt`'s caller persists this back
+					// into the sidecar's own copy before advancing `activeIndex`.
+					const outgoingLiveText = view.state.doc.sliceString(span.contentFrom, span.contentTo);
 					view.dispatch({
 						changes: { from: span.contentFrom, to: span.contentTo, insert: entry.options[nextIndex] },
 					});
+					onCycleAltRef.current?.(id, outgoingLiveText);
+					return;
 				}
 			}
-			onCycleAltRef.current?.(id);
+			// Nothing to cycle (one option, or no live span found) — the
+			// caller's own handler already no-ops on this same condition, so
+			// the text passed through here is never actually read.
+			onCycleAltRef.current?.(id, '');
 		};
 		// Rendered wikilink click, then Ctrl/Cmd+click on a heading — middle
 		// opens a link in a new tab. **Deliberately NOT a click target for
@@ -1066,11 +1021,11 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 								highlighted: s.id === highlightedAnnotationIdRef.current,
 							};
 						});
-						return new AnnotationGutterMarker(items);
+						return new AnnotationGutterMarker('loom-md', items);
 					},
 					lineMarkerChange: (update) =>
 						update.docChanged || update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations))),
-					initialSpacer: () => new AnnotationGutterMarker([]),
+					initialSpacer: () => new AnnotationGutterMarker('loom-md', []),
 					domEventHandlers: {
 						click: (gutterView, line, event) => {
 							const target = event.target instanceof Element ? event.target : null;
@@ -1218,13 +1173,11 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 			sync() {
 				// Mirrors the guard `fountain-field.tsx`'s own `sync()` needed for a
 				// real, reported leak: `scheduleSync`'s callback already checks
-				// `destroyed`, but this field's `fountain-field.tsx` counterpart is
-				// also called directly from an OUTLIVING `document`-level scroll
-				// listener, which could still fire after `destroy()` had already run
-				// and re-create handle spans nothing would ever clean up again. This
-				// field has no such external caller today, but the check costs
-				// nothing and keeps the two implementations' safety invariants in
-				// sync, same as everywhere else they're deliberately mirrored.
+				// `destroyed`, but this is ALSO called directly from the outer
+				// `document`-level scroll listener registered alongside view
+				// creation below, which could still fire after `destroy()` had
+				// already run and re-create handle spans nothing would ever clean
+				// up again.
 				if (this.destroyed) return;
 				const view = this.view;
 				// Mirrors `fountain-field.tsx`'s own two extra `sync()` guards (see
@@ -1327,6 +1280,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 							EditorView.editable.of(false),
 							plainLinksFacet.of(plainLinks ?? false),
 							EditorView.lineWrapping,
+							scrollWithinEditor,
 							cmPlaceholder(placeholder ?? ''),
 							livePreview,
 							annotationDecorations,
@@ -1349,6 +1303,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 					: [
 							history(),
 							EditorView.lineWrapping,
+							scrollWithinEditor,
 							cmPlaceholder(placeholder ?? ''),
 							livePreview,
 							annotationDecorations,
@@ -1397,7 +1352,38 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 			}),
 		});
 		viewRef.current = view;
+		// Mirrors `fountain-field.tsx`'s own outer-page-scroll tracking — a real,
+		// previously-missing gap: `AnnotationHandlesOverlay`'s own `update()`
+		// only re-syncs handle positions on CM6-internal viewport/geometry
+		// changes (the editor's OWN scroll), never the OUTER page scrolling the
+		// whole editor box around on screen, which CM6 has no reason to know or
+		// care about — without this, a comment span's drag handles could sit at
+		// stale screen coordinates whenever something outside the editor itself
+		// scrolled. Only wired when the field is actually editable —
+		// `annotationHandlesOverlay` is only mounted into the extensions array
+		// in that branch above, so `view.plugin(...)` would always return
+		// `undefined` here otherwise. Same capture-phase "any scroll, anywhere"
+		// listener the comment popover's own scroll-tracking uses, and the same
+		// `setTimeout`-not-`requestAnimationFrame` deferral `scheduleSync`
+		// needs: a native 'scroll' event can fire SYNCHRONOUSLY from inside
+		// CM6's own scroll-into-view machinery, and a capture-phase listener
+		// runs nested inside that same call stack — squarely inside the same
+		// "reading layout isn't allowed during an update" window `scheduleSync`
+		// exists to dodge (confirmed by a live crash in `fountain-field.tsx`'s
+		// own history); `requestAnimationFrame` doesn't reliably escape it,
+		// since CM6 schedules its own internal measure work via rAF too.
+		let scrollSyncQueued = false;
+		const onAnyScroll = () => {
+			if (scrollSyncQueued) return;
+			scrollSyncQueued = true;
+			view.dom.win.setTimeout(() => {
+				scrollSyncQueued = false;
+				view.plugin(annotationHandlesOverlay)?.sync();
+			}, 0);
+		};
+		if (!readOnly) document.addEventListener('scroll', onAnyScroll, true);
 		return () => {
+			if (!readOnly) document.removeEventListener('scroll', onAnyScroll, true);
 			popScope();
 			// Explicit, not relying solely on `destroy()` triggering CM6's own
 			// `focusChanged` update via the native DOM blur a detached

@@ -185,9 +185,18 @@ export function findStrayAnnotationMarkers(text: string): { from: number; to: nu
 export function cleanAnnotationMarkers(text: string): { text: string; changed: boolean } {
 	const strays = findStrayAnnotationMarkers(text);
 	if (strays.length === 0) return { text, changed: false };
-	let next = text;
-	for (const s of strays) next = next.slice(0, s.from) + next.slice(s.to);
-	return { text: next, changed: true };
+	// One pass, front-to-back, collecting the kept fragments between strays —
+	// `strays` itself is sorted back-to-front (see findStrayAnnotationMarkers),
+	// so walk it in reverse here to visit them in document order.
+	const kept: string[] = [];
+	let cursor = 0;
+	for (let i = strays.length - 1; i >= 0; i--) {
+		const s = strays[i];
+		kept.push(text.slice(cursor, s.from));
+		cursor = s.to;
+	}
+	kept.push(text.slice(cursor));
+	return { text: kept.join(''), changed: true };
 }
 
 /** Marker ids currently backed by a COMPLETE pair — the annotation
@@ -543,7 +552,7 @@ export function parseSceneHeading(rawLine: string): SceneHeadingParts {
 
 	// Production scene number, at the END of the line: `INT. HOUSE - DAY #7#`.
 	let sceneNumber = '';
-	const numMatch = /#([^#\s][^#]*)#\s*$/.exec(line);
+	const numMatch = SCENE_NUMBER_RE.exec(line);
 	if (numMatch) {
 		sceneNumber = numMatch[1].trim();
 		line = line.slice(0, numMatch.index).trim();
@@ -581,6 +590,7 @@ export function renderSceneHeading(parts: SceneHeadingParts): string {
 }
 
 const CHARACTER_EXT_RE = /\(([^)]*)\)\s*\^?\s*$/;
+const SCENE_NUMBER_RE = /#([^#\s][^#]*)#\s*$/;
 
 /** Whether a line reads as a character cue: uppercase, and carrying a letter. */
 function looksLikeCharacter(line: string): boolean {
@@ -780,7 +790,7 @@ export function parseFountain(text: string): ParsedScript {
 		// Page break: three or more `=`, optionally carrying a hidden loom id
 		// (only ones recognized as sitting BETWEEN acts ever get one — see
 		// the `pageBreaks` derivation below). Checked before synopsis, `=`.
-		if (/^={3,}$/.test(cls.replace(LOOM_ID_RE_G, '').trim())) {
+		if (PAGE_BREAK_RE.test(cls.replace(LOOM_ID_RE_G, '').trim())) {
 			elements.push({ type: 'page-break', text: '', line: i, loomId: readLoomId(rawLine) });
 			i++;
 			continue;
@@ -927,6 +937,10 @@ export function parseFountain(text: string): ParsedScript {
 	// automatically, which is the whole point.
 	const scenes: ParsedScene[] = [];
 	const sectionStack: { level: number; text: string; loomId: string | null; branchGroup: string | null }[] = [];
+	// Built once rather than `sections.find(...)` per section element below —
+	// `sections` was already fully collected in the tokenizer pass above, so
+	// re-scanning it per element would be an avoidable O(sections²).
+	const sectionsByLine = new Map(sections.map((s) => [s.line, s]));
 	let usedLines = 0;
 	let current: ParsedScene | null = null;
 
@@ -943,7 +957,7 @@ export function parseFountain(text: string): ParsedScript {
 			while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].level >= (element.level ?? 1)) {
 				sectionStack.pop();
 			}
-			const sec = sections.find((s) => s.line === element.line);
+			const sec = sectionsByLine.get(element.line);
 			sectionStack.push({
 				level: element.level ?? 1,
 				text: element.text,
@@ -1039,24 +1053,36 @@ export function parseFountain(text: string): ParsedScript {
  * lose. It only ever ADDS: an existing id is never changed or removed, so the
  * operation is idempotent and safe to run on every load.
  */
-/** Every loom id currently in use anywhere in the script — scenes, sections
- *  (acts and branch-tagged sub-sections), and act-boundary page
- *  breaks all share one `[[loom:…]]` namespace, so any op that's about to
- *  hand out a fresh id has to check against all three first. */
-function allLoomIds(parsed: ParsedScript): Set<string> {
+/** Every loom id anywhere across the given groups (scenes/sections/page
+ *  breaks, or prose's acts/chapters/page breaks — anything sharing the one
+ *  `[[loom:…]]` namespace within its own document) — shared by fountain.ts's
+ *  `allLoomIds` and prose.ts's `allBookLoomIds` so a fresh id always checks
+ *  against every group at once, whichever format it's issued for. */
+export function collectLoomIds(...groups: { loomId: string | null }[][]): Set<string> {
 	return new Set(
-		[...parsed.scenes, ...parsed.sections, ...parsed.pageBreaks]
+		groups
+			.flat()
 			.map((s) => s.loomId)
 			.filter((id): id is string => id !== null)
 	);
 }
 
+/** Every loom id currently in use anywhere in the script — scenes, sections
+ *  (acts and branch-tagged sub-sections), and act-boundary page
+ *  breaks all share one `[[loom:…]]` namespace, so any op that's about to
+ *  hand out a fresh id has to check against all three first. */
+function allLoomIds(parsed: ParsedScript): Set<string> {
+	return collectLoomIds(parsed.scenes, parsed.sections, parsed.pageBreaks);
+}
+
 /** A fresh id guaranteed not to collide with anything in `seen` —
  *  `newSceneId()`'s own collision-resistance is already high, but every id
- *  already in the script is a hard constraint regardless (a genuine
+ *  already in the document is a hard constraint regardless (a genuine
  *  duplicate would silently conflate two different things), so every
- *  id-issuing op re-rolls against the script's actual current ids. */
-function freshSceneId(seen: Set<string>): string {
+ *  id-issuing op re-rolls against the document's actual current ids. Shared
+ *  by fountain.ts (scenes/sections/page breaks) and prose.ts (acts/chapters/
+ *  page breaks) — the collision check is format-agnostic. */
+export function freshLoomId(seen: Set<string>): string {
 	let id = newSceneId();
 	while (seen.has(id)) id = newSceneId();
 	return id;
@@ -1085,7 +1111,7 @@ export function ensureSceneIds(text: string): { text: string; changed: boolean }
 	const lines = text.split(/\r?\n/);
 	const seen = allLoomIds(parsed);
 	for (const line of missing) {
-		const id = freshSceneId(seen);
+		const id = freshLoomId(seen);
 		seen.add(id);
 		lines[line] = `${lines[line].trimEnd()} [[loom:${id}]]`;
 	}
@@ -1312,6 +1338,11 @@ export const ORPHAN_WORDS = new Set([
 
 const ORPHAN_PAIR_RE = /\b([A-Za-z]+)( )([A-Za-z]+)/g;
 
+/** A page-break line: three or more `=`, nothing else once a loom id marker
+ *  is stripped. Shared with prose.ts's own page-break recognition (identical
+ *  rule, just applied to a different heading grammar). */
+export const PAGE_BREAK_RE = /^={3,}$/;
+
 /**
  * Finds every `<glue word> <next word>` run and returns the whole pair's
  * span (word, the space, and the following word) \u2014 for a caller that wants
@@ -1340,6 +1371,23 @@ export function preventOrphans(text: string): string {
 
 // --- Import ----------------------------------------------------------------
 
+/** Groups `pool` entries into order-preserving queues keyed by their
+ *  normalized (trim + lowercase) heading/title — lets `reattachSceneIds`/
+ *  `reattachSectionIds` claim the next unclaimed entry for a given heading in
+ *  O(1) (`queue.shift()`) instead of a linear `pool.find` scan re-normalizing
+ *  every remaining candidate for every incoming scene/section (O(n·m) over a
+ *  reimport's full scene/section count, the exact case where this runs). */
+function buildReattachQueues<T>(pool: T[], keyOf: (item: T) => string): Map<string, T[]> {
+	const queues = new Map<string, T[]>();
+	for (const item of pool) {
+		const key = keyOf(item).trim().toLowerCase();
+		const queue = queues.get(key);
+		if (queue) queue.push(item);
+		else queues.set(key, [item]);
+	}
+	return queues;
+}
+
 /**
  * Re-attaches an incoming script's scenes to the ids they had before.
  *
@@ -1363,15 +1411,14 @@ export function reattachSceneIds(
 	const lines = incoming.split(/\r?\n/);
 	const taken = new Set(parsed.scenes.map((s) => s.loomId).filter((id): id is string => id !== null));
 	const pool = known.filter((k) => !taken.has(k.id));
-	const used = new Set<string>();
+	const queues = buildReattachQueues(pool, (k) => k.heading);
 
 	let matched = 0;
 	for (const scene of parsed.scenes) {
 		if (scene.loomId !== null) continue;
 		const heading = scene.heading.trim().toLowerCase();
-		const hit = pool.find((k) => !used.has(k.id) && k.heading.trim().toLowerCase() === heading);
+		const hit = queues.get(heading)?.shift();
 		if (!hit) continue;
-		used.add(hit.id);
 		matched++;
 		lines[scene.line] = `${lines[scene.line].trimEnd()} [[loom:${hit.id}]]`;
 	}
@@ -1405,15 +1452,14 @@ export function reattachSectionIds(
 		parsed.sections.map((s) => s.loomId).filter((id): id is string => id !== null)
 	);
 	const pool = known.filter((k) => !taken.has(k.id));
-	const used = new Set<string>();
+	const queues = buildReattachQueues(pool, (k) => k.title);
 
 	let matched = 0;
 	for (const section of parsed.sections) {
 		if (section.level !== 1 || section.loomId !== null) continue;
 		const title = section.text.trim().toLowerCase();
-		const hit = pool.find((k) => !used.has(k.id) && k.title.trim().toLowerCase() === title);
+		const hit = queues.get(title)?.shift();
 		if (!hit) continue;
-		used.add(hit.id);
 		matched++;
 		lines[section.line] = `${lines[section.line].trimEnd()} [[loom:${hit.id}]]`;
 	}
@@ -1554,8 +1600,9 @@ export function sceneEndLine(parsed: ParsedScript, scene: ParsedScene): number {
  *  `reorderBranchGroup`, `rebuildTopLevel`): a captured span often ends with
  *  the blank line that used to separate it from whatever followed, and
  *  re-inserting that verbatim would double up with the blank line each call
- *  site adds back itself. */
-function trimTrailingBlankLines(block: string[]): string[] {
+ *  site adds back itself. Shared by prose.ts, which imports this directly
+ *  rather than duplicating it — the trim itself is format-agnostic. */
+export function trimTrailingBlankLines(block: string[]): string[] {
 	const clean = [...block];
 	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
 	return clean;
@@ -1953,7 +2000,7 @@ export function renameSectionTitle(text: string, sectionId: string, newTitle: st
  */
 export function appendAct(text: string, title: string): string {
 	const parsed = parseFountain(text);
-	const id = freshSceneId(allLoomIds(parsed));
+	const id = freshLoomId(allLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	return `${trimmed}\n\n# ${title.trim()} [[loom:${id}]]\n`;
 }
@@ -1969,7 +2016,7 @@ export function appendAct(text: string, title: string): string {
  */
 export function appendPageBreak(text: string): string {
 	const parsed = parseFountain(text);
-	const id = freshSceneId(allLoomIds(parsed));
+	const id = freshLoomId(allLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	return `${trimmed}\n\n=== [[loom:${id}]]\n`;
 }
@@ -1987,7 +2034,7 @@ export function appendPageBreak(text: string): string {
  */
 export function appendScene(text: string, location: string): string {
 	const parsed = parseFountain(text);
-	const id = freshSceneId(allLoomIds(parsed));
+	const id = freshLoomId(allLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	const heading = location.trim() === '' ? 'NEW LOCATION' : location.trim().toUpperCase();
 	return `${trimmed}\n\nINT. ${heading} - DAY [[loom:${id}]]\n`;

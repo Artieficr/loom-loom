@@ -8,9 +8,10 @@
  * scene headings, character cues, dialogue blocks, transitions) — the whole
  * grammar is two heading levels, `#` for an Act and `##` for a Chapter, each
  * carrying a hidden `[[loom:<id>]]` marker, the exact same non-exporting-note
- * convention Fountain's own `#` sections use (reusing `newSceneId`/
- * `readLoomId`/`stripLoomIds` from fountain.ts directly rather than
- * duplicating them — they're already format-agnostic string utilities).
+ * convention Fountain's own `#` sections use (reusing `readLoomId`,
+ * `collectLoomIds`, `freshLoomId`, `trimTrailingBlankLines`, and
+ * `PAGE_BREAK_RE` from fountain.ts directly rather than duplicating them —
+ * they're already format-agnostic string/id utilities).
  * Everything between headings is opaque prose body text: bold/italic/
  * underline/strikethrough/wikilink markup stays literal here and is only
  * decorated (never tokenized) by `markdown-field.tsx` — no dedicated CM6
@@ -23,7 +24,7 @@
  * plain, undecorated body text.
  */
 
-import { newSceneId, readLoomId } from './fountain';
+import { readLoomId, collectLoomIds, freshLoomId, trimTrailingBlankLines, PAGE_BREAK_RE } from './fountain';
 
 const LOOM_ID_RE_G = /\s*\[\[loom:[A-Za-z0-9]+\]\]/g;
 
@@ -80,7 +81,7 @@ export function parseBook(text: string): ParsedBook {
 			const id = readLoomId(line);
 			acts.push({ title: line.slice(1).replace(LOOM_ID_RE_G, '').trim(), loomId: id, line: i });
 			currentActId = id;
-		} else if (/^={3,}$/.test(line.replace(LOOM_ID_RE_G, '').trim())) {
+		} else if (PAGE_BREAK_RE.test(line.replace(LOOM_ID_RE_G, '').trim())) {
 			let j = i + 1;
 			while (j < lines.length && lines[j].trim() === '') j++;
 			const next = j < lines.length ? lines[j].trim() : '';
@@ -93,23 +94,10 @@ export function parseBook(text: string): ParsedBook {
 
 /** Every loom id currently in use anywhere in the book — acts, chapters, and
  *  page breaks all share one `[[loom:…]]` namespace, so a fresh id has to
- *  check against all three before it's handed out. */
+ *  check against all three before it's handed out. Thin wrapper over
+ *  fountain.ts's shared `collectLoomIds`. */
 function allBookLoomIds(parsed: ParsedBook): Set<string> {
-	return new Set(
-		[...parsed.acts, ...parsed.chapters, ...parsed.pageBreaks]
-			.map((s) => s.loomId)
-			.filter((id): id is string => id !== null)
-	);
-}
-
-/** A fresh id guaranteed not to collide with anything already in the book —
- *  mirrors `freshSceneId` (fountain.ts), re-rolling `newSceneId()` against
- *  the book's own current ids rather than trusting its collision-resistance
- *  alone. */
-function freshBookId(seen: Set<string>): string {
-	let id = newSceneId();
-	while (seen.has(id)) id = newSceneId();
-	return id;
+	return collectLoomIds(parsed.acts, parsed.chapters, parsed.pageBreaks);
 }
 
 /** Normalizes blank lines sitting immediately around an Act/Chapter heading
@@ -172,7 +160,7 @@ export function ensureBookIds(text: string): { text: string; changed: boolean } 
 	const lines = collapsed.text.split(/\r?\n/);
 	const seen = allBookLoomIds(parsed);
 	for (const line of missing) {
-		const id = freshBookId(seen);
+		const id = freshLoomId(seen);
 		seen.add(id);
 		lines[line] = `${lines[line].trimEnd()} [[loom:${id}]]`;
 	}
@@ -209,15 +197,6 @@ function actEndLine(parsed: ParsedBook, act: ParsedAct, totalLines: number): num
 
 function chapterEndLine(parsed: ParsedBook, chapter: ParsedChapter, totalLines: number): number {
 	return nextChapterOrActLine(parsed, chapter.line) ?? totalLines;
-}
-
-/** Drops trailing blank lines off a captured block — shared by every op
- *  below that lifts a chunk of the book out and re-splices it elsewhere,
- *  mirrors fountain.ts's own helper of the same name/purpose. */
-function trimTrailingBlankLines(block: string[]): string[] {
-	const clean = [...block];
-	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
-	return clean;
 }
 
 const WIKILINK_MENTION_RE = /\[\[([^[\]\n|]+)(?:\|[^[\]\n]*)?\]\]/g;
@@ -353,7 +332,7 @@ export function renameBookChapterTitle(text: string, chapterId: string, newTitle
  *  than the note starting orphaned. */
 export function appendBookAct(text: string, title: string): string {
 	const parsed = parseBook(text);
-	const id = freshBookId(allBookLoomIds(parsed));
+	const id = freshLoomId(allBookLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	return `${trimmed}\n\n# ${title.trim()} [[loom:${id}]]\n`;
 }
@@ -364,7 +343,7 @@ export function appendBookAct(text: string, title: string): string {
  *  actless if there's no act yet, same as typing one in by hand. */
 export function appendBookChapter(text: string, title: string): string {
 	const parsed = parseBook(text);
-	const id = freshBookId(allBookLoomIds(parsed));
+	const id = freshLoomId(allBookLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	const heading = title.trim() === '' ? 'Untitled chapter' : title.trim();
 	return `${trimmed}\n\n## ${heading} [[loom:${id}]]\n`;
@@ -378,7 +357,7 @@ export function appendBookChapter(text: string, title: string): string {
  *  same way once the next commit re-parses. */
 export function appendBookPageBreak(text: string): string {
 	const parsed = parseBook(text);
-	const id = freshBookId(allBookLoomIds(parsed));
+	const id = freshLoomId(allBookLoomIds(parsed));
 	const trimmed = text.replace(/\s+$/, '');
 	return `${trimmed}\n\n=== [[loom:${id}]]\n`;
 }
