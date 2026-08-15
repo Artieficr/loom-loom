@@ -43,8 +43,8 @@ import { MarkdownField, MarkdownFieldHandle } from './markdown-field';
 import { Icon, ViewShell } from './common';
 import { useIndexVersion } from './hooks';
 import { t } from '../i18n';
-import { findAnnotationSpans } from '../fountain';
-import { CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
+import { cleanAnnotationMarkers, findAnnotationSpans, liveAnnotationIds } from '../fountain';
+import { AltTextEntry, CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
 import { CommentPopover } from './annotation-popover';
 import type { LinkOption } from './link-textarea';
 import type LoomLoomPlugin from '../main';
@@ -340,13 +340,45 @@ export async function editBookAndSync(
 ): Promise<boolean> {
 	const changed = await editBook(plugin, project, (raw) => {
 		const applied = apply(raw);
-		return applied === null ? null : ensureBookIds(applied).text;
+		if (applied === null) return null;
+		// Strips any LONE surviving comment/alt-text marker (a partial delete
+		// took out only one half of a pair) — mirrors `runCommit`'s identical
+		// step in script-view.tsx (fountain.ts's own `cleanAnnotationMarkers` is
+		// format-agnostic, so it applies here unchanged), run before the write
+		// so this write and the sidecar prune below both see the same text.
+		return cleanAnnotationMarkers(ensureBookIds(applied).text).text;
 	});
 	if (changed) {
 		const file = findBookFile(plugin, project);
 		if (file) {
 			const raw = await plugin.app.vault.read(file);
 			await syncActsChapters(plugin, project, parseBook(raw), raw);
+			// Prune the sidecar of any comment/alt-text entry whose marker id
+			// is no longer backed by a live pair in the text that just
+			// landed — mirrors `runCommit`'s identical prune. Without this,
+			// Book never garbage-collected orphaned sidecar entries the way
+			// Script does (deleting a commented/alt-texted span needs no
+			// special handling of its own; this is what actually clears the
+			// now-orphaned sidecar data out afterward).
+			const liveIds = liveAnnotationIds(raw);
+			void mutateScriptNotes(plugin.app, project, (notes) => {
+				let touched = false;
+				const comments = { ...notes.comments };
+				for (const id of Object.keys(comments)) {
+					if (!liveIds.has(id)) {
+						delete comments[id];
+						touched = true;
+					}
+				}
+				const altText = { ...notes.altText };
+				for (const id of Object.keys(altText)) {
+					if (!liveIds.has(id)) {
+						delete altText[id];
+						touched = true;
+					}
+				}
+				return touched ? { ...notes, comments, altText } : notes;
+			});
 		}
 	}
 	return changed;
@@ -491,6 +523,47 @@ async function stripAnnotationMarkerInBook(plugin: LoomLoomPlugin, project: Proj
 	});
 }
 
+/** Reads an alt-text span's CURRENT live text straight off disk — the
+ *  Book-level analogue of `script-view.tsx`'s own `liveAltSpanText`, which
+ *  reads it from React state instead (Script keeps the whole document in
+ *  memory; Book doesn't have an equivalent single source, since a span could
+ *  sit in any chapter's own text). Used only to catch a hand-edit to the
+ *  active option that hasn't reached the sidecar yet before a swap would
+ *  otherwise discard it — see `syncOutgoingBookAltOption`. */
+async function liveBookAltSpanText(plugin: LoomLoomPlugin, project: ProjectDef, id: string): Promise<string | null> {
+	const file = findBookFile(plugin, project);
+	if (!file) return null;
+	// `handleOpenAltMenu` awaits this before opening `AltTextModal` at all —
+	// a transient read failure (e.g. the file vanishing between
+	// `findBookFile` and the read, on a syncing vault) must not leave the
+	// modal permanently unopenable; falling back to `null` here just means
+	// the caller's own `syncOutgoingBookAltOption` no-ops and shows the
+	// sidecar's last-known text instead, same as before this sync existed.
+	try {
+		const raw = await plugin.app.vault.cachedRead(file);
+		const span = findAnnotationSpans(raw).find((s) => s.kind === 'alt' && s.id === id);
+		return span ? raw.slice(span.contentFrom, span.contentTo) : null;
+	} catch (e) {
+		console.error('Loom Loom: could not read the book to sync an alt-text span', e);
+		return null;
+	}
+}
+
+/** Rewrites `entry`'s OUTGOING (currently active) option to match
+ *  `outgoingLiveText` when it differs — the Book-level analogue of
+ *  `script-view.tsx`'s own `syncOutgoingAltOption`. Without this, a hand-edit
+ *  typed directly into the active option's text (the normal way to revise
+ *  one — see fountain.ts's own architecture note) never reaches the sidecar:
+ *  switching to a different option and back later would silently revert the
+ *  edit, restoring the STALE text the sidecar last remembered instead of
+ *  what was actually left on the page. */
+function syncOutgoingBookAltOption(entry: AltTextEntry, outgoingLiveText: string | null): AltTextEntry {
+	if (outgoingLiveText === null || outgoingLiveText === entry.options[entry.activeIndex]) return entry;
+	const options = entry.options.slice();
+	options[entry.activeIndex] = outgoingLiveText;
+	return { ...entry, options };
+}
+
 /**
  * Comments/alternative-text data + handlers for the Book, shared by the
  * Chapter/Act entity page sections and `BookView` itself — one hook rather
@@ -513,6 +586,35 @@ export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef |
 	 *  trusting `scriptNotes.comments[id]` alone, which could still read
 	 *  stale-empty for a reply added moments ago. */
 	const commentsWithNewEntryRef = useRef<Set<string>>(new Set());
+
+	/** `openComment.rect` is a one-time snapshot — without this, scrolling
+	 *  whichever Book/Act/Chapter surface is open left the popover floating
+	 *  in the same screen spot while the commented text scrolled out from
+	 *  under it. Mirrors `script-view.tsx`'s own copy of this effect, but
+	 *  this hook has no single known container ref of its own (it's shared
+	 *  identically by Book and the Act/Chapter sections, each with their own
+	 *  wrapper DOM) — queries `document` for the icon directly and falls back
+	 *  to a plain viewport-visibility check in place of a specific scroll
+	 *  container's bounds. */
+	useEffect(() => {
+		if (!openComment) return;
+		const id = openComment.id;
+		const track = () => {
+			const icon = document.querySelector(`[data-loom-annotation-id="${id}"]`);
+			if (!(icon instanceof HTMLElement)) {
+				setOpenComment(null);
+				return;
+			}
+			const rect = icon.getBoundingClientRect();
+			if (rect.bottom < 0 || rect.top > window.innerHeight) {
+				setOpenComment(null);
+				return;
+			}
+			setOpenComment((prev) => (prev && prev.id === id ? { id, rect } : prev));
+		};
+		document.addEventListener('scroll', track, true);
+		return () => document.removeEventListener('scroll', track, true);
+	}, [openComment?.id]);
 
 	/** A new comment marker was just inserted — mirrors `script-view.tsx`'s
 	 *  own `handleCreateComment` exactly: writes NOTHING to the sidecar.
@@ -651,104 +753,130 @@ export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef |
 
 	/** The click already swapped the document (`markdown-field.tsx`'s own
 	 *  mousedown handler, which has direct access to its own live view) —
-	 *  this only persists the sidecar's `activeIndex`. */
-	const handleCycleAlt = (id: string) => {
+	 *  this persists the sidecar's `activeIndex`, but first reconciles
+	 *  `outgoingLiveText` (the OUTGOING option's actual live document text,
+	 *  read by `cycleAltInPlace` right before the swap overwrote it) against
+	 *  the sidecar's own stored copy for that option — a hand-edit typed
+	 *  straight into the active option (the normal way to edit one, per this
+	 *  feature's own architecture note) would otherwise be silently discarded
+	 *  the moment cycling swaps away from it, since the sidecar never saw it.
+	 *  Mirrors `script-view.tsx`'s own `syncOutgoingAltOption`. */
+	const handleCycleAlt = (id: string, outgoingLiveText: string) => {
 		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (file) => {
 			const entry = file.altText[id];
 			if (!entry || entry.options.length < 2) return file;
-			const activeIndex = (entry.activeIndex + 1) % entry.options.length;
-			return { ...file, altText: { ...file.altText, [id]: { ...entry, activeIndex, acceptedIndex: null } } };
+			const options =
+				outgoingLiveText !== entry.options[entry.activeIndex]
+					? entry.options.map((opt, i) => (i === entry.activeIndex ? outgoingLiveText : opt))
+					: entry.options;
+			const activeIndex = (entry.activeIndex + 1) % options.length;
+			return { ...file, altText: { ...file.altText, [id]: { ...entry, options, activeIndex, acceptedIndex: null } } };
 		});
 	};
 
 	const handleOpenAltMenu = (id: string) => {
 		if (!project) return;
-		const entry = scriptNotes.altText[id];
-		if (!entry) return;
-		new AltTextModal(plugin.app, {
-			options: entry.options,
-			activeIndex: entry.activeIndex,
-			acceptedIndex: entry.acceptedIndex,
-			onDraft: (index) => {
-				void mutateScriptNotes(plugin.app, project, (file) => {
-					const e = file.altText[id];
-					if (!e) return file;
-					return { ...file, altText: { ...file.altText, [id]: { ...e, activeIndex: index, acceptedIndex: null } } };
-				});
-				void replaceAltContentInBook(plugin, project, id, entry.options[index]);
-			},
-			onAccept: (index) => {
-				void mutateScriptNotes(plugin.app, project, (file) => {
-					const e = file.altText[id];
-					if (!e) return file;
-					return { ...file, altText: { ...file.altText, [id]: { ...e, activeIndex: index, acceptedIndex: index } } };
-				});
-				void replaceAltContentInBook(plugin, project, id, entry.options[index]);
-			},
-			onEditOption: (index, newText) => {
-				void mutateScriptNotes(plugin.app, project, (file) => {
-					const e = file.altText[id];
-					if (!e) return file;
-					const options = [...e.options];
-					options[index] = newText;
-					return { ...file, altText: { ...file.altText, [id]: { ...e, options } } };
-				});
-				if (index === entry.activeIndex) void replaceAltContentInBook(plugin, project, id, newText);
-			},
-			onAddOption: (text) => {
-				void mutateScriptNotes(plugin.app, project, (file) => {
-					const e = file.altText[id];
-					if (!e) return file;
-					return { ...file, altText: { ...file.altText, [id]: { ...e, options: [...e.options, text] } } };
-				});
-			},
-			// Deleting down to exactly one remaining option is a real action,
-			// not just another edit — mirrors `script-view.tsx`'s own
-			// `handleDeleteAltOption` exactly: an alt-text span with a single
-			// option has nothing left to alternate BETWEEN, so (same as a
-			// comment thread's own "delete the last reply strips the
-			// markers" behavior) the whole `[[loom-alt:<id>]]` wrapper comes
-			// OUT of the document, leaving the survivor's wording as ordinary
-			// text, and the sidecar entry is dropped entirely rather than
-			// left describing a permanently single-option span. `undefined`
-			// tells `AltTextModal` to close itself — there's nothing left for
-			// it to show.
-			onDeleteOption: async (index) => {
-				if (entry.options.length <= 1) return undefined;
-				const options = entry.options.filter((_, i) => i !== index);
-				if (options.length <= 1) {
-					const survivor = options[0] ?? '';
-					await mutateScriptNotes(plugin.app, project, (file) => {
-						const { [id]: _dropped, ...rest } = file.altText;
-						return { ...file, altText: rest };
+		const entry0 = scriptNotes.altText[id];
+		if (!entry0) return;
+		void (async () => {
+			// The active option's wording is ordinarily edited by hand directly
+			// in the text, not through this modal — read it back off disk once,
+			// up front, so a not-yet-persisted hand-edit is what the modal shows
+			// and acts on rather than the sidecar's own possibly-stale copy. Not
+			// re-read per callback below (Script's own `syncOutgoingAltOption`
+			// can, cheaply, off React state already held in memory; Book has no
+			// such state and a per-click vault read isn't worth it for a modal
+			// that's normally acted on once) — same "essentially never happens
+			// in practice" race every other Book alt-text write already accepts.
+			const outgoingLiveText = await liveBookAltSpanText(plugin, project, id);
+			const entry = syncOutgoingBookAltOption(entry0, outgoingLiveText);
+			new AltTextModal(plugin.app, {
+				options: entry.options,
+				activeIndex: entry.activeIndex,
+				acceptedIndex: entry.acceptedIndex,
+				onDraft: (index) => {
+					void mutateScriptNotes(plugin.app, project, (file) => {
+						const e = file.altText[id];
+						if (!e) return file;
+						const s = syncOutgoingBookAltOption(e, outgoingLiveText);
+						return { ...file, altText: { ...file.altText, [id]: { ...s, activeIndex: index, acceptedIndex: null } } };
 					});
-					// The surviving option's text has to actually BE the live
-					// document content before the wrapper markers come out, or
-					// stripping would leave whichever text happened to be
-					// active (possibly the just-deleted option's) instead of
-					// the survivor's.
-					await replaceAltContentInBook(plugin, project, id, survivor);
-					await stripAnnotationMarkerInBook(plugin, project, id);
-					return undefined;
-				}
-				let activeIndex = entry.activeIndex;
-				let acceptedIndex = entry.acceptedIndex;
-				if (index === activeIndex) activeIndex = Math.min(activeIndex, options.length - 1);
-				else if (index < activeIndex) activeIndex -= 1;
-				if (acceptedIndex !== null) {
-					if (index === acceptedIndex) acceptedIndex = null;
-					else if (index < acceptedIndex) acceptedIndex -= 1;
-				}
-				await mutateScriptNotes(plugin.app, project, (file) => {
-					const e = file.altText[id];
-					if (!e) return file;
-					return { ...file, altText: { ...file.altText, [id]: { id, options, activeIndex, acceptedIndex } } };
-				});
-				if (index === entry.activeIndex) void replaceAltContentInBook(plugin, project, id, options[activeIndex] ?? '');
-				return { options, activeIndex, acceptedIndex };
-			},
-		}).open();
+					void replaceAltContentInBook(plugin, project, id, entry.options[index]);
+				},
+				onAccept: (index) => {
+					void mutateScriptNotes(plugin.app, project, (file) => {
+						const e = file.altText[id];
+						if (!e) return file;
+						const s = syncOutgoingBookAltOption(e, outgoingLiveText);
+						return { ...file, altText: { ...file.altText, [id]: { ...s, activeIndex: index, acceptedIndex: index } } };
+					});
+					void replaceAltContentInBook(plugin, project, id, entry.options[index]);
+				},
+				onEditOption: (index, newText) => {
+					void mutateScriptNotes(plugin.app, project, (file) => {
+						const e = file.altText[id];
+						if (!e) return file;
+						const options = [...e.options];
+						options[index] = newText;
+						return { ...file, altText: { ...file.altText, [id]: { ...e, options } } };
+					});
+					if (index === entry.activeIndex) void replaceAltContentInBook(plugin, project, id, newText);
+				},
+				onAddOption: (text) => {
+					void mutateScriptNotes(plugin.app, project, (file) => {
+						const e = file.altText[id];
+						if (!e) return file;
+						return { ...file, altText: { ...file.altText, [id]: { ...e, options: [...e.options, text] } } };
+					});
+				},
+				// Deleting down to exactly one remaining option is a real action,
+				// not just another edit — mirrors `script-view.tsx`'s own
+				// `handleDeleteAltOption` exactly: an alt-text span with a single
+				// option has nothing left to alternate BETWEEN, so (same as a
+				// comment thread's own "delete the last reply strips the
+				// markers" behavior) the whole `[[loom-alt:<id>]]` wrapper comes
+				// OUT of the document, leaving the survivor's wording as ordinary
+				// text, and the sidecar entry is dropped entirely rather than
+				// left describing a permanently single-option span. `undefined`
+				// tells `AltTextModal` to close itself — there's nothing left for
+				// it to show.
+				onDeleteOption: async (index) => {
+					if (entry.options.length <= 1) return undefined;
+					const options = entry.options.filter((_, i) => i !== index);
+					if (options.length <= 1) {
+						const survivor = options[0] ?? '';
+						await mutateScriptNotes(plugin.app, project, (file) => {
+							const { [id]: _dropped, ...rest } = file.altText;
+							return { ...file, altText: rest };
+						});
+						// The surviving option's text has to actually BE the live
+						// document content before the wrapper markers come out, or
+						// stripping would leave whichever text happened to be
+						// active (possibly the just-deleted option's) instead of
+						// the survivor's.
+						await replaceAltContentInBook(plugin, project, id, survivor);
+						await stripAnnotationMarkerInBook(plugin, project, id);
+						return undefined;
+					}
+					let activeIndex = entry.activeIndex;
+					let acceptedIndex = entry.acceptedIndex;
+					if (index === activeIndex) activeIndex = Math.min(activeIndex, options.length - 1);
+					else if (index < activeIndex) activeIndex -= 1;
+					if (acceptedIndex !== null) {
+						if (index === acceptedIndex) acceptedIndex = null;
+						else if (index < acceptedIndex) acceptedIndex -= 1;
+					}
+					await mutateScriptNotes(plugin.app, project, (file) => {
+						const e = file.altText[id];
+						if (!e) return file;
+						return { ...file, altText: { ...file.altText, [id]: { id, options, activeIndex, acceptedIndex } } };
+					});
+					if (index === entry.activeIndex) void replaceAltContentInBook(plugin, project, id, options[activeIndex] ?? '');
+					return { options, activeIndex, acceptedIndex };
+				},
+			}).open();
+		})();
 	};
 
 	return {
@@ -1149,14 +1277,27 @@ function Book({ view }: { view: BookView }): ReactElement {
 	const acts = plugin.indexer
 		.getAll('act', project.root)
 		.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
-	const chaptersOf = (act: EntityRecord): EntityRecord[] =>
-		plugin.indexer
-			.getAll('chapter', project.root)
-			.filter((c) => c.chapterAct !== '' && plugin.indexer.resolve(c.chapterAct, c.path)?.path === act.path)
-			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
-	const actlessChapters = plugin.indexer
-		.getAll('chapter', project.root)
-		.filter((c) => c.chapterAct === '' || !plugin.indexer.resolve(c.chapterAct, c.path));
+	// Grouped in ONE pass over every chapter (below), rather than `chaptersOf`
+	// re-scanning + re-resolving the whole chapter list per act — this used to
+	// run once per act per render (the Outline/Preview JSX below calls
+	// `chaptersOf(act)` per act row) AND again per act inside the search-match
+	// loop just below, an avoidable O(acts × chapters) with a real
+	// `plugin.indexer.resolve` (Obsidian `getFirstLinkpathDest`) call per
+	// chapter each time, unmemoized.
+	const chaptersByAct = new Map<string, EntityRecord[]>();
+	const actlessChapters: EntityRecord[] = [];
+	for (const c of plugin.indexer.getAll('chapter', project.root)) {
+		const actPath = c.chapterAct !== '' ? plugin.indexer.resolve(c.chapterAct, c.path)?.path : undefined;
+		if (!actPath) {
+			actlessChapters.push(c);
+			continue;
+		}
+		const list = chaptersByAct.get(actPath);
+		if (list) list.push(c);
+		else chaptersByAct.set(actPath, [c]);
+	}
+	for (const list of chaptersByAct.values()) list.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+	const chaptersOf = (act: EntityRecord): EntityRecord[] => chaptersByAct.get(act.path) ?? [];
 	const orphans = parsed ? orphanedBookEntities(plugin, project, parsed) : { acts: [], chapters: [] };
 
 	/** The Outline's own top-level list — every Act AND every act-boundary
