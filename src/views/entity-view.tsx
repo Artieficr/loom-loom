@@ -57,6 +57,7 @@ import {
 	QuestTagChip,
 	Truncated,
 	buildEntityLinkNames,
+	buildLinkTargetLabels,
 	locationLabel,
 	mainLocationFirst,
 	openCreateLinkEntity,
@@ -289,6 +290,9 @@ function HubNoteText({
 	app,
 	initial,
 	names,
+	linkLabels,
+	ambientSuggestDismissMs,
+	ambientExcludeTarget,
 	onOpenLink,
 	onCreateEntity,
 	onCommit,
@@ -296,6 +300,9 @@ function HubNoteText({
 	app: App;
 	initial: string;
 	names: LinkOption[];
+	linkLabels?: Map<string, string>;
+	ambientSuggestDismissMs?: number;
+	ambientExcludeTarget?: string;
 	onOpenLink: (target: string) => void;
 	onCreateEntity?: (name: string, insert: (linkInsert: string) => void) => void;
 	onCommit: (value: string) => void;
@@ -308,6 +315,9 @@ function HubNoteText({
 			app={app}
 			value={value}
 			names={names}
+			linkLabels={linkLabels}
+			ambientSuggestDismissMs={ambientSuggestDismissMs}
+			ambientExcludeTarget={ambientExcludeTarget}
 			onOpenLink={onOpenLink}
 			onCreateEntity={onCreateEntity}
 			onChange={(v) => {
@@ -1252,6 +1262,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	// `target|short name` so the raw link resolves AND reads well.
 	const linkNames = useMemo(
 		() => (project ? buildEntityLinkNames(plugin, project) : []),
+		[plugin, project, version]
+	);
+	const linkLabels = useMemo(
+		() => (project ? buildLinkTargetLabels(plugin, project) : new Map<string, string>()),
 		[plugin, project, version]
 	);
 
@@ -2985,7 +2999,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							<HubNoteText
 								app={plugin.app}
 								initial={item.description}
-								names={linkNames}
+								names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 								onOpenLink={openLinkTarget}
 								onCreateEntity={createLinkEntity}
 								onCommit={(v) => writeItemDescription(item, v)}
@@ -4026,7 +4040,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<MarkdownField
 						app={plugin.app}
 						value={note.text}
-						names={linkNames}
+						names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 						onOpenLink={openLinkTarget}
 						onCreateEntity={createLinkEntity}
 						onChange={(v) => setNote({ text: v }, false)}
@@ -4424,7 +4438,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<HubNoteText
 						app={plugin.app}
 						initial={en.text}
-						names={linkNames}
+						names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 						onOpenLink={openLinkTarget}
 						onCreateEntity={createLinkEntity}
 						onCommit={(v) =>
@@ -5066,7 +5080,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<MarkdownField
 						app={plugin.app}
 						value={body ?? ''}
-						names={linkNames}
+						names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 						onOpenLink={openLinkTarget}
 						onCreateEntity={createLinkEntity}
 						onChange={(v) => {
@@ -5385,7 +5399,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							<MarkdownField
 								app={plugin.app}
 								value={reward}
-								names={linkNames}
+								names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 								placeholder={t('common.notSpecified')}
 								onOpenLink={openLinkTarget}
 								onCreateEntity={createLinkEntity}
@@ -5407,7 +5421,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<MarkdownField
 						app={plugin.app}
 						value={description === '' ? copyOriginal?.description ?? '' : description}
-						names={linkNames}
+						names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 						onOpenLink={openLinkTarget}
 						onCreateEntity={createLinkEntity}
 						onChange={(v) => {
@@ -5421,7 +5435,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							<MarkdownField
 								app={plugin.app}
 								value={copyOriginal?.description ?? ''}
-								names={linkNames}
+								names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 								onOpenLink={openLinkTarget}
 								onChange={() => undefined}
 								readOnly
@@ -5485,7 +5499,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				<MarkdownField
 					app={plugin.app}
 					value={description}
-					names={linkNames}
+					names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 					onOpenLink={openLinkTarget}
 					onCreateEntity={createLinkEntity}
 					placeholder={t('view.entity.common.descriptionPlaceholder')}
@@ -5994,6 +6008,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													characters={scriptParsed?.characters ?? []}
 													locations={scriptParsed?.locations ?? []}
 													entityOptions={entityOptions}
+													ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
 													onOpenCharacter={(name) => {
 														if (!project) return;
 														const match = plugin.indexer
@@ -6200,6 +6215,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									bookText={bookText}
 									chapters={actChapters}
 									names={linkNames}
+									linkLabels={linkLabels}
 									onOpenLink={openLinkTarget}
 									emptyMessage={
 										<div className="loom-attendance-empty">
@@ -6220,7 +6236,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								<MarkdownField
 									app={plugin.app}
 									value={actBookExcerpt}
-									names={linkNames}
+									names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 									onOpenLink={openLinkTarget}
 									onCreateEntity={createLinkEntity}
 									onChange={(v) => {
@@ -6378,7 +6394,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									<HubNoteText
 										app={plugin.app}
 										initial={o.name}
-										names={linkNames}
+										names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 										onOpenLink={openLinkTarget}
 										onCreateEntity={createLinkEntity}
 										onCommit={(v) => commitSet(idx, { name: v })}
@@ -6604,7 +6620,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				<MarkdownField
 					app={plugin.app}
 					value={body ?? ''}
-					names={linkNames}
+					names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 					onOpenLink={openLinkTarget}
 					onCreateEntity={createLinkEntity}
 					placeholder={t('view.entity.common.notesPlaceholder')}
@@ -7286,6 +7302,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														characters={scriptParsed?.characters ?? []}
 														locations={scriptParsed?.locations ?? []}
 														entityOptions={entityOptions}
+														ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
 														onOpenCharacter={(name) => {
 															if (!project) return;
 															const match = plugin.indexer
@@ -7486,7 +7503,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								<MarkdownField
 									app={plugin.app}
 									value={chapterExcerpt}
-									names={linkNames}
+									names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 									onOpenLink={openLinkTarget}
 									onCreateEntity={createLinkEntity}
 									onChange={(v) => {
@@ -7511,7 +7528,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									<MarkdownField
 										app={plugin.app}
 										value={chapterExcerpt}
-										names={linkNames}
+										names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
 										onOpenLink={openLinkTarget}
 										readOnly
 										plainLinks

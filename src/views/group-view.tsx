@@ -23,6 +23,7 @@ import {
 	NavRail,
 	SearchableSelect,
 	buildEntityLinkNames,
+	buildLinkTargetLabels,
 	locationLabel,
 	noProjectMessage,
 	openEntityLink,
@@ -288,6 +289,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 	// Note texts render with the shared live-preview field (read-only): links,
 	// bold/italic, bullets — the same formatting the editors show.
 	const linkNames: LinkOption[] = buildEntityLinkNames(plugin, project);
+	const linkLabels = buildLinkTargetLabels(plugin, project);
 	const openLinkFrom = (ownerPath: string) => (target: string, newTab = false) =>
 		openEntityLink(plugin, view, ownerPath, target, newTab);
 
@@ -360,6 +362,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 								app={plugin.app}
 								value={en.text}
 								names={linkNames}
+								linkLabels={linkLabels}
 								onOpenLink={openLinkFrom(en.owner.path)}
 								onChange={() => undefined}
 								readOnly

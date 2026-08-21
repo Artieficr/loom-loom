@@ -2739,6 +2739,7 @@ function Script({ view }: { view: ScriptView }) {
 								characters={parsed.characters}
 								locations={parsed.locations}
 								entityOptions={entityOptions}
+								ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
 								onOpenCharacter={(name) => {
 									if (!project) return;
 									const match = plugin.indexer

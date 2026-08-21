@@ -41,6 +41,7 @@ import {
 	SearchableSelect,
 	ViewShell,
 	buildEntityLinkNames,
+	buildLinkTargetLabels,
 	noProjectMessage,
 	openEntityLink,
 	recordLabel,
@@ -1975,6 +1976,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		() => (project ? buildEntityLinkNames(plugin, project) : []),
 		[plugin, project, version]
 	);
+	const panelLinkLabels = useMemo(
+		() => (project ? buildLinkTargetLabels(plugin, project) : new Map<string, string>()),
+		[plugin, project, version]
+	);
 	// The filter popover's "Focus on entities" search options — every project
 	// entity not already picked. The popover can stay open through a drag/
 	// spring/animation replay (which re-renders this component continuously),
@@ -2725,6 +2730,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						connectionLabel={panelConnectionLabel}
 						threshold={plugin.settings.graphCollapseThreshold}
 						names={panelLinkNames}
+						linkLabels={panelLinkLabels}
 						onOpenLink={panelOnOpenLink}
 						width={panelWidth}
 						onWidthChange={setPanelWidth}

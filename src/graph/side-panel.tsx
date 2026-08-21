@@ -72,6 +72,7 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 	connectionLabel,
 	threshold,
 	names,
+	linkLabels,
 	onOpenLink,
 	width,
 	onWidthChange,
@@ -87,6 +88,9 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 	threshold: number;
 	/** Link vocabulary for the read-only description's rendered links. */
 	names: LinkOption[];
+	/** Clean display names for wikilink targets — `MarkdownField`'s own
+	 *  `linkLabels` prop, passed straight through. */
+	linkLabels?: Map<string, string>;
 	/** Opens a wikilink target from the rendered description. */
 	onOpenLink: (target: string, newTab?: boolean) => void;
 	/** Current panel width (px), owned by the graph view so it persists. */
@@ -159,6 +163,7 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 						app={app}
 						value={record.description}
 						names={names}
+						linkLabels={linkLabels}
 						onOpenLink={onOpenLink}
 						onChange={() => undefined}
 						readOnly

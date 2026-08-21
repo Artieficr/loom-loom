@@ -2,7 +2,7 @@ import { TFile, normalizePath } from 'obsidian';
 import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
-import { Icon, buildEntityLinkNames, openCreateLinkEntity, openEntityLink } from './common';
+import { Icon, buildEntityLinkNames, buildLinkTargetLabels, openCreateLinkEntity, openEntityLink } from './common';
 import { MarkdownField, MarkdownFieldHandle } from './markdown-field';
 import { t } from '../i18n';
 import type LoomLoomPlugin from '../main';
@@ -223,6 +223,7 @@ export function QuickNotesPanel({
 	}, [plugin]);
 
 	const names = useMemo(() => buildEntityLinkNames(plugin, project), [plugin, project]);
+	const linkLabels = useMemo(() => buildLinkTargetLabels(plugin, project), [plugin, project]);
 
 	return (
 		<>
@@ -250,6 +251,8 @@ export function QuickNotesPanel({
 								save(v);
 							}}
 							names={names}
+						linkLabels={linkLabels}
+						ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
 							onOpenLink={(target, newTab) =>
 								openEntityLink(plugin, view, fileRef.current?.path ?? quickNotesFilePath(project), target, newTab)
 							}
