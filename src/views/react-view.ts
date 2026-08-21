@@ -14,6 +14,10 @@ export interface LoomNavigator {
 	openEntity(path: string, newTab?: boolean): void;
 	navigateTo(viewType: string, state?: Record<string, unknown>): void;
 	openLoomFile(path: string): void;
+	/** Registers (or clears, with `null`) this leaf's Quick Notes toggle callback. */
+	registerQuickNotesToggle(fn: (() => void) | null): void;
+	/** Toggles this leaf's Quick Notes panel, if a callback is currently registered. */
+	toggleQuickNotesPanel(): void;
 	plugin: LoomLoomPlugin;
 }
 
@@ -44,6 +48,7 @@ function openEntityFrom(view: View, path: string, newTab = false): void {
 export abstract class LoomReactView extends ItemView implements LoomNavigator {
 	navigation = true;
 	private root: Root | null = null;
+	private quickNotesToggle: (() => void) | null = null;
 
 	constructor(leaf: WorkspaceLeaf, readonly plugin: LoomLoomPlugin) {
 		super(leaf);
@@ -80,6 +85,14 @@ export abstract class LoomReactView extends ItemView implements LoomNavigator {
 		const file = this.plugin.app.vault.getFileByPath(path);
 		if (file instanceof TFile) void this.leaf.openFile(file);
 	}
+
+	registerQuickNotesToggle(fn: (() => void) | null): void {
+		this.quickNotesToggle = fn;
+	}
+
+	toggleQuickNotesPanel(): void {
+		this.quickNotesToggle?.();
+	}
 }
 
 /** File-backed variant (project home .loom files, entity pages over .md). */
@@ -87,6 +100,7 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 	navigation = true;
 	allowNoFile = false;
 	private root: Root | null = null;
+	private quickNotesToggle: (() => void) | null = null;
 
 	constructor(leaf: WorkspaceLeaf, readonly plugin: LoomLoomPlugin) {
 		super(leaf);
@@ -127,5 +141,13 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 	openLoomFile(path: string): void {
 		const file = this.plugin.app.vault.getFileByPath(path);
 		if (file instanceof TFile) void this.leaf.openFile(file);
+	}
+
+	registerQuickNotesToggle(fn: (() => void) | null): void {
+		this.quickNotesToggle = fn;
+	}
+
+	toggleQuickNotesPanel(): void {
+		this.quickNotesToggle?.();
 	}
 }

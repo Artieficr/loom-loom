@@ -27,13 +27,32 @@ body.loom-text-large {
 	font-size: inherit;
 }
 
-/* Rail + page content side by side; the rail is in flow, never an overlay. */
+/* Rail + page content side by side; the rail itself is always in flow, never
+   an overlay. `position: relative` is this row's own contribution to Quick
+   Notes: the sliding panel is a SIBLING of `.loom-rail` (never nested inside
+   it — see `.loom-rail`'s own comment for why), absolutely positioned against
+   THIS row so it can grow out from under the rail without the rail's box
+   (or any of its buttons) being affected by the panel's open/close state at
+   all. Home reuses this exact class for the identical reason (see
+   home-view.tsx) rather than a bespoke wrapper eyeballed to the same spot.
+   `--loom-rail-w` approximates the rail's own natural width (icon + button
+   padding + rail padding + its 1px border) from the same tokens `.loom-rail`
+   itself is built from — the Quick Notes panel below reads it to offset its
+   own content clear of the rail instead of starting underneath it (a real,
+   reported bug: the panel's header text render partially hidden behind the
+   rail before this existed). Defined here, on the shared ancestor, rather
+   than on `.loom-rail` itself — custom properties don't cross over to a
+   sibling, and the panel is a sibling of the rail, not a descendant of it. */
 .loom-shell-row,
 .loom-entity-row {
+	position: relative;
 	display: flex;
 	flex: 1;
 	height: 100%;
 	min-height: 0;
+	--loom-rail-w: calc(
+		var(--icon-m, 18px) + var(--size-2-3, 8px) * 2 + var(--size-2-2, 4px) * 2 + 1px
+	);
 }
 
 .loom-entity-row .loom-entity {
@@ -47,15 +66,48 @@ body.loom-text-large {
 
 /* ---- navigation rail ---- */
 
+/* `position: relative` + an explicit `z-index` lift the rail into its own
+   stacking context ABOVE the Quick Notes panel-wrap (`.loom-qn-panel-wrap`,
+   a sibling of this element, z-index 20) — without it, an absolutely
+   positioned sibling paints above ordinary in-flow content by default
+   regardless of DOM order, which would have let the panel cover the rail's
+   own icons as it opened instead of visibly growing out from under them.
+   `align-items: center` has to live HERE too, not just on `.loom-rail-buttons`
+   below — a real, reported regression from splitting the two: the Quick
+   Notes trigger button sits as this element's own DIRECT flex child (a
+   sibling of `.loom-rail-buttons`, not one of the buttons inside it), so
+   without this it fell back to the flex column default (`stretch`) and grew
+   to the rail's full width instead of staying an intrinsically-sized square
+   icon button like every other one. */
 .loom-rail {
+	position: relative;
+	z-index: 21;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	height: 100%;
+	flex-shrink: 0;
+	border-right: 1px solid var(--background-modifier-border);
+}
+
+/* Inner scroller — every ordinary rail button (home/script/book/group/entity
+   types/graph) lives here, separate from the spacer/Quick-Notes-trigger pair
+   below so a long button list scrolls on its own without ever pushing the
+   trigger off the rail's true bottom edge. */
+.loom-rail-buttons {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	gap: var(--size-2-2);
 	padding: var(--size-4-2) var(--size-2-2);
-	border-right: 1px solid var(--background-modifier-border);
-	flex-shrink: 0;
 	overflow-y: auto;
+	min-height: 0;
+}
+
+/* Pushes the Quick Notes trigger to the rail's true bottom edge regardless
+   of how many entity-type buttons the project has above it. */
+.loom-rail-spacer {
+	flex: 1;
 }
 
 .loom-rail-btn {
@@ -91,6 +143,149 @@ body.loom-text-large {
 	width: 60%;
 	border-top: 1px solid var(--background-modifier-border);
 	margin: var(--size-2-1) 0;
+}
+
+/* Purely a DOM marker for quick-notes.tsx's focus tracker — no visual/layout
+   footprint of its own. */
+.loom-qn-trigger-wrap {
+	display: contents;
+}
+
+/* ---- Quick Notes: per-project scratchpad, slides out from under the rail ---- */
+
+/* The panel is a SIBLING of `.loom-rail` (in `.loom-shell-row`/`.loom-entity-row`,
+   both `position: relative` — see their own rule above), never a child of it:
+   nesting it inside `.loom-rail` was tried first and reverted — it made the
+   rail's own box (and therefore every icon on it) implicated in the panel's
+   open/close animation instead of staying completely independent. Always
+   mounted; only the `-open` class toggles.
+
+   The wrap starts at the row's own left edge (`left: 0`, the same origin the
+   rail itself sits at) with `width: 0` — invisible, tucked entirely UNDER the
+   rail, which sits in a higher stacking context (`.loom-rail`'s own explicit
+   z-index) and paints on top of it regardless of DOM order. Opening animates
+   the wrap's WIDTH out to `var(--loom-rail-w) + 28em` — the rail's own
+   footprint PLUS the panel's real content width — so the visible portion
+   grows out from under the rail's right edge — literally "slides out from
+   under the rail" — rather than translating the whole panel, which would
+   have either moved the rail (nested) or needed a hardcoded rail-width
+   constant (sibling, translate-based) to line the reveal up with the rail's
+   own edge. The INNER `.loom-qn-panel` stays this same fixed total width
+   regardless of the wrap's current animated width, so its content never
+   reflows mid-animation — only `overflow: hidden` on the wrap clips what's
+   currently revealed. Its own `padding-left: var(--loom-rail-w)` (with
+   `box-sizing: border-box`, so that padding comes OUT of the 28em rather
+   than adding to it) is what keeps the header/editor content clear of the
+   rail instead of starting underneath it — a real, reported bug otherwise:
+   without it, the panel's own content occupied the SAME `0` to `28em` span
+   the wrap does, so the rail (painting on top, `--loom-rail-w` wide) simply
+   covered the first slice of it — visibly clipping the header title's own
+   text, not just the space to its left. */
+.loom-qn-panel-wrap {
+	position: absolute;
+	top: 0;
+	left: 0;
+	height: 100%;
+	width: 0;
+	overflow: hidden;
+	transition: width 200ms ease;
+	z-index: 20;
+}
+
+.loom-qn-panel-wrap.loom-qn-panel-open {
+	width: calc(var(--loom-rail-w) + 28em);
+	max-width: 90vw;
+}
+
+/* Inset from the wrap's own top/bottom (which stay flush, `height: 100%`, so
+   the width-clip animation isn't affected) and rounded on the right only —
+   the left edge sits under the rail (`padding-left` above) and is never
+   visible, so rounding it too would just clip the padding oddly for no
+   visual gain. Reads as a floating card (defined top/bottom edge + shadow)
+   rather than a rectangle flush to the pane's own top and bottom. */
+.loom-qn-panel {
+	box-sizing: border-box;
+	width: calc(var(--loom-rail-w) + 28em);
+	max-width: 90vw;
+	padding-left: var(--loom-rail-w);
+	margin: var(--size-4-3) 0;
+	height: calc(100% - var(--size-4-3) * 2);
+	border-radius: 0 var(--radius-m, 8px) var(--radius-m, 8px) 0;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-left: none;
+	box-shadow: var(--shadow-l, 0 4px 16px rgba(0, 0, 0, 0.2));
+	display: flex;
+	flex-direction: column;
+}
+
+/* Subtle dim over whatever's behind the panel while it's open — a visual
+   cue only, never blocks interaction (`pointer-events: none`): the panel is
+   deliberately NOT close-on-outside-click (see quick-notes.tsx's own doc
+   comment — the workflow is jot something down, then browse the vault to
+   find what to link back in), so the rest of the view has to stay fully
+   clickable underneath it. */
+.loom-qn-backdrop {
+	position: absolute;
+	inset: 0;
+	z-index: 15;
+	background: rgba(0, 0, 0, 0.08);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 200ms ease;
+}
+
+.loom-qn-backdrop.loom-qn-panel-open {
+	opacity: 1;
+}
+
+.loom-qn-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: var(--size-4-2) var(--size-4-3);
+	border-bottom: 1px solid var(--background-modifier-border);
+	flex-shrink: 0;
+}
+
+.loom-qn-title {
+	font-weight: var(--font-semibold, 600);
+}
+
+.loom-qn-close {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: none;
+	box-shadow: none;
+	cursor: pointer;
+	color: var(--text-muted);
+	padding: var(--size-2-2);
+	height: auto;
+	border-radius: var(--radius-s);
+}
+
+.loom-qn-close:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.loom-qn-body {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding: var(--size-4-2) var(--size-4-3);
+}
+
+.loom-qn-body .loom-md-field {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+.loom-qn-body .loom-md-field .cm-editor {
+	flex: 1;
+	height: 100%;
 }
 
 .loom-shell {
@@ -164,7 +359,13 @@ body.loom-text-large {
 
 /* ---- home ---- */
 
+/* Sits beside the (minimal, Quick-Notes-only) rail in `.loom-shell-row` —
+   see home-view.tsx — so it needs the same flex/scroll treatment `.loom-shell`
+   gives every other view's content column, on top of its own centering. */
 .loom-home {
+	flex: 1;
+	min-width: 0;
+	overflow-y: auto;
 	max-width: 760px;
 	margin: 0 auto;
 	padding: var(--size-4-8) var(--size-4-4);

@@ -24,6 +24,7 @@ import {
 	scaffoldProject,
 } from './project';
 import { HomeView } from './views/home-view';
+import { LoomFileReactView, LoomReactView } from './views/react-view';
 import { EntityListView } from './views/list-view';
 import { GraphView } from './views/graph-view';
 import { EntityView } from './views/entity-view';
@@ -121,6 +122,19 @@ export default class LoomLoomPlugin extends Plugin {
 						p
 					).open()
 				),
+		});
+		this.addCommand({
+			id: 'toggle-quick-notes',
+			name: t('command.toggleQuickNotes'),
+			// Toggles whichever leaf is currently focused — the panel is per-
+			// view-instance, so this is correct even with several project tabs
+			// open at once. No-ops when the active leaf isn't a loom view.
+			callback: () => {
+				const view = this.app.workspace.getActiveViewOfType(ItemView);
+				if (view instanceof LoomReactView || view instanceof LoomFileReactView) {
+					view.toggleQuickNotesPanel();
+				}
+			},
 		});
 
 		this.addSettingTab(new LoomLoomSettingTab(this.app, this));

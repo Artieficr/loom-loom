@@ -5,7 +5,8 @@
 		"openLoom": "Open Loom",
 		"setupProject": "Set up project",
 		"applyManagedFileNames": "Apply managed file names",
-		"createEntity": "Create entity in current project"
+		"createEntity": "Create entity in current project",
+		"toggleQuickNotes": "Toggle Quick Notes panel"
 	},
 	"notice": {
 		"applyingManagedFileNames": "Loom Loom: applying managed file names…",
@@ -177,11 +178,16 @@
 		"noProjectFound": "No project found. Open a project home file (.loom) first.",
 		"home": "Home",
 		"loomGraph": "Loom",
-		"openLabel": "Open {label}"
+		"openLabel": "Open {label}",
+		"quickNotes": "Quick Notes"
 	},
 	"view": {
 		"home": {
 			"loadingProject": "Loading project…"
+		},
+		"quickNotes": {
+			"close": "Close Quick Notes",
+			"placeholder": "Notes…"
 		},
 		"list": {
 			"addBeatTitle": "Add {article} {beat}",

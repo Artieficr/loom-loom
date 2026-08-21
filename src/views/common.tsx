@@ -29,8 +29,11 @@ import { formatLoomDate, groupNameOf } from '../calendar';
 import { features, projectTypes, roleOf } from '../project-kind';
 import { createScriptFile, scriptFilePath as scriptPathOf } from './script-view';
 import { createBookFile, findBookFile } from './book-view';
-import { ProjectDef } from '../indexer';
+import { QUICK_NOTES_ICON, QuickNotesPanel, useQuickNotesToggle } from './quick-notes';
+import { ProjectDef, linkTargetOf } from '../indexer';
 import { LoomNavigator } from './react-view';
+import { LinkOption } from './link-textarea';
+import { CreateEntityModal, EntityTypeSuggestModal } from '../project';
 import { LocaleKey, t } from '../i18n';
 import type LoomLoomPlugin from '../main';
 
@@ -370,6 +373,79 @@ export function recordLabel(record: EntityRecord, project: ProjectDef | null): s
 	return record.name;
 }
 
+/**
+ * `[[` autocomplete vocabulary for a markdown-field-style editor: every entity
+ * in the given project, searched/shown by its short display label (a session
+ * by its date), inserted as `target|label` so the raw link resolves AND reads
+ * well. Each entity's native `aliases` frontmatter is offered too, alongside
+ * the primary label, resolving to the same target. Shared by every
+ * `MarkdownField` consumer that needs project-scoped entity linking — see
+ * `openEntityLink`/`openCreateLinkEntity` below for the matching open/create
+ * handlers.
+ */
+export function buildEntityLinkNames(plugin: LoomLoomPlugin, project: ProjectDef): LinkOption[] {
+	return plugin.indexer
+		.getAll(undefined, project.root)
+		.flatMap((r) => {
+			const target = linkTargetOf(r);
+			const label = recordLabel(r, project);
+			const opts: LinkOption[] = [{ label, insert: target === label ? label : `${target}|${label}` }];
+			const f = plugin.app.vault.getFileByPath(r.path);
+			const aliases = f ? (plugin.app.metadataCache.getFileCache(f)?.frontmatter?.aliases as unknown) : undefined;
+			if (Array.isArray(aliases)) {
+				for (const a of aliases) {
+					if (typeof a === 'string' && a.trim() !== '' && a !== label) {
+						opts.push({ label: a, insert: `${target}|${a}` });
+					}
+				}
+			}
+			return opts;
+		})
+		.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/**
+ * Opens a wikilink target from a markdown-field-style editor: a resolvable
+ * loom entity gets its structured entity page (via `view.openEntity`),
+ * anything else falls back to Obsidian's normal link opening.
+ */
+export function openEntityLink(
+	plugin: LoomLoomPlugin,
+	view: LoomNavigator,
+	sourcePath: string,
+	target: string,
+	newTab = false
+): void {
+	const resolved = plugin.indexer.resolve(target, sourcePath);
+	if (resolved) view.openEntity(resolved.path, newTab);
+	else void plugin.app.workspace.openLinkText(target, sourcePath, newTab ? 'tab' : false);
+}
+
+/**
+ * `[[` "+ Create …" flow: type picker → creation modal with the short name
+ * prefilled; the finished entity links back into the editor in place.
+ */
+export function openCreateLinkEntity(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	entered: string,
+	insert: (linkInsert: string) => void
+): void {
+	new EntityTypeSuggestModal(plugin, (type) =>
+		new CreateEntityModal(plugin, type, project, {
+			initialName: entered,
+			onCreated: (created) => {
+				// Short name = managed basename minus its prefix (the index
+				// may not have caught the new file yet).
+				const prefix = `${project.name} ${ENTITY_META[type].label} `;
+				const label = created.basename.startsWith(prefix) ? created.basename.slice(prefix.length) : entered;
+				insert(created.basename === label ? label : `${created.basename}|${label}`);
+			},
+		}).open(),
+		project
+	).open();
+}
+
 /** Search/display label for a location: a sublocation reads "Secret room,
  *  Tavern, City" (its full ancestry, so same-named places stay distinct). The
  *  `subChipFullAncestry` setting can trim it to just the sublocation's own name. */
@@ -501,7 +577,7 @@ export function QuestTagChip({ plugin, tag }: { plugin: LoomLoomPlugin; tag: str
 	);
 }
 
-function RailButton({
+export function RailButton({
 	icon,
 	iconFallback,
 	label,
@@ -534,112 +610,155 @@ function RailButton({
 /**
  * Icon-only navigation rail on the left of every page except home: home
  * first, then the entity lists, then the graph — the home page's whole
- * navigation. Sits in normal flow, so it never overlaps content.
- * `active` marks the current page ('graph' or an entity type).
- */
+ * navigation. Sits in normal flow, so it never overlaps content — the one
+ * exception is the Quick Notes panel it hosts, a SIBLING of the `<nav>`
+ * itself (see `.loom-qn-panel-wrap`'s own CSS comment), never a child of it,
+ * so the rail's own box and buttons are never implicated in the panel's
+ * open/close animation. `active` marks the current page ('graph' or an
+ * entity type). `minimal` renders just the Quick Notes trigger with no other
+ * buttons/separators — Home's own stand-in rail (home-view.tsx), so its
+ * trigger lands in the exact same spot as every other page's without
+ * hand-tuning a separate position for it. */
 export function NavRail({
 	navigator,
 	project,
 	active,
+	minimal,
 }: {
 	navigator: LoomNavigator;
 	project: ProjectDef;
 	active?: string;
+	minimal?: boolean;
 }) {
+	const [quickNotesOpen, setQuickNotesOpen] = useQuickNotesToggle(navigator);
 	return (
-		<nav className="loom-rail">
-			<RailButton icon="home" label={t('common.home')} onClick={() => navigator.openLoomFile(project.loomPath)} />
-			<div className="loom-rail-sep" />
-			{/* The script leads, in the slot the Group takes in the other kinds,
-			    so every entity button below keeps its usual position. */}
-			{features(project.config).script ? (
-				<RailButton
-					icon={SCRIPT_ICON}
-					label={scriptLabel()}
-					active={active === 'script'}
-					onClick={() => {
-						// Created on demand: a project switched to Writer after
-						// setup has no script file yet.
-						const path = scriptPathOf(project);
-						if (navigator.plugin.app.vault.getFileByPath(path)) navigator.openLoomFile(path);
-						else {
-							void createScriptFile(navigator.plugin, project).then((f) =>
-								navigator.openLoomFile(f.path)
-							);
-						}
-					}}
-				/>
-			) : null}
-			{/* Writer/Prose's own rail entry, mirroring Script's above (mutually
-			    exclusive, same slot) — an additional whole-book entry point;
-			    Chapters keep their own normal entry in the generic loop below too. */}
-			{project.config.kind === 'writer' && project.config.writerMode === 'prose' ? (
-				<RailButton
-					icon={BOOK_ICON}
-					label={bookLabel()}
-					active={active === 'book'}
-					onClick={() => {
-						// Created on demand: a project switched to Writer/Prose after
-						// setup has no Book file yet — mirrors the Script button above.
-						const bookFile = findBookFile(navigator.plugin, project);
-						if (bookFile) navigator.openLoomFile(bookFile.path);
-						else void createBookFile(navigator.plugin, project).then((f) => navigator.openLoomFile(f.path));
-					}}
-				/>
-			) : null}
-			{/* The Group is the party — present only in kinds that have one. */}
-			{features(project.config).group ? (
-			<RailButton
-				icon={PC_GROUP_ICON}
-				iconFallback="star"
-				label={groupNameOf(project.config)}
-				active={active === 'group'}
-				onClick={() => {
-					// Navigators are views — record where the Group page was
-					// opened from so its Back button can return there.
-					const nav = navigator as LoomNavigator &
-						Partial<{ getViewType: () => string; getState: () => Record<string, unknown> }>;
-					const origin =
-						typeof nav.getViewType === 'function' && typeof nav.getState === 'function'
-							? { type: nav.getViewType(), state: nav.getState() }
-							: undefined;
-					navigator.navigateTo(VIEW_GROUP, { project: project.root, origin });
-				}}
-			/>
-			) : null}
-			{projectTypes(project.config).filter((et) => et !== 'region').flatMap((et) => {
-				const btn = (
+		<>
+			<nav className="loom-rail">
+				<div className="loom-rail-buttons">
+					{minimal ? null : (
+						<>
+							<RailButton
+								icon="home"
+								label={t('common.home')}
+								onClick={() => navigator.openLoomFile(project.loomPath)}
+							/>
+							<div className="loom-rail-sep" />
+							{/* The script leads, in the slot the Group takes in the other kinds,
+							    so every entity button below keeps its usual position. */}
+							{features(project.config).script ? (
+								<RailButton
+									icon={SCRIPT_ICON}
+									label={scriptLabel()}
+									active={active === 'script'}
+									onClick={() => {
+										// Created on demand: a project switched to Writer after
+										// setup has no script file yet.
+										const path = scriptPathOf(project);
+										if (navigator.plugin.app.vault.getFileByPath(path)) navigator.openLoomFile(path);
+										else {
+											void createScriptFile(navigator.plugin, project).then((f) =>
+												navigator.openLoomFile(f.path)
+											);
+										}
+									}}
+								/>
+							) : null}
+							{/* Writer/Prose's own rail entry, mirroring Script's above (mutually
+							    exclusive, same slot) — an additional whole-book entry point;
+							    Chapters keep their own normal entry in the generic loop below too. */}
+							{project.config.kind === 'writer' && project.config.writerMode === 'prose' ? (
+								<RailButton
+									icon={BOOK_ICON}
+									label={bookLabel()}
+									active={active === 'book'}
+									onClick={() => {
+										// Created on demand: a project switched to Writer/Prose after
+										// setup has no Book file yet — mirrors the Script button above.
+										const bookFile = findBookFile(navigator.plugin, project);
+										if (bookFile) navigator.openLoomFile(bookFile.path);
+										else
+											void createBookFile(navigator.plugin, project).then((f) =>
+												navigator.openLoomFile(f.path)
+											);
+									}}
+								/>
+							) : null}
+							{/* The Group is the party — present only in kinds that have one. */}
+							{features(project.config).group ? (
+								<RailButton
+									icon={PC_GROUP_ICON}
+									iconFallback="star"
+									label={groupNameOf(project.config)}
+									active={active === 'group'}
+									onClick={() => {
+										// Navigators are views — record where the Group page was
+										// opened from so its Back button can return there.
+										const nav = navigator as LoomNavigator &
+											Partial<{ getViewType: () => string; getState: () => Record<string, unknown> }>;
+										const origin =
+											typeof nav.getViewType === 'function' && typeof nav.getState === 'function'
+												? { type: nav.getViewType(), state: nav.getState() }
+												: undefined;
+										navigator.navigateTo(VIEW_GROUP, { project: project.root, origin });
+									}}
+								/>
+							) : null}
+							{projectTypes(project.config)
+								.filter((et) => et !== 'region')
+								.flatMap((et) => {
+									const btn = (
+										<RailButton
+											key={et}
+											icon={ENTITY_META[et].icon}
+											label={entityPlural(et)}
+											active={active === et}
+											onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: et })}
+										/>
+									);
+									// Maps sits right after Locations, matching the home wheel order.
+									if (et === 'location') {
+										return [
+											btn,
+											<RailButton
+												key="maps"
+												icon={MAPS_ICON}
+												label={mapsLabel()}
+												active={active === 'map'}
+												onClick={() => navigator.navigateTo(VIEW_MAP, { project: project.root })}
+											/>,
+										];
+									}
+									return [btn];
+								})}
+							<div className="loom-rail-sep" />
+							<RailButton
+								icon="spool"
+								label={t('common.loomGraph')}
+								active={active === 'graph'}
+								onClick={() => navigator.navigateTo(VIEW_GRAPH, { project: project.root })}
+							/>
+						</>
+					)}
+				</div>
+				<div className="loom-rail-spacer" />
+				{/* `.loom-qn-trigger-wrap` (`display: contents`, no layout effect of
+				    its own) marks this button as Quick-Notes UI for the focus
+				    tracker in quick-notes.tsx — clicking it shifts DOM focus to the
+				    button itself before our own state update even runs, and without
+				    this the tracker would wrongly treat that as "the field the user
+				    was just working in" instead of ignoring it. */}
+				<span className="loom-qn-trigger-wrap">
 					<RailButton
-						key={et}
-						icon={ENTITY_META[et].icon}
-						label={entityPlural(et)}
-						active={active === et}
-						onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: et })}
+						icon={QUICK_NOTES_ICON}
+						iconFallback="sticky-note"
+						label={t('common.quickNotes')}
+						active={quickNotesOpen}
+						onClick={() => setQuickNotesOpen((o) => !o)}
 					/>
-				);
-				// Maps sits right after Locations, matching the home wheel order.
-				if (et === 'location') {
-					return [
-						btn,
-						<RailButton
-							key="maps"
-							icon={MAPS_ICON}
-							label={mapsLabel()}
-							active={active === 'map'}
-							onClick={() => navigator.navigateTo(VIEW_MAP, { project: project.root })}
-						/>,
-					];
-				}
-				return [btn];
-			})}
-			<div className="loom-rail-sep" />
-			<RailButton
-				icon="spool"
-				label={t('common.loomGraph')}
-				active={active === 'graph'}
-				onClick={() => navigator.navigateTo(VIEW_GRAPH, { project: project.root })}
-			/>
-		</nav>
+				</span>
+			</nav>
+			<QuickNotesPanel plugin={navigator.plugin} view={navigator} project={project} open={quickNotesOpen} />
+		</>
 	);
 }
 

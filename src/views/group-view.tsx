@@ -15,7 +15,6 @@ import {
 } from '../types';
 import { formatLoomDateShort, groupNameOf, serializeProjectConfig } from '../calendar';
 import { projectRoleType, projectTypes, roleOf } from '../project-kind';
-import { linkTargetOf } from '../indexer';
 import { t } from '../i18n';
 import { LoomReactView } from './react-view';
 import {
@@ -23,9 +22,10 @@ import {
 	Icon,
 	NavRail,
 	SearchableSelect,
+	buildEntityLinkNames,
 	locationLabel,
 	noProjectMessage,
-	recordLabel,
+	openEntityLink,
 } from './common';
 import { MarkdownField } from './markdown-field';
 import type { LinkOption } from './link-textarea';
@@ -287,21 +287,9 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 
 	// Note texts render with the shared live-preview field (read-only): links,
 	// bold/italic, bullets — the same formatting the editors show.
-	const linkNames: LinkOption[] = plugin.indexer
-		.getAll(undefined, project.root)
-		.map((r) => {
-			const target = linkTargetOf(r);
-			const label = roleOf(r.type) === 'anchor' ? recordLabel(r, project) : r.name;
-			return { label, insert: target === label ? label : `${target}|${label}` };
-		})
-		.sort((a, b) => a.label.localeCompare(b.label));
-	const openLinkFrom =
-		(ownerPath: string) =>
-		(target: string, newTab = false) => {
-			const resolved = plugin.indexer.resolve(target, ownerPath);
-			if (resolved) view.openEntity(resolved.path, newTab);
-			else void plugin.app.workspace.openLinkText(target, ownerPath, newTab ? 'tab' : false);
-		};
+	const linkNames: LinkOption[] = buildEntityLinkNames(plugin, project);
+	const openLinkFrom = (ownerPath: string) => (target: string, newTab = false) =>
+		openEntityLink(plugin, view, ownerPath, target, newTab);
 
 	const chipRow = (records: EntityRecord[]) => (
 		<div className="loom-tag-row">
