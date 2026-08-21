@@ -32,6 +32,7 @@ import {
 	refreshAnnotations,
 	scrollWithinEditor,
 } from './annotation-cm6';
+import { LinkSuggestEntry, buildLinkSuggestExtension } from './link-suggest-cm6';
 
 /**
  * Obsidian-flavored live-preview field for the Notes/Description boxes: a
@@ -71,6 +72,14 @@ interface InlineToken {
 	content: { from: number; to: number; cls: string };
 	/** Wikilink target for click-to-open. */
 	link?: string;
+	/** The wikilink TARGET's own character range — distinct from `content`,
+	 *  which for an ALIASED link covers only the alias text after `|`. Only
+	 *  set on wikilink tokens; lets a clean-name substitution replace just
+	 *  the target even when the whole token is otherwise raw at the cursor. */
+	targetRange?: { from: number; to: number };
+	/** Whether this wikilink token has an explicit `|alias` — undefined for
+	 *  non-link tokens. */
+	hasAlias?: boolean;
 }
 
 const INLINE_RULES: {
@@ -90,6 +99,27 @@ const INLINE_RULES: {
 
 const WIKILINK_RE = /\[\[([^[\]\n|]+)(?:\|([^[\]\n]*))?\]\]/g;
 
+/** The two `LinkSuggestConfig` checks specific to wikilink syntax — module-
+ *  level since neither depends on any per-instance state, only the line
+ *  text (see `link-suggest-cm6.ts`'s own doc comment for why this module
+ *  never assumes any particular link syntax itself). */
+function isInsideWikilinkOpen(line: string, ch: number): boolean {
+	const open = line.lastIndexOf('[[', ch);
+	if (open === -1) return false;
+	const close = line.indexOf(']]', open);
+	return close === -1 || close >= ch;
+}
+
+function overlapsClosedWikilink(line: string, from: number, to: number): boolean {
+	WIKILINK_RE.lastIndex = 0;
+	for (let m = WIKILINK_RE.exec(line); m; m = WIKILINK_RE.exec(line)) {
+		const mFrom = m.index;
+		const mTo = mFrom + m[0].length;
+		if (from < mTo && to > mFrom) return true;
+	}
+	return false;
+}
+
 /** Opt-in per-instance flag (`MarkdownField`'s `plainLinks` prop) — a
  *  wikilink renders as inert plain text, not a colored/clickable span, the
  *  same "just text" treatment Script's own Pages preview already gives its
@@ -99,6 +129,24 @@ const WIKILINK_RE = /\[\[([^[\]\n|]+)(?:\|([^[\]\n]*))?\]\]/g;
  *  an item's read-only "Original description" spoiler) keeps ordinary
  *  clickable/colored links, so this can't be folded into `readOnly` itself. */
 const plainLinksFacet = Facet.define<boolean, boolean>({ combine: (values) => values.some(Boolean) });
+
+/** Clean display names for wikilink TARGETS that resolve to a Loom entity
+ *  (`buildLinkTargetLabels`, common.tsx — `linkTargetOf(record) ->
+ *  recordLabel(record, project)`), keyed by the raw target string. This
+ *  field is intentionally pure regex/no-`plugin` — resolving a target to a
+ *  record happens in the CALLER, once per relevant render, and is handed
+ *  down as plain data via the `linkLabels` prop, same decoupling `onOpenLink`
+ *  already keeps. Set once per `EditorView` at mount (like `plainLinksFacet`
+ *  above) rather than kept live via a `Compartment` reconfigure — this
+ *  codebase has no existing Compartment precedent, and the gap it would
+ *  close (an entity renamed while another already-open field still shows
+ *  its OLD clean name until that field is reopened) is a rare, low-stakes
+ *  edge case not worth the added CM6 machinery. A target missing from this
+ *  map (a non-Loom note, or a broken link) renders exactly as before this
+ *  feature existed — no attempted cleanup. */
+const linkLabelsFacet = Facet.define<Map<string, string>, Map<string, string>>({
+	combine: (values) => values[0] ?? new Map(),
+});
 
 /** Prose/Book's hidden Act/Chapter identity marker (`prose.ts`/`fountain.ts`'s
  *  `[[loom:<id>]]` convention) — never a real wikilink, so it's excluded from
@@ -149,6 +197,8 @@ function lineTokens(text: string, lineFrom: number): InlineToken[] {
 			],
 			content: { from: contentFrom, to: to - 2, cls: 'loom-md-link' },
 			link: target,
+			targetRange: { from: from + 2, to: from + 2 + target.length },
+			hasAlias,
 		});
 	}
 
@@ -190,6 +240,40 @@ class HrWidget extends WidgetType {
 	}
 }
 
+/** Renders a resolved clean display name in place of a wikilink's raw
+ *  (managed, ugly) target — the one widget in this file whose content is
+ *  dynamic per instance rather than fixed, so (unlike `BulletWidget`/
+ *  `HrWidget`) it needs an `eq()` override: without one, CM6 would tear
+ *  down and rebuild this DOM node on every decoration rebuild even when
+ *  nothing about it actually changed. `toDOM` replicates exactly what the
+ *  ordinary content `Decoration.mark` gives an ordinary wikilink (the
+ *  `loom-md-link`/`loom-md-link-plain` class, the `data-loom-link` attribute
+ *  `openLinkOnMousedown` keys its click handling off of) so click-to-open
+ *  and `plainLinks` both keep working unchanged. */
+class ResolvedLinkWidget extends WidgetType {
+	constructor(
+		private readonly label: string,
+		private readonly target: string,
+		private readonly plain: boolean
+	) {
+		super();
+	}
+
+	eq(other: ResolvedLinkWidget): boolean {
+		return other.label === this.label && other.target === this.target && other.plain === this.plain;
+	}
+
+	toDOM(view: EditorView): HTMLElement {
+		const el = view.dom.doc.body.createSpan({
+			cls: this.plain ? 'loom-md-link-plain' : 'loom-md-link',
+			text: this.label,
+		});
+		if (!this.plain) el.dataset.loomLink = this.target;
+		el.detach();
+		return el;
+	}
+}
+
 function buildDecorations(view: EditorView): DecorationSet {
 	const entries: { from: number; to: number; deco: Decoration }[] = [];
 	const sel = view.state.selection;
@@ -202,6 +286,7 @@ function buildDecorations(view: EditorView): DecorationSet {
 	const touches = (from: number, to: number) =>
 		revealRaw && sel.ranges.some((r) => r.from <= to && r.to >= from);
 	const plainLinks = view.state.facet(plainLinksFacet);
+	const linkLabels = view.state.facet(linkLabelsFacet);
 
 	for (const range of view.visibleRanges) {
 		let pos = range.from;
@@ -314,12 +399,49 @@ function buildDecorations(view: EditorView): DecorationSet {
 			for (const token of lineTokens(text, line.from).sort((a, b) => a.from - b.from)) {
 				// Raw only while the cursor sits strictly inside the token, so a
 				// just-completed `**bold**` renders the moment it's closed.
-				if (revealRaw && sel.ranges.some((r) => r.from < token.to && r.to > token.from)) continue;
+				const touching = revealRaw && sel.ranges.some((r) => r.from < token.to && r.to > token.from);
+				const link = token.link;
+				const resolvedLabel = link !== undefined ? linkLabels.get(link) : undefined;
+
+				if (link !== undefined && resolvedLabel !== undefined) {
+					if (touching) {
+						// Substitute ONLY the target range — `[[`, `|`, the alias text
+						// (if any), and `]]` are left completely undecorated, i.e. real
+						// raw editable text, unlike every other token here (which goes
+						// fully raw at the cursor). The target is auto-managed, never
+						// meant to be hand-edited, so it stays clean even here; the
+						// alias, if present, is real user content and stays editable.
+						entries.push({
+							from: token.targetRange!.from,
+							to: token.targetRange!.to,
+							deco: Decoration.replace({ widget: new ResolvedLinkWidget(resolvedLabel, link, plainLinks) }),
+						});
+						continue;
+					}
+					if (!token.hasAlias) {
+						// Bare link, not touching — the actual gap this closes: show
+						// the clean name instead of the raw (ugly, managed) target.
+						for (const h of token.hide) entries.push({ from: h.from, to: h.to, deco: Decoration.replace({}) });
+						entries.push({
+							from: token.content.from,
+							to: token.content.to,
+							deco: Decoration.replace({ widget: new ResolvedLinkWidget(resolvedLabel, link, plainLinks) }),
+						});
+						continue;
+					}
+					// Aliased, not touching: falls through to the unchanged path
+					// below, deliberately — a hand-typed alias (e.g. a nickname) is
+					// real content the user chose; substituting it with the
+					// canonical name here would silently overwrite it on every
+					// render. Already renders clean today (the alias IS the shown
+					// content), nothing to fix.
+				}
+
+				if (touching) continue;
 				for (const h of token.hide) {
 					entries.push({ from: h.from, to: h.to, deco: Decoration.replace({}) });
 				}
 				if (token.content.to > token.content.from) {
-					const link = token.link;
 					entries.push({
 						from: token.content.from,
 						to: token.content.to,
@@ -622,6 +744,21 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	 *  Prose's unified Book/Act editor) does. */
 	onBlur?: () => void;
 	names: LinkOption[];
+	/** Clean display names for wikilink targets that resolve to a Loom
+	 *  entity — `buildLinkTargetLabels(plugin, project)` (common.tsx). A
+	 *  target missing from this map (a non-Loom note, or a broken link)
+	 *  renders exactly as it always has, raw target included. Omit entirely
+	 *  for a caller with no project context — every wikilink then renders
+	 *  as before this feature existed. */
+	linkLabels?: Map<string, string>;
+	/** Ambient link suggester (see link-suggest-cm6.ts) — always on; never
+	 *  mounted at all in a `readOnly` field. */
+	ambientSuggestDismissMs?: number;
+	/** This project entity's own managed target (`linkTargetOf(record)`) —
+	 *  suppresses ambient suggestions offering to link an entity to itself.
+	 *  Left unset at call sites with no single "current entity" (Quick
+	 *  Notes, the Group/Graph pages' own note fields). */
+	ambientExcludeTarget?: string;
 	placeholder?: string;
 	/** Live-preview but not editable (e.g. an "Original description" spoiler);
 	 *  clicking rendered links still works, and an existing comment's popover
@@ -698,6 +835,9 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	onChange,
 	onBlur,
 	names,
+	linkLabels,
+	ambientSuggestDismissMs,
+	ambientExcludeTarget,
 	placeholder,
 	onOpenLink,
 	onCreateEntity,
@@ -718,6 +858,10 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	const viewRef = useRef<EditorView | null>(null);
 	const namesRef = useRef(names);
 	namesRef.current = names;
+	const ambientDismissMsRef = useRef(ambientSuggestDismissMs ?? 0);
+	ambientDismissMsRef.current = ambientSuggestDismissMs ?? 0;
+	const ambientExcludeTargetRef = useRef(ambientExcludeTarget);
+	ambientExcludeTargetRef.current = ambientExcludeTarget;
 	const onChangeRef = useRef(onChange);
 	onChangeRef.current = onChange;
 	const onBlurRef = useRef(onBlur);
@@ -1258,6 +1402,45 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 		}
 		const annotationHandlesOverlay = ViewPlugin.fromClass(AnnotationHandlesOverlay);
 
+		// Ambient link suggester (link-suggest-cm6.ts) — only ever mounted into
+		// the editable extensions branch below (see there). Corpus cached keyed
+		// on `namesRef.current`'s own reference identity: `names` is memoized by
+		// every caller (a `useMemo` over `[plugin, project]`/`version`), so this
+		// only actually rebuilds when the underlying project data changes, not
+		// on every keystroke's own re-render.
+		let ambientCorpusCache: { source: LinkOption[]; map: Map<string, LinkSuggestEntry> } | null = null;
+		const linkSuggestExt = buildLinkSuggestExtension({
+			getCorpus: () => {
+				const source = namesRef.current;
+				if (ambientCorpusCache?.source !== source) {
+					const map = new Map<string, LinkSuggestEntry>();
+					const exclude = ambientExcludeTargetRef.current;
+					for (const n of source) {
+						if (exclude !== undefined && (n.insert === exclude || n.insert.startsWith(`${exclude}|`))) continue;
+						const key = n.label.toLowerCase();
+						// `n.insert` alone (`target|label`, or bare `label` when they're
+						// equal) is NOT a link — it's what the EXISTING `[[` completion
+						// splices between brackets that are already there. The ambient
+						// suggester has no such context, so it has to supply the
+						// brackets itself — a real, reported bug otherwise (the
+						// "suggestion" landed as inert plain text, not a link at all).
+						// `displayLabel` is what the pill actually shows: never the raw
+						// `target|label` (the entity's ugly managed filename), always
+						// the clean label that was actually typed/matched.
+						if (!map.has(key)) map.set(key, { insert: `[[${n.insert}]]`, displayLabel: n.label });
+					}
+					ambientCorpusCache = { source, map };
+				}
+				return ambientCorpusCache.map;
+			},
+			getDismissMs: () => ambientDismissMsRef.current,
+			maxPhraseWords: 5,
+			isInsideOpenMarker: isInsideWikilinkOpen,
+			overlapsClosedLink: overlapsClosedWikilink,
+			pillClass: 'loom-link-suggest-pill',
+			ariaLabel: (entry) => t('common.linkSuggestAccept', { insert: entry.displayLabel }),
+		});
+
 		const view = new EditorView({
 			parent: hostRef.current,
 			state: EditorState.create({
@@ -1283,6 +1466,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 							EditorState.readOnly.of(true),
 							EditorView.editable.of(false),
 							plainLinksFacet.of(plainLinks ?? false),
+							linkLabelsFacet.of(linkLabels ?? new Map<string, string>()),
 							EditorView.lineWrapping,
 							scrollWithinEditor,
 							cmPlaceholder(placeholder ?? ''),
@@ -1306,6 +1490,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 						]
 					: [
 							history(),
+							linkLabelsFacet.of(linkLabels ?? new Map<string, string>()),
 							EditorView.lineWrapping,
 							scrollWithinEditor,
 							cmPlaceholder(placeholder ?? ''),
@@ -1313,6 +1498,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 							annotationDecorations,
 							...(annotationGutterExt ? [annotationGutterExt] : []),
 							annotationHandlesOverlay,
+							linkSuggestExt,
 							bracketPairing,
 							pairDeletion,
 							formatContinuation,

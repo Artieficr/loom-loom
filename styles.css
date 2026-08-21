@@ -88,6 +88,13 @@ body.loom-text-large {
 	height: 100%;
 	flex-shrink: 0;
 	border-right: 1px solid var(--background-modifier-border);
+	/* The rail never needed its own opaque background before — nothing sat
+	   behind it worth hiding. Now the Quick Notes backdrop (`.loom-qn-backdrop`,
+	   z-index 15, below the rail's own 21) does, and a real, reported bug:
+	   without this, the rail's own transparent gaps (between/around buttons)
+	   let that dimmed content bleed straight through, reading as "holes" in
+	   the rail rather than a solid column. */
+	background: var(--background-primary);
 }
 
 /* Inner scroller — every ordinary rail button (home/script/book/group/entity
@@ -835,6 +842,38 @@ span.loom-row-caret {
 	opacity: 0.7;
 	border-style: dashed;
 	background: var(--background-secondary);
+}
+
+/* Ambient link suggester's floating pill (link-suggest-cm6.ts) — anchored
+   above the matched text via `transform: translate(-50%, -100%)`, positioned
+   from its own `left`/`top` (computed in JS from `coordsAtPos`, set via
+   `setCssProps`). One shared class for both editor fields — the DOM shape is
+   identical, no per-field styling needed the way the annotation gutter icons'
+   `classPrefix` split does. */
+.loom-link-suggest-pill {
+	position: fixed;
+	z-index: var(--layer-tooltip);
+	transform: translate(-50%, -100%);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	box-shadow: var(--shadow-s);
+	padding: var(--size-2-1) var(--size-2-2);
+	font-size: var(--font-ui-smaller, 12px);
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+/* Underline only — no background/border change at all, sidestepping the whole
+   transparency question: `--background-modifier-hover` is typically semi-
+   transparent by design in Obsidian's theme (meant to overlay list/menu rows
+   that already have a solid background under them), which doesn't hold for a
+   pill floating with nothing solid deliberately behind it — even mixed against
+   the pill's own solid base it still read as a color shift worth avoiding
+   entirely here. */
+.loom-link-suggest-pill:hover {
+	text-decoration: underline;
 }
 
 /* Tooltip header: the full name, above the (optional) description. */

@@ -30,6 +30,7 @@ import {
 	refreshAnnotations,
 	scrollWithinEditor,
 } from './annotation-cm6';
+import { LinkSuggestEntry, buildLinkSuggestExtension } from './link-suggest-cm6';
 
 /**
  * Live-preview editor for the Fountain script. Deliberately NOT
@@ -61,6 +62,40 @@ const INTEXT_OPTIONS = ['INT.', 'EXT.', 'INT./EXT.', 'EST.'];
 /** Mirrors `SCENE_PREFIXES` in fountain.ts (not exported — this only needs
  *  to recognize a heading-shaped START, not fully replicate scene parsing). */
 const SCENE_PREFIX_RE = /^(?:INT\.?\/EXT\.?|INT\/EXT\.?|I\/E\.?|INT\.?|EXT\.?|EST\.?)\s+/i;
+
+/** The two `LinkSuggestConfig` checks specific to `@[Name|Display]` syntax —
+ *  module-level, no per-instance state needed (see link-suggest-cm6.ts's own
+ *  doc comment for why that module never assumes any particular syntax). */
+function isInsideEntityLinkOpen(line: string, ch: number): boolean {
+	const open = line.lastIndexOf('@[', ch);
+	if (open === -1) return false;
+	const close = line.indexOf(']', open);
+	return close === -1 || close >= ch;
+}
+
+function overlapsClosedEntityLink(line: string, from: number, to: number): boolean {
+	for (const link of findEntityLinks(line)) {
+		if (from < link.to && to > link.from) return true;
+	}
+	return false;
+}
+
+/** Cheap heuristic — skip ambient suggestions on scene-heading/character-cue/
+ *  transition lines, which already have their own dedicated autocompletes
+ *  (`intExtCompletion`/`characterCompletion`, below) with different
+ *  semantics (a heading's location text isn't prose to hyperlink inline).
+ *  Deliberately NOT a full `parseFountain` classification — cheap enough to
+ *  run on every trigger, and a false positive/negative here is low-stakes
+ *  (worst case: a suggestion shows up somewhere slightly redundant, never a
+ *  correctness bug). */
+function looksLikeNonProseLine(lineText: string): boolean {
+	const trimmed = lineText.trim();
+	if (trimmed === '') return false;
+	if (SCENE_PREFIX_RE.test(trimmed)) return true;
+	if (/\bTO:\s*$/.test(trimmed) && trimmed === trimmed.toUpperCase()) return true;
+	const letters = trimmed.replace(/[^A-Za-z]/g, '');
+	return letters.length > 0 && trimmed === trimmed.toUpperCase();
+}
 
 const ELEMENT_CLASS: Partial<Record<ElementType, string>> = {
 	'scene-heading': 'loom-fountain-scene-heading',
@@ -218,6 +253,8 @@ export const FountainField = forwardRef(function FountainField(
 		onCycleAlt,
 		onOpenAltMenu,
 		highlightedAnnotationId,
+		ambientSuggestDismissMs,
+		ambientExcludeEntityName,
 	}: {
 		value: string;
 		onChange: (value: string) => void;
@@ -276,6 +313,13 @@ export const FountainField = forwardRef(function FountainField(
 		/** A marker id a search match currently points at — its gutter icon
 		 *  gets a highlight class without touching the document. */
 		highlightedAnnotationId?: string | null;
+		/** Ambient link suggester (link-suggest-cm6.ts) — always on. */
+		ambientSuggestDismissMs?: number;
+		/** This project's own current entity's name — suppresses ambient
+		 *  suggestions offering to link it to itself. Only meaningful on a
+		 *  Character/Faction/Location/Item's own embedded Script section;
+		 *  the main Script view (no single "current entity") leaves it unset. */
+		ambientExcludeEntityName?: string;
 	},
 	ref: ForwardedRef<FountainFieldHandle>
 ) {
@@ -301,6 +345,8 @@ export const FountainField = forwardRef(function FountainField(
 	const onCycleAltRef = useRef(onCycleAlt);
 	const onOpenAltMenuRef = useRef(onOpenAltMenu);
 	const highlightedAnnotationIdRef = useRef(highlightedAnnotationId ?? null);
+	const ambientDismissMsRef = useRef(ambientSuggestDismissMs ?? 0);
+	const ambientExcludeNameRef = useRef(ambientExcludeEntityName);
 	onChangeRef.current = onChange;
 	onBlurRef.current = onBlur;
 	charactersRef.current = characters;
@@ -317,6 +363,8 @@ export const FountainField = forwardRef(function FountainField(
 	onOpenCommentRef.current = onOpenComment;
 	onCycleAltRef.current = onCycleAlt;
 	onOpenAltMenuRef.current = onOpenAltMenu;
+	ambientDismissMsRef.current = ambientSuggestDismissMs ?? 0;
+	ambientExcludeNameRef.current = ambientExcludeEntityName;
 	highlightedAnnotationIdRef.current = highlightedAnnotationId ?? null;
 
 	useImperativeHandle(ref, () => ({
@@ -1146,6 +1194,33 @@ export const FountainField = forwardRef(function FountainField(
 			return false;
 		});
 
+		// Ambient link suggester (link-suggest-cm6.ts) — no caching here (unlike
+		// markdown-field.tsx): `entityOptions` isn't memoized by its one real
+		// caller (script-view.tsx builds it fresh every render), so a cache
+		// keyed on reference identity would falsely invalidate constantly.
+		// Rebuilding a plain Map from a project's own cast/location/item list
+		// (realistically dozens to low hundreds of entries) on each ~150ms
+		// debounced trigger is cheap enough to not need caching at all.
+		const linkSuggestExt = buildLinkSuggestExtension({
+			getCorpus: () => {
+				const map = new Map<string, LinkSuggestEntry>();
+				const exclude = ambientExcludeNameRef.current;
+				for (const opt of entityOptionsRef.current) {
+					if (exclude !== undefined && opt.name === exclude) continue;
+					const key = opt.name.toLowerCase();
+					if (!map.has(key)) map.set(key, { insert: `@[${opt.name}]`, displayLabel: opt.name });
+				}
+				return map;
+			},
+			getDismissMs: () => ambientDismissMsRef.current,
+			maxPhraseWords: 5,
+			isInsideOpenMarker: isInsideEntityLinkOpen,
+			overlapsClosedLink: overlapsClosedEntityLink,
+			shouldSkipLine: looksLikeNonProseLine,
+			pillClass: 'loom-link-suggest-pill',
+			ariaLabel: (entry) => t('common.linkSuggestAccept', { insert: entry.displayLabel }),
+		});
+
 		const view = new EditorView({
 			parent: hostRef.current,
 			state: EditorState.create({
@@ -1157,6 +1232,7 @@ export const FountainField = forwardRef(function FountainField(
 					fountainDecorations,
 					annotationGutter,
 					annotationHandlesOverlay,
+					linkSuggestExt,
 					entityBracketPairing,
 					autocompletion({
 						override: [intExtCompletion, characterCompletion, locationCompletion, entityLinkCompletion],

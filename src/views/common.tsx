@@ -405,6 +405,23 @@ export function buildEntityLinkNames(plugin: LoomLoomPlugin, project: ProjectDef
 }
 
 /**
+ * `linkTargetOf(record) -> recordLabel(record, project)`, one entry per
+ * record — unlike `buildEntityLinkNames`'s alias-fan-out/sorted `LinkOption[]`
+ * (which loses the primary-name mapping once aliases and sorting are mixed
+ * in), this is the plain target->clean-label lookup a wikilink-rendering
+ * consumer needs. Feeds `MarkdownField`'s `linkLabels` prop (markdown-field.tsx)
+ * — see that field's own doc comment for why resolution happens here, once
+ * per relevant render, rather than inside the field's own decoration code.
+ */
+export function buildLinkTargetLabels(plugin: LoomLoomPlugin, project: ProjectDef): Map<string, string> {
+	const map = new Map<string, string>();
+	for (const r of plugin.indexer.getAll(undefined, project.root)) {
+		map.set(linkTargetOf(r), recordLabel(r, project));
+	}
+	return map;
+}
+
+/**
  * Opens a wikilink target from a markdown-field-style editor: a resolvable
  * loom entity gets its structured entity page (via `view.openEntity`),
  * anything else falls back to Obsidian's normal link opening.

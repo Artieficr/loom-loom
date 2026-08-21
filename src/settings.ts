@@ -73,6 +73,10 @@ export interface LoomLoomSettings {
 	 *  decorative marks, not native Obsidian markdown, so they stay a plain
 	 *  fixed color unless the user opts in to match their theme. */
 	followThemeTextColoring: boolean;
+	/** How long an unaccepted ambient-link-suggestion pill (always on — see
+	 *  `link-suggest-cm6.ts`) stays visible before disappearing on its own;
+	 *  0 = persist until accepted/dismissed. */
+	ambientLinkSuggestDismissMs: number;
 	/** Background colors for the built-in quest tags (main / important / side). */
 	questTagColors: { main: string; important: string; side: string };
 	/** Session page — how many previously-resolved quests to list in the Quests
@@ -164,6 +168,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	textSize: 'normal',
 	locale: 'auto',
 	followThemeTextColoring: false,
+	ambientLinkSuggestDismissMs: 0,
 	questTagColors: { main: '#b48b0e', important: '#c95f5f', side: '#58b478' },
 	sessionResolvedQuests: 6,
 	subChipFullAncestry: true,
@@ -355,6 +360,12 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof data.followThemeTextColoring === 'boolean') {
 		base.followThemeTextColoring = data.followThemeTextColoring;
 	}
+	if (
+		typeof data.ambientLinkSuggestDismissMs === 'number' &&
+		[0, 5000, 10000, 20000].includes(data.ambientLinkSuggestDismissMs)
+	) {
+		base.ambientLinkSuggestDismissMs = data.ambientLinkSuggestDismissMs;
+	}
 	if (typeof data.questTagColors === 'object' && data.questTagColors !== null) {
 		for (const k of ['main', 'important', 'side'] as const) {
 			const color = (data.questTagColors as Record<string, unknown>)[k];
@@ -476,7 +487,12 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
  * page's list here and the row covers it automatically.
  */
 const PAGE_SETTINGS_KEYS = {
-	general: ['textSize', 'locale', 'followThemeTextColoring'] as (keyof LoomLoomSettings)[],
+	general: [
+		'textSize',
+		'locale',
+		'followThemeTextColoring',
+		'ambientLinkSuggestDismissMs',
+	] as (keyof LoomLoomSettings)[],
 	entities: [
 		'questTagColors',
 		'sessionResolvedQuests',
@@ -776,6 +792,38 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 												await this.plugin.saveSettings();
 											})
 									);
+								},
+							},
+							{
+								name: t('settings.general.ambientLinkSuggestDismiss.name'),
+								desc: t('settings.general.ambientLinkSuggestDismiss.desc'),
+								// Not `renderFixedWidthDropdown` — that helper reads/writes
+								// through `getControlValue`/`setControlValue`, which only
+								// coerces string<->number for the ONE field it hardcodes by
+								// name (`sessionResolvedQuests`); a second numeric dropdown
+								// through that same generic path would silently store a
+								// STRING into this `number`-typed setting. A small, self-
+								// contained dropdown here avoids touching that shared,
+								// name-hardcoded mechanism for an unrelated field.
+								render: (setting) => {
+									const options: [number, string][] = [
+										[0, t('settings.general.ambientLinkSuggestDismiss.persist')],
+										[5000, t('settings.general.ambientLinkSuggestDismiss.sec5')],
+										[10000, t('settings.general.ambientLinkSuggestDismiss.sec10')],
+										[20000, t('settings.general.ambientLinkSuggestDismiss.sec20')],
+									];
+									setting.addDropdown((dd) => {
+										for (const [ms, label] of options) dd.addOption(String(ms), label);
+										dd.setValue(String(this.plugin.settings.ambientLinkSuggestDismissMs)).onChange(
+											async (value) => {
+												this.plugin.settings.ambientLinkSuggestDismissMs = Number(value);
+												await this.plugin.saveSettings();
+												this.plugin.indexer.refreshViews();
+											}
+										);
+										const longest = Math.max(...options.map(([, label]) => label.length));
+										dd.selectEl.setCssProps({ width: `${longest + 6}ch` });
+									});
 								},
 							},
 						],

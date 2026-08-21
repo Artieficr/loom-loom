@@ -179,7 +179,8 @@
 		"home": "Home",
 		"loomGraph": "Loom",
 		"openLabel": "Open {label}",
-		"quickNotes": "Quick Notes"
+		"quickNotes": "Quick Notes",
+		"linkSuggestAccept": "Insert {insert}"
 	},
 	"view": {
 		"home": {
@@ -874,6 +875,14 @@
 				"exampleBold": "Bold",
 				"exampleItalic": "Italic",
 				"exampleUnderline": "Underline"
+			},
+			"ambientLinkSuggestDismiss": {
+				"name": "Suggestion auto-dismiss",
+				"desc": "How long an unaccepted link suggestion stays visible before it disappears on its own.",
+				"persist": "Until dismissed",
+				"sec5": "5 seconds",
+				"sec10": "10 seconds",
+				"sec20": "20 seconds"
 			},
 			"language": {
 				"name": "Language",

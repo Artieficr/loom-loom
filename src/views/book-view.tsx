@@ -38,7 +38,14 @@ import {
 } from '../project';
 import { LoomFileReactView } from './react-view';
 import { MarkdownField, MarkdownFieldHandle } from './markdown-field';
-import { Icon, ViewShell, buildEntityLinkNames, openCreateLinkEntity, openEntityLink } from './common';
+import {
+	Icon,
+	ViewShell,
+	buildEntityLinkNames,
+	buildLinkTargetLabels,
+	openCreateLinkEntity,
+	openEntityLink,
+} from './common';
 import { useIndexVersion } from './hooks';
 import { t } from '../i18n';
 import { cleanAnnotationMarkers, findAnnotationSpans, liveAnnotationIds } from '../fountain';
@@ -912,6 +919,7 @@ export function ActChapterBlocks({
 	bookText,
 	chapters,
 	names,
+	linkLabels,
 	onOpenLink,
 	emptyMessage,
 	annotations,
@@ -921,6 +929,7 @@ export function ActChapterBlocks({
 	bookText: string | null;
 	chapters: EntityRecord[];
 	names: LinkOption[];
+	linkLabels?: Map<string, string>;
 	onOpenLink: (target: string, newTab?: boolean) => void;
 	emptyMessage: ReactElement;
 	/** Comments/alternative-text — optional, same as `MarkdownField`'s own
@@ -945,6 +954,7 @@ export function ActChapterBlocks({
 							app={plugin.app}
 							value={excerpt}
 							names={names}
+							linkLabels={linkLabels}
 							onOpenLink={onOpenLink}
 							readOnly
 							plainLinks
@@ -1209,6 +1219,10 @@ function Book({ view }: { view: BookView }): ReactElement {
 
 	const linkNames = useMemo<LinkOption[]>(
 		() => (project ? buildEntityLinkNames(plugin, project) : []),
+		[plugin, project]
+	);
+	const linkLabels = useMemo(
+		() => (project ? buildLinkTargetLabels(plugin, project) : new Map<string, string>()),
 		[plugin, project]
 	);
 
@@ -1631,6 +1645,8 @@ function Book({ view }: { view: BookView }): ReactElement {
 									app={plugin.app}
 									value={bookText}
 									names={linkNames}
+									linkLabels={linkLabels}
+									ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
 									onOpenLink={openLinkTarget}
 									onCreateEntity={createLinkEntity}
 									onChange={(v) => {
@@ -1680,6 +1696,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 													bookText={bookText}
 													chapters={chaptersOf(act)}
 													names={linkNames}
+													linkLabels={linkLabels}
 													onOpenLink={openLinkTarget}
 													emptyMessage={
 														<div className="loom-attendance-empty">
