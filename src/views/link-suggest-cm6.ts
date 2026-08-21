@@ -151,6 +151,18 @@ export function buildLinkSuggestExtension(config: LinkSuggestConfig) {
 			}
 
 			update(update: ViewUpdate): void {
+				// A pill is `position: fixed` on `document.body` (see `show()`), so
+				// a hidden ANCESTOR (a backgrounded Obsidian tab, or this field
+				// tearing down without `destroy()` running — see below) never clips
+				// it: left alone, it would keep floating at its last screen
+				// position over whatever the user switches to next. Losing focus is
+				// the field's own signal that it's no longer the thing being
+				// edited, so every pending suggestion is dropped outright here —
+				// not just hidden — matching this module's own "only ever reacts
+				// while actively being typed into" scope.
+				if (update.focusChanged && !update.view.hasFocus && this.suggestions.length > 0) {
+					this.dismissAll();
+				}
 				if (update.docChanged) {
 					this.remapSuggestions(update.changes);
 					if (this.triggerTimer !== null) window.clearTimeout(this.triggerTimer);
@@ -262,6 +274,20 @@ export function buildLinkSuggestExtension(config: LinkSuggestConfig) {
 							to: view.coordsAtPos(s.to, -1),
 						})),
 					write: (measured) => {
+						// Belt-and-suspenders alongside the focus-loss dismissal in
+						// `update()` above: `view.dom.offsetParent === null` is the
+						// standard "is this actually rendered right now" check for a
+						// backgrounded-but-not-destroyed tab (same test
+						// `AnnotationHandlesOverlay` uses for the identical
+						// `position: fixed`-on-`document.body` leak) — catches a
+						// reposition triggered by something other than this view's
+						// own focus changing (e.g. a doc change landing while the
+						// tab sits in the background), which `update()`'s
+						// `focusChanged` check alone wouldn't see.
+						if (this.view.dom.offsetParent === null) {
+							for (const m of measured) m.s.el.setCssProps({ display: 'none' });
+							return;
+						}
 						const scrollerRect = this.view.scrollDOM.getBoundingClientRect();
 						for (const m of measured) {
 							if (this.suggestions.indexOf(m.s) === -1) continue;
