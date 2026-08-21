@@ -56,8 +56,11 @@ import {
 	SuggestInput,
 	QuestTagChip,
 	Truncated,
+	buildEntityLinkNames,
 	locationLabel,
 	mainLocationFirst,
+	openCreateLinkEntity,
+	openEntityLink,
 	recordLabel,
 	scrollIntoContainer,
 } from './common';
@@ -347,6 +350,24 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  hook `BookView` itself uses, so an id resolves identically wherever
 	 *  it's opened from. */
 	const bookAnnotations = useBookAnnotations(plugin, project);
+	/** Guards `commitName`/`commitActTitle` against firing twice concurrently
+	 *  (Enter then blur) — see those functions' own doc comments. Read here,
+	 *  not down next to them, for the same reason as `scriptText`/`bookText`
+	 *  above: a hook can't sit behind the early return below (`!file ||
+	 *  !record`) — a real, reported bug this fixes: this ref used to live
+	 *  right next to `commitName` itself, past that return, so a component
+	 *  instance whose `record` only became available on a LATER render (the
+	 *  vault's index still cold right after Obsidian's own startup, well
+	 *  after this same view had already rendered once with `record`
+	 *  undefined) called one MORE hook than its previous render had — a
+	 *  genuine Rules-of-Hooks violation (React error #310, "rendered more
+	 *  hooks than during the previous render"), surfacing as every page in
+	 *  the workspace going blank until the affected tab was closed and
+	 *  reopened fresh (a plain navigation always hits a warm index, so it
+	 *  never took this path) — restoring a saved workspace on the next
+	 *  launch reliably reproduced it again, since the same cold-index race
+	 *  replayed identically. */
+	const commitNameInFlightRef = useRef(false);
 	/** Session page's own event hub: the bottom "+ Add" button (mirrors the
 	 *  top one, added so a long play session doesn't need scrolling back up
 	 *  every time) only shows once the TOP button has scrolled out of view —
@@ -1229,32 +1250,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	// Link completions offer only this project's entities, searched by their
 	// short (user-entered) name — sessions by their date. Inserted as
 	// `target|short name` so the raw link resolves AND reads well.
-	const linkNames = useMemo(() => {
-		const records = record ? plugin.indexer.getAll(undefined, record.project) : [];
-		return records
-			.flatMap((r) => {
-				const target = linkTargetOf(r);
-				const label = draftLabel(r);
-				const opts: LinkOption[] = [
-					{ label, insert: target === label ? label : `${target}|${label}` },
-				];
-				// Also offer each alias (native `aliases` frontmatter); inserting the
-				// real target keeps the link resolvable while showing the alias.
-				const f = plugin.app.vault.getFileByPath(r.path);
-				const aliases = f
-					? (plugin.app.metadataCache.getFileCache(f)?.frontmatter?.aliases as unknown)
-					: undefined;
-				if (Array.isArray(aliases)) {
-					for (const a of aliases) {
-						if (typeof a === 'string' && a.trim() !== '' && a !== label) {
-							opts.push({ label: a, insert: `${target}|${a}` });
-						}
-					}
-				}
-				return opts;
-			})
-			.sort((a, b) => a.label.localeCompare(b.label));
-	}, [plugin, record, version]);
+	const linkNames = useMemo(
+		() => (project ? buildEntityLinkNames(plugin, project) : []),
+		[plugin, project, version]
+	);
 
 	const saveBody = useMemo(() => {
 		let timer = 0;
@@ -1282,9 +1281,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  their entity page, anything else Obsidian's normal link opening. */
 	const openLinkTarget = (target: string, newTab = false) => {
 		if (!record) return;
-		const resolved = plugin.indexer.resolve(target, record.path);
-		if (resolved) view.openEntity(resolved.path, newTab);
-		else void plugin.app.workspace.openLinkText(target, record.path, newTab ? 'tab' : false);
+		openEntityLink(plugin, view, record.path, target, newTab);
 	};
 
 	/** Ctrl/Cmd+click on a Chapter heading inline in the Act page's own
@@ -1304,23 +1301,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** "+ Create …" from a [[ completion: type picker → creation modal with
 	 *  the short name prefilled; the finished entity links back in place. */
 	const createLinkEntity = (entered: string, insert: (linkInsert: string) => void) => {
-		const proj = record ? plugin.indexer.getProjectByRoot(record.project) ?? null : null;
-		if (!proj) return;
-		new EntityTypeSuggestModal(plugin, (type) =>
-			new CreateEntityModal(plugin, type, proj, {
-				initialName: entered,
-				onCreated: (created) => {
-					// Short name = managed basename minus its prefix (the index
-					// may not have caught the new file yet).
-					const prefix = `${proj.name} ${ENTITY_META[type].label} `;
-					const label = created.basename.startsWith(prefix)
-						? created.basename.slice(prefix.length)
-						: entered;
-					insert(created.basename === label ? label : `${created.basename}|${label}`);
-				},
-			}).open(),
-			proj
-		).open();
+		if (!project) return;
+		openCreateLinkEntity(plugin, project, entered, insert);
 	};
 
 	if (!file || !record) {
@@ -1633,10 +1615,6 @@ function EntityPage({ view }: { view: EntityView }) {
 				new Notice(t('view.entity.common.saveFailed'));
 			});
 	};
-
-	/** Guards `commitName`/`commitActTitle` against firing twice concurrently
-	 *  (Enter then blur) — see those functions' own doc comments. */
-	const commitNameInFlightRef = useRef(false);
 
 	/** Renames the file to its managed name and stores the entered display
 	 *  name (`loomName` + a native alias so [[…]] autocomplete finds it).

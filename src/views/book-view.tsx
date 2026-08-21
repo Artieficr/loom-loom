@@ -3,7 +3,6 @@ import { CSSProperties, ReactElement, useEffect, useMemo, useRef, useState } fro
 import {
 	BOOK_EXTENSION,
 	BOOK_ICON,
-	ENTITY_META,
 	EntityRecord,
 	FM,
 	VIEW_PROSE,
@@ -32,7 +31,6 @@ import { setLoomKey } from '../fm';
 import {
 	AltTextModal,
 	CreateEntityModal,
-	EntityTypeSuggestModal,
 	TextInputModal,
 	createEntity,
 	entityFileName,
@@ -40,7 +38,7 @@ import {
 } from '../project';
 import { LoomFileReactView } from './react-view';
 import { MarkdownField, MarkdownFieldHandle } from './markdown-field';
-import { Icon, ViewShell } from './common';
+import { Icon, ViewShell, buildEntityLinkNames, openCreateLinkEntity, openEntityLink } from './common';
 import { useIndexVersion } from './hooks';
 import { t } from '../i18n';
 import { cleanAnnotationMarkers, findAnnotationSpans, liveAnnotationIds } from '../fountain';
@@ -1209,33 +1207,14 @@ function Book({ view }: { view: BookView }): ReactElement {
 		</span>
 	);
 
-	const linkNames = useMemo<LinkOption[]>(() => {
-		if (!project) return [];
-		return plugin.indexer
-			.getAll(undefined, project.root)
-			.flatMap((r) => {
-				const target = linkTargetOf(r);
-				const label = r.name;
-				const opts: LinkOption[] = [{ label, insert: target === label ? label : `${target}|${label}` }];
-				const f = plugin.app.vault.getFileByPath(r.path);
-				const aliases = f ? (plugin.app.metadataCache.getFileCache(f)?.frontmatter?.aliases as unknown) : undefined;
-				if (Array.isArray(aliases)) {
-					for (const a of aliases) {
-						if (typeof a === 'string' && a.trim() !== '' && a !== label) {
-							opts.push({ label: a, insert: `${target}|${a}` });
-						}
-					}
-				}
-				return opts;
-			})
-			.sort((a, b) => a.label.localeCompare(b.label));
-	}, [plugin, project]);
+	const linkNames = useMemo<LinkOption[]>(
+		() => (project ? buildEntityLinkNames(plugin, project) : []),
+		[plugin, project]
+	);
 
 	const openLinkTarget = (target: string, newTab = false) => {
 		if (!file) return;
-		const resolved = plugin.indexer.resolve(target, file.path);
-		if (resolved) view.openEntity(resolved.path, newTab);
-		else void plugin.app.workspace.openLinkText(target, file.path, newTab ? 'tab' : false);
+		openEntityLink(plugin, view, file.path, target, newTab);
 	};
 
 	/** Ctrl/Cmd+click on an Act (`level === 1`)/Chapter (`level === 2`)
@@ -1255,19 +1234,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 
 	const createLinkEntity = (entered: string, insert: (linkInsert: string) => void) => {
 		if (!project) return;
-		new EntityTypeSuggestModal(
-			plugin,
-			(type) =>
-				new CreateEntityModal(plugin, type, project, {
-					initialName: entered,
-					onCreated: (created) => {
-						const prefix = `${project.name} ${ENTITY_META[type].label} `;
-						const label = created.basename.startsWith(prefix) ? created.basename.slice(prefix.length) : entered;
-						insert(created.basename === label ? label : `${created.basename}|${label}`);
-					},
-				}).open(),
-			project
-		).open();
+		openCreateLinkEntity(plugin, project, entered, insert);
 	};
 
 	if (!project) {

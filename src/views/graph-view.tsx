@@ -35,7 +35,16 @@ import { GraphLayout, LayoutNode, computeGraphLayout } from '../graph/layout';
 import { EdgeRoute, Pt, edgeEndDirs, edgePath, edgeXRange } from '../graph/routing';
 import { GraphSidePanel, PANEL_MAX, PANEL_MIN } from '../graph/side-panel';
 import { LoomReactView } from './react-view';
-import { EntityChip, Icon, SearchableSelect, ViewShell, noProjectMessage, recordLabel } from './common';
+import {
+	EntityChip,
+	Icon,
+	SearchableSelect,
+	ViewShell,
+	buildEntityLinkNames,
+	noProjectMessage,
+	openEntityLink,
+	recordLabel,
+} from './common';
 import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
 import { projectRoleType, projectTypes, roleOf } from '../project-kind';
@@ -1946,9 +1955,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const panelOnOpenLink = useCallback(
 		(target: string, newTab?: boolean) => {
 			if (!selectedRecord) return;
-			const resolved = plugin.indexer.resolve(target, selectedRecord.path);
-			if (resolved) view.openEntity(resolved.path, newTab);
-			else void plugin.app.workspace.openLinkText(target, selectedRecord.path, newTab ? 'tab' : false);
+			openEntityLink(plugin, view, selectedRecord.path, target, newTab);
 		},
 		[plugin, selectedRecord, view]
 	);
@@ -1965,17 +1972,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	);
 	// Link vocabulary for the side panel's read-only description (rendered links).
 	const panelLinkNames = useMemo(
-		() =>
-			project
-				? plugin.indexer
-						.getAll(undefined, project.root)
-						.map((r) => {
-							const target = linkTargetOf(r);
-							const label = roleOf(r.type) === 'anchor' ? recordLabel(r, project) : r.name;
-							return { label, insert: target === label ? label : `${target}|${label}` };
-						})
-						.sort((a, b) => a.label.localeCompare(b.label))
-				: [],
+		() => (project ? buildEntityLinkNames(plugin, project) : []),
 		[plugin, project, version]
 	);
 	// The filter popover's "Focus on entities" search options — every project

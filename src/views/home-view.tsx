@@ -21,7 +21,7 @@ import {
 import { groupNameOf } from '../calendar';
 import { features, projectTypes } from '../project-kind';
 import { LoomFileReactView } from './react-view';
-import { Icon } from './common';
+import { Icon, NavRail } from './common';
 import { useIndexVersion } from './hooks';
 import { countMapPages, mapsFilePath } from './map-view';
 import { createScriptFile, scriptFilePath } from './script-view';
@@ -216,6 +216,12 @@ function Home({ view }: { view: HomeView }) {
 	const loomCustom = plugin.settings.loomButtonStyle === 'custom';
 
 	return (
+		<div className="loom-shell-row">
+		{/* No entity-list/script/graph buttons here — the wheel below already
+		    covers that navigation — just Quick Notes, so its trigger lands in
+		    the exact spot every other page's does instead of a hand-tuned
+		    stand-in position. */}
+		<NavRail navigator={view} project={project} minimal />
 		<div className="loom-home">
 			<h2>{project.name}</h2>
 			<div className="loom-home-wheel">
@@ -254,6 +260,7 @@ function Home({ view }: { view: HomeView }) {
 					);
 				})}
 			</div>
+		</div>
 		</div>
 	);
 }

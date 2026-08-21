@@ -604,6 +604,10 @@ function linkCompletion(
  *  Fountain-specific methods this field has no equivalent need for. */
 export interface MarkdownFieldHandle {
 	scrollToPos: (pos: number) => void;
+	/** Focuses the field with the cursor placed at the very end of the
+	 *  document — for a caller that wants typing to be possible the instant
+	 *  it opens, with no click needed first (Quick Notes' own panel). */
+	focusEnd: () => void;
 }
 
 export const MarkdownField = forwardRef<MarkdownFieldHandle, {
@@ -1422,6 +1426,13 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 				const view = viewRef.current;
 				if (!view) return;
 				view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'center' }) });
+			},
+			focusEnd: () => {
+				const view = viewRef.current;
+				if (!view) return;
+				const end = view.state.doc.length;
+				view.dispatch({ selection: { anchor: end }, effects: EditorView.scrollIntoView(end) });
+				view.focus();
 			},
 		}),
 		[]
