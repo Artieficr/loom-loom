@@ -152,10 +152,48 @@ body.loom-text-large {
 	margin: var(--size-2-1) 0;
 }
 
-/* Purely a DOM marker for quick-notes.tsx's focus tracker — no visual/layout
-   footprint of its own. */
+/* Home's own rail (`NavRail minimal`) renders the exact same button list a
+   normal rail does (see NavRail's own doc comment) so its layout — and
+   therefore the Quick Notes trigger's own position — matches a real rail
+   pixel for pixel; only visibility is stripped here, never the DOM. The
+   border keeps its 1px WIDTH (just made transparent) rather than being
+   removed outright, so the rail's own box stays exactly as wide as a normal
+   page's — `border-right: none` would shave a pixel off and reintroduce the
+   drift this is fixing. `.loom-rail-buttons` stays in the layout
+   (`visibility: hidden`, not `display: none`) so it still occupies the same
+   space and pushes the spacer/trigger down to the identical spot; `pointer-
+   events: none` keeps its now-invisible buttons from swallowing clicks meant
+   for the home page underneath them. */
+.loom-rail-minimal {
+	border-right-color: transparent;
+	background: transparent;
+}
+
+.loom-rail-minimal .loom-rail-buttons {
+	visibility: hidden;
+	pointer-events: none;
+}
+
+/* Purely a DOM marker for quick-notes.tsx's focus tracker — `display: contents`
+   itself has no box/layout footprint of its own. */
 .loom-qn-trigger-wrap {
 	display: contents;
+}
+
+/* Nudges the trigger button itself up off the rail's true bottom edge —
+   `display: contents` on the wrap above doesn't stop this child selector
+   from still reaching the real button in the DOM. A real, reported look:
+   with no gap here the button sits flush with the row's bottom edge, well
+   below the open Quick Notes panel's own bottom edge, so the button read as
+   floating outside the panel instead of within it. The target isn't the
+   panel's OWN outer margin (`.loom-qn-panel`'s `margin`, below in this
+   file) — matching only that lands the button exactly ON the panel's edge.
+   What should match is the gap the panel's own content already keeps from
+   that edge — the Notes field sits `var(--size-4-2)` above it via
+   `.loom-qn-body`'s bottom padding (below in this file) — so the button's
+   own clearance is the panel's outer margin PLUS that same inner gap. */
+.loom-qn-trigger-wrap > .loom-rail-btn {
+	margin-bottom: calc(var(--size-4-3) + var(--size-4-2));
 }
 
 /* ---- Quick Notes: per-project scratchpad, slides out from under the rail ---- */
@@ -246,11 +284,22 @@ body.loom-text-large {
 	opacity: 1;
 }
 
+/* Cancels the panel's own `padding-left: var(--loom-rail-w)` (normally hidden
+   under the rail, which paints above the panel) via a matching negative
+   margin, then re-adds it as padding on the header itself — so the header's
+   BOX (and therefore its `border-bottom` below) spans the panel's true full
+   width instead of stopping at the padded content edge. On a normal page
+   this is invisible either way, since the rail covers that strip regardless;
+   it only matters on Home, where the rail is transparent (`.loom-rail-minimal`)
+   and that strip is actually visible — there, a border-bottom scoped to just
+   the padded content used to stop abruptly instead of reaching the left edge
+   the way the panel's own outer top border already does. */
 .loom-qn-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: var(--size-4-2) var(--size-4-3);
+	margin-left: calc(-1 * var(--loom-rail-w));
+	padding: var(--size-4-2) var(--size-4-3) var(--size-4-2) calc(var(--loom-rail-w) + var(--size-4-3));
 	border-bottom: 1px solid var(--background-modifier-border);
 	flex-shrink: 0;
 }

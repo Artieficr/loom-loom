@@ -26,7 +26,7 @@ import {
 	scriptLabel,
 } from '../types';
 import { formatLoomDate, groupNameOf } from '../calendar';
-import { features, projectTypes, roleOf } from '../project-kind';
+import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
 import { createScriptFile, scriptFilePath as scriptPathOf } from './script-view';
 import { createBookFile, findBookFile } from './book-view';
 import { QUICK_NOTES_ICON, QuickNotesPanel, useQuickNotesToggle } from './quick-notes';
@@ -632,10 +632,14 @@ export function RailButton({
  * itself (see `.loom-qn-panel-wrap`'s own CSS comment), never a child of it,
  * so the rail's own box and buttons are never implicated in the panel's
  * open/close animation. `active` marks the current page ('graph' or an
- * entity type). `minimal` renders just the Quick Notes trigger with no other
- * buttons/separators — Home's own stand-in rail (home-view.tsx), so its
- * trigger lands in the exact same spot as every other page's without
- * hand-tuning a separate position for it. */
+ * entity type). `minimal` still renders the FULL normal button set — Home's
+ * own stand-in rail (home-view.tsx) needs the exact same DOM/layout a normal
+ * rail has so the Quick Notes trigger computes to the exact same position;
+ * only `.loom-rail-minimal`'s CSS (`visibility: hidden` on the button list,
+ * transparent border/background) hides everything but the trigger, rather
+ * than omitting the buttons from the tree, which is what let their layout
+ * (and therefore the trigger's own position) drift out of sync with a real
+ * rail's in the first place. */
 export function NavRail({
 	navigator,
 	project,
@@ -650,112 +654,125 @@ export function NavRail({
 	const [quickNotesOpen, setQuickNotesOpen] = useQuickNotesToggle(navigator);
 	return (
 		<>
-			<nav className="loom-rail">
+			<nav className={minimal ? 'loom-rail loom-rail-minimal' : 'loom-rail'}>
 				<div className="loom-rail-buttons">
-					{minimal ? null : (
-						<>
-							<RailButton
-								icon="home"
-								label={t('common.home')}
-								onClick={() => navigator.openLoomFile(project.loomPath)}
-							/>
-							<div className="loom-rail-sep" />
-							{/* The script leads, in the slot the Group takes in the other kinds,
-							    so every entity button below keeps its usual position. */}
-							{features(project.config).script ? (
-								<RailButton
-									icon={SCRIPT_ICON}
-									label={scriptLabel()}
-									active={active === 'script'}
-									onClick={() => {
-										// Created on demand: a project switched to Writer after
-										// setup has no script file yet.
-										const path = scriptPathOf(project);
-										if (navigator.plugin.app.vault.getFileByPath(path)) navigator.openLoomFile(path);
-										else {
-											void createScriptFile(navigator.plugin, project).then((f) =>
-												navigator.openLoomFile(f.path)
-											);
-										}
-									}}
-								/>
-							) : null}
-							{/* Writer/Prose's own rail entry, mirroring Script's above (mutually
-							    exclusive, same slot) — an additional whole-book entry point;
-							    Chapters keep their own normal entry in the generic loop below too. */}
-							{project.config.kind === 'writer' && project.config.writerMode === 'prose' ? (
-								<RailButton
-									icon={BOOK_ICON}
-									label={bookLabel()}
-									active={active === 'book'}
-									onClick={() => {
-										// Created on demand: a project switched to Writer/Prose after
-										// setup has no Book file yet — mirrors the Script button above.
-										const bookFile = findBookFile(navigator.plugin, project);
-										if (bookFile) navigator.openLoomFile(bookFile.path);
-										else
-											void createBookFile(navigator.plugin, project).then((f) =>
-												navigator.openLoomFile(f.path)
-											);
-									}}
-								/>
-							) : null}
-							{/* The Group is the party — present only in kinds that have one. */}
-							{features(project.config).group ? (
-								<RailButton
-									icon={PC_GROUP_ICON}
-									iconFallback="star"
-									label={groupNameOf(project.config)}
-									active={active === 'group'}
-									onClick={() => {
-										// Navigators are views — record where the Group page was
-										// opened from so its Back button can return there.
-										const nav = navigator as LoomNavigator &
-											Partial<{ getViewType: () => string; getState: () => Record<string, unknown> }>;
-										const origin =
-											typeof nav.getViewType === 'function' && typeof nav.getState === 'function'
-												? { type: nav.getViewType(), state: nav.getState() }
-												: undefined;
-										navigator.navigateTo(VIEW_GROUP, { project: project.root, origin });
-									}}
-								/>
-							) : null}
-							{projectTypes(project.config)
-								.filter((et) => et !== 'region')
-								.flatMap((et) => {
-									const btn = (
-										<RailButton
-											key={et}
-											icon={ENTITY_META[et].icon}
-											label={entityPlural(et)}
-											active={active === et}
-											onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: et })}
-										/>
+					<RailButton
+						icon="home"
+						label={t('common.home')}
+						onClick={() => navigator.openLoomFile(project.loomPath)}
+					/>
+					<div className="loom-rail-sep" />
+					{/* The script leads, in the slot the Group takes in the other kinds,
+					    so every entity button below keeps its usual position. */}
+					{features(project.config).script ? (
+						<RailButton
+							icon={SCRIPT_ICON}
+							label={scriptLabel()}
+							active={active === 'script'}
+							onClick={() => {
+								// Created on demand: a project switched to Writer after
+								// setup has no script file yet.
+								const path = scriptPathOf(project);
+								if (navigator.plugin.app.vault.getFileByPath(path)) navigator.openLoomFile(path);
+								else {
+									void createScriptFile(navigator.plugin, project).then((f) =>
+										navigator.openLoomFile(f.path)
 									);
-									// Maps sits right after Locations, matching the home wheel order.
-									if (et === 'location') {
-										return [
-											btn,
-											<RailButton
-												key="maps"
-												icon={MAPS_ICON}
-												label={mapsLabel()}
-												active={active === 'map'}
-												onClick={() => navigator.navigateTo(VIEW_MAP, { project: project.root })}
-											/>,
-										];
-									}
-									return [btn];
-								})}
-							<div className="loom-rail-sep" />
-							<RailButton
-								icon="spool"
-								label={t('common.loomGraph')}
-								active={active === 'graph'}
-								onClick={() => navigator.navigateTo(VIEW_GRAPH, { project: project.root })}
-							/>
-						</>
-					)}
+								}
+							}}
+						/>
+					) : null}
+					{/* Writer/Prose's own rail entry, mirroring Script's above (mutually
+					    exclusive, same slot) — an additional whole-book entry point;
+					    Chapters keep their own normal entry in the generic loop below too. */}
+					{project.config.kind === 'writer' && project.config.writerMode === 'prose' ? (
+						<RailButton
+							icon={BOOK_ICON}
+							label={bookLabel()}
+							active={active === 'book'}
+							onClick={() => {
+								// Created on demand: a project switched to Writer/Prose after
+								// setup has no Book file yet — mirrors the Script button above.
+								const bookFile = findBookFile(navigator.plugin, project);
+								if (bookFile) navigator.openLoomFile(bookFile.path);
+								else
+									void createBookFile(navigator.plugin, project).then((f) =>
+										navigator.openLoomFile(f.path)
+									);
+							}}
+						/>
+					) : null}
+					{/* Writer's own anchor/beat pair (Act, then Scene/Chapter) sits right
+					    after Script/Book — the script/book → act → scene/chapter reading
+					    order — rather than falling wherever they land in the generic
+					    entity-type loop below, which is filtered to skip them here. */}
+					{project.config.kind === 'writer'
+						? ([projectRoleType(project.config, 'anchor'), projectRoleType(project.config, 'beat')] as const).map(
+								(et) => (
+									<RailButton
+										key={et}
+										icon={ENTITY_META[et].icon}
+										label={entityPlural(et)}
+										active={active === et}
+										onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: et })}
+									/>
+								)
+							)
+						: null}
+					{/* The Group is the party — present only in kinds that have one. */}
+					{features(project.config).group ? (
+						<RailButton
+							icon={PC_GROUP_ICON}
+							iconFallback="star"
+							label={groupNameOf(project.config)}
+							active={active === 'group'}
+							onClick={() => {
+								// Navigators are views — record where the Group page was
+								// opened from so its Back button can return there.
+								const nav = navigator as LoomNavigator &
+									Partial<{ getViewType: () => string; getState: () => Record<string, unknown> }>;
+								const origin =
+									typeof nav.getViewType === 'function' && typeof nav.getState === 'function'
+										? { type: nav.getViewType(), state: nav.getState() }
+										: undefined;
+								navigator.navigateTo(VIEW_GROUP, { project: project.root, origin });
+							}}
+						/>
+					) : null}
+					{projectTypes(project.config)
+						.filter((et) => et !== 'region' && et !== 'act' && et !== 'scene' && et !== 'chapter')
+						.flatMap((et) => {
+							const btn = (
+								<RailButton
+									key={et}
+									icon={ENTITY_META[et].icon}
+									label={entityPlural(et)}
+									active={active === et}
+									onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: et })}
+								/>
+							);
+							// Maps sits right after Locations, matching the home wheel order.
+							if (et === 'location') {
+								return [
+									btn,
+									<RailButton
+										key="maps"
+										icon={MAPS_ICON}
+										label={mapsLabel()}
+										active={active === 'map'}
+										onClick={() => navigator.navigateTo(VIEW_MAP, { project: project.root })}
+									/>,
+								];
+							}
+							return [btn];
+						})}
+					<div className="loom-rail-sep" />
+					<RailButton
+						icon="spool"
+						label={t('common.loomGraph')}
+						active={active === 'graph'}
+						onClick={() => navigator.navigateTo(VIEW_GRAPH, { project: project.root })}
+					/>
 				</div>
 				<div className="loom-rail-spacer" />
 				{/* `.loom-qn-trigger-wrap` (`display: contents`, no layout effect of
