@@ -35,6 +35,7 @@ import {
 	EntityOrigin,
 	EntityRecord,
 	EntityType,
+	EventKind,
 	FM,
 	LOOM_EXTENSION,
 	PC_GROUP_VALUE,
@@ -67,6 +68,8 @@ import {
 import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
 import { ProjectDef, extractLinkpath, linkTargetOf } from './indexer';
 import { fmLoomValue, setLoomKey } from './fm';
+import { recomputeEventLocks, waitForMetadataSync } from './gm-lock';
+import { SessionConflict, cascadeDecisionPointSession, setEventSession } from './gm-decision-point';
 import { canCreateProjectOfKind } from './license/gating';
 import { LocaleKey, t } from './i18n';
 import {
@@ -198,6 +201,12 @@ export interface NewEntityFields {
 	parentLocation?: string;
 	/** Location only: region name — the new location is part of this region. */
 	region?: string;
+	/** Event only (GM projects): decision point name — the new event is part
+	 *  of this decision point. */
+	decisionPoint?: string;
+	/** Event only (GM projects): planning status, defaults to `planned` — see
+	 *  ROADMAP.md's "Game Master" entry. Absent on every other kind/type. */
+	eventKind?: EventKind;
 	/** Event only: entity names involved — written into the starting session
 	 *  note's `involved` list (session-less for lore events). */
 	involved?: string[];
@@ -330,6 +339,12 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	}
 	if (type === 'location' && fields.region && fields.region !== '') {
 		lines.push(`${FM.region}: ${yamlQuote(`[[${fields.region}]]`)}`);
+	}
+	if (type === 'event' && fields.decisionPoint && fields.decisionPoint !== '') {
+		lines.push(`${FM.decisionPoint}: ${yamlQuote(`[[${fields.decisionPoint}]]`)}`);
+	}
+	if (type === 'event' && fields.eventKind) {
+		lines.push(`${FM.eventKind}: ${fields.eventKind}`);
 	}
 	if (type === 'faction') {
 		const members = (fields.members ?? []).filter((m) => m.character !== '');
@@ -876,7 +891,31 @@ export class AddRelationshipModal extends Modal {
 					tc.setValue(recordPickLabel(this.plugin, this.project, r));
 				},
 				(r) => recordPickLabel(this.plugin, this.project, r),
-				false
+				false,
+				// Any entity type can be a relationship target, so this has to
+				// ask WHICH type before it can create anything — the same
+				// type-picker flow the Involved-entities picker uses (see
+				// `view.entity.sessionNotes.createNewEntityAction`'s own key),
+				// not a single-type `CreateEntityModal` the way most other
+				// `RecordInputSuggest` callers open one directly.
+				() =>
+					new EntityTypeSuggestModal(this.plugin, (type) =>
+						new CreateEntityModal(this.plugin, type, this.project, {
+							onCreated: (f) => {
+								void waitForMetadataSync(this.app, f).then(() => {
+									const rec = this.plugin.indexer.resolve(f.basename, this.project.loomPath) ?? {
+										...pcGroupStub(this.project.root),
+										path: f.path,
+										name: f.basename,
+										type,
+									};
+									this.target = rec;
+									tc.setValue(recordPickLabel(this.plugin, this.project, rec));
+								});
+							},
+						}).open()
+					).open(),
+				t('view.entity.sessionNotes.createNewEntityAction')
 			);
 		});
 		new Setting(this.contentEl).addButton((b) =>
@@ -946,7 +985,24 @@ export class AddToHoldersModal extends Modal {
 					this.picked.push(r);
 					refresh();
 				},
-				(r) => recordPickLabel(this.plugin, this.project, r)
+				(r) => recordPickLabel(this.plugin, this.project, r),
+				true,
+				() =>
+					new CreateEntityModal(this.plugin, this.holderType, this.project, {
+						onCreated: (f) => {
+							void waitForMetadataSync(this.app, f).then(() => {
+								const rec = this.plugin.indexer.resolve(f.basename, this.project.loomPath) ?? {
+									...pcGroupStub(this.project.root),
+									path: f.path,
+									name: f.basename,
+									type: this.holderType,
+								};
+								this.picked.push(rec);
+								refresh();
+							});
+						},
+					}).open(),
+				t('project.createEntity.createNewAction', { label: entityLabel(this.holderType) })
 			);
 		});
 		chips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
@@ -1053,6 +1109,11 @@ export class RecordSuggestModal extends FuzzySuggestModal<EntityRecord> {
  * the views' SearchableSelect): typing filters, picking hands the record over
  * and clears the input for the next pick.
  */
+/** Sentinel path for the synthetic "+ Create new …" row `RecordInputSuggest`
+ *  can prepend to its own suggestion list — never a real file, so nothing
+ *  else needs to recognize it except `selectSuggestion` itself below. */
+const CREATE_NEW_SUGGESTION = 'loom:create-new-suggestion';
+
 class RecordInputSuggest extends AbstractInputSuggest<EntityRecord> {
 	constructor(
 		app: App,
@@ -1062,23 +1123,48 @@ class RecordInputSuggest extends AbstractInputSuggest<EntityRecord> {
 		private label: (r: EntityRecord) => string = (r) => r.name,
 		/** Multi-pick inputs (involved, givers) clear after each pick; a single-
 		 *  value field (the searchable Name) keeps the pick's text instead. */
-		private clearOnPick = true
+		private clearOnPick = true,
+		/** When set, a "+ Create new …" row always leads the suggestion list —
+		 *  every selectable search should expose a way to create what it's
+		 *  missing, not just show empty when nothing matches yet. A function
+		 *  (rather than a plain string) so a field whose target TYPE can
+		 *  change after construction (the Involved picker's type filter) can
+		 *  still read that choice live instead of freezing it at build time. */
+		private onCreateNew?: () => void,
+		private createLabel?: string | (() => string)
 	) {
 		super(app, input);
 	}
 
+	private createLabelText(): string {
+		return typeof this.createLabel === 'function' ? this.createLabel() : (this.createLabel ?? '');
+	}
+
 	getSuggestions(query: string): EntityRecord[] {
 		const q = query.toLowerCase();
-		return this.records().filter(
+		const matches = this.records().filter(
 			(r) => r.name.toLowerCase().includes(q) || this.label(r).toLowerCase().includes(q)
 		);
+		if (!this.onCreateNew) return matches;
+		const createRow: EntityRecord = { ...pcGroupStub(''), path: CREATE_NEW_SUGGESTION, name: this.createLabelText() };
+		return [createRow, ...matches];
 	}
 
 	renderSuggestion(r: EntityRecord, el: HTMLElement): void {
+		if (r.path === CREATE_NEW_SUGGESTION) {
+			el.addClass('loom-suggest-create-new');
+			el.setText(this.createLabelText());
+			return;
+		}
 		el.setText(this.label(r));
 	}
 
 	selectSuggestion(r: EntityRecord): void {
+		if (r.path === CREATE_NEW_SUGGESTION) {
+			this.close();
+			this.onCreateNew?.();
+			return;
+		}
 		this.pick(r);
 		if (this.clearOnPick) this.input.value = '';
 		this.close();
@@ -1272,6 +1358,8 @@ export interface CreateEntityOptions {
 	parentLocation?: EntityRecord;
 	/** Locations only: prefill the new location's "Part of region". */
 	region?: EntityRecord;
+	/** Events only (GM projects): prefill the new event's Decision Point. */
+	decisionPoint?: EntityRecord;
 	/** The new entity starts with a session note pinned to this session. */
 	noteSession?: EntityRecord;
 	/** Quests only: prefills "Received in session" without pinning a session
@@ -1379,6 +1467,30 @@ export class CreateEntityModal extends Modal {
 		return this.plugin.indexer.resolve(name, this.project.loomPath);
 	}
 
+	/**
+	 * A "+ Create new …" pick inside this modal opens a NESTED CreateEntityModal
+	 * and needs the freshly created file back as a real `EntityRecord` (to
+	 * render as a chip) the instant it closes — but Obsidian's metadataCache
+	 * re-parses a just-written file on its own later tick, not synchronously
+	 * within the write's own promise (see `waitForMetadataSync`'s own doc
+	 * comment for the confirmed bug this avoids — `rebuildNow` alone doesn't
+	 * fix it, since it only re-reads whatever metadataCache currently has,
+	 * stale or not). Falls back to a minimal stand-in (name/type only, no
+	 * date/description) on the off chance resolution still misses, so the
+	 * pick never silently does nothing.
+	 */
+	private async resolveAfterCreate(f: TFile, type: EntityType): Promise<EntityRecord> {
+		await waitForMetadataSync(this.app, f);
+		return (
+			this.plugin.indexer.resolve(f.basename, this.project.loomPath) ?? {
+				...pcGroupStub(this.project.root),
+				path: f.path,
+				name: f.basename,
+				type,
+			}
+		);
+	}
+
 	/** Sublocation label: full ancestry ("Secret room, Tavern, City"), or just
 	 *  the own name when `subChipFullAncestry` is off. */
 	private locLabel(r: EntityRecord): string {
@@ -1423,12 +1535,13 @@ export class CreateEntityModal extends Modal {
 		);
 
 		if (this.type !== 'session') {
-			// From a session page (noteSession set), the event/quest Name is a
-			// search over existing ones: picking a match pins it to the session on
-			// submit; typing a new name just creates it.
-			const searchable =
-				(roleOf(this.type) === 'beat' || this.type === 'quest') &&
-				this.options.noteSession !== undefined;
+			// The event/quest Name is always a search over existing ones —
+			// whether opened from a session page or the plain entity list, so
+			// there's one event-creation experience, not two: picking a match
+			// pins it to the session when one is known (`noteSession`), or just
+			// opens the existing one otherwise (see `submit()`'s `pickedExisting`
+			// branch); typing a new name just creates it either way.
+			const searchable = roleOf(this.type) === 'beat' || this.type === 'quest';
 			const noun = entityLabel(this.type).toLowerCase();
 			const article = /^[aeiou]/.test(noun) ? 'an' : 'a';
 			new Setting(this.contentEl)
@@ -1504,7 +1617,17 @@ export class CreateEntityModal extends Modal {
 					(r) => {
 						(this.fields.questGivers ??= []).push(linkTargetOf(r));
 						refreshGivers();
-					}
+					},
+					(r) => r.name,
+					true,
+					() =>
+						new CreateEntityModal(this.plugin, 'character', this.project, {
+							onCreated: (f) => {
+								(this.fields.questGivers ??= []).push(f.basename);
+								refreshGivers();
+							},
+						}).open(),
+					t('project.createEntity.createNewAction', { label: entityLabel('character') })
 				);
 			});
 			const giverChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
@@ -1545,7 +1668,18 @@ export class CreateEntityModal extends Modal {
 							this.receivedSession = r;
 							refreshReceived();
 						},
-						sessionLabel
+						sessionLabel,
+						true,
+						() =>
+							new CreateEntityModal(this.plugin, projectRoleType(this.project.config, 'anchor'), this.project, {
+								onCreated: (f) => {
+									void this.resolveAfterCreate(f, projectRoleType(this.project.config, 'anchor')).then((rec) => {
+										this.receivedSession = rec;
+										refreshReceived();
+									});
+								},
+							}).open(),
+						t('project.createEntity.createNewAction', { label: entityLabel(projectRoleType(this.project.config, 'anchor')) })
 					);
 				}
 			};
@@ -1626,7 +1760,18 @@ export class CreateEntityModal extends Modal {
 								this.pickedSession = r;
 								refreshSession();
 							},
-							sessionLabel
+							sessionLabel,
+							true,
+							() =>
+								new CreateEntityModal(this.plugin, anchorType, this.project, {
+									onCreated: (f) => {
+										void this.resolveAfterCreate(f, anchorType).then((rec) => {
+											this.pickedSession = rec;
+											refreshSession();
+										});
+									},
+								}).open(),
+							t('project.createEntity.createNewAction', { label: entityLabel(anchorType) })
 						);
 					}
 				};
@@ -1656,7 +1801,7 @@ export class CreateEntityModal extends Modal {
 					: []),
 				...this.plugin.indexer
 					.getAll(undefined, this.project.root)
-					.filter((r) => roleOf(r.type) === null)
+					.filter((r) => roleOf(r.type) === null && r.type !== 'decisionPoint')
 					.filter((r) => involveFilter === null || r.type === involveFilter)
 					.filter((r) => !taken(r))
 					.sort((a, b) => a.name.localeCompare(b.name)),
@@ -1665,15 +1810,43 @@ export class CreateEntityModal extends Modal {
 				.setName(t('project.createEntity.involvedEntities'))
 				.addText((text) => {
 					text.setPlaceholder(t('project.createEntity.involvePlaceholder'));
-					new RecordInputSuggest(this.app, text.inputEl, candidates, (r) => {
-						if (r.path === PC_GROUP_VALUE) {
-							const group = (this.fields.group ??= []);
-							for (const pc of missingPcs()) group.push(linkTargetOf(pc));
-						} else {
-							(this.fields.involved ??= []).push(linkTargetOf(r));
-						}
-						refreshInvolved();
-					});
+					new RecordInputSuggest(
+						this.app,
+						text.inputEl,
+						candidates,
+						(r) => {
+							if (r.path === PC_GROUP_VALUE) {
+								const group = (this.fields.group ??= []);
+								for (const pc of missingPcs()) group.push(linkTargetOf(pc));
+							} else {
+								(this.fields.involved ??= []).push(linkTargetOf(r));
+							}
+							refreshInvolved();
+						},
+						(r) => r.name,
+						true,
+						// Same "pick a type, then create" flow as the entity page's own
+						// Involve… control (`view.entity.sessionNotes.createNewEntityAction`,
+						// entity-view.tsx) — reused rather than inventing new copy: when a
+						// type filter is already active it creates that type directly,
+						// otherwise it asks via the same `EntityTypeSuggestModal` every
+						// other "create any involved entity" flow in this codebase uses.
+						() => {
+							const createAs = (type: EntityType) => {
+								new CreateEntityModal(this.plugin, type, this.project, {
+									onCreated: (f) => {
+										void this.resolveAfterCreate(f, type).then((rec) => {
+											(this.fields.involved ??= []).push(linkTargetOf(rec));
+											refreshInvolved();
+										});
+									},
+								}).open();
+							};
+							if (involveFilter !== null) createAs(involveFilter);
+							else new EntityTypeSuggestModal(this.plugin, createAs, this.project, ['decisionPoint']).open();
+						},
+						t('view.entity.sessionNotes.createNewEntityAction')
+					);
 				})
 				.addExtraButton((btn) => {
 					btn.setIcon('filter').setTooltip(t('project.createEntity.filterByType'));
@@ -1689,7 +1862,7 @@ export class CreateEntityModal extends Modal {
 									btn.setIcon('filter');
 								})
 						);
-						for (const et of projectTypes(this.project.config).filter((et) => roleOf(et) === null)) {
+						for (const et of projectTypes(this.project.config).filter((et) => roleOf(et) === null && et !== 'decisionPoint')) {
 							menu.addItem((item) =>
 								item
 									.setTitle(entityPlural(et))
@@ -1747,7 +1920,18 @@ export class CreateEntityModal extends Modal {
 						(this.fields.places ??= []).push(linkTargetOf(r));
 						refreshPlaces();
 					},
-					(r) => this.locLabel(r)
+					(r) => this.locLabel(r),
+					true,
+					() =>
+						new CreateEntityModal(this.plugin, 'location', this.project, {
+							onCreated: (f) => {
+								void this.resolveAfterCreate(f, 'location').then((rec) => {
+									(this.fields.places ??= []).push(linkTargetOf(rec));
+									refreshPlaces();
+								});
+							},
+						}).open(),
+					t('project.createEntity.createNewAction', { label: entityLabel('location') })
 				);
 			});
 			const placeChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
@@ -1833,7 +2017,17 @@ export class CreateEntityModal extends Modal {
 							factionInput.value = r.name;
 						},
 						(r) => r.name,
-						false
+						false,
+						() =>
+							new CreateEntityModal(this.plugin, 'faction', this.project, {
+								onCreated: (f) => {
+									m.faction = f.basename;
+									void waitForMetadataSync(this.app, f).then(() => {
+										factionInput.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
+									});
+								},
+							}).open(),
+						t('project.createEntity.createNewAction', { label: entityLabel('faction') })
 					);
 					row.createSpan({ text: t('project.createEntity.atLabel'), cls: 'loom-modal-faction-lbl' });
 					const locInput = row.createEl('input', {
@@ -1850,7 +2044,17 @@ export class CreateEntityModal extends Modal {
 							locInput.value = r.name;
 						},
 						(r) => this.locLabel(r),
-						false
+						false,
+						() =>
+							new CreateEntityModal(this.plugin, 'location', this.project, {
+								onCreated: (f) => {
+									m.location = f.basename;
+									void waitForMetadataSync(this.app, f).then(() => {
+										locInput.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
+									});
+								},
+							}).open(),
+						t('project.createEntity.createNewAction', { label: entityLabel('location') })
 					);
 					const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
 					rm.addEventListener('click', (e) => {
@@ -1920,7 +2124,17 @@ export class CreateEntityModal extends Modal {
 							charInput.value = r.name;
 						},
 						(r) => r.name,
-						false
+						false,
+						() =>
+							new CreateEntityModal(this.plugin, 'character', this.project, {
+								onCreated: (f) => {
+									m.character = f.basename;
+									void waitForMetadataSync(this.app, f).then(() => {
+										charInput.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
+									});
+								},
+							}).open(),
+						t('project.createEntity.createNewAction', { label: entityLabel('character') })
 					);
 					row.createSpan({ text: t('project.createEntity.atLabel'), cls: 'loom-modal-faction-lbl' });
 					const locInput = row.createEl('input', {
@@ -1937,7 +2151,17 @@ export class CreateEntityModal extends Modal {
 							locInput.value = r.name;
 						},
 						(r) => this.locLabel(r),
-						false
+						false,
+						() =>
+							new CreateEntityModal(this.plugin, 'location', this.project, {
+								onCreated: (f) => {
+									m.location = f.basename;
+									void waitForMetadataSync(this.app, f).then(() => {
+										locInput.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
+									});
+								},
+							}).open(),
+						t('project.createEntity.createNewAction', { label: entityLabel('location') })
 					);
 					const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
 					rm.addEventListener('click', (e) => {
@@ -2022,7 +2246,19 @@ export class CreateEntityModal extends Modal {
 							this.fields.region = linkTargetOf(r);
 							refreshRegion();
 						},
-						(r) => r.name
+						(r) => r.name,
+						true,
+						() =>
+							new CreateEntityModal(this.plugin, 'region', this.project, {
+								onCreated: (f) => {
+									void this.resolveAfterCreate(f, 'region').then((rec) => {
+										pickedRegion = rec;
+										this.fields.region = linkTargetOf(rec);
+										refreshRegion();
+									});
+								},
+							}).open(),
+						t('project.createEntity.createNewAction', { label: entityLabel('region') })
 					);
 				}
 			};
@@ -2052,7 +2288,22 @@ export class CreateEntityModal extends Modal {
 							refreshParent();
 							refreshRegion();
 						},
-						(r) => this.locLabel(r)
+						(r) => this.locLabel(r),
+						true,
+						() =>
+							new CreateEntityModal(this.plugin, 'location', this.project, {
+								onCreated: (f) => {
+									void this.resolveAfterCreate(f, 'location').then((rec) => {
+										pickedParent = rec;
+										this.fields.parentLocation = linkTargetOf(rec);
+										pickedRegion = null;
+										this.fields.region = '';
+										refreshParent();
+										refreshRegion();
+									});
+								},
+							}).open(),
+						t('project.createEntity.createNewAction', { label: entityLabel('location') })
 					);
 				}
 				refreshRegion();
@@ -2064,11 +2315,63 @@ export class CreateEntityModal extends Modal {
 			locDesc.setClass('loom-modal-wide');
 		}
 
-		if (this.type === 'region') {
-			const regDesc = new Setting(this.contentEl)
+		if (this.type === 'region' || this.type === 'decisionPoint') {
+			const groupDesc = new Setting(this.contentEl)
 				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
-			regDesc.setClass('loom-modal-wide');
+			groupDesc.setClass('loom-modal-wide');
+		}
+
+		if (this.type === 'event' && featuresOf(this.project.config.kind, this.project.config.writerMode).eventPlanning) {
+			// New events default to Planned (see ROADMAP.md's "Game Master"
+			// entry) — never surfaced as a field here, just written on submit.
+			this.fields.eventKind = 'planned';
+			const decisionPoints = this.plugin.indexer
+				.getAll('decisionPoint', this.project.root)
+				.sort((a, b) => a.name.localeCompare(b.name));
+			let pickedDp: EntityRecord | null = this.options.decisionPoint ?? null;
+			if (pickedDp) this.fields.decisionPoint = linkTargetOf(pickedDp);
+			const dpSetting = new Setting(this.contentEl).setName(t('project.createEntity.decisionPoint'));
+			const dpEl = dpSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
+			const refreshDp = () => {
+				dpEl.empty();
+				if (pickedDp) {
+					this.renderChip(dpEl, pickedDp, pickedDp.name, () => {
+						pickedDp = null;
+						this.fields.decisionPoint = '';
+						refreshDp();
+					});
+				} else {
+					const input = dpEl.createEl('input', {
+						type: 'text',
+						attr: { placeholder: t('project.createEntity.notSpecifiedParens') },
+					});
+					new RecordInputSuggest(
+						this.app,
+						input,
+						() => decisionPoints,
+						(r) => {
+							pickedDp = r;
+							this.fields.decisionPoint = linkTargetOf(r);
+							refreshDp();
+						},
+						(r) => r.name,
+						true,
+						() =>
+							new CreateEntityModal(this.plugin, 'decisionPoint', this.project, {
+								onCreated: (f) => {
+									void this.resolveAfterCreate(f, 'decisionPoint').then((rec) => {
+										pickedDp = rec;
+										this.fields.decisionPoint = linkTargetOf(rec);
+										refreshDp();
+									});
+								},
+							}).open(),
+						t('project.createEntity.createNewAction', { label: entityLabel('decisionPoint') })
+					);
+				}
+			};
+			refreshDp();
 		}
 
 		if (roleOf(this.type) === 'beat') {
@@ -2157,9 +2460,10 @@ export class CreateEntityModal extends Modal {
 
 	private async submit(): Promise<void> {
 		// Name search matched an existing event/quest: pin it to the session
-		// rather than creating a duplicate.
-		if (this.pickedExisting && this.options.noteSession) {
-			await this.pinExisting(this.pickedExisting, this.options.noteSession);
+		// rather than creating a duplicate — or, with no session in context
+		// (opened from the plain entity list), just open the existing one.
+		if (this.pickedExisting) {
+			await this.pinExisting(this.pickedExisting, this.options.noteSession ?? null);
 			return;
 		}
 		if (this.type !== 'session' && this.fields.name === '') {
@@ -2194,6 +2498,13 @@ export class CreateEntityModal extends Modal {
 		try {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
 			await this.applyFactions(file.basename);
+			// A new event born straight into a Decision Point that already has a
+			// Happened sibling should show Locked immediately, not just on the
+			// next unrelated GM edit.
+			if (this.type === 'event' && this.fields.decisionPoint) {
+				await waitForMetadataSync(this.app, file);
+				await recomputeEventLocks(this.app, this.plugin.indexer, this.project.root);
+			}
 			this.close();
 			if (this.options.onCreated) this.options.onCreated(file);
 			else if (!connectTo) {
@@ -2238,7 +2549,17 @@ export class CreateEntityModal extends Modal {
 
 	/** Pins an existing entity to `session` via a session note (skips if it's
 	 *  already there), then closes — the session-page hub picks it up. */
-	private async pinExisting(entity: EntityRecord, session: EntityRecord): Promise<void> {
+	private async pinExisting(entity: EntityRecord, session: EntityRecord | null): Promise<void> {
+		const f = this.plugin.app.vault.getFileByPath(entity.path);
+		if (!f) return;
+		// No session in context (opened from the plain entity list, not a
+		// session page) — nothing to pin, just open what already exists
+		// instead of creating a same-named duplicate.
+		if (session === null) {
+			this.close();
+			if (this.options.onCreated) this.options.onCreated(f);
+			return;
+		}
 		const already = entity.sessionNotes.some(
 			(n) => n.session !== null && this.plugin.indexer.resolve(n.session, entity.path)?.path === session.path
 		);
@@ -2247,8 +2568,6 @@ export class CreateEntityModal extends Modal {
 			this.close();
 			return;
 		}
-		const f = this.plugin.app.vault.getFileByPath(entity.path);
-		if (!f) return;
 		try {
 			await this.plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
 				const cur = fmLoomValue(fm, FM.sessionNotes);
@@ -3579,20 +3898,103 @@ export class ConfirmModal extends Modal {
 	}
 }
 
+/**
+ * GM projects: a Decision Point and an event about to join it each already
+ * have a DIFFERENT session — asks which one wins rather than silently
+ * picking a side (see `reconcileSessionBeforeLink`, gm-decision-point.ts).
+ * "Use the Decision Point's session" only touches this one event; "Use the
+ * event's session" cascades onto the Decision Point AND every one of its
+ * OTHER member events too, same as any other Decision-Point session change —
+ * both buttons close the modal and resolve the promise the caller awaits,
+ * "Cancel" resolves it `false` (the whole link action is abandoned, not just
+ * the session choice).
+ */
+export class SessionConflictModal extends Modal {
+	private resolve!: (linked: boolean) => void;
+
+	constructor(
+		app: App,
+		private conflict: SessionConflict,
+		private plugin: LoomLoomPlugin,
+		private project: ProjectDef
+	) {
+		super(app);
+	}
+
+	/** `Modal.open()` itself stays void-returning (its own base signature —
+	 *  overriding it to return a Promise trips
+	 *  `@typescript-eslint/no-misused-promises` for any caller that only
+	 *  knows it as a plain `Modal`), so this is a separate method: opens the
+	 *  modal and resolves once a choice is made — `true` for either
+	 *  session-reconciling button, `false` for Cancel. */
+	openAndWait(): Promise<boolean> {
+		this.open();
+		return new Promise((resolve) => {
+			this.resolve = resolve;
+		});
+	}
+
+	onOpen(): void {
+		const { dp, event, dpSession, eventSession } = this.conflict;
+		const dpLabel = recordPickLabel(this.plugin, this.project, dpSession);
+		const eventLabel = recordPickLabel(this.plugin, this.project, eventSession);
+		this.setTitle(t('project.sessionConflict.title'));
+		this.contentEl.createEl('p', {
+			cls: 'loom-confirm-detail',
+			text: t('project.sessionConflict.detail', { dp: dp.name, dpSession: dpLabel, event: event.name, eventSession: eventLabel }),
+		});
+		new Setting(this.contentEl)
+			.addButton((btn) =>
+				btn.setButtonText(t('project.common.cancel')).onClick(() => {
+					this.close();
+					this.resolve(false);
+				})
+			)
+			.addButton((btn) =>
+				btn.setButtonText(t('project.sessionConflict.useEventSession', { label: eventLabel })).onClick(() => {
+					this.close();
+					void cascadeDecisionPointSession(this.app, this.plugin.indexer, dp, linkTargetOf(eventSession)).then(() =>
+						this.resolve(true)
+					);
+				})
+			)
+			.addButton((btn) => {
+				btn.setButtonText(t('project.sessionConflict.useDpSession', { label: dpLabel })).onClick(() => {
+					this.close();
+					void setEventSession(this.app, event, linkTargetOf(dpSession)).then(() => this.resolve(true));
+				});
+				btn.buttonEl.addClass('mod-cta');
+			});
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
 export class EntityTypeSuggestModal extends FuzzySuggestModal<EntityType> {
 	constructor(
 		plugin: LoomLoomPlugin,
 		private onPick: (type: EntityType) => void,
 		/** Offers only the types this project's kind holds; without it, every
 		 *  type the plugin knows (both chronologies) is listed. */
-		private project?: ProjectDef
+		private project?: ProjectDef,
+		/** Types to drop from the list regardless of the above — for a
+		 *  caller whose `onPick` auto-links the freshly created entity into
+		 *  a specific list (Involved, a Relationship target, …) where a
+		 *  grouping-only type like Decision Point would never belong. Every
+		 *  OTHER caller (the command palette, entity-list "+ New", the `[[`
+		 *  create-link flow) leaves this unset — Decision Point stays
+		 *  reachable there, same as Region already is. */
+		private excludeTypes?: readonly EntityType[]
 	) {
 		super(plugin.app);
 		this.setPlaceholder(t('project.pickEntityType'));
 	}
 
 	getItems(): EntityType[] {
-		return this.project ? [...projectTypes(this.project.config)] : [...ENTITY_TYPES];
+		const types = this.project ? [...projectTypes(this.project.config)] : [...ENTITY_TYPES];
+		return this.excludeTypes ? types.filter((t) => !this.excludeTypes?.includes(t)) : types;
 	}
 
 	getItemText(type: EntityType): string {

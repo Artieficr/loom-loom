@@ -127,7 +127,9 @@
 			"sublocationOf": "Sublocation of",
 			"optionalPlaceholder": "(Optional)",
 			"partOfRegion": "Part of region",
-			"notSpecifiedParens": "(Not specified)"
+			"decisionPoint": "Decision point",
+			"notSpecifiedParens": "(Not specified)",
+			"createNewAction": "+ Create new {label}…"
 		},
 		"notes": "Notes",
 		"setup": {
@@ -164,6 +166,12 @@
 		"confirm": {
 			"continueDefault": "Continue"
 		},
+		"sessionConflict": {
+			"title": "Session mismatch",
+			"detail": "\"{dp}\" is linked to session {dpSession}, but \"{event}\" is linked to session {eventSession}. Which one should they share?",
+			"useDpSession": "Use {label} (updates this event)",
+			"useEventSession": "Use {label} (updates the decision point and its other events)"
+		},
 		"pickEntityType": "Pick the entity type",
 		"pickProject": "Pick a project"
 	},
@@ -193,6 +201,11 @@
 		"list": {
 			"addBeatTitle": "Add {article} {beat}",
 			"unspecifiedRegion": "Unspecified Region",
+			"unspecifiedDecisionPoint": "Unspecified Decision Point",
+			"deadChip": "Dead",
+			"addEvent": "Add event",
+			"pickEvent": "Pick the event…",
+			"newEventInDecisionPoint": "New event in decision point",
 			"pickBeat": "Pick the {beat}…",
 			"pickAnchor": "Pick the {anchor}…",
 			"changeDate": "Change the date",
@@ -339,15 +352,48 @@
 				"turnIntoSublocationCta": "Turn into sublocation",
 				"pickParentPlaceholder": "Pick the parent location…",
 				"turnToSublocation": "Turn to a sublocation",
-				"createRegionAction": "+ Create region…",
 				"clearRegion": "Clear region",
 				"changeRegion": "Change region",
 				"sublocations": "Sublocations",
 				"detachSublocation": "Detach sublocation",
 				"scenesInSublocations": "Scenes in sublocations",
 				"addLocationPlaceholder": "Add a location…",
-				"newLocationAction": "+ New location",
 				"removeFromRegion": "Remove from this region"
+			},
+			"event": {
+				"decisionPointLabel": "Decision point",
+				"pickDecisionPointPlaceholder": "Pick a decision point…",
+				"clearDecisionPoint": "Clear decision point",
+				"statusLabel": "Status",
+				"statusPlanned": "Planned",
+				"statusHappened": "Happened",
+				"statusLore": "Lore",
+				"statusLocked": "Locked",
+				"improvisedLabel": "Improvised",
+				"improvisedTooltip": "This event happened at the table without being planned ahead of time.\nOptional tracking.",
+				"specialConditionsLabel": "Special conditions",
+				"addConditionAction": "+ Add a condition",
+				"addAlternativeSetAction": "+ Add an alternative set (OR)",
+				"orDivider": "OR",
+				"removeConditionSet": "Remove this set",
+				"removeCondition": "Remove this condition",
+				"conditionCharacterAlive": "Character is alive",
+				"conditionGroupCarriesItem": "Group carries an item",
+				"conditionEventHappened": "Event happened",
+				"conditionDecisionPointHappened": "Decision point happened",
+				"pickCharacterPlaceholder": "Pick a character…",
+				"pickItemPlaceholder": "Pick an item…",
+				"pickEventPlaceholder": "Pick an event…",
+				"pickDecisionPointConditionPlaceholder": "Pick a decision point…",
+				"lockedReasonCascade": "Another event in this decision point already happened",
+				"lockedReasonConditionPrefix": "Condition not met:"
+			},
+			"decisionPoint": {
+				"sessionLabel": "Session",
+				"pickSessionPlaceholder": "Pick a session…",
+				"clearSession": "Clear session",
+				"addEventPlaceholder": "Add an event…",
+				"removeFromDecisionPoint": "Remove from this decision point"
 			},
 			"events": {
 				"newOnTop": "New on top",
@@ -359,7 +405,6 @@
 				"removeFromNoteDetail": "If you remove {name} from {owner}, this event won't be displayed here anymore.",
 				"removeFromInvolvedTitle": "Remove from involved?",
 				"removeFromLocationTitle": "Remove from this location?",
-				"createNewBeatAction": "+ Create new {beat}",
 				"noSession": "No session"
 			},
 			"items": {
@@ -369,7 +414,6 @@
 				"deleteThisItem": "Delete this item",
 				"removeFromPage": "Remove from this page",
 				"addItemPlaceholder": "Add an item…",
-				"createNewItemAction": "+ Create new item",
 				"itemsInSublocations": "Items in sublocations",
 				"alternativeDescription": "Alternative description",
 				"originalDescription": "Original description",
@@ -398,7 +442,6 @@
 			},
 			"faction": {
 				"members": "Members",
-				"createNewCharacterAction": "+ Create new character",
 				"removeMember": "Remove member",
 				"cancelAddingFaction": "Cancel adding faction",
 				"clearLocation": "Clear location",
@@ -445,7 +488,6 @@
 			},
 			"relationships": {
 				"targetPlaceholderTyped": "{label} note",
-				"createEntityAction": "+ Create entity…",
 				"removeRelationship": "Remove relationship",
 				"removeConfirmTitle": "Remove relationship?",
 				"removeConfirmDetail": "Removes \"{type}\" → {target}.",
@@ -454,7 +496,6 @@
 			},
 			"sessionNotes": {
 				"pickSession": "Pick a session…",
-				"newSessionAction": "+ New session…",
 				"involvePlaceholder": "Involve…",
 				"createNewEntityAction": "+ Create new entity",
 				"createNewLocationAction": "+ Create new location",
@@ -827,6 +868,11 @@
 			"label": "Chapter",
 			"plural": "Chapters",
 			"newTitle": "New Chapter"
+		},
+		"decisionPoint": {
+			"label": "Decision Point",
+			"plural": "Decision Points",
+			"newTitle": "New Decision Point"
 		}
 	},
 	"projectKind": {

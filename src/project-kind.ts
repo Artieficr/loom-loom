@@ -130,7 +130,7 @@ export const BEAT_TYPES: readonly EntityType[] = ENTITY_TYPES.filter((t) => TYPE
  */
 const KIND_TYPES: Record<ProjectKind, readonly EntityType[]> = {
 	player: ['character', 'location', 'region', 'faction', 'item', 'quest', 'event', 'session'],
-	gm: ['character', 'location', 'region', 'faction', 'item', 'quest', 'event', 'session'],
+	gm: ['character', 'location', 'region', 'faction', 'item', 'quest', 'event', 'decisionPoint', 'session'],
 	writer: ['character', 'location', 'region', 'faction', 'item', 'quest', 'scene', 'act'],
 };
 const WRITER_PROSE_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest', 'chapter', 'act'];
@@ -161,8 +161,17 @@ export interface KindFeatures {
 	 *  picker. A cast member in a story isn't "away from the party", and their
 	 *  death is a scene rather than a flag — so writer projects don't show it. */
 	pcLifecycle: boolean;
-	/** GM: event planning state — `planned` / `locked` / `improvised` plus the
-	 *  `happened` tick. Placeholder; the fields are read, the UI isn't built. */
+	/** Which characters `pcLifecycle`'s Alive + death-session tracking applies
+	 *  to (meaningless when `pcLifecycle` is false). `'pc'`: PC-tagged
+	 *  characters only. `'all'`: every character — tracking any character's
+	 *  fate, not just a PC's, is useful in both Player and GM projects (a
+	 *  GM's Special Conditions, "Character is alive", also depend on it for
+	 *  NPCs). The Active (away-from-the-party) tick is unaffected by this —
+	 *  it stays PC-only regardless. */
+	characterLifecycleScope: 'pc' | 'all';
+	/** GM: an event's planning status pill (Planned/Happened/Lore, plus the
+	 *  system-only Locked state), the Improvised tick, Decision Points, and
+	 *  Special Conditions — see ROADMAP.md's "Game Master" entry. */
 	eventPlanning: boolean;
 	/** GM: preplanned NPC lines / speech-style examples on character pages.
 	 *  Placeholder; the field is read, the UI isn't built. */
@@ -186,6 +195,7 @@ const KIND_FEATURES: Record<ProjectKind, KindFeatures> = {
 		attendance: true,
 		group: true,
 		pcLifecycle: true,
+		characterLifecycleScope: 'all',
 		eventPlanning: false,
 		npcLines: false,
 		script: false,
@@ -196,6 +206,7 @@ const KIND_FEATURES: Record<ProjectKind, KindFeatures> = {
 		attendance: true,
 		group: true,
 		pcLifecycle: true,
+		characterLifecycleScope: 'all',
 		eventPlanning: true,
 		npcLines: true,
 		script: false,
@@ -206,6 +217,7 @@ const KIND_FEATURES: Record<ProjectKind, KindFeatures> = {
 		attendance: false,
 		group: false,
 		pcLifecycle: false,
+		characterLifecycleScope: 'pc',
 		eventPlanning: false,
 		npcLines: false,
 		script: true,

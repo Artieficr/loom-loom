@@ -318,14 +318,12 @@
 				"turnIntoSublocationCta": "Превратить в подлокацию",
 				"pickParentPlaceholder": "Выберите родительскую локацию…",
 				"turnToSublocation": "Превратить в подлокацию",
-				"createRegionAction": "+ Создать регион…",
 				"clearRegion": "Очистить регион",
 				"changeRegion": "Изменить регион",
 				"sublocations": "Подлокации",
 				"detachSublocation": "Отсоединить подлокацию",
 				"scenesInSublocations": "Сцены в подлокациях",
 				"addLocationPlaceholder": "Добавить локацию…",
-				"newLocationAction": "+ Новая локация",
 				"removeFromRegion": "Убрать из этого региона"
 			},
 			"events": {
@@ -338,7 +336,6 @@
 				"removeFromNoteDetail": "Если убрать «{name}» из «{owner}», это событие больше не будет здесь отображаться.",
 				"removeFromInvolvedTitle": "Убрать из участников?",
 				"removeFromLocationTitle": "Убрать из этой локации?",
-				"createNewBeatAction": "+ Создать: {beat}",
 				"noSession": "Без сессии"
 			},
 			"items": {
@@ -348,7 +345,6 @@
 				"deleteThisItem": "Удалить этот предмет",
 				"removeFromPage": "Убрать со страницы",
 				"addItemPlaceholder": "Добавить предмет…",
-				"createNewItemAction": "+ Создать новый предмет",
 				"itemsInSublocations": "Предметы в подлокациях",
 				"alternativeDescription": "Альтернативное описание",
 				"originalDescription": "Исходное описание",
@@ -377,7 +373,6 @@
 			},
 			"faction": {
 				"members": "Участники",
-				"createNewCharacterAction": "+ Создать нового персонажа",
 				"removeMember": "Удалить участника",
 				"cancelAddingFaction": "Отменить добавление фракции",
 				"clearLocation": "Очистить локацию",
@@ -422,7 +417,6 @@
 			},
 			"relationships": {
 				"targetPlaceholderTyped": "Заметка «{label}»",
-				"createEntityAction": "+ Создать сущность…",
 				"removeRelationship": "Удалить связь",
 				"removeConfirmTitle": "Удалить связь?",
 				"removeConfirmDetail": "Удаляет связь «{type}» → {target}.",
@@ -431,7 +425,6 @@
 			},
 			"sessionNotes": {
 				"pickSession": "Выберите сессию…",
-				"newSessionAction": "+ Новая сессия…",
 				"involvePlaceholder": "Задействовать…",
 				"createNewEntityAction": "+ Создать новую сущность",
 				"createNewLocationAction": "+ Создать новую локацию",

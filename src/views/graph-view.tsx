@@ -370,6 +370,18 @@ interface GraphEdgeProps {
 	/** Line-draw progress during the animation (1 = fully drawn). Below 1 the
 	 *  line grows from both endpoints toward the center. */
 	draw: number;
+	/** GM projects: persistent dash pattern carrying an Event's planning state
+	 *  (`RoutedEdge.lineStyle`) — `undefined` for the plain solid default. A
+	 *  CSS class, not an inline `strokeDasharray`, so it never fights the
+	 *  `draw`-animation's own inline dasharray above (inline wins while
+	 *  `draw < 1`; once settled at `draw === 1` this class takes over). */
+	lineStyle?: 'dashed' | 'locked';
+	/** A `'locked'` edge's own opacity fade, suppressed without touching its
+	 *  dash pattern — the dash is a STATUS marker (this edge touches a Locked
+	 *  event) and stays regardless; only the "less relevant" fade is
+	 *  selection-dependent (see the `dim`/`connectedTo` comment at this
+	 *  prop's call site). No effect on any other `lineStyle`. */
+	lockedFadeSuppressed?: boolean;
 }
 const GraphEdge = memo(function GraphEdge({
 	route,
@@ -389,6 +401,8 @@ const GraphEdge = memo(function GraphEdge({
 	arrowSize,
 	opacity,
 	draw,
+	lineStyle,
+	lockedFadeSuppressed,
 }: GraphEdgeProps) {
 	const pa = { x: pax, y: pay };
 	const pb = { x: pbx, y: pby };
@@ -428,10 +442,15 @@ const GraphEdge = memo(function GraphEdge({
 	// in the center at draw=1.
 	const drawing = draw < 1;
 	const half = 50 * Math.max(0, draw);
+	const edgeClass =
+		'loom-edge' +
+		(dim ? ' loom-dim' : '') +
+		(lineStyle === 'dashed' ? ' loom-edge-planned' : lineStyle === 'locked' ? ' loom-edge-locked' : '') +
+		(lineStyle === 'locked' && lockedFadeSuppressed ? ' loom-edge-locked-focused' : '');
 	return (
 		<g style={opacity < 1 ? { opacity } : undefined}>
 			<path
-				className={dim ? 'loom-edge loom-dim' : 'loom-edge'}
+				className={edgeClass}
 				d={edgePath(route, pa, pb, da, db)}
 				pathLength={drawing ? 100 : undefined}
 				strokeDasharray={drawing ? `${half} ${100 - 2 * half} ${half}` : undefined}
@@ -457,6 +476,9 @@ interface GraphNodeProps {
 	pinned: boolean;
 	showDropRing: boolean;
 	dropRemove: boolean;
+	/** GM projects: a Locked event's node fades the same way its incident
+	 *  edges do (`RoutedEdge.lineStyle`) — visual parity between the two. */
+	locked: boolean;
 	label: string;
 	shortLabel: string;
 	/** Reveal opacity during the creation-order animation (1 = normal). */
@@ -479,6 +501,7 @@ const GraphNode = memo(function GraphNode({
 	pinned,
 	showDropRing,
 	dropRemove,
+	locked,
 	label,
 	shortLabel,
 	opacity,
@@ -492,6 +515,7 @@ const GraphNode = memo(function GraphNode({
 	if (selected) classes.push('loom-node-selected');
 	if (focused) classes.push('loom-node-focused');
 	if (pinned) classes.push('loom-node-pinned');
+	if (locked) classes.push('loom-node-locked');
 	return (
 		<g
 			className={classes.join(' ')}
@@ -2475,6 +2499,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 															arrowSize={plugin.settings.graphArrowSize}
 															opacity={1}
 															draw={drawT}
+															lineStyle={edge.lineStyle}
 														/>
 													);
 												})}
@@ -2498,6 +2523,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 															pinned={false}
 															showDropRing={false}
 															dropRemove={false}
+															locked={node.record.type === 'event' && node.record.eventKind === 'locked'}
 															label={label}
 															shortLabel={shortLabel}
 															opacity={1}
@@ -2537,6 +2563,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 									(filterActive &&
 										filterMode === 'dim' &&
 										(!endpointVisible(a) || !endpointVisible(b)));
+								// GM projects: a Locked event's own fade (`.loom-edge-locked`
+								// opacity) is meant to read as "less relevant" in the FULL
+								// graph — once a node is selected and this edge is part of
+								// ITS OWN focused neighborhood (not dimmed by the selection),
+								// that fade is counter-productive: it's exactly the connection
+								// the user selected the node to see. Suppressed only in that
+								// specific case (`connectedTo !== null && !dim`); the default,
+								// nothing-selected view still fades every locked edge as
+								// before. The dash PATTERN stays regardless — it's a status
+								// marker (this edge touches a Locked event), not a relevance
+								// cue, so `lineStyle` itself is left untouched; only the fade
+								// is conditional (`lockedFadeSuppressed`, GraphEdge's own prop).
+								const lockedFadeSuppressed = edge.lineStyle === 'locked' && connectedTo !== null && !dim;
 								// Path/arrow math runs inside the memoized GraphEdge — skipped
 								// unless one of these primitive props changes (i.e. an endpoint
 								// moved), so a drag only recomputes its incident edges.
@@ -2560,6 +2599,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										arrowSize={plugin.settings.graphArrowSize}
 										opacity={1}
 										draw={1}
+										lineStyle={edge.lineStyle}
+										lockedFadeSuppressed={lockedFadeSuppressed}
 									/>
 								);
 							})}
@@ -2606,6 +2647,14 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 											? declaresConnection(dragRef.current.node, node.id)
 											: declaresConnection(node, dragRef.current.id)
 										: false;
+								// See the matching edge-side comment above: a Locked event's own
+								// fade is suppressed once it's part of a SELECTED node's own
+								// focused neighborhood (not dimmed), so left-clicking a node to
+								// see its connections doesn't leave the relevant ones faded.
+								const locked =
+									node.record.type === 'event' &&
+									node.record.eventKind === 'locked' &&
+									!(connectedTo !== null && !dim);
 								return (
 									<GraphNode
 										key={node.id}
@@ -2620,6 +2669,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 										pinned={isPinned}
 										showDropRing={showDropRing}
 										dropRemove={dropRemove}
+										locked={locked}
 										label={label}
 										shortLabel={shortLabel}
 										opacity={1}

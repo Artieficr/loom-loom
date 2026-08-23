@@ -63,12 +63,31 @@ export const ENTITY_TYPES = [
 	'scene',
 	'act',
 	'chapter',
+	'decisionPoint',
 ] as const;
 
 export type EntityType = (typeof ENTITY_TYPES)[number];
 
 export function isEntityType(value: unknown): value is EntityType {
 	return typeof value === 'string' && (ENTITY_TYPES as readonly string[]).includes(value);
+}
+
+/** Case-insensitive lookup back to the canonically-cased `EntityType` —
+ *  every OTHER type is a single lowercase word, so a bare `.toLowerCase()`
+ *  before an `isEntityType` check was always safe until `decisionPoint`
+ *  became the first camelCase one: lowercasing `'decisionPoint'` produces
+ *  `'decisionpoint'`, which doesn't match anything in `ENTITY_TYPES` and
+ *  silently fails `isEntityType` — a real bug this fixes (a frontmatter
+ *  `loomType: decisionPoint` read back through the old `.toLowerCase()` +
+ *  `isEntityType` pair was rejected outright, never indexed at all). Reads
+ *  a value however it's cased (a hand-typed `DecisionPoint`/`decisionpoint`
+ *  both resolve too) and returns the type's real casing. */
+const ENTITY_TYPE_BY_LOWER: Record<string, EntityType> = Object.fromEntries(
+	ENTITY_TYPES.map((t) => [t.toLowerCase(), t])
+);
+export function normalizeEntityType(value: unknown): EntityType | null {
+	if (typeof value !== 'string') return null;
+	return ENTITY_TYPE_BY_LOWER[value.toLowerCase()] ?? null;
 }
 
 export interface EntityTypeMeta {
@@ -92,6 +111,10 @@ export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
 	scene: { label: 'Scene', plural: 'Scenes', folder: 'Entities/Scenes', icon: 'clapperboard' },
 	act: { label: 'Act', plural: 'Acts', folder: 'Entities/Acts', icon: 'book-open' },
 	chapter: { label: 'Chapter', plural: 'Chapters', folder: 'Entities/Chapters', icon: 'book-text' },
+	/** GM projects only: a grouping layer above Events, mirroring Region-over-
+	 *  Location — see project-kind.ts's GM type list and ROADMAP.md's "Game
+	 *  Master" entry. */
+	decisionPoint: { label: 'Decision Point', plural: 'Decision Points', folder: 'Entities/Decision Points', icon: 'split' },
 };
 
 /** `ENTITY_META[type].label`/`.plural` are the English source strings — folder
@@ -132,6 +155,7 @@ export const ENTITY_TAGS: Record<EntityType, string[]> = {
 	scene: [],
 	act: [],
 	chapter: [],
+	decisionPoint: [],
 };
 
 /** Characters tagged PC appear in session attendance and carry the alive flag. */
@@ -158,7 +182,15 @@ export const PC_GROUP_ICON = 'circle-star';
  *  return for the `'beat'` role. */
 export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event', 'act', 'scene', 'chapter'];
 /** Entity types that live on the fixed lower axis of the graph. */
-export const GLOBAL_TYPES: readonly EntityType[] = ['character', 'location', 'region', 'faction', 'item', 'quest'];
+export const GLOBAL_TYPES: readonly EntityType[] = [
+	'character',
+	'location',
+	'region',
+	'faction',
+	'item',
+	'quest',
+	'decisionPoint',
+];
 
 export const TIMELINES_FOLDER = 'Timelines';
 /** File extension of project home files (shown in the file explorer like .canvas/.base). */
@@ -191,11 +223,30 @@ export const FM = {
 	region: 'loomRegion',
 	/** Region only: manual display order of the region's member locations. */
 	regionOrder: 'loomRegionOrder',
+	/** Decision Point only (GM projects): manual display order of its member
+	 *  events, mirroring `regionOrder`. */
+	decisionPointOrder: 'loomDecisionPointOrder',
+	/** Decision Point only (GM projects): link to the session it belongs to —
+	 *  its own field, a single link like `region`/`parentLocation`, not a full
+	 *  `sessionNotes` array (a Decision Point has no per-note text/involved to
+	 *  carry, just "which session"). Changing it cascades onto every member
+	 *  event's own session (see `gm-decision-point.ts`); the reverse (adding
+	 *  an event with a DIFFERENT already-set session) is a conflict the UI
+	 *  resolves explicitly rather than silently overwriting either side. */
+	decisionPointSession: 'loomDecisionPointSession',
 	members: 'loomMembers',
+	/** Player projects: PC characters only. GM projects: every character —
+	 *  see `KindFeatures.characterLifecycleScope` in project-kind.ts. */
 	alive: 'loomAlive',
 	/** Character only (PC): false while the character is away from the party —
-	 *  excluded from new virtual-Group picks until re-ticked. */
+	 *  excluded from new virtual-Group picks until re-ticked. Always PC-only,
+	 *  regardless of `characterLifecycleScope` — an NPC was never "in the
+	 *  party" to begin with. */
 	active: 'loomActive',
+	/** Same scope as `alive` above. GM projects rely on this being set for any
+	 *  dead character (not just PCs) so a "Character is alive" special
+	 *  condition (see `specialConditions`) can tell whether a past reference
+	 *  to that character predates or postdates the death. */
 	deathSession: 'loomDeathSession',
 	questGiver: 'loomQuestGiver',
 	questReceived: 'loomQuestReceived',
@@ -216,12 +267,31 @@ export const FM = {
 	/** Character-specific item copy only: link to the owning character. Hidden
 	 *  from the link pass — the character already connects via its `loomItems`. */
 	itemOwner: 'loomItemOwner',
-	/** GM projects, beat entities: planning state — see `EVENT_KINDS`. Absent/''
-	 *  on anything that was simply recorded. */
+	/** GM projects, events: planning state — see `EVENT_KINDS`. Absent/'' on
+	 *  anything that was simply recorded (e.g. Player/Writer projects, which
+	 *  never write this key at all). */
 	eventKind: 'loomEventKind',
-	/** GM projects, beat entities: whether the beat actually happened at the
-	 *  table. A `planned` event is speculative until this is ticked. */
-	happened: 'loomHappened',
+	/** GM projects, events: an unplanned event the GM added during/after the
+	 *  session, independent of `eventKind` — purely for later planned-vs-
+	 *  improvised analysis, no effect on locking. */
+	improvised: 'loomImprovised',
+	/** GM projects, events: link to the Decision Point this event belongs to,
+	 *  or absent. Its own field, like `region` on a location — an Event under
+	 *  the same Decision Point as another auto-locks when a sibling is marked
+	 *  Happened; see `eventLockReasons`. */
+	decisionPoint: 'loomDecisionPoint',
+	/** GM projects, events: the "+ Add a condition" builder — an array of
+	 *  OR'd groups, each an array of AND'd `{ type, target }` entries (see
+	 *  `SPECIAL_CONDITION_TYPES`). Empty/absent = no conditions, never locks
+	 *  the event on this basis. Hidden entirely on a Lore event. */
+	specialConditions: 'loomSpecialConditions',
+	/** GM projects, events: why `eventKind` is currently `locked` — a list of
+	 *  reason codes (`'cascade'`, or `condition:<groupIndex>:<conditionIndex>`
+	 *  for each currently-failing special condition). `eventKind === 'locked'`
+	 *  iff this is non-empty. Recomputed and rewritten at specific edit-time
+	 *  triggers (see ROADMAP.md's "Game Master" entry) — never derived live
+	 *  by the graph or timeline, which just read it. */
+	eventLockReasons: 'loomEventLockReasons',
 	/** GM projects, characters: preplanned lines / speech-style examples for an
 	 *  NPC, one entry per line. Free-form text, no links resolved. */
 	npcLines: 'loomNpcLines',
@@ -432,6 +502,39 @@ export interface QuestObjective {
 	finishedSession: string | null;
 }
 
+/** GM projects: the kinds of special condition an Event's "+ Add a
+ *  condition" builder offers (`loomSpecialConditions`, see `FM.
+ *  specialConditions`). `characterAlive`/`groupCarriesItem` target a
+ *  character/item; `eventHappened`/`decisionPointHappened` target another
+ *  event/decision point, letting a GM chain locks beyond direct cascade
+ *  siblings. */
+export const SPECIAL_CONDITION_TYPES = [
+	'characterAlive',
+	'groupCarriesItem',
+	'eventHappened',
+	'decisionPointHappened',
+] as const;
+export type SpecialConditionType = (typeof SPECIAL_CONDITION_TYPES)[number];
+
+export function isSpecialConditionType(value: unknown): value is SpecialConditionType {
+	return typeof value === 'string' && (SPECIAL_CONDITION_TYPES as readonly string[]).includes(value);
+}
+
+/** One condition row: `type` picks what's being checked, `target` is the
+ *  linkpath of whatever it's checked against (a character, an item, an
+ *  event, or a decision point, depending on `type`). */
+export interface SpecialCondition {
+	type: SpecialConditionType;
+	target: string;
+}
+
+/** One AND'd group of conditions within the OR'd top-level list
+ *  (`loomSpecialConditions: SpecialConditionGroup[]`) — the whole section
+ *  passes when at least one group's conditions are all satisfied. */
+export interface SpecialConditionGroup {
+	conditions: SpecialCondition[];
+}
+
 /** A typed relationship as declared in one note's frontmatter. */
 export interface RelationshipDecl {
 	type: string;
@@ -474,6 +577,15 @@ export interface EntityRecord {
 	/** Region only: manual display order of its member locations (drag-reordered
 	 *  on the region's page). */
 	regionOrder: string[];
+	/** Event only, GM projects: linkpath of the Decision Point this event
+	 *  belongs to, or null. Mirrors `region` above. */
+	decisionPoint: string | null;
+	/** Decision Point only: manual display order of its member events
+	 *  (drag-reordered on the decision point's page). Mirrors `regionOrder`. */
+	decisionPointOrder: string[];
+	/** Decision Point only, GM projects: linkpath of the session it belongs
+	 *  to, or null. See `FM.decisionPointSession`'s own doc comment. */
+	decisionPointSession: string | null;
 	/** Character/location only: ordered item linkpaths shown in the Items
 	 *  section (drag-reordered here); also connect in the graph as plain links. */
 	items: string[];
@@ -485,13 +597,17 @@ export interface EntityRecord {
 	/** Faction only: member characters with per-membership roles (dedicated
 	 *  list, not relationships; typed `member` connection). */
 	members: FactionMemberDecl[];
-	/** Character only (PC): false once the character has died. */
+	/** Character only: false once the character has died. Player projects
+	 *  track this for PCs only; GM projects track it for every character
+	 *  (`KindFeatures.characterLifecycleScope`). */
 	alive: boolean;
 	/** Character only (PC): false while away from the party (narrative absence);
-	 *  new virtual-Group picks skip inactive PCs. Default true. */
+	 *  new virtual-Group picks skip inactive PCs. Default true. Always
+	 *  PC-only, unlike `alive`/`deathSession` above. */
 	active: boolean;
-	/** Character only (PC): linkpath of the session they died in. Sessions
-	 *  after it no longer offer the character for attendance. */
+	/** Character only: linkpath of the session they died in. Sessions after it
+	 *  no longer offer a PC for attendance; a GM project's Special Conditions
+	 *  ("Character is alive") reads it to stay correct against history. */
 	deathSession: string | null;
 	/** Quest only: linkpath of the session the quest was received in. */
 	questReceived: string | null;
@@ -510,10 +626,18 @@ export interface EntityRecord {
 	 *  fall back to `created` so unstamped entries stay chronological.
 	 *  Acts order by this instead of by a date (`anchorOrder: 'sequence'`). */
 	seq: number | null;
-	/** Beat entities in a GM project: planning state, '' when none. */
+	/** Events in a GM project: planning state, '' when none (every other
+	 *  project kind, or a GM event that hasn't been touched yet). */
 	eventKind: EventKind | '';
-	/** Beat entities in a GM project: whether it actually happened at the table. */
-	happened: boolean;
+	/** Events in a GM project: an unplanned event the GM added during/after
+	 *  the session, independent of `eventKind`. */
+	improvised: boolean;
+	/** Events in a GM project: the "+ Add a condition" builder — OR'd groups
+	 *  of AND'd conditions. Empty = no conditions. */
+	specialConditions: SpecialConditionGroup[];
+	/** Events in a GM project: why `eventKind` is `locked`, or [] when it
+	 *  isn't. See `FM.eventLockReasons`. */
+	eventLockReasons: string[];
 	/** Characters in a GM project: preplanned lines / speech-style examples. */
 	npcLines: string[];
 	/** Acts: title as it should appear in the exported script; '' falls back
@@ -590,6 +714,9 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		sublocationOrder: [],
 		region: null,
 		regionOrder: [],
+		decisionPoint: null,
+		decisionPointOrder: [],
+		decisionPointSession: null,
 		items: [],
 		itemOrigin: null,
 		itemOwner: null,
@@ -605,7 +732,9 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		objectives: [],
 		seq: null,
 		eventKind: '',
-		happened: false,
+		improvised: false,
+		specialConditions: [],
+		eventLockReasons: [],
 		npcLines: [],
 		displayTitle: '',
 		sceneId: '',
@@ -646,17 +775,23 @@ export function questOutcomeLabel(outcome: string): string {
 }
 
 /**
- * GM planning state of a beat entity ('' = none, just something that happened).
+ * GM projects: an Event's planning state ('' = a Player/Writer project,
+ * which never writes this field). One single-select pill on the Event page
+ * picks between `planned`/`happened`/`lore`; `locked` is never directly
+ * pickable — see `FM.eventLockReasons`.
  *
- * - `planned` — written ahead of the session; may or may not come to pass.
- * - `locked` — a planned beat that player action has ruled out for good (the
- *   NPC it needed is dead), kept on file rather than deleted.
- * - `improvised` — happened at the table without being planned, written up
- *   afterwards.
- *
- * Placeholder: the field is indexed, the UI that sets it isn't built yet.
+ * - `planned` — the default on creation; may or may not come to pass.
+ * - `happened` — the GM has recorded it as having actually happened at the
+ *   table. Flipping OTHER events under the same Decision Point to `locked`
+ *   is a side effect of this (see `eventLockReasons`'s `'cascade'` reason).
+ * - `lore` — pure worldbuilding detail, never tied to a session; hides the
+ *   Decision Point field and the Special Conditions section on that event.
+ * - `locked` — ruled out, either because a sibling under the same Decision
+ *   Point is `happened` or because a Special Condition is failing (or both
+ *   at once) — see `eventLockReasons` for which. Reverts to `planned` only
+ *   once every reason clears.
  */
-export const EVENT_KINDS = ['planned', 'locked', 'improvised'] as const;
+export const EVENT_KINDS = ['planned', 'happened', 'lore', 'locked'] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
 export function isEventKind(value: unknown): value is EventKind {

@@ -274,7 +274,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 				.setChecked(filterType === null)
 				.onClick(() => setFilterType(null))
 		);
-		for (const et of projectTypes(project.config).filter((et) => roleOf(et) === null)) {
+		for (const et of projectTypes(project.config).filter((et) => roleOf(et) === null && et !== 'decisionPoint')) {
 			menu.addItem((item) =>
 				item
 					.setTitle(entityPlural(et))
@@ -527,7 +527,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 									placeholder={t('view.group.filterByEntityPlaceholder')}
 									options={plugin.indexer
 										.getAll(undefined, project.root)
-										.filter((r) => roleOf(r.type) === null)
+										.filter((r) => roleOf(r.type) === null && r.type !== 'decisionPoint')
 										.filter((r) => filterType === null || r.type === filterType)
 										.filter((r) => !entityFilter.includes(r.path))
 										.sort((a, b) => a.name.localeCompare(b.name))

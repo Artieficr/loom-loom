@@ -18,12 +18,17 @@ import {
 	EntityOrigin,
 	EntityRecord,
 	EntityType,
+	EventKind,
 	FM,
 	PC_GROUP_NAME,
 	PC_GROUP_VALUE,
 	PC_TAG,
 	QUEST_OUTCOMES,
 	questOutcomeLabel,
+	SPECIAL_CONDITION_TYPES,
+	SpecialCondition,
+	SpecialConditionGroup,
+	SpecialConditionType,
 	VIEW_ENTITY,
 	VIEW_GROUP,
 	VIEW_LIST,
@@ -35,6 +40,7 @@ import {
 	CreateEntityModal,
 	EntityTypeSuggestModal,
 	RecordSuggestModal,
+	SessionConflictModal,
 	TextInputModal,
 	createEntity,
 	createItemCopy,
@@ -70,7 +76,9 @@ import { LinkOption } from './link-textarea';
 import { MarkdownField } from './markdown-field';
 import { FountainField, FountainFieldHandle } from './fountain-field';
 import { extractLinkpath, linkTargetOf, memberEntryLinkpath } from '../indexer';
-import { fmLoomValue, setLoomKey } from '../fm';
+import { evaluateEvent, recomputeEventLocks, waitForMetadataSync } from '../gm-lock';
+import { cascadeDecisionPointSession, reconcileSessionBeforeLink } from '../gm-decision-point';
+import { clearFmKeys, fmLoomValue, setLoomKey } from '../fm';
 import { MiniGraph } from './mini-graph';
 import { findMapsFile } from './map-view';
 import { useIndexVersion } from './hooks';
@@ -234,17 +242,6 @@ function useDebouncedFrontmatterField(plugin: LoomLoomPlugin, file: TFile | null
 			}, 600);
 		};
 	}, [plugin, file, key, label]);
-}
-
-/** Deletes a frontmatter key by any of its spellings (loom-prefixed and
- *  legacy), case-insensitively — several fields here clear a relationship by
- *  removing the key entirely rather than writing it empty (detaching a
- *  sublocation, clearing a region, reviving a PC). */
-function clearFmKeys(fm: Record<string, unknown>, ...names: string[]): void {
-	const wanted = new Set(names.map((n) => n.toLowerCase()));
-	for (const k of Object.keys(fm)) {
-		if (wanted.has(k.toLowerCase())) delete fm[k];
-	}
 }
 
 interface RelationshipDraft {
@@ -1163,6 +1160,11 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [objectives, setObjectives] = useState<ObjectiveDraft[]>(
 		record?.objectives.map((o) => ({ name: o.name, finishedOn: o.finishedSession ?? '' })) ?? []
 	);
+	/** Events (GM projects): the "+ Add a condition" builder — OR'd groups of
+	 *  AND'd conditions, each a `{ type, target }` linkpath pick. */
+	const [specialConditions, setSpecialConditions] = useState<SpecialConditionGroup[]>(
+		record?.specialConditions ?? []
+	);
 	const [body, setBody] = useState<string | null>(null);
 	/** Live sublocation reorder: rows slide in real time while the grip is
 	 *  held; the row itself is never carried by the cursor. */
@@ -1243,6 +1245,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		);
 		setSessionNotes(record.sessionNotes.map((n, idx) => ({ session: n.session ?? '', text: n.text, places: n.places, involved: n.involved, group: n.group, seq: n.seq, idx })));
 		setObjectives(record.objectives.map((o) => ({ name: o.name, finishedOn: o.finishedSession ?? '' })));
+		setSpecialConditions(record.specialConditions);
 	}, [record]);
 
 	useEffect(() => {
@@ -1587,7 +1590,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const vocab = ENTITY_TAGS[record.type];
 	const allTags = [...new Set([...vocab, ...record.loomTags])];
 	const sessions = project ? plugin.indexer.getAll(anchorType, project.root) : [];
-	const targetRecords = project ? plugin.indexer.getAll(undefined, project.root) : [];
+	const targetRecords = project
+		? plugin.indexer.getAll(undefined, project.root).filter((r) => r.type !== 'decisionPoint')
+		: [];
 
 	// This anchor's chronological number: its 1-based position among all the
 	// project's anchors — sessions ordered by date, acts by their manual
@@ -2408,11 +2413,24 @@ function EntityPage({ view }: { view: EntityView }) {
 	};
 	/** Sets a location's region to this region (region page "Add location"). */
 	const addRegionLocation = (target: string) => {
-		const rec = plugin.indexer.resolve(target, record.path);
-		if (!rec) return;
-		const f = plugin.app.vault.getFileByPath(rec.path);
-		if (!f) return;
 		void (async () => {
+			// A location just made via this field's own "+ Create new" action
+			// isn't indexed yet the instant `onCreated` fires — Obsidian's
+			// metadataCache re-parses a write on its own later tick, not
+			// synchronously (see `waitForMetadataSync`'s doc comment). Resolve
+			// immediately first (the common case: an already-existing pick,
+			// where waiting would just be a pointless delay); only fall back to
+			// waiting when that comes up empty.
+			let rec = plugin.indexer.resolve(target, record.path);
+			if (!rec) {
+				const pending = plugin.app.metadataCache.getFirstLinkpathDest(target, record.path);
+				if (!pending) return;
+				await waitForMetadataSync(plugin.app, pending);
+				rec = plugin.indexer.resolve(target, record.path);
+				if (!rec) return;
+			}
+			const f = plugin.app.vault.getFileByPath(rec.path);
+			if (!f) return;
 			await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
 				setLoomKey(fm, FM.region, `[[${linkTargetOf(record)}]]`)
 			);
@@ -2444,6 +2462,269 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 		return false;
 	};
+
+	// --- Decision Points (GM projects): a grouping layer above events, --------
+	// --- mirroring Regions above locations exactly. ---------------------------
+	const isDecisionPoint = record.type === 'decisionPoint';
+	const isEvent = record.type === 'event';
+	// Decision points available to pick as an event's own field, GM projects only.
+	const decisionPoints =
+		isEvent && kindFeatures.eventPlanning && project ? plugin.indexer.getAll('decisionPoint', project.root) : [];
+	const currentDecisionPoint =
+		record.decisionPoint !== null ? plugin.indexer.resolve(record.decisionPoint, record.path) : null;
+	/** Runs the lock evaluator over the whole project. `justWritten`, when
+	 *  given, is awaited via `waitForMetadataSync` first — the ONE record at
+	 *  risk of being stale is whichever file a caller just wrote, so
+	 *  targeting that file specifically is both correct AND cheap (no
+	 *  project-wide rescan the way `rebuildNow` would be, which doesn't even
+	 *  fix the staleness — it just re-reads metadataCache exactly as it
+	 *  currently stands, same race). Called after any edit that can affect
+	 *  an event's lock state; a no-op outside GM projects. */
+	const triggerEventLockRecompute = (justWritten?: TFile | null) => {
+		if (!project || !kindFeatures.eventPlanning) return;
+		void (async () => {
+			if (justWritten) await waitForMetadataSync(plugin.app, justWritten);
+			await recomputeEventLocks(plugin.app, plugin.indexer, project.root);
+		})();
+	};
+	/** Awaitable sibling of `writeFm` — same target file, same error handling,
+	 *  just exposes the write's completion so a lock recompute can be chained
+	 *  after it lands rather than firing on a stale index. */
+	const writeFmAwait = async (apply: (fm: Record<string, unknown>) => void) => {
+		if (!file) return;
+		try {
+			await plugin.app.fileManager.processFrontMatter(file, apply);
+		} catch (e) {
+			console.error('Loom Loom: failed to update frontmatter', e);
+			new Notice(t('view.entity.common.saveFailed'));
+		}
+	};
+	const setEventDecisionPoint = (target: string | null) => {
+		void (async () => {
+			if (target === null) {
+				await writeFmAwait((fm) => clearFmKeys(fm, 'loomdecisionpoint', 'decisionpoint'));
+				triggerEventLockRecompute(file);
+				return;
+			}
+			// Same fast-path-then-wait resolve as `addDecisionPointEvent` — a
+			// Decision Point just made via this field's own "+ Create new"
+			// action isn't indexed yet the instant `onCreated` fires.
+			let dp = plugin.indexer.resolve(target, record.path);
+			if (!dp) {
+				const pending = plugin.app.metadataCache.getFirstLinkpathDest(target, record.path);
+				if (!pending) return;
+				await waitForMetadataSync(plugin.app, pending);
+				dp = plugin.indexer.resolve(target, record.path);
+				if (!dp) return;
+			}
+			// A brand-new Decision Point has no session of its own yet, so this
+			// always auto-adopts THIS event's session with no conflict (see
+			// `reconcileSessionBeforeLink`) — the same call handles "picked an
+			// existing Decision Point" and "just created one" identically.
+			if (project) {
+				const conflict = await reconcileSessionBeforeLink(plugin.app, plugin.indexer, dp, record);
+				if (conflict) {
+					const linked = await new SessionConflictModal(plugin.app, conflict, plugin, project).openAndWait();
+					if (!linked) return;
+				}
+			}
+			await writeFmAwait((fm) => setLoomKey(fm, FM.decisionPoint, `[[${target}]]`));
+			triggerEventLockRecompute(file);
+		})();
+	};
+	// Decision Point page: its own session — a direct link, not a full
+	// `sessionNotes` array (see `FM.decisionPointSession`'s doc comment).
+	// Changing it cascades onto every member event's own session.
+	const currentDpSession =
+		record.decisionPointSession !== null ? plugin.indexer.resolve(record.decisionPointSession, record.path) : null;
+	const setDecisionPointSession = (target: string | null) => {
+		void (async () => {
+			const ok = await cascadeDecisionPointSession(plugin.app, plugin.indexer, record, target);
+			if (!ok) new Notice(t('view.entity.common.saveFailed'));
+		})();
+	};
+	// Decision Point page: its member events, ordered by `decisionPointOrder`.
+	const decisionPointEvents = (() => {
+		if (!isDecisionPoint || !project) return [];
+		const orderIdx = new Map<string, number>(
+			record.decisionPointOrder
+				.map((lp, i) => [plugin.indexer.resolve(lp, record.path)?.path, i] as const)
+				.filter((e): e is [string, number] => e[0] !== undefined)
+		);
+		return plugin.indexer
+			.getAll('event', project.root)
+			.filter((e) => e.decisionPoint !== null && plugin.indexer.resolve(e.decisionPoint, e.path)?.path === record.path)
+			.sort(
+				(a, b) =>
+					(orderIdx.get(a.path) ?? Number.MAX_SAFE_INTEGER) -
+						(orderIdx.get(b.path) ?? Number.MAX_SAFE_INTEGER) || a.name.localeCompare(b.name)
+			);
+	})();
+	const writeDecisionPointOrder = (ordered: EntityRecord[]) => {
+		writeFm((fm) => setLoomKey(fm, FM.decisionPointOrder, ordered.map((s) => `[[${linkTargetOf(s)}]]`)));
+	};
+	/** Sets an event's decision point to this one (decision point page "Add event"). */
+	const addDecisionPointEvent = (target: string) => {
+		void (async () => {
+			// Same fast-path-then-wait pattern as `addRegionLocation` above — an
+			// event just made via this field's own "+ New event" action isn't
+			// indexed yet the instant `onCreated` fires.
+			let rec = plugin.indexer.resolve(target, record.path);
+			if (!rec) {
+				const pending = plugin.app.metadataCache.getFirstLinkpathDest(target, record.path);
+				if (!pending) return;
+				await waitForMetadataSync(plugin.app, pending);
+				rec = plugin.indexer.resolve(target, record.path);
+				if (!rec) return;
+			}
+			// A brand-new event has no session of its own yet, so this always
+			// auto-adopts THIS decision point's session with no conflict (see
+			// `reconcileSessionBeforeLink`) — the same call handles "picked an
+			// existing event" and "just created one" identically.
+			if (project) {
+				const conflict = await reconcileSessionBeforeLink(plugin.app, plugin.indexer, record, rec);
+				if (conflict) {
+					const linked = await new SessionConflictModal(plugin.app, conflict, plugin, project).openAndWait();
+					if (!linked) return;
+				}
+			}
+			const f = plugin.app.vault.getFileByPath(rec.path);
+			if (!f) return;
+			try {
+				await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
+					setLoomKey(fm, FM.decisionPoint, `[[${linkTargetOf(record)}]]`)
+				);
+			} catch (e) {
+				console.error('Loom Loom: failed to update frontmatter', e);
+				new Notice(t('view.entity.common.saveFailed'));
+				return;
+			}
+			writeDecisionPointOrder([...decisionPointEvents, rec]);
+			triggerEventLockRecompute(f);
+		})();
+	};
+	/** Removes an event from this decision point (clears its `decisionPoint`). */
+	const removeDecisionPointEvent = (e: EntityRecord) => {
+		const f = plugin.app.vault.getFileByPath(e.path);
+		if (!f) return;
+		void (async () => {
+			await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+				clearFmKeys(fm, 'loomdecisionpoint', 'decisionpoint');
+			});
+			writeDecisionPointOrder(decisionPointEvents.filter((o) => o.path !== e.path));
+			triggerEventLockRecompute(f);
+		})();
+	};
+
+	// Events (GM projects): status pill + Improvised tick. The pill only ever
+	// writes `planned`/`happened`/`lore` directly — `locked` is written solely
+	// by the lock-recompute pass (`recomputeEventLocks`, gm-lock.ts), never
+	// picked here.
+	const setEventStatus = (kind: EventKind) => {
+		void (async () => {
+			await writeFmAwait((fm) => setLoomKey(fm, FM.eventKind, kind));
+			triggerEventLockRecompute(file);
+		})();
+	};
+	const setImprovised = (v: boolean) => {
+		writeFm((fm) => setLoomKey(fm, FM.improvised, v));
+	};
+	const commitSpecialConditions = (next: SpecialConditionGroup[]) => {
+		setSpecialConditions(next);
+		void (async () => {
+			// Compute the new lock state synchronously, in memory, against the
+			// EDITED conditions, and write it in the SAME transaction as the
+			// edit itself — a real, reported bug this fixes: writing just the
+			// conditions and leaving `eventKind`/`eventLockReasons` for the
+			// later async `triggerEventLockRecompute` pass to catch up left the
+			// event showing as still Locked for however long `waitForMetadataSync`
+			// took to see its own write land (bounded, but not instant), which
+			// read as "deleting a condition doesn't unlock the event." A frozen
+			// (`happened`/`lore`) event is never touched here, matching
+			// `recomputeEventLocks`'s own skip — its status doesn't reopen for
+			// re-evaluation just because its conditions were edited afterward.
+			const stillFrozen = record.eventKind === 'happened' || record.eventKind === 'lore';
+			const result =
+				!stillFrozen && project && kindFeatures.eventPlanning
+					? evaluateEvent({ ...record, specialConditions: next }, plugin.indexer, project.root)
+					: null;
+			await writeFmAwait((fm) => {
+				setLoomKey(
+					fm,
+					FM.specialConditions,
+					next.map((g) => ({
+						conditions: g.conditions.map((c) => ({
+							type: c.type,
+							target: c.target === '' ? '' : `[[${c.target}]]`,
+						})),
+					}))
+				);
+				if (result) {
+					setLoomKey(fm, FM.eventKind, result.eventKind);
+					setLoomKey(fm, FM.eventLockReasons, result.reasons);
+				}
+			});
+			// Backstop only now — the write above already applied this event's
+			// own new lock state, so this pass has nothing left to do for IT,
+			// but still catches any knock-on effect on OTHER events (e.g. this
+			// event just became the last one needed to unblock a sibling's own
+			// `eventHappened` condition — never true here since editing
+			// conditions can't change THIS event's own `happened` status, but
+			// kept for the same defense-in-depth every other lock-affecting
+			// write in this file already has).
+			triggerEventLockRecompute(file);
+		})();
+	};
+	/** Which entity type a condition's target search picks from. */
+	const conditionTargetType = (type: SpecialConditionType): EntityType =>
+		type === 'characterAlive'
+			? 'character'
+			: type === 'groupCarriesItem'
+				? 'item'
+				: type === 'eventHappened'
+					? 'event'
+					: 'decisionPoint';
+	const conditionTypeLabel = (type: SpecialConditionType): string =>
+		t(`view.entity.event.condition${type.charAt(0).toUpperCase()}${type.slice(1)}` as LocaleKey);
+	/** The target-search list + placeholder for one condition row, scoped to
+	 *  this project and excluding the event's own page as a target. */
+	const conditionPickerFor = (type: SpecialConditionType): { list: EntityRecord[]; placeholder: string } => {
+		const targetType = conditionTargetType(type);
+		const list = project
+			? plugin.indexer.getAll(targetType, project.root).filter((r) => r.path !== record.path)
+			: [];
+		const placeholderKey =
+			targetType === 'character'
+				? 'view.entity.event.pickCharacterPlaceholder'
+				: targetType === 'item'
+					? 'view.entity.event.pickItemPlaceholder'
+					: targetType === 'event'
+						? 'view.entity.event.pickEventPlaceholder'
+						: 'view.entity.event.pickDecisionPointConditionPlaceholder';
+		return { list, placeholder: t(placeholderKey) };
+	};
+	/** Opens the "+ Add a condition"/"+ Add an alternative set" type-pick menu. */
+	const openConditionTypeMenu = (e: ReactMouseEvent, onPick: (type: SpecialConditionType) => void) => {
+		const menu = new Menu();
+		for (const type of SPECIAL_CONDITION_TYPES) {
+			menu.addItem((item) => item.setTitle(conditionTypeLabel(type)).onClick(() => onPick(type)));
+		}
+		menu.showAtMouseEvent(e.nativeEvent);
+	};
+	/** Human-readable text for one `loomEventLockReasons` entry — resolves a
+	 *  condition reason's target name fresh from the index rather than storing
+	 *  display text, so a later character/item rename never leaves a stale
+	 *  blocker label behind. */
+	const lockReasonLabel = (reason: string): string => {
+		if (reason === 'cascade') return t('view.entity.event.lockedReasonCascade');
+		const m = /^condition:(\d+):(\d+)$/.exec(reason);
+		if (!m) return reason;
+		const cond: SpecialCondition | undefined = record.specialConditions[Number(m[1])]?.conditions[Number(m[2])];
+		if (!cond) return t('view.entity.event.lockedReasonConditionPrefix');
+		const targetRec = plugin.indexer.resolve(cond.target, record.path);
+		return `${t('view.entity.event.lockedReasonConditionPrefix')} ${conditionTypeLabel(cond.type)} — ${targetRec?.name ?? cond.target}`;
+	};
+
 	/** Renames a location's file to its managed name for `parentName` (undefined
 	 *  = top-level). Obsidian updates the links. */
 	const renameLocationFile = async (rec: EntityRecord, parentName: string | undefined) => {
@@ -2780,7 +3061,14 @@ function EntityPage({ view }: { view: EntityView }) {
 					.sort((a, b) => recordLabel(a.holder, project).localeCompare(recordLabel(b.holder, project)))
 			: [];
 		const currentItemLinks = () => itemRecords.map((r) => `[[${linkTargetOf(r)}]]`);
-		const setItemLinks = (links: string[]) => writeFm((fm) => setLoomKey(fm, FM.items, links));
+		// A GM "Group carries an item" condition reads a PC's own `loomItems`,
+		// so any change here can flip which events are locked.
+		const setItemLinks = (links: string[]) => {
+			void (async () => {
+				await writeFmAwait((fm) => setLoomKey(fm, FM.items, links));
+				triggerEventLockRecompute(file);
+			})();
+		};
 		const addItemLink = (linkTarget: string) => {
 			if (currentItemLinks().includes(`[[${linkTarget}]]`)) return;
 			setItemLinks([...currentItemLinks(), `[[${linkTarget}]]`]);
@@ -2837,36 +3125,44 @@ function EntityPage({ view }: { view: EntityView }) {
 		const addItemToHolder = (holder: EntityRecord) => {
 			const f = plugin.app.vault.getFileByPath(holder.path);
 			if (!f) return;
-			void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				const cur = fmLoomValue(fm, FM.items);
-				const arr = Array.isArray(cur) ? [...(cur as unknown[])] : [];
-				const present = arr.some(
-					(x) =>
-						typeof x === 'string' &&
-						plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
-				);
-				if (!present) arr.push(`[[${linkTargetOf(record)}]]`);
-				setLoomKey(fm, FM.items, arr);
-			});
+			void (async () => {
+				await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+					const cur = fmLoomValue(fm, FM.items);
+					const arr = Array.isArray(cur) ? [...(cur as unknown[])] : [];
+					const present = arr.some(
+						(x) =>
+							typeof x === 'string' &&
+							plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
+					);
+					if (!present) arr.push(`[[${linkTargetOf(record)}]]`);
+					setLoomKey(fm, FM.items, arr);
+				});
+				// A GM "Group carries an item" condition reads a PC's own
+				// `loomItems`, so a new holder can flip which events are locked.
+				triggerEventLockRecompute(f);
+			})();
 		};
 		const removeItemFromHolder = (holder: EntityRecord) => {
 			const f = plugin.app.vault.getFileByPath(holder.path);
 			if (!f) return;
-			void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				const cur = fmLoomValue(fm, FM.items);
-				const arr = Array.isArray(cur) ? (cur as unknown[]) : [];
-				setLoomKey(
-					fm,
-					FM.items,
-					arr.filter(
-						(x) =>
-							!(
-								typeof x === 'string' &&
-								plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
-							)
-					)
-				);
-			});
+			void (async () => {
+				await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
+					const cur = fmLoomValue(fm, FM.items);
+					const arr = Array.isArray(cur) ? (cur as unknown[]) : [];
+					setLoomKey(
+						fm,
+						FM.items,
+						arr.filter(
+							(x) =>
+								!(
+									typeof x === 'string' &&
+									plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
+								)
+						)
+					);
+				});
+				triggerEventLockRecompute(f);
+			})();
 		};
 		// A character-specific item copy: original + owning-character links.
 		const isItemCopy =
@@ -3397,7 +3693,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		(isSession || showsEvents) && project
 			? plugin.indexer
 					.getAll(undefined, project.root)
-					.filter((r) => roleOf(r.type) === null)
+					.filter((r) => roleOf(r.type) === null && r.type !== 'decisionPoint')
 					.sort((a, b) => a.name.localeCompare(b.name))
 			: [];
 	/** The note's involved entities, resolved and grouped by type then name. */
@@ -3441,7 +3737,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				.getAll(undefined, project.root)
 				// Locations can be involved (a place discussed/featured in the event)
 				// as well as a `places` entry (where it happened) — both are allowed.
-				.filter((r) => roleOf(r.type) === null && r.path !== record.path)
+				.filter((r) => roleOf(r.type) === null && r.type !== 'decisionPoint' && r.path !== record.path)
 				.sort((a, b) => a.name.localeCompare(b.name))
 		: [];
 	/** The current party (alive + active PCs, minus this page's own entity) —
@@ -3547,25 +3843,46 @@ function EntityPage({ view }: { view: EntityView }) {
 		((record.type !== 'scene' && record.type !== 'act' && record.type !== 'chapter') ||
 			sessionQuests.length > 0);
 
-	// PC life state: unticking Alive reveals the death-session picker.
-	// Gated on the kind: a writer project's cast has no party to be away from,
-	// and a character's death is a scene rather than a flag.
+	// Away-from-the-party ("Active") is always PC-only — an NPC/Cast member
+	// was never "in the party" to begin with. Gated on the kind: a writer
+	// project's cast has no party to be away from.
 	const isPc =
 		record.type === 'character' && record.loomTags.includes(PC_TAG) && kindFeatures.pcLifecycle;
+	// Alive + death-session: every character, not just PCs, in both Player and
+	// GM projects (`characterLifecycleScope`) — tracking any character's fate
+	// is useful on its own, and a GM's Special Conditions additionally read it
+	// for NPCs. Unticking Alive reveals the death-session picker.
+	const showsLifecycle =
+		record.type === 'character' &&
+		kindFeatures.pcLifecycle &&
+		(kindFeatures.characterLifecycleScope === 'all' || record.loomTags.includes(PC_TAG));
 	const deathSession =
 		record.deathSession !== null ? plugin.indexer.resolve(record.deathSession, record.path) : null;
 	const clearDeathKey = (fm: Record<string, unknown>) => clearFmKeys(fm, 'loomdeathsession', 'deathsession');
 	const setAlive = (alive: boolean) => {
-		writeFm((fm) => {
-			setLoomKey(fm, FM.alive, alive);
-			if (alive) clearDeathKey(fm);
-		});
+		void (async () => {
+			await writeFmAwait((fm) => {
+				setLoomKey(fm, FM.alive, alive);
+				if (alive) clearDeathKey(fm);
+			});
+			// A GM Special Condition can name any character's fate — a death (or
+			// an undone one) can flip which events are locked.
+			triggerEventLockRecompute(file);
+		})();
 	};
 	const setDeathSession = (target: string | null) => {
-		writeFm((fm) => {
-			if (target === null) clearDeathKey(fm);
-			else setLoomKey(fm, FM.deathSession, `[[${target}]]`);
-		});
+		void (async () => {
+			await writeFmAwait((fm) => {
+				if (target === null) clearDeathKey(fm);
+				else setLoomKey(fm, FM.deathSession, `[[${target}]]`);
+			});
+			// Mirrors `setAlive` above — a Special Condition naming this
+			// character could depend on it, and whichever session they died in
+			// is part of that fate even though `characterAlive` itself only
+			// reads the flat `alive` flag today; keeping this in sync now
+			// avoids a silent gap if that condition ever grows session-aware.
+			triggerEventLockRecompute(file);
+		})();
 	};
 	/** Away from the party: inactive PCs are skipped by new virtual-Group picks
 	 *  (existing group snapshots keep them — history stays as it was). */
@@ -3675,7 +3992,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				action={
 					project
 						? {
-								label: t('view.entity.relationships.createEntityAction'),
+								label: t('view.entity.sessionNotes.createNewEntityAction'),
 								onPick: () =>
 									new EntityTypeSuggestModal(plugin, (type) =>
 										new CreateEntityModal(plugin, type, project, {
@@ -3708,7 +4025,8 @@ function EntityPage({ view }: { view: EntityView }) {
 												});
 											},
 										}).open(),
-										project
+										project,
+										['decisionPoint']
 									).open(),
 							}
 						: undefined
@@ -3820,7 +4138,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							action={
 								project
 									? {
-											label: t('view.entity.sessionNotes.newSessionAction'),
+											label: t('project.createEntity.createNewAction', { label: entityLabel(anchorType) }),
 											onPick: () =>
 												new CreateEntityModal(plugin, anchorType, project, {
 													onCreated: (created) => setNote({ session: created.basename }, true),
@@ -3877,7 +4195,8 @@ function EntityPage({ view }: { view: EntityView }) {
 														onCreated: (created) =>
 															setNote({ involved: [...note.involved, created.basename] }, true),
 													}).open(),
-													project
+													project,
+													['decisionPoint']
 												).open(),
 										}
 									: undefined
@@ -3897,7 +4216,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										.setChecked(current === null)
 										.onClick(() => setHubFilter({ ...hubFilter, [fkey]: null }))
 								);
-								for (const et of projectTypes(project?.config).filter((et) => roleOf(et) === null)) {
+								for (const et of projectTypes(project?.config).filter((et) => roleOf(et) === null && et !== 'decisionPoint')) {
 									menu.addItem((item) =>
 										item
 											.setTitle(entityPlural(et))
@@ -4032,6 +4351,18 @@ function EntityPage({ view }: { view: EntityView }) {
 								.sort(mainLocationFirst)
 								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 							onPick={(name) => setNote({ places: [...note.places, name] }, true)}
+							action={
+								project
+									? {
+											label: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
+											onPick: () =>
+												new CreateEntityModal(plugin, 'location', project, {
+													onCreated: (created) =>
+														setNote({ places: [...note.places, created.basename] }, true),
+												}).open(),
+										}
+									: undefined
+							}
 						/>
 					</div>
 				
@@ -4294,7 +4625,8 @@ function EntityPage({ view }: { view: EntityView }) {
 														onCreated: (created) =>
 															writeEntryInvolved(en, (list) => [...list, `[[${created.basename}]]`]),
 													}).open(),
-													project
+													project,
+													['decisionPoint']
 												).open();
 											},
 										}
@@ -4314,7 +4646,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										.setChecked(current === null)
 										.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: null }))
 								);
-								for (const et of projectTypes(project?.config).filter((et) => roleOf(et) === null)) {
+								for (const et of projectTypes(project?.config).filter((et) => roleOf(et) === null && et !== 'decisionPoint')) {
 									menu.addItem((item) =>
 										item
 											.setTitle(entityPlural(et))
@@ -4479,7 +4811,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							if (ev) addExistingEventToPage(ev);
 						}}
 						action={{
-							label: t('view.entity.events.createNewBeatAction', { beat: beatLabel }),
+							label: t('project.createEntity.createNewAction', { label: entityLabel(beatType) }),
 							onPick: () =>
 								new CreateEntityModal(plugin, beatType, project, {
 									...(isLocation
@@ -4548,7 +4880,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							.map((it) => ({ value: linkTargetOf(it), label: it.name }))}
 						onPick={(linkTarget) => addItemLink(linkTarget)}
 						action={{
-							label: t('view.entity.items.createNewItemAction'),
+							label: t('project.createEntity.createNewAction', { label: entityLabel('item') }),
 							onPick: () =>
 								new CreateEntityModal(plugin, 'item', project, {
 									onCreated: (created) => addItemLink(created.basename),
@@ -4917,7 +5249,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								action={
 									project
 										? {
-												label: t('view.entity.location.createRegionAction'),
+												label: t('project.createEntity.createNewAction', { label: entityLabel('region') }),
 												onPick: () =>
 													new CreateEntityModal(plugin, 'region', project, {
 														onCreated: (created) => {
@@ -5329,6 +5661,18 @@ function EntityPage({ view }: { view: EntityView }) {
 								.sort((a, b) => a.name.localeCompare(b.name))
 								.map((c) => ({ value: linkTargetOf(c), label: c.name }))}
 							onPick={(target) => writeQuestGivers([...questGiverRecords.map((g) => linkTargetOf(g)), target])}
+							action={
+								project
+									? {
+											label: t('project.createEntity.createNewAction', { label: entityLabel('character') }),
+											onPick: () =>
+												new CreateEntityModal(plugin, 'character', project, {
+													onCreated: (created) =>
+														writeQuestGivers([...questGiverRecords.map((g) => linkTargetOf(g)), created.basename]),
+												}).open(),
+										}
+									: undefined
+							}
 						/>
 						{questGiverRecords.length > 0 ? (
 							<div className="loom-tag-row">
@@ -5360,6 +5704,19 @@ function EntityPage({ view }: { view: EntityView }) {
 										placeholder={t('project.createEntity.pickAnchor', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel })}
 										options={questAnchorsSorted.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 										onPick={(name) => setQuestSession('questReceived', name)}
+										action={
+											project
+												? {
+														label: t('project.createEntity.createNewAction', {
+															label: entityLabel(questAnchorType),
+														}),
+														onPick: () =>
+															new CreateEntityModal(plugin, questAnchorType, project, {
+																onCreated: (created) => setQuestSession('questReceived', created.basename),
+															}).open(),
+													}
+												: undefined
+										}
 									/>
 								)}
 							</div>
@@ -5378,6 +5735,20 @@ function EntityPage({ view }: { view: EntityView }) {
 											placeholder={t('project.createEntity.pickAnchor', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel })}
 											options={questAnchorsSorted.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 											onPick={(name) => setQuestSession('questOutcomeSession', name)}
+											action={
+												project
+													? {
+															label: t('project.createEntity.createNewAction', {
+																label: entityLabel(questAnchorType),
+															}),
+															onPick: () =>
+																new CreateEntityModal(plugin, questAnchorType, project, {
+																	onCreated: (created) =>
+																		setQuestSession('questOutcomeSession', created.basename),
+																}).open(),
+														}
+													: undefined
+											}
 										/>
 									)}
 								</div>
@@ -5451,7 +5822,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : (
 		<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
 				<span className="loom-field-label">{t('project.createEntity.description')}</span>
-				{isPc ? (
+				{showsLifecycle ? (
 					<label className="loom-check">
 						<input type="checkbox" checked={record.alive} onChange={(e) => setAlive(e.target.checked)} />
 						{t('view.entity.common.alive')}
@@ -5470,7 +5841,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						<InfoIcon text={t('view.entity.common.activeTooltip')} />
 					</div>
 				) : null}
-				{isPc && !record.alive ? (
+				{showsLifecycle && !record.alive ? (
 					<div className="loom-death-row">
 						<span className="loom-field-label">{t('view.entity.common.deathSession')}</span>
 						{deathSession && roleOf(deathSession.type) === 'anchor' ? (
@@ -5492,6 +5863,17 @@ function EntityPage({ view }: { view: EntityView }) {
 									.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
 									.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
 								onPick={(name) => setDeathSession(name)}
+								action={
+									project
+										? {
+												label: t('project.createEntity.createNewAction', { label: entityLabel(anchorType) }),
+												onPick: () =>
+													new CreateEntityModal(plugin, anchorType, project, {
+														onCreated: (created) => setDeathSession(created.basename),
+													}).open(),
+											}
+										: undefined
+								}
 							/>
 						)}
 					</div>
@@ -6411,6 +6793,19 @@ function EntityPage({ view }: { view: EntityView }) {
 												label: recordLabel(s, project),
 											}))}
 											onPick={(name) => commitSet(idx, { finishedOn: name })}
+											action={
+												project
+													? {
+															label: t('project.createEntity.createNewAction', {
+																label: entityLabel(questAnchorType),
+															}),
+															onPick: () =>
+																new CreateEntityModal(plugin, questAnchorType, project, {
+																	onCreated: (created) => commitSet(idx, { finishedOn: created.basename }),
+																}).open(),
+														}
+													: undefined
+											}
 										/>
 									)}
 								</div>
@@ -6492,7 +6887,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						action={
 							project
 								? {
-										label: t('view.entity.faction.createNewCharacterAction'),
+										label: t('project.createEntity.createNewAction', { label: entityLabel('character') }),
 										onPick: () =>
 											new CreateEntityModal(plugin, 'character', project, {
 												onCreated: (created) =>
@@ -6536,6 +6931,24 @@ function EntityPage({ view }: { view: EntityView }) {
 									if (faction) editMembersOf(faction, (arr) => [...arr, `[[${linkTargetOf(record)}]]`]);
 									setFactionDraft(false);
 								}}
+								action={
+									project
+										? {
+												label: t('project.createEntity.createNewAction', { label: entityLabel('faction') }),
+												onPick: () =>
+													new CreateEntityModal(plugin, 'faction', project, {
+														onCreated: (created) => {
+															// A fresh faction's `EntityRecord` isn't indexed yet the
+															// instant `onCreated` fires — `editFmList` only needs the
+															// file's own PATH, so it writes straight through the
+															// `TFile` without waiting on the index at all.
+															editFmList(created.path, FM.members, (arr) => [...arr, `[[${linkTargetOf(record)}]]`]);
+															setFactionDraft(false);
+														},
+													}).open(),
+											}
+										: undefined
+								}
 							/>
 							<button
 								className="loom-nav-btn"
@@ -6586,6 +6999,18 @@ function EntityPage({ view }: { view: EntityView }) {
 											.sort((a, b) => a.name.localeCompare(b.name))
 											.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 										onPick={(name) => setMembershipField(m.faction, { location: name })}
+										action={
+											project
+												? {
+														label: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
+														onPick: () =>
+															new CreateEntityModal(plugin, 'location', project, {
+																onCreated: (created) =>
+																	setMembershipField(m.faction, { location: created.basename }),
+															}).open(),
+													}
+												: undefined
+										}
 									/>
 								)}
 							</div>
@@ -6632,6 +7057,231 @@ function EntityPage({ view }: { view: EntityView }) {
 			</div>
 			) : null}
 
+			{/* Event planning (GM projects only): status pill, Improvised tick,
+			    Decision Point field, and Special Conditions builder, laid out
+			    two columns wide — status/decision-point on the left, conditions
+			    on the right, since a GM page has the width to spare here and
+			    conditions can otherwise run long. Sits above Session notes (the
+			    isBeat branch right below) since a GM reads planning state before
+			    anything narrative. See ROADMAP.md's "Game Master" entry. */}
+			{isEvent && kindFeatures.eventPlanning ? (
+				<div className="loom-field loom-field-sep">
+					<div className="loom-event-planning-row">
+						<div className="loom-event-planning-col">
+							<span className="loom-field-label">{t('view.entity.event.statusLabel')}</span>
+							{record.eventKind === 'locked' ? (
+								<div className="loom-event-status-locked">
+									<span className="loom-chip loom-chip-locked">{t('view.entity.event.statusLocked')}</span>
+									{record.eventLockReasons.length > 0 ? (
+										<ul className="loom-event-lock-reasons">
+											{record.eventLockReasons.map((reason, i) => (
+												<li key={i}>{lockReasonLabel(reason)}</li>
+											))}
+										</ul>
+									) : null}
+								</div>
+							) : (
+								<div className="loom-seg">
+									{(['planned', 'happened', 'lore'] as const).map((k) => (
+										<button
+											key={k}
+											className={
+												record.eventKind === k || (record.eventKind === '' && k === 'planned')
+													? 'loom-seg-btn loom-seg-on'
+													: 'loom-seg-btn'
+											}
+											onClick={() => setEventStatus(k)}
+										>
+											{t(
+												`view.entity.event.status${k.charAt(0).toUpperCase()}${k.slice(1)}` as LocaleKey
+											)}
+										</button>
+									))}
+								</div>
+							)}
+							<div className="loom-check-with-info">
+								<label className="loom-check">
+									<input
+										type="checkbox"
+										checked={record.improvised}
+										onChange={(e) => setImprovised(e.target.checked)}
+									/>
+									{t('view.entity.event.improvisedLabel')}
+								</label>
+								<InfoIcon text={t('view.entity.event.improvisedTooltip')} />
+							</div>
+							{record.eventKind !== 'lore' ? (
+								<div className="loom-event-planning-sub">
+									<span className="loom-field-label">{t('view.entity.event.decisionPointLabel')}</span>
+									<div className="loom-region-pick">
+										{currentDecisionPoint ? (
+											<EntityChip
+												plugin={plugin}
+												record={currentDecisionPoint}
+												onOpen={() => view.openEntity(currentDecisionPoint.path)}
+												onRemove={() => setEventDecisionPoint(null)}
+												removeLabel={t('view.entity.event.clearDecisionPoint')}
+											/>
+										) : (
+											<SearchableSelect
+												placeholder={t('view.entity.event.pickDecisionPointPlaceholder')}
+												options={decisionPoints
+													.map((r) => ({ value: linkTargetOf(r), label: r.name }))
+													.sort((a, b) => a.label.localeCompare(b.label))}
+												action={
+													project
+														? {
+																label: t('project.createEntity.createNewAction', { label: entityLabel('decisionPoint') }),
+																onPick: () =>
+																	new CreateEntityModal(plugin, 'decisionPoint', project, {
+																		onCreated: (created) => setEventDecisionPoint(created.basename),
+																	}).open(),
+															}
+														: undefined
+												}
+												onPick={(target) => setEventDecisionPoint(target)}
+											/>
+										)}
+									</div>
+								</div>
+							) : null}
+						</div>
+						{record.eventKind !== 'lore' ? (
+							<div className="loom-event-planning-col">
+								<span className="loom-field-label">{t('view.entity.event.specialConditionsLabel')}</span>
+								{specialConditions.map((group, gi) => (
+									<div key={gi}>
+										{gi > 0 ? <div className="loom-cond-or-divider">{t('view.entity.event.orDivider')}</div> : null}
+										<div className="loom-cond-box">
+											{group.conditions.map((cond, ci) => {
+												const picker = conditionPickerFor(cond.type);
+												const targetRec =
+													cond.target !== '' ? plugin.indexer.resolve(cond.target, record.path) : null;
+												return (
+													<div key={ci} className="loom-cond-row">
+														<span className="loom-cond-type">{conditionTypeLabel(cond.type)}</span>
+														{targetRec ? (
+															<EntityChip
+																plugin={plugin}
+																record={targetRec}
+																onOpen={() => view.openEntity(targetRec.path)}
+																onRemove={() => {
+																	const next = specialConditions
+																		.map((g, i) =>
+																			i !== gi ? g : { conditions: g.conditions.filter((_, j) => j !== ci) }
+																		)
+																		.filter((g) => g.conditions.length > 0);
+																	commitSpecialConditions(next);
+																}}
+																removeLabel={t('view.entity.event.removeCondition')}
+															/>
+														) : (
+															<>
+																<SearchableSelect
+																	key={`${gi}:${ci}:${cond.target}`}
+																	placeholder={picker.placeholder}
+																options={picker.list
+																	.map((r) => ({ value: linkTargetOf(r), label: r.name }))
+																	.sort((a, b) => a.label.localeCompare(b.label))}
+																action={
+																	project
+																		? {
+																				label: t('project.createEntity.createNewAction', {
+																					label: entityLabel(conditionTargetType(cond.type)),
+																				}),
+																				onPick: () =>
+																					new CreateEntityModal(
+																						plugin,
+																						conditionTargetType(cond.type),
+																						project,
+																						{
+																							onCreated: (created) => {
+																								const next = specialConditions.map((g, i) =>
+																									i !== gi
+																										? g
+																										: {
+																												conditions: g.conditions.map((c, j) =>
+																													j !== ci
+																														? c
+																														: { ...c, target: created.basename }
+																												),
+																											}
+																								);
+																								commitSpecialConditions(next);
+																							},
+																						}
+																					).open(),
+																			}
+																		: undefined
+																}
+																onPick={(target) => {
+																	const next = specialConditions.map((g, i) =>
+																		i !== gi
+																			? g
+																			: {
+																					conditions: g.conditions.map((c, j) =>
+																						j !== ci ? c : { ...c, target }
+																					),
+																				}
+																	);
+																	commitSpecialConditions(next);
+																}}
+															/>
+															{/* No target picked yet — nothing to attach the EntityChip's
+															    own remove ✕ to, so this row still needs a standalone
+															    one to drop the row outright. */}
+															<button
+																className="loom-rel-filter"
+																aria-label={t('view.entity.event.removeCondition')}
+																onClick={() => {
+																	const next = specialConditions
+																		.map((g, i) =>
+																			i !== gi ? g : { conditions: g.conditions.filter((_, j) => j !== ci) }
+																		)
+																		.filter((g) => g.conditions.length > 0);
+																	commitSpecialConditions(next);
+																}}
+															>
+																<Icon name="x" />
+															</button>
+														</>
+													)}
+												</div>
+											);
+										})}
+											<button
+												className="loom-hub-add-row"
+												onClick={(e) =>
+													openConditionTypeMenu(e, (type) => {
+														const next = specialConditions.map((g, i) =>
+															i !== gi ? g : { conditions: [...g.conditions, { type, target: '' }] }
+														);
+														commitSpecialConditions(next);
+													})
+												}
+											>
+												{t('view.entity.event.addConditionAction')}
+											</button>
+										</div>
+									</div>
+								))}
+								<button
+									className="loom-hub-add-row"
+									onClick={(e) =>
+										openConditionTypeMenu(e, (type) =>
+											commitSpecialConditions([...specialConditions, { conditions: [{ type, target: '' }] }])
+										)
+									}
+								>
+									{specialConditions.length === 0
+										? t('view.entity.event.addConditionAction')
+										: t('view.entity.event.addAlternativeSetAction')}
+								</button>
+							</div>
+						) : null}
+					</div>
+				</div>
+			) : null}
 
 			{isBeat && scriptMode ? (
 				<>
@@ -7598,6 +8248,21 @@ function EntityPage({ view }: { view: EntityView }) {
 								const c = plugin.indexer.get(path);
 								if (c) addItemToHolder(c);
 							}}
+							action={{
+								label: t('project.createEntity.createNewAction', { label: entityLabel('character') }),
+								onPick: () =>
+									new CreateEntityModal(plugin, 'character', project, {
+										onCreated: (f) => {
+											// A fresh character isn't indexed yet the instant
+											// `onCreated` fires — wait for it, same pattern the
+											// Decision Point fields above use.
+											void waitForMetadataSync(plugin.app, f).then(() => {
+												const c = plugin.indexer.resolve(f.basename, project.loomPath);
+												if (c) addItemToHolder(c);
+											});
+										},
+									}).open(),
+							}}
 						/>
 					</div>
 					{holderCharacters.length > 0 ? (
@@ -7631,6 +8296,18 @@ function EntityPage({ view }: { view: EntityView }) {
 							onPick={(path) => {
 								const l = plugin.indexer.get(path);
 								if (l) addItemToHolder(l);
+							}}
+							action={{
+								label: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
+								onPick: () =>
+									new CreateEntityModal(plugin, 'location', project, {
+										onCreated: (f) => {
+											void waitForMetadataSync(plugin.app, f).then(() => {
+												const l = plugin.indexer.resolve(f.basename, project.loomPath);
+												if (l) addItemToHolder(l);
+											});
+										},
+									}).open(),
 							}}
 						/>
 					</div>
@@ -7868,7 +8545,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								.sort((a, b) => locationLabel(a, plugin).localeCompare(locationLabel(b, plugin)))
 								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 							action={{
-								label: t('view.entity.location.newLocationAction'),
+								label: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
 								onPick: () =>
 									new CreateEntityModal(plugin, 'location', project, {
 										onCreated: (created) => addRegionLocation(created.basename),
@@ -7888,6 +8565,85 @@ function EntityPage({ view }: { view: EntityView }) {
 									onOpen={() => view.openEntity(l.path)}
 									onRemove={() => removeRegionLocation(l)}
 									removeLabel={t('view.entity.location.removeFromRegion')}
+								/>
+							))}
+						</div>
+					) : null}
+				</div>
+			) : null}
+
+			{/* Decision Point page: its own Session field — same picker shape as
+			    an Event's own birth session. Changing it cascades onto every
+			    member event's own session (see `cascadeDecisionPointSession`). */}
+			{isDecisionPoint && project ? (
+				<div className="loom-field">
+					<span className="loom-field-label">{t('view.entity.decisionPoint.sessionLabel')}</span>
+					<div className="loom-region-pick">
+						{currentDpSession ? (
+							<EntityChip
+								plugin={plugin}
+								record={currentDpSession}
+								label={recordLabel(currentDpSession, project)}
+								onOpen={() => view.openEntity(currentDpSession.path)}
+								onRemove={() => setDecisionPointSession(null)}
+								removeLabel={t('view.entity.decisionPoint.clearSession')}
+							/>
+						) : (
+							<SearchableSelect
+								placeholder={t('view.entity.decisionPoint.pickSessionPlaceholder')}
+								options={sessions
+									.slice()
+									.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
+									.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
+								action={{
+									label: t('project.createEntity.createNewAction', { label: entityLabel(anchorType) }),
+									onPick: () =>
+										new CreateEntityModal(plugin, anchorType, project, {
+											onCreated: (created) => setDecisionPointSession(created.basename),
+										}).open(),
+								}}
+								onPick={(target) => setDecisionPointSession(target)}
+							/>
+						)}
+					</div>
+				</div>
+			) : null}
+
+			{/* Decision Point page: its member events (an event's own "Decision
+			    point" field points here) — mirrors Region's own Locations
+			    section above exactly. */}
+			{isDecisionPoint && project ? (
+				<div className="loom-field loom-field-sep">
+					<span className="loom-field-label">{entityPlural('event')}</span>
+					<div className="loom-hub-add-row">
+						<SearchableSelect
+							placeholder={t('view.entity.decisionPoint.addEventPlaceholder')}
+							options={plugin.indexer
+								.getAll('event', project.root)
+								.filter((e) => !decisionPointEvents.some((m) => m.path === e.path))
+								.sort((a, b) => recordLabel(a, project).localeCompare(recordLabel(b, project)))
+								.map((e) => ({ value: linkTargetOf(e), label: recordLabel(e, project) }))}
+							action={{
+								label: t('project.createEntity.createNewAction', { label: entityLabel('event') }),
+								onPick: () =>
+									new CreateEntityModal(plugin, 'event', project, {
+										onCreated: (created) => addDecisionPointEvent(created.basename),
+									}).open(),
+							}}
+							onPick={(target) => addDecisionPointEvent(target)}
+						/>
+					</div>
+					{decisionPointEvents.length > 0 ? (
+						<div className="loom-tag-row">
+							{decisionPointEvents.map((e) => (
+								<EntityChip
+									key={e.path}
+									plugin={plugin}
+									record={e}
+									label={recordLabel(e, project)}
+									onOpen={() => view.openEntity(e.path)}
+									onRemove={() => removeDecisionPointEvent(e)}
+									removeLabel={t('view.entity.decisionPoint.removeFromDecisionPoint')}
 								/>
 							))}
 						</div>

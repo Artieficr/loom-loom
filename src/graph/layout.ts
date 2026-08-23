@@ -40,6 +40,11 @@ const MULTI_CLEARANCE = 100;
 /** Sublocation grid width: a parent's sublocations sit SUB_COLS wide under
  *  it, wrapping to further rows (the 5th starts row two, the 9th row three…). */
 const SUB_COLS = 4;
+/** GM projects: horizontal spacing between a session's own Decision Points,
+ *  fanned out in a row centered under it (n=1 sits exactly on the session's
+ *  own x). Narrower than COL_WIDTH — DPs don't need a full session column's
+ *  worth of room, just enough to keep labels from colliding. */
+const DP_FAN_SPACING = 110;
 
 /** Default/minimum distance between parallel vertical trunk lanes —
  *  overridable per call via `computeGraphLayout`'s `trunkGap` (settings.graphTrunkGap). */
@@ -256,8 +261,20 @@ export function computeGraphLayout(
 		arrowA: e.arrowUpper,
 		arrowB: e.arrowLower,
 		route: toRoute(e),
+		lineStyle: eventLineStyle(e.upper.record.type === 'event' ? e.upper.record : e.lower.record),
 	}));
 	return { nodes: allNodes, edges, neighbors, width, height: bottom };
+}
+
+/** GM projects: the line style an edge touching `record` should carry —
+ *  `undefined` (plain solid) unless `record` is itself an Event, and then
+ *  only for Planned/Locked (Happened/Lore stay plain solid too). See
+ *  `RoutedEdge.lineStyle`'s own doc comment. */
+function eventLineStyle(record: EntityRecord): 'dashed' | 'locked' | undefined {
+	if (record.type !== 'event') return undefined;
+	if (record.eventKind === 'locked') return 'locked';
+	if (record.eventKind === 'planned' || record.eventKind === '') return 'dashed';
+	return undefined;
 }
 
 function toRoute(e: CEdge): EdgeRoute {
@@ -312,6 +329,41 @@ function collectEdges(
 			neighbors.get(b)?.add(a);
 		}
 	}
+	// GM projects: an event under a Decision Point routes its own session
+	// connection THROUGH the decision point instead of drawing a second,
+	// redundant line straight to the session — the decision point already
+	// carries a real edge to that same session via its own
+	// `decisionPointSession` field (collected above like any other
+	// connection, so no synthesizing needed here), only reachable when the
+	// decision point actually HAS a session linked — an event whose Decision
+	// Point has no session yet keeps its own direct edge, since that's the
+	// only path to the session at all in that case. Keyed by the event's own
+	// path -> the DP's session's resolved PATH (not the DP's own path) — an
+	// event can independently carry a SECOND, unrelated session note of its
+	// own (a second `sessionNotes` entry), and only the edge to THIS SAME
+	// session is actually redundant; a real bug once compared just "is either
+	// endpoint a Decision-Pointed event" and deleted every session-note edge
+	// off it, silently dropping an unrelated session connection too.
+	const eventDpSessionPath = new Map<string, string>();
+	for (const r of records) {
+		if (r.type !== 'event' || r.decisionPoint === null) continue;
+		const dp = indexer.resolve(r.decisionPoint, r.path);
+		if (dp?.type !== 'decisionPoint' || !indexed.has(dp.path) || dp.decisionPointSession === null) continue;
+		const dpSession = indexer.resolve(dp.decisionPointSession, dp.path);
+		if (dpSession) eventDpSessionPath.set(r.path, dpSession.path);
+	}
+	if (eventDpSessionPath.size > 0) {
+		for (const [key, edge] of [...byKey.entries()]) {
+			if (edge.relType !== 'session note') continue;
+			const eventPath = eventDpSessionPath.has(edge.a) ? edge.a : eventDpSessionPath.has(edge.b) ? edge.b : null;
+			if (eventPath === null) continue;
+			const otherPath = eventPath === edge.a ? edge.b : edge.a;
+			if (otherPath !== eventDpSessionPath.get(eventPath)) continue;
+			byKey.delete(key);
+			neighbors.get(edge.a)?.delete(edge.b);
+			neighbors.get(edge.b)?.delete(edge.a);
+		}
+	}
 	return { raw: [...byKey.values()], neighbors };
 }
 
@@ -346,12 +398,44 @@ function placeNodes(
 	const freeEvents = allColumns.filter(isFreeEvent).map((c) => c.anchor);
 	const columns = allColumns.filter((c) => !isFreeEvent(c));
 
+	// GM projects: a session's own Decision Points (fanned left-to-right,
+	// centered on it — see the placement loop below) can extend well past
+	// COL_WIDTH's own half, so the fixed inter-session distance has to be
+	// measured against the OUTERMOST Decision Point on each side, not the
+	// session nodes themselves, or a wide fan crowds straight into its
+	// neighbor's own fan (a real, reported bug: two adjacent sessions each
+	// carrying several Decision Points overlapped once there were enough of
+	// them). Computed here, before `colX` itself, purely from column ORDER
+	// (`colIndexOf`, not `colOf` — that only gets filled in once `colX`
+	// already exists, further down) — `dpsBySessionCol` built here is reused
+	// there for the actual placement rather than recomputed a second time.
+	const colIndexOf = new Map<string, number>();
+	columns.forEach((col, i) => colIndexOf.set(col.anchor.path, i));
+	const dpsBySessionCol = new Map<number, EntityRecord[]>();
+	for (const dp of indexer.getAll('decisionPoint', projectRoot)) {
+		if (!inSet(dp) || dp.decisionPointSession === null) continue;
+		const session = indexer.resolve(dp.decisionPointSession, dp.path);
+		if (!session) continue;
+		const ci = colIndexOf.get(session.path);
+		if (ci === undefined) continue;
+		(dpsBySessionCol.get(ci) ?? dpsBySessionCol.set(ci, []).get(ci))?.push(dp);
+	}
+	/** Half-width (px) of a session's own DP fan, symmetric around its
+	 *  center — mirrors the `(k - (n-1)/2) * DP_FAN_SPACING` placement
+	 *  formula below; 0/1 DP needs none (n=1 sits exactly on the session's
+	 *  own x, same as today). */
+	const dpFanHalfWidth = (ci: number): number => {
+		const n = dpsBySessionCol.get(ci)?.length ?? 0;
+		return n > 1 ? ((n - 1) / 2) * DP_FAN_SPACING : 0;
+	};
+
 	// Column x positions: corridor i is the gap left of column i; a corridor
 	// holding many trunk lanes widens beyond the default so lanes stay
 	// LANE_GAP apart (inconsistent date spacing is the accepted price).
 	const colX: number[] = [];
 	for (let i = 0; i < columns.length; i++) {
-		const base = i === 0 ? MARGIN_X + leftPad : COL_WIDTH;
+		const dpPad = i === 0 ? dpFanHalfWidth(0) : dpFanHalfWidth(i - 1) + dpFanHalfWidth(i);
+		const base = (i === 0 ? MARGIN_X + leftPad : COL_WIDTH) + dpPad;
 		const gap = Math.max(base, corridorWidths?.get(i) ?? 0);
 		colX.push(i === 0 ? gap : colX[i - 1] + gap);
 	}
@@ -412,13 +496,72 @@ function placeNodes(
 		colOf.set(col.anchor.path, i);
 		if (anchorKind === 'beat') occupy(0, x);
 	});
-	// Sub-events: single-session at their column's x, multi-session centered
-	// between the columns they span; y from the shared grid row.
+	// GM projects: a Decision Point sits in its own row directly under its OWN
+	// session (`decisionPointSession` — several under one session fan out
+	// left-to-right, centered on it), and an event under that Decision Point
+	// clusters beneath IT instead of directly under the session. A Decision
+	// Point with no session set yet isn't placed here at all (it has nothing
+	// to anchor a column position to — it still exists in the index and can
+	// be found/edited normally, just not drawn until it has one). Only takes
+	// effect when this graph actually has at least one PLACED Decision Point
+	// — every other project, and a GM project that hasn't set one up yet,
+	// lays out events exactly as it always did. `dpsBySessionCol` itself was
+	// already built above, before `colX` — reused here rather than
+	// recomputed, since `colOf`'s session entries (just now populated by the
+	// loop above) hold the exact same indices `colIndexOf` did.
+	const dpPlaced = new Map<string, { x: number; nextRow: number }>();
+	for (const [ci, dps] of dpsBySessionCol) {
+		const x = colX[ci];
+		dps.sort((a, b) => a.name.localeCompare(b.name));
+		const n = dps.length;
+		dps.forEach((dp, k) => {
+			const dpX = x + (k - (n - 1) / 2) * DP_FAN_SPACING;
+			nodes.set(dp.path, {
+				id: dp.path,
+				record: dp,
+				x: dpX,
+				y: EVENT_Y0,
+				kind: 'beat',
+				zone: 0,
+			});
+			colOf.set(dp.path, nearestColumn(colX, dpX));
+			occupy(0, dpX);
+			dpPlaced.set(dp.path, { x: dpX, nextRow: 1 });
+		});
+	}
+	// Every event's row shifts down by one when this graph has any placed
+	// Decision Point row at all, so a plain (no-DP, or DP-with-no-session)
+	// event never lands on top of it.
+	const eventRowShift = dpPlaced.size > 0 ? 1 : 0;
+	const dpOf = new Map<string, EntityRecord>();
 	for (const ev of orderedEvents) {
-		const cols = eventCols.get(ev.path) ?? [];
-		const xs = cols.map((ci) => colX[ci]);
-		const x = cols.length > 1 ? (Math.min(...xs) + Math.max(...xs)) / 2 : xs[0] ?? MARGIN_X;
-		const row = rowOf.get(ev.path) ?? 0;
+		if (ev.decisionPoint === null) continue;
+		const dp = indexer.resolve(ev.decisionPoint, ev.path);
+		if (dp?.type === 'decisionPoint' && dpPlaced.has(dp.path)) dpOf.set(ev.path, dp);
+	}
+
+	// Sub-events: DP'd events stack under their own Decision Point's x, at a
+	// row local to that DP; everything else is single-session at their
+	// column's x, multi-session centered between the columns they span, at
+	// the shared grid row (`rowOf`, shifted per `eventRowShift` above).
+	for (const ev of orderedEvents) {
+		const dp = dpOf.get(ev.path);
+		const placedDp = dp ? dpPlaced.get(dp.path) : undefined;
+		let x: number;
+		let row: number;
+		let col: number;
+		if (placedDp) {
+			x = placedDp.x;
+			row = placedDp.nextRow;
+			placedDp.nextRow += 1;
+			col = nearestColumn(colX, x);
+		} else {
+			const cols = eventCols.get(ev.path) ?? [];
+			const xs = cols.map((ci) => colX[ci]);
+			x = cols.length > 1 ? (Math.min(...xs) + Math.max(...xs)) / 2 : xs[0] ?? MARGIN_X;
+			row = (rowOf.get(ev.path) ?? 0) + eventRowShift;
+			col = cols.length > 1 ? nearestColumn(colX, x) : (cols[0] ?? 0);
+		}
 		nodes.set(ev.path, {
 			id: ev.path,
 			record: ev,
@@ -427,7 +570,7 @@ function placeNodes(
 			kind: 'beat',
 			zone: 0,
 		});
-		colOf.set(ev.path, cols.length > 1 ? nearestColumn(colX, x) : cols[0] ?? 0);
+		colOf.set(ev.path, col);
 		occupy(row, x);
 	}
 
@@ -505,7 +648,11 @@ function placeNodes(
 			type,
 			records: indexer
 				.getAll(type, projectRoot)
-				.filter((r) => !subRoot.has(r.path) && inSet(r))
+				// A Decision Point already placed under its own session (above)
+				// stays out of the generic bottom row — the OTHER kind (no
+				// session set yet) still falls through to it, so it stays
+				// visible/findable in the graph rather than not drawn at all.
+				.filter((r) => !subRoot.has(r.path) && !dpPlaced.has(r.path) && inSet(r))
 				.sort((a, b) => a.name.localeCompare(b.name)),
 		}))
 		.filter((row) => row.records.length > 0);
@@ -855,6 +1002,33 @@ function classifyEdges(raw: RawEdge[], placement: Placement): CEdge[] {
 			[e.upper, e.lower] = [e.lower, e.upper];
 			[e.arrowUpper, e.arrowLower] = [e.arrowLower, e.arrowUpper];
 		};
+		// GM projects: an edge touching a Decision Point (event↔DP, or
+		// session↔DP) keeps the same diagonal-exit/vertical-trunk/diagonal-
+		// entry "fan" look every other edge uses, but its trunk lane is
+		// pinned directly to the Decision Point's OWN x rather than resolved
+		// through the shared corridor system. Decision Points are fanned x
+		// positions WITHIN one session's column, not real columns of their
+		// own — the corridor math (`colOf`, `corridorDemand`) has no way to
+		// tell two different Decision Points under the same session apart
+		// (they all resolve to the same "nearest real column"), which is what
+		// let an edge's trunk bend through a DIFFERENT Decision Point's own
+		// lane. Pinning `laneX` to the DP's exact x sidesteps that entirely —
+		// `corridor: null` keeps `routeEdges`'s corridor packer from ever
+		// touching it — and since an event under a Decision Point is always
+		// placed at that same x (`placeNodes`), this also self-selects a
+		// perfectly vertical trunk for event↔DP edges, with no horizontal run.
+		if (
+			relType === 'decisionPoint' ||
+			(relType === 'session note' && (na.record.type === 'decisionPoint' || nb.record.type === 'decisionPoint'))
+		) {
+			const dpNode = na.record.type === 'decisionPoint' ? na : nb;
+			if (na.y > nb.y) swapEnds();
+			e.kind = 'fan';
+			e.corridor = null;
+			e.laneX = dpNode.x;
+			out.push(e);
+			continue;
+		}
 		if (na.zone === nb.zone) {
 			if (na.zone > 0) {
 				// Same global layer: U through the band below that row.

@@ -181,10 +181,13 @@ function Home({ view }: { view: HomeView }) {
 		// Maps sits right after Locations, counting the project's map PAGES (its
 		// entities aren't notes, so the count comes from the Maps file, not the
 		// index). Regions are reached through Locations (the location list groups by
-		// region), so they don't get their own wheel satellite. Chapter keeps its
+		// region) and Decision Points through Events (same grouping, one tier
+		// down), so neither gets its own wheel satellite. Chapter keeps its
 		// normal satellite here too — the "Book" 12-o'clock entry above is an
 		// additional whole-book entry point, not a replacement for this one.
-		...projectTypes(project.config).filter((t) => t !== 'region').flatMap((type) => {
+		...projectTypes(project.config)
+			.filter((t) => t !== 'region' && t !== 'decisionPoint')
+			.flatMap((type) => {
 			const entry = {
 				key: type,
 				icon: ENTITY_META[type].icon,

@@ -46,3 +46,14 @@ export function fmLoomValue(fm: Record<string, unknown>, key: string): unknown {
 export function setLoomKey(fm: Record<string, unknown>, key: string, value: unknown) {
 	setFmKey(fm, key, value, legacyFmKeys(key));
 }
+
+/** Deletes a frontmatter key by any of its spellings (loom-prefixed and
+ *  legacy), case-insensitively — several fields clear a relationship by
+ *  removing the key entirely rather than writing it empty (detaching a
+ *  sublocation, clearing a region, reviving a PC). */
+export function clearFmKeys(fm: Record<string, unknown>, ...names: string[]): void {
+	const wanted = new Set(names.map((n) => n.toLowerCase()));
+	for (const k of Object.keys(fm)) {
+		if (wanted.has(k.toLowerCase())) delete fm[k];
+	}
+}
