@@ -653,6 +653,16 @@ span.loom-row-caret {
 	flex: 0 0 auto;
 }
 
+/* Character list's "Dead" flag — same muted-red family as the Orphan chip,
+   but plain text-color rather than a filled pill, so it reads as a light
+   status note rather than a warning. */
+.loom-chip.loom-chip-dead {
+	background: none;
+	border-color: color-mix(in srgb, #e0433d 55%, var(--background-modifier-border));
+	color: color-mix(in srgb, #e0433d 70%, var(--text-normal));
+	flex: 0 0 auto;
+}
+
 .loom-row-name {
 	font-weight: var(--font-medium);
 	white-space: nowrap;
@@ -1072,6 +1082,17 @@ span.loom-row-caret {
 	filter: brightness(1.08);
 }
 
+/* GM projects: a Locked event's bubble — visually muted (still fully
+   clickable, so no pointer-events change), desaturated toward the theme's
+   own muted tones rather than the event's own node color. */
+.loom-bubble-locked {
+	filter: grayscale(0.7) opacity(0.6);
+}
+
+.loom-bubble-locked:hover {
+	filter: grayscale(0.7) opacity(0.6) brightness(1.08);
+}
+
 /* Events clamp ~20% wider than sessions so more of the title fits. */
 .loom-bubble-event {
 	min-width: 132px;
@@ -1333,6 +1354,29 @@ span.loom-row-caret {
 	transition: opacity 150ms ease;
 }
 
+/* GM projects: an edge touching a Planned event — an open, even dash. */
+.loom-edge-planned {
+	stroke-dasharray: 6 4;
+}
+
+/* An edge touching a Locked event — denser than Planned's, so the two read
+   as visually distinct at a glance rather than "some dashed line", plus a
+   fade (opacity, not the much stronger `.loom-dim` used for search/filter
+   dimming elsewhere) so a locked connection reads as clearly the less
+   relevant one at a glance rather than just a different dash pattern. */
+.loom-edge-locked {
+	stroke-dasharray: 2 2;
+	opacity: 0.3;
+}
+
+/* Selecting a node suppresses ONLY the fade above for a Locked edge that's
+   part of ITS OWN focused neighborhood (graph-view.tsx's `lockedFadeSuppressed`)
+   — the dash pattern itself stays (it's a status marker, not a relevance cue),
+   just at full opacity like the rest of the focused connections. */
+.loom-edge-locked.loom-edge-locked-focused {
+	opacity: 1;
+}
+
 /* Declaration arrowheads: point at the node the relationship is declared on. */
 .loom-edge-arrows {
 	fill: var(--background-modifier-border-hover);
@@ -1397,6 +1441,15 @@ span.loom-row-caret {
 
 .loom-node-pinned.loom-dim {
 	opacity: 1;
+}
+
+/* GM projects: a Locked event's own node — same fade as its incident edges
+   (`.loom-edge-locked`). Deliberately plain opacity, not a `color-mix` tint
+   on the node's own fill — a tint was judged not to read well visually; the
+   edges' own low opacity already keeps them unobtrusive enough that seeing
+   them faintly through the node isn't a real problem. */
+.loom-node-locked {
+	opacity: 0.3;
 }
 
 /* Off-screen pin indicator: a node-colored dot clamped to the viewport edge with
@@ -1805,6 +1858,13 @@ span.loom-row-caret {
 }
 
 .loom-combo-menu .loom-combo-action {
+	color: var(--text-accent);
+}
+
+/* `RecordInputSuggest`'s own "+ Create new …" leading suggestion (native
+   Obsidian suggest popups, not the React `.loom-combo` menu above — same
+   accent treatment as `.loom-combo-action` for the identical role). */
+.loom-suggest-create-new {
 	color: var(--text-accent);
 }
 
@@ -2282,6 +2342,97 @@ span.loom-row-caret {
 	background: var(--interactive-accent) !important;
 	border-color: var(--interactive-accent) !important;
 	color: var(--text-on-accent) !important;
+}
+
+/* ---- GM event planning: status pill, Special Conditions ---- */
+
+/* Status/Decision Point (left) and Special Conditions (right) sit side by
+   side — a GM page has the width to spare, and Special Conditions can run
+   long once several OR groups are in play. Wraps to a single column on a
+   narrow pane rather than clipping. */
+.loom-event-planning-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-6);
+	align-items: flex-start;
+}
+
+.loom-event-planning-col {
+	flex: 1 1 260px;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+/* Decision Point nests under Status/Improvised in the left column — its own
+   label, so it still reads as a distinct field, not a continuation of the
+   status pill above it. */
+.loom-event-planning-sub {
+	margin-top: var(--size-2-2);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+}
+
+.loom-event-status-locked {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--size-2-2);
+}
+
+/* Read-only "Locked" pill — grey rather than accent, so it reads as a state
+   the GM can't pick, distinct from the Planned/Happened/Lore pills' active
+   accent color. */
+.loom-chip-locked {
+	background: var(--background-modifier-border);
+	color: var(--text-muted);
+	cursor: default;
+	padding: var(--size-2-1) var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+}
+
+.loom-event-lock-reasons {
+	margin: 0;
+	padding-left: var(--size-4-4);
+	color: var(--text-muted);
+	font-size: 0.9em;
+}
+
+/* One AND'd condition group — a bordered box so several groups read as
+   visually distinct alternatives, "OR"'d by the divider between them. */
+.loom-cond-box {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-2);
+	padding: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+.loom-cond-or-divider {
+	text-align: center;
+	color: var(--text-muted);
+	font-size: 0.8em;
+	font-weight: var(--font-semibold, 600);
+	margin: var(--size-2-2) 0;
+}
+
+.loom-cond-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+}
+
+.loom-cond-type {
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.loom-cond-row .loom-combo {
+	flex: 1;
+	max-width: 240px;
 }
 
 /* Alive tick (PC characters). */

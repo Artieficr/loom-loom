@@ -25,10 +25,12 @@ import {
 	QuestObjective,
 	RelationshipDecl,
 	SessionNoteDecl,
+	SpecialConditionGroup,
 	TIMELINES_FOLDER,
 	TimelineDef,
-	isEntityType,
+	normalizeEntityType,
 	isEventKind,
+	isSpecialConditionType,
 	legacyFmKeys,
 	formatTimestamp,
 	parseTimestamp,
@@ -743,8 +745,8 @@ export class LoomIndexer extends Component {
 		const rawTypes = fm ? fmLoom(fm, FM.timelineTypes) : undefined;
 		if (Array.isArray(rawTypes)) {
 			for (const t of rawTypes) {
-				const lower = typeof t === 'string' ? t.toLowerCase() : '';
-				if (isEntityType(lower)) types.push(lower);
+				const type = normalizeEntityType(t);
+				if (type !== null) types.push(type);
 			}
 		}
 		const rawName = fm ? fmLoom(fm, FM.name) : undefined;
@@ -760,8 +762,8 @@ export class LoomIndexer extends Component {
 
 	private parseEntity(file: TFile, project: ProjectDef, fm: FrontMatterCache): EntityRecord | null {
 		const rawType = fmLoom(fm, FM.type);
-		const type = typeof rawType === 'string' ? rawType.toLowerCase() : '';
-		if (!isEntityType(type)) return null;
+		const type = normalizeEntityType(rawType);
+		if (type === null) return null;
 
 		const relationships: RelationshipDecl[] = [];
 		const rawRelationships = fmLoom(fm, FM.relationships);
@@ -817,6 +819,24 @@ export class LoomIndexer extends Component {
 			}
 		}
 
+		const specialConditions: SpecialConditionGroup[] = [];
+		const rawGroups = fmLoom(fm, FM.specialConditions);
+		if (Array.isArray(rawGroups)) {
+			for (const g of rawGroups) {
+				if (typeof g !== 'object' || g === null) continue;
+				const rawConditions = (g as { conditions?: unknown }).conditions;
+				if (!Array.isArray(rawConditions)) continue;
+				const conditions = rawConditions.flatMap((c) => {
+					if (typeof c !== 'object' || c === null) return [];
+					const { type, target } = c as { type?: unknown; target?: unknown };
+					if (typeof type !== 'string' || !isSpecialConditionType(type)) return [];
+					const linkpath = typeof target === 'string' ? extractLinkpath(target) : null;
+					return linkpath !== null ? [{ type, target: linkpath }] : [];
+				});
+				specialConditions.push({ conditions });
+			}
+		}
+
 		// Sessions always track real-world dates; everything else follows the
 		// project's calendar (a custom calendar when enabled).
 		const calendar =
@@ -850,6 +870,9 @@ export class LoomIndexer extends Component {
 			sublocationOrder: parseLinkList(fmLoom(fm, FM.sublocationOrder)),
 			region: fmLinkpath(fm, FM.region),
 			regionOrder: parseLinkList(fmLoom(fm, FM.regionOrder)),
+			decisionPoint: fmLinkpath(fm, FM.decisionPoint),
+			decisionPointOrder: parseLinkList(fmLoom(fm, FM.decisionPointOrder)),
+			decisionPointSession: fmLinkpath(fm, FM.decisionPointSession),
 			items: parseLinkList(fmLoom(fm, FM.items)),
 			itemOrigin: fmLinkpath(fm, FM.itemOrigin),
 			itemOwner: fmLinkpath(fm, FM.itemOwner),
@@ -875,7 +898,9 @@ export class LoomIndexer extends Component {
 				const v = fmLoom(fm, FM.eventKind);
 				return typeof v === 'string' && isEventKind(v.toLowerCase()) ? (v.toLowerCase() as EventKind) : '';
 			})(),
-			happened: fmLoom(fm, FM.happened) === true,
+			improvised: fmLoom(fm, FM.improvised) === true,
+			specialConditions,
+			eventLockReasons: parseTagList(fmLoom(fm, FM.eventLockReasons)),
 			npcLines: parseTagList(fmLoom(fm, FM.npcLines)),
 			displayTitle: fmString(fm, FM.displayTitle),
 			sceneId: fmString(fm, FM.sceneId),
@@ -1043,6 +1068,25 @@ export class LoomIndexer extends Component {
 			if (region?.type === 'region' && region.path !== record.path && !linked.has(region.path)) {
 				out.push({ record: region, relType: 'region', direction: 'outgoing' });
 				linked.add(region.path);
+			}
+		}
+		// A GM event's `decisionPoint` connects it to that decision point (a
+		// grouping layer above events, mirroring region above locations).
+		if (record.decisionPoint !== null) {
+			const dp = this.resolve(record.decisionPoint, record.path);
+			if (dp?.type === 'decisionPoint' && dp.path !== record.path && !linked.has(dp.path)) {
+				out.push({ record: dp, relType: 'decisionPoint', direction: 'outgoing' });
+				linked.add(dp.path);
+			}
+		}
+		// A GM decision point's own `decisionPointSession` connects it to the
+		// session it belongs to — same relType as an event's own session-note
+		// connection below, so it reads as the same kind of edge.
+		if (record.decisionPointSession !== null) {
+			const session = this.resolve(record.decisionPointSession, record.path);
+			if (session?.type === 'session' && !linked.has(session.path)) {
+				out.push({ record: session, relType: 'session note', direction: 'outgoing' });
+				linked.add(session.path);
 			}
 		}
 		for (const note of record.sessionNotes) {

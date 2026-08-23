@@ -34,6 +34,7 @@ import {
 	ConfirmModal,
 	CreateEntityModal,
 	RecordSuggestModal,
+	SessionConflictModal,
 	TextInputModal,
 	copyEntityRecord,
 	purgeEntityReferences,
@@ -41,6 +42,8 @@ import {
 	renameEntityRecord,
 	sessionFileName,
 } from '../project';
+import { reconcileSessionBeforeLink } from '../gm-decision-point';
+import { recomputeEventLocks, waitForMetadataSync } from '../gm-lock';
 import { LocaleKey, t } from '../i18n';
 import { linkTargetOf } from '../indexer';
 import { fmLoomValue, setLoomKey } from '../fm';
@@ -147,6 +150,9 @@ function compare(
 /** Sentinel path of the synthetic "Unspecified Region" group in the location
  *  list — locations with no region nest under it. */
 const UNSPEC_REGION = 'loom:unspecified-region';
+/** Same idea, one structural tier down: the synthetic "Unspecified Decision
+ *  Point" group in the (GM-project) event list. */
+const UNSPEC_DECISION_POINT = 'loom:unspecified-decision-point';
 
 function EntityList({
 	view,
@@ -530,78 +536,126 @@ function EntityList({
 	// the list — a match shouldn't hide inside a collapsed parent. Cycles fall
 	// back to top level.
 	const nested = (type === 'location' || type === 'item') && query === '';
+	// GM projects: events group under their Decision Point exactly the same
+	// way locations group under their Region — an extra top layer, not a
+	// parent/child chain of their own the way sublocations/item-copies are.
+	const groupsByDecisionPoint = type === 'event' && query === '';
 	const parentLinkOf = (r: EntityRecord): string | null =>
 		type === 'item' ? r.itemOrigin : r.parentLocation;
 	const { roots, childrenOf } = useMemo(() => {
 		const childrenOf = new Map<string, EntityRecord[]>();
 		const roots: EntityRecord[] = [];
-		if (!nested) return { roots: records, childrenOf };
-		const byPath = new Map(records.map((r) => [r.path, r]));
-		const parentInList = (r: EntityRecord): EntityRecord | null => {
-			const link = parentLinkOf(r);
-			const parent = link !== null ? plugin.indexer.resolve(link, r.path) : null;
-			return parent && parent.path !== r.path && byPath.has(parent.path)
-				? byPath.get(parent.path) ?? null
-				: null;
-		};
-		const inCycle = (r: EntityRecord): boolean => {
-			const seen = new Set([r.path]);
-			let cur: EntityRecord | null = parentInList(r);
-			while (cur) {
-				if (seen.has(cur.path)) return true;
-				seen.add(cur.path);
-				cur = parentInList(cur);
+		if (!nested && !groupsByDecisionPoint) return { roots: records, childrenOf };
+		let topLevel: EntityRecord[];
+		if (nested) {
+			const byPath = new Map(records.map((r) => [r.path, r]));
+			const parentInList = (r: EntityRecord): EntityRecord | null => {
+				const link = parentLinkOf(r);
+				const parent = link !== null ? plugin.indexer.resolve(link, r.path) : null;
+				return parent && parent.path !== r.path && byPath.has(parent.path)
+					? byPath.get(parent.path) ?? null
+					: null;
+			};
+			const inCycle = (r: EntityRecord): boolean => {
+				const seen = new Set([r.path]);
+				let cur: EntityRecord | null = parentInList(r);
+				while (cur) {
+					if (seen.has(cur.path)) return true;
+					seen.add(cur.path);
+					cur = parentInList(cur);
+				}
+				return false;
+			};
+			// Sublocation (or item-copy) nesting: children hang under their parent;
+			// everything else is a top-level record.
+			topLevel = [];
+			for (const r of records) {
+				const parent = !inCycle(r) ? parentInList(r) : null;
+				if (parent) {
+					if (!childrenOf.has(parent.path)) childrenOf.set(parent.path, []);
+					childrenOf.get(parent.path)?.push(r);
+				} else {
+					topLevel.push(r);
+				}
 			}
-			return false;
-		};
-		// Sublocation (or item-copy) nesting: children hang under their parent;
-		// everything else is a top-level record.
-		const topLevel: EntityRecord[] = [];
-		for (const r of records) {
-			const parent = !inCycle(r) ? parentInList(r) : null;
-			if (parent) {
-				if (!childrenOf.has(parent.path)) childrenOf.set(parent.path, []);
-				childrenOf.get(parent.path)?.push(r);
-			} else {
-				topLevel.push(r);
-			}
+		} else {
+			// Events have no self-nesting chain of their own — the whole list is
+			// "top level" going into the Decision Point grouping below.
+			topLevel = records;
 		}
 		// Locations get an extra top layer: each main location nests under its
 		// Region (or "Unspecified Region" when it has none).
-		if (type !== 'location' || !project) return { roots: topLevel, childrenOf };
-		const groups = new Map<string, { region: EntityRecord | null; mains: EntityRecord[] }>();
-		for (const m of topLevel) {
-			const reg = m.region ? plugin.indexer.resolve(m.region, m.path) : null;
-			const region = reg?.type === 'region' ? reg : null;
-			const key = region?.path ?? UNSPEC_REGION;
-			if (!groups.has(key)) groups.set(key, { region, mains: [] });
-			groups.get(key)?.mains.push(m);
+		if (type === 'location' && project) {
+			const groups = new Map<string, { region: EntityRecord | null; mains: EntityRecord[] }>();
+			for (const m of topLevel) {
+				const reg = m.region ? plugin.indexer.resolve(m.region, m.path) : null;
+				const region = reg?.type === 'region' ? reg : null;
+				const key = region?.path ?? UNSPEC_REGION;
+				if (!groups.has(key)) groups.set(key, { region, mains: [] });
+				groups.get(key)?.mains.push(m);
+			}
+			const realKeys = [...groups.keys()]
+				.filter((k) => k !== UNSPEC_REGION)
+				.sort((a, b) => (groups.get(a)?.region?.name ?? '').localeCompare(groups.get(b)?.region?.name ?? ''));
+			// No region in use yet → keep the plain flat location list (don't wrap
+			// everything under a lone "Unspecified Region").
+			if (realKeys.length === 0) return { roots: topLevel, childrenOf };
+			for (const k of realKeys) {
+				const g = groups.get(k);
+				if (!g?.region) continue;
+				roots.push(g.region);
+				childrenOf.set(g.region.path, g.mains);
+			}
+			const unspec = groups.get(UNSPEC_REGION);
+			if (unspec) {
+				const stub: EntityRecord = {
+					...pcGroupStub(project.root),
+					path: UNSPEC_REGION,
+					name: t('view.list.unspecifiedRegion'),
+					type: 'region',
+				};
+				roots.push(stub);
+				childrenOf.set(UNSPEC_REGION, unspec.mains);
+			}
+			return { roots, childrenOf };
 		}
-		const realKeys = [...groups.keys()]
-			.filter((k) => k !== UNSPEC_REGION)
-			.sort((a, b) => (groups.get(a)?.region?.name ?? '').localeCompare(groups.get(b)?.region?.name ?? ''));
-		// No region in use yet → keep the plain flat location list (don't wrap
-		// everything under a lone "Unspecified Region").
-		if (realKeys.length === 0) return { roots: topLevel, childrenOf };
-		for (const k of realKeys) {
-			const g = groups.get(k);
-			if (!g?.region) continue;
-			roots.push(g.region);
-			childrenOf.set(g.region.path, g.mains);
+		// Events get the identical extra top layer, one tier down: each event
+		// nests under its Decision Point (or "Unspecified Decision Point").
+		if (type === 'event' && project) {
+			const groups = new Map<string, { dp: EntityRecord | null; events: EntityRecord[] }>();
+			for (const ev of topLevel) {
+				const resolved = ev.decisionPoint ? plugin.indexer.resolve(ev.decisionPoint, ev.path) : null;
+				const dp = resolved?.type === 'decisionPoint' ? resolved : null;
+				const key = dp?.path ?? UNSPEC_DECISION_POINT;
+				if (!groups.has(key)) groups.set(key, { dp, events: [] });
+				groups.get(key)?.events.push(ev);
+			}
+			const realKeys = [...groups.keys()]
+				.filter((k) => k !== UNSPEC_DECISION_POINT)
+				.sort((a, b) => (groups.get(a)?.dp?.name ?? '').localeCompare(groups.get(b)?.dp?.name ?? ''));
+			// No decision point in use yet → keep the plain flat event list.
+			if (realKeys.length === 0) return { roots: topLevel, childrenOf };
+			for (const k of realKeys) {
+				const g = groups.get(k);
+				if (!g?.dp) continue;
+				roots.push(g.dp);
+				childrenOf.set(g.dp.path, g.events);
+			}
+			const unspec = groups.get(UNSPEC_DECISION_POINT);
+			if (unspec) {
+				const stub: EntityRecord = {
+					...pcGroupStub(project.root),
+					path: UNSPEC_DECISION_POINT,
+					name: t('view.list.unspecifiedDecisionPoint'),
+					type: 'decisionPoint',
+				};
+				roots.push(stub);
+				childrenOf.set(UNSPEC_DECISION_POINT, unspec.events);
+			}
+			return { roots, childrenOf };
 		}
-		const unspec = groups.get(UNSPEC_REGION);
-		if (unspec) {
-			const stub: EntityRecord = {
-				...pcGroupStub(project.root),
-				path: UNSPEC_REGION,
-				name: t('view.list.unspecifiedRegion'),
-				type: 'region',
-			};
-			roots.push(stub);
-			childrenOf.set(UNSPEC_REGION, unspec.mains);
-		}
-		return { roots, childrenOf };
-	}, [plugin.indexer, records, nested, type, project]);
+		return { roots: topLevel, childrenOf };
+	}, [plugin.indexer, records, nested, groupsByDecisionPoint, type, project]);
 
 	const isCollapsed = (path: string) =>
 		collapseOverride.get(path) ?? (childrenOf.get(path)?.length ?? 0) > 5;
@@ -807,8 +861,9 @@ function EntityList({
 
 	const onRowMenu = (e: ReactMouseEvent, r: EntityRecord) => {
 		e.preventDefault();
-		// The synthetic "Unspecified Region" group has no note → no menu.
-		if (r.path === UNSPEC_REGION) return;
+		// The synthetic "Unspecified Region"/"Unspecified Decision Point" group
+		// has no note → no menu.
+		if (r.path === UNSPEC_REGION || r.path === UNSPEC_DECISION_POINT) return;
 		const menu = new Menu();
 		const isItemCopy = r.type === 'item' && r.itemOrigin !== null;
 
@@ -946,6 +1001,66 @@ function EntityList({
 					.onClick(() =>
 						new CreateEntityModal(plugin, 'location', project, {
 							region: r,
+							onCreated: () => {},
+						}).open()
+					)
+			);
+		}
+
+		if (r.type === 'decisionPoint') {
+			menu.addSeparator();
+			menu.addItem((i) =>
+				i
+					.setTitle(t('view.list.addEvent'))
+					.setIcon(ENTITY_META.event.icon)
+					.onClick(() =>
+						new RecordSuggestModal(
+							plugin.app,
+							plugin.indexer
+								.getAll('event', project.root)
+								.filter((ev) => plugin.indexer.resolve(ev.decisionPoint ?? '', ev.path)?.path !== r.path)
+								.sort((a, b) => a.name.localeCompare(b.name)),
+							// Mirrors `addDecisionPointEvent` (entity-view.tsx) rather than a
+							// bare `writeFmOf` — this is the SAME action from a second entry
+							// point, and it needs the same guarantees: a real session
+							// conflict must be resolved (not silently picked a side), and
+							// the lock state has to be recomputed once the link lands, or a
+							// newly-cascaded event never shows as Locked until an unrelated
+							// edit elsewhere happens to trigger a recompute.
+							(ev) => {
+								void (async () => {
+									const conflict = await reconcileSessionBeforeLink(plugin.app, plugin.indexer, r, ev);
+									if (conflict) {
+										const linked = await new SessionConflictModal(plugin.app, conflict, plugin, project).openAndWait();
+										if (!linked) return;
+									}
+									const f = plugin.app.vault.getFileByPath(ev.path);
+									if (!f) return;
+									try {
+										await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
+											setLoomKey(fm, FM.decisionPoint, `[[${linkTargetOf(r)}]]`)
+										);
+									} catch (e) {
+										console.error('Loom Loom: failed to update frontmatter', e);
+										return;
+									}
+									if (features(project.config).eventPlanning) {
+										await waitForMetadataSync(plugin.app, f);
+										await recomputeEventLocks(plugin.app, plugin.indexer, project.root);
+									}
+								})();
+							},
+							t('view.list.pickEvent')
+						).open()
+					)
+			);
+			menu.addItem((i) =>
+				i
+					.setTitle(t('view.list.newEventInDecisionPoint'))
+					.setIcon(ENTITY_META.event.icon)
+					.onClick(() =>
+						new CreateEntityModal(plugin, 'event', project, {
+							decisionPoint: r,
 							onCreated: () => {},
 						}).open()
 					)
@@ -1241,6 +1356,7 @@ function EntityList({
 													(c) =>
 														roleOf(c.type) === null &&
 														c.type !== 'location' &&
+														c.type !== 'decisionPoint' &&
 														!eventInvolvedFilter.includes(c.path)
 												)
 												.sort((a, b) => a.name.localeCompare(b.name))
@@ -1308,7 +1424,7 @@ function EntityList({
 					) : null}
 				</div>
 			) : null}
-			{nested && childrenOf.size > 0 ? (
+			{(nested || groupsByDecisionPoint) && childrenOf.size > 0 ? (
 				<button
 					className="loom-list-iconbtn"
 					aria-label={allCollapsed ? t('view.list.expandAll') : t('view.list.collapseAll')}
@@ -1364,26 +1480,27 @@ function EntityList({
 	};
 
 	const row = (r: EntityRecord, depth: number) => {
-		const hasChildren = nested && (childrenOf.get(r.path)?.length ?? 0) > 0;
-		const isUnspecRegion = r.path === UNSPEC_REGION;
+		const hasChildren =
+			(nested || groupsByDecisionPoint) && (childrenOf.get(r.path)?.length ?? 0) > 0;
+		const isUnspecGroup = r.path === UNSPEC_REGION || r.path === UNSPEC_DECISION_POINT;
 		const cast = r.type === 'scene' ? sceneCastOf(r) : r.type === 'act' ? actCastOf(r) : [];
 		return (
 			<div
 				key={r.path}
 				className={
 					(depth > 0 ? 'loom-row loom-row-sub' : 'loom-row') +
-					(r.type === 'region' ? ' loom-row-region' : '') +
+					(r.type === 'region' || r.type === 'decisionPoint' ? ' loom-row-region' : '') +
 					(hasScriptFilter && isOrphan(r) ? ' loom-row-orphan' : '')
 				}
 				onClick={() => {
-					if (isUnspecRegion) toggleCollapsed(r.path);
+					if (isUnspecGroup) toggleCollapsed(r.path);
 					else view.openEntity(r.path);
 				}}
 				onContextMenu={(e) => onRowMenu(e, r)}
 			>
 				{/* The caret slot is always reserved in nested mode so names line
 				    up on each hierarchy level whether a row can collapse or not. */}
-				{nested ? (
+				{nested || groupsByDecisionPoint ? (
 					hasChildren ? (
 						<button
 							className="loom-row-caret"
@@ -1431,6 +1548,12 @@ function EntityList({
 								{tag}
 							</span>
 						))}
+				{/* Every character's Alive state is tracked, not just PCs — a quick
+				    "Dead" flag right next to the type chip, nothing shown for a
+				    living character. */}
+				{r.type === 'character' && !r.alive ? (
+					<span className="loom-chip loom-chip-dead">{t('view.list.deadChip')}</span>
+				) : null}
 				{r.date && r.type !== 'session' ? (
 					<span className="loom-row-date">{recordDate(r, project)}</span>
 				) : null}
@@ -1438,7 +1561,7 @@ function EntityList({
 				{hasScriptFilter && isOrphan(r) ? (
 				<span className="loom-chip loom-chip-orphan">{t('view.list.orphanChip')}</span>
 			) : null}
-				{isUnspecRegion ? null : (
+				{isUnspecGroup ? null : (
 				<button
 					className="loom-row-delete"
 					aria-label={t('project.common.delete')}
@@ -1540,7 +1663,7 @@ function EntityList({
 	// further nested subtree. The outermost (root) subtree owns the horizontal
 	// scroll so deep nesting scrolls as one unit, not the whole list.
 	const renderSubtree = (parent: EntityRecord, depth: number, isRoot: boolean): ReactElement | null => {
-		if (!nested || isCollapsed(parent.path)) return null;
+		if ((!nested && !groupsByDecisionPoint) || isCollapsed(parent.path)) return null;
 		const children = childrenOf.get(parent.path) ?? [];
 		if (children.length === 0) return null;
 		return (

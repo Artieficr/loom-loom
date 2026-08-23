@@ -112,9 +112,15 @@ function Bubble({
 	// Node color (session/event) as a translucent fill + solid border, exactly
 	// like EntityChip; incoming style (drag transform / visibility) wins.
 	const nodeColor = navigator.plugin.settings.nodeColors[record.type];
+	// GM projects: a Locked event greys out (still fully clickable) — the
+	// eventKind field is '' for every non-GM record, so this is a no-op
+	// everywhere else.
+	const locked = record.type === 'event' && record.eventKind === 'locked';
 	return (
 		<button
-			className={['loom-bubble', `loom-bubble-${kind}`, className ?? ''].filter(Boolean).join(' ')}
+			className={['loom-bubble', `loom-bubble-${kind}`, locked ? 'loom-bubble-locked' : '', className ?? '']
+				.filter(Boolean)
+				.join(' ')}
 			style={{ background: nodeColor + '40', borderColor: nodeColor, ...style }}
 			data-bubble-path={record.path}
 			onPointerDown={onDragDown}

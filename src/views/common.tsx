@@ -740,7 +740,14 @@ export function NavRail({
 						/>
 					) : null}
 					{projectTypes(project.config)
-						.filter((et) => et !== 'region' && et !== 'act' && et !== 'scene' && et !== 'chapter')
+						.filter(
+							(et) =>
+								et !== 'region' &&
+								et !== 'decisionPoint' &&
+								et !== 'act' &&
+								et !== 'scene' &&
+								et !== 'chapter'
+						)
 						.flatMap((et) => {
 							const btn = (
 								<RailButton

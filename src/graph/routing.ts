@@ -39,6 +39,12 @@ export interface RoutedEdge {
 	arrowA: boolean;
 	arrowB: boolean;
 	route: EdgeRoute;
+	/** GM projects only: an edge touching an Event carries that event's
+	 *  planning state — `undefined` (the default solid line) for Happened/
+	 *  Lore, `'dashed'` for Planned, `'locked'` for Locked. Never set on an
+	 *  edge that doesn't touch an Event (e.g. the Session↔Decision-Point
+	 *  edge stays plain solid). See ROADMAP.md's "Game Master" entry. */
+	lineStyle?: 'dashed' | 'locked';
 }
 
 export interface Pt {

@@ -36,6 +36,14 @@ export function syncRegionColor(settings: LoomLoomSettings): void {
 	settings.nodeColors.region = darkenHex(settings.nodeColors.location);
 }
 
+/** Decision Point has no configurable color either — always a darker shade of
+ *  the event color (`nodeColors.event`, itself always a mirror of `.scene`,
+ *  the beat group's canonical key). Call on load and after any event-color
+ *  change, mirroring `syncRegionColor`. */
+export function syncDecisionPointColor(settings: LoomLoomSettings): void {
+	settings.nodeColors.decisionPoint = darkenHex(settings.nodeColors.event);
+}
+
 /** Graph node radius (px) slider bounds. */
 export const NODE_SIZE_MIN = 8;
 export const NODE_SIZE_MAX = 44;
@@ -180,7 +188,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphDropEdits: 'target',
 	confirmTimelineMove: true,
 	notesNewestFirst: true,
-	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location', 'region'],
+	globalLayerOrder: ['quest', 'character', 'faction', 'item', 'location', 'region', 'decisionPoint'],
 	// Colors are shared by STRUCTURAL ROLE, not per entity type: every
 	// ANCHOR (Session, Act — owns a timeline/graph column) shares one color,
 	// every BEAT (Event, Scene, Chapter — stacks beneath an anchor) shares
@@ -208,6 +216,9 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		faction: '#d16d9e',
 		item: '#d8b13c',
 		quest: '#c95f5f',
+		// Decision Point is not user-configurable either — always a darker shade
+		// of the event color (`syncDecisionPointColor`). Initial value only.
+		decisionPoint: '#8c5629',
 	},
 	nodeSizes: {
 		session: 26,
@@ -221,6 +232,7 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 		faction: 17,
 		item: 17,
 		quest: 17,
+		decisionPoint: 17,
 	},
 	groupColor: '#46b5a5',
 	mapsColor: '#c9a36b',
@@ -422,8 +434,13 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			}
 		}
 		// Types missing from the stored order (e.g. added in an update) append
-		// in default order so every global type always has a layer.
-		for (const t of DEFAULT_SETTINGS.globalLayerOrder) {
+		// in GLOBAL_TYPES' own order so every global type always has a layer —
+		// reads the authoritative type list directly rather than
+		// DEFAULT_SETTINGS' own copy of it, so an existing vault's stored
+		// order self-heals for a newly added global type even if that copy
+		// ever drifts out of sync. A type with no assigned layer here gets no
+		// graph row at all, so this is the one place that omission is silent.
+		for (const t of GLOBAL_TYPES) {
 			if (!order.includes(t)) order.push(t);
 		}
 		base.globalLayerOrder = order;
@@ -476,8 +493,9 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		}
 	}
 	base.timelineManualOrder = parseNumberMapSetting(data.timelineManualOrder);
-	// Region color is derived, never stored independently.
+	// Region/Decision Point colors are derived, never stored independently.
 	syncRegionColor(base);
+	syncDecisionPointColor(base);
 	return base;
 }
 
@@ -606,10 +624,13 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// shared ANCHOR color) — see `nodeColors`'s own doc comment and
 		// `entitiesItems`'s `ANCHOR_GROUP`/`BEAT_GROUP`. This keeps each group
 		// in sync the moment its shared row is edited, not just on next reload
-		// (`mergeSettings` also enforces it, as a backstop).
+		// (`mergeSettings` also enforces it, as a backstop). Decision Point
+		// tracks the (now up to date) event color the same way Region tracks
+		// location's.
 		if (key === 'nodeColors.scene') {
 			this.plugin.settings.nodeColors.event = value as string;
 			this.plugin.settings.nodeColors.chapter = value as string;
+			syncDecisionPointColor(this.plugin.settings);
 		}
 		if (key === 'nodeColors.act') this.plugin.settings.nodeColors.session = value as string;
 		await this.plugin.saveSettings();
@@ -1152,9 +1173,10 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// three share it).
 		const colorSizeBoxes: SettingDefinitionItem[] = [{ type: 'group', heading: t('settings.entities.colorsHeading') }];
 		for (const type of ENTITY_TYPES) {
-			// Region has no color/size row — its color is auto-derived from the
-			// location color (a darker shade), and it isn't a map node.
-			if (type === 'region') continue;
+			// Region/Decision Point have no color/size row — their color is
+			// auto-derived (a darker shade of location/event respectively), and
+			// neither is a map node.
+			if (type === 'region' || type === 'decisionPoint') continue;
 			// Act/Scene/Chapter are emitted together with Session/Act below,
 			// at the group's first-encountered member (Event, then Session) —
 			// skip their own individual slot in this loop.
