@@ -1232,6 +1232,23 @@ export function sceneAtLine(parsed: ParsedScript, line: number): ParsedScene | n
 	return parsed.scenes.find((s) => line >= s.line && line < sceneEndLine(parsed, s)) ?? null;
 }
 
+/** A scene EXCERPT's body starts after its own heading line (line 0), plus
+ *  however many blank lines separate the two — not a fixed "heading + 1"
+ *  constant, since the excerpt's own body-derivation trims a variable amount
+ *  of leading blank space. This is the shared line-numbering translation
+ *  between a heading-included excerpt (what `sceneScriptText` returns, and
+ *  what Pages preview/pagination render from) and the heading-stripped BODY
+ *  the live editor's own text actually holds — extracted once three call
+ *  sites (the Scene page's own scroll-position math, and both "Open this
+ *  scene" cross-view navigation hand-offs in script-view.tsx/entity-view.tsx)
+ *  turned out to have copied the identical blank-line-counting loop. */
+export function sceneBodyLineOffset(excerpt: string): number {
+	const afterHeading = excerpt.split('\n').slice(1);
+	let blanks = 0;
+	while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
+	return 1 + blanks;
+}
+
 /**
  * Scene loom ids currently backed by a heading in the script — what tells a
  * Scene note apart from an "orphan" (its heading was rewritten or deleted

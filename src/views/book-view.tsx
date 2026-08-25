@@ -28,6 +28,7 @@ import {
 } from '../prose';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { setLoomKey } from '../fm';
+import { queueWrite } from '../write-queue';
 import {
 	AltTextModal,
 	CreateEntityModal,
@@ -36,7 +37,7 @@ import {
 	entityFileName,
 	purgeEntityReferences,
 } from '../project';
-import { LoomFileReactView } from './react-view';
+import { LoomFileReactView, LoomNavigator } from './react-view';
 import { MarkdownField } from './markdown-field';
 import {
 	Icon,
@@ -105,27 +106,56 @@ export async function appendChapterToBook(plugin: LoomLoomPlugin, project: Proje
 	await plugin.app.vault.modify(file, appendBookChapter(raw, title));
 }
 
-/** Serializes every `editBook` call against the same project's Book file —
- *  same fix, same reasoning as `editScript`'s own `scriptWriteQueues`
- *  (script-view.tsx): `replaceAltContentInBook`/`stripAnnotationMarkerInBook`
- *  call `editBookAndSync` straight from an icon click, bypassing
- *  `queueBookEdit` entirely (that queue only ever covered the Editor field's
- *  own buffered draft and Outline's reorders), so two overlapping calls
- *  could each read the file before the other's write landed and silently
- *  lose one of them — the confirmed real cause of a reported "both alt-text
- *  options turned into the same text" data-loss bug from rapid clicking. */
-const bookWriteQueues = new Map<string, Promise<unknown>>();
+/** Preview's right-click "Open this chapter" (`ActChapterBlocks`'s
+ *  `onOpenChapter`, via `MarkdownField`'s own contextmenu handler) —
+ *  resolves the chapter id to its backing note and hands off the clicked
+ *  position through the exact `localStorage` key the Chapter page's own
+ *  mount-time restore reads (`pendingChapterScrollLineRef`, entity-view.tsx
+ *  — a character offset, not a line, since Chapter's field has no
+ *  line-based `scrollToLine`), mirroring `PagesPreviewBody`'s own "Open
+ *  this scene" (script-view.tsx). `offset` is already in the same space
+ *  Chapter's own page's field uses — both render
+ *  `chapterBookText(bookText, chapterId)` verbatim, with no further offset
+ *  translation the way Fountain's heading-stripped excerpts need. Shared
+ *  by `Book`'s own Preview here and Act's Prose section (entity-view.tsx)
+ *  — byte-identical logic, extracted once found duplicated rather than
+ *  left as two copies. */
+export function openThisChapter(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef | null | undefined,
+	view: LoomNavigator,
+	chapterId: string,
+	offset: number
+): void {
+	if (!project) return;
+	const record = plugin.indexer.getAll('chapter', project.root).find((r) => r.chapterId === chapterId);
+	if (!record) return;
+	window.localStorage.setItem(`loom-chapter-script-line:${record.path}`, String(offset));
+	view.openEntity(record.path);
+}
 
 /**
  * Applies a change to the project's Book file. Mirrors `editScript`.
+ *
+ * Serialized (`queueWrite`, `'book'` registry keyed by `bookFilePath`) — same
+ * fix, same reasoning as `editScript`'s own: `replaceAltContentInBook`/
+ * `stripAnnotationMarkerInBook` call `editBookAndSync` straight from an icon
+ * click, bypassing `queueBookEdit` entirely (that queue only ever covered the
+ * Editor field's own buffered draft and Outline's reorders), so two
+ * overlapping calls could each read the file before the other's write
+ * landed and silently lose one of them — the confirmed real cause of a
+ * reported "both alt-text options turned into the same text" data-loss bug
+ * from rapid clicking. `project.ts`'s own `editBookFile` (used only by the
+ * Act/Chapter creation modals) keys into the SAME `'book'` registry by the
+ * same path, so a creation-modal write and an alt-text-cycling write against
+ * the same Book file now genuinely serialize against each other too.
  */
 export async function editBook(
 	plugin: LoomLoomPlugin,
 	project: ProjectDef,
 	apply: (text: string) => string | null
 ): Promise<boolean> {
-	const path = bookFilePath(project);
-	const run = (bookWriteQueues.get(path) ?? Promise.resolve()).then(async () => {
+	return queueWrite('book', bookFilePath(project), async () => {
 		const file = findBookFile(plugin, project);
 		if (!file) return false;
 		try {
@@ -139,11 +169,6 @@ export async function editBook(
 			return false;
 		}
 	});
-	bookWriteQueues.set(
-		path,
-		run.catch(() => {})
-	);
-	return run;
 }
 
 /**
@@ -559,12 +584,21 @@ async function stripAnnotationMarkerInBook(plugin: LoomLoomPlugin, project: Proj
 }
 
 /** Reads an alt-text span's CURRENT live text straight off disk — the
- *  Book-level analogue of `script-view.tsx`'s own `liveAltSpanText`, which
- *  reads it from React state instead (Script keeps the whole document in
- *  memory; Book doesn't have an equivalent single source, since a span could
- *  sit in any chapter's own text). Used only to catch a hand-edit to the
- *  active option that hasn't reached the sidecar yet before a swap would
- *  otherwise discard it — see `syncOutgoingBookAltOption`. */
+ *  Book-level analogue of `entity-view.tsx`'s own `liveAltSpanText` (which
+ *  reads it from `sceneDraft` React state instead, Scene's one remaining
+ *  live-editor surface); Book has no equivalent single in-memory source
+ *  since a span could sit in any chapter's own text, and — since the
+ *  modular-only editing change removed Book/Act's own buffered Editor
+ *  field entirely — has no live buffer to prefer over disk anyway. Used to
+ *  catch a hand-edit to the active option that hasn't reached the sidecar
+ *  yet before a swap would otherwise discard it — see
+ *  `syncOutgoingBookAltOption`. That race window is narrower than it once
+ *  was: the only place a hand-edit can still happen at all is Chapter's own
+ *  live editor, which commits every keystroke straight to disk, so this now
+ *  only ever catches a write that's still mid-flight (a few ms), not
+ *  "however long since the last blur" the way it did when Book/Act's own
+ *  editor buffered locally — still worth keeping for that narrow window,
+ *  just no longer the load-bearing fix it originally was. */
 async function liveBookAltSpanText(plugin: LoomLoomPlugin, project: ProjectDef, id: string): Promise<string | null> {
 	const file = findBookFile(plugin, project);
 	if (!file) return null;
@@ -590,12 +624,15 @@ async function liveBookAltSpanText(plugin: LoomLoomPlugin, project: ProjectDef, 
 
 /** Rewrites `entry`'s OUTGOING (currently active) option to match
  *  `outgoingLiveText` when it differs — the Book-level analogue of
- *  `script-view.tsx`'s own `syncOutgoingAltOption`. Without this, a hand-edit
- *  typed directly into the active option's text (the normal way to revise
- *  one — see fountain.ts's own architecture note) never reaches the sidecar:
- *  switching to a different option and back later would silently revert the
- *  edit, restoring the STALE text the sidecar last remembered instead of
- *  what was actually left on the page. */
+ *  `entity-view.tsx`'s own `syncOutgoingAltOption` (script-view.tsx has no
+ *  equivalent any more — Script lost its own live editor entirely, so
+ *  there's nothing there to reconcile against). Without this, a hand-edit
+ *  typed directly into Chapter's own live editor (the normal way to revise
+ *  an active option — see fountain.ts's own architecture note) could lose
+ *  the tail end of an in-flight write if a swap landed in the same
+ *  instant: switching to a different option and back would then silently
+ *  revert to the STALE text the sidecar last remembered instead of what
+ *  was actually left on the page. */
 function syncOutgoingBookAltOption(entry: AltTextEntry, outgoingLiveText: string | null): AltTextEntry {
 	if (outgoingLiveText === null || outgoingLiveText === entry.options[entry.activeIndex]) return entry;
 	const options = entry.options.slice();
@@ -1248,25 +1285,8 @@ function Book({ view }: { view: BookView }): ReactElement {
 		openEntityLink(plugin, view, file.path, target, newTab);
 	};
 
-	/** Preview's right-click "Open this chapter" (`ActChapterBlocks`'s
-	 *  `onOpenChapter`, via `MarkdownField`'s own contextmenu handler) —
-	 *  resolves the chapter id to its backing note and hands off the
-	 *  clicked position through the exact `localStorage` key the Chapter
-	 *  page's own mount-time restore reads (`pendingChapterScrollLineRef`,
-	 *  entity-view.tsx — a character offset, not a line, since Chapter's
-	 *  field has no line-based `scrollToLine`), mirroring
-	 *  `PagesPreviewBody`'s own "Open this scene" (script-view.tsx). `offset`
-	 *  is already in the same space Chapter's own page's field uses —
-	 *  both render `chapterBookText(bookText, chapterId)` verbatim, with no
-	 *  further offset translation the way Fountain's heading-stripped
-	 *  excerpts need. */
-	const openThisChapter = (chapterId: string, offset: number) => {
-		if (!project) return;
-		const record = plugin.indexer.getAll('chapter', project.root).find((r) => r.chapterId === chapterId);
-		if (!record) return;
-		window.localStorage.setItem(`loom-chapter-script-line:${record.path}`, String(offset));
-		view.openEntity(record.path);
-	};
+	const openThisChapterFromBook = (chapterId: string, offset: number) =>
+		openThisChapter(plugin, project, view, chapterId, offset);
 
 	if (!project) {
 		return <div className="loom-view loom-book-view loom-empty">{t('view.home.loadingProject')}</div>;
@@ -1726,7 +1746,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 													}
 													annotations={annotations}
 													highlightedAnnotationId={highlightedAnnotationId}
-													onOpenChapter={openThisChapter}
+													onOpenChapter={openThisChapterFromBook}
 												/>
 											</div>
 										))}
