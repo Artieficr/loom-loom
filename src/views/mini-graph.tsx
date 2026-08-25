@@ -6,7 +6,7 @@ import {
 	useState,
 } from 'react';
 import { ENTITY_TYPES, EntityRecord, EntityType, entityPlural } from '../types';
-import { projectTypes, roleOf } from '../project-kind';
+import { features, projectTypes, roleOf } from '../project-kind';
 import { LayoutNode, computeGraphLayout } from '../graph/layout';
 import { edgePath } from '../graph/routing';
 import { LoomIndexer, ProjectDef } from '../indexer';
@@ -74,7 +74,7 @@ export function focusNeighborhood(
  */
 export function buildFocusLayout(
 	plugin: LoomLoomPlugin,
-	project: { root: string },
+	project: { root: string; config?: ProjectDef['config'] },
 	focusId: string
 ) {
 	const keep = new Set([focusId]);
@@ -115,7 +115,12 @@ export function buildFocusLayout(
 		plugin.settings.globalLayerOrder,
 		plugin.settings.graphLineGap,
 		new Map(),
-		plugin.settings.graphTrunkGap
+		plugin.settings.graphTrunkGap,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		features(project.config).eventPlanning
 	);
 	return { nodes: full.nodes, edges: full.edges, byId: new Map(full.nodes.map((n) => [n.id, n])) };
 }

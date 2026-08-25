@@ -1489,6 +1489,23 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 					? [
 							EditorState.readOnly.of(true),
 							EditorView.editable.of(false),
+							// A real, found bug: `contentEditable="false"` (what
+							// `editable.of(false)` sets) does NOT make an element
+							// focusable via `.focus()` on its own — it needs an
+							// explicit `tabindex`, which this field never set. CM6's
+							// own internal mouse-selection start (`handlers.mousedown`
+							// in @codemirror/view) calls `focusPreventScroll(contentDOM)`
+							// to focus it before rendering a drag-selection into the
+							// DOM; without a tabindex that call silently no-ops, so
+							// `view.hasFocus` never becomes true during the drag and
+							// `DocView.updateSelection`'s own `focused` gate (its
+							// `fromPointer` bypass is dead code in this CM6 version —
+							// nothing ever passes it `true`) never lets the native
+							// selection actually render — text in a readOnly field
+							// looked completely unselectable by mouse. `tabindex="-1"`
+							// makes the element PROGRAMMATICALLY focusable (never added
+							// to the tab order) without changing anything else.
+							EditorView.contentAttributes.of({ tabindex: '-1' }),
 							plainLinksFacet.of(plainLinks ?? false),
 							linkLabelsFacet.of(linkLabels ?? new Map<string, string>()),
 							EditorView.lineWrapping,
