@@ -3030,18 +3030,6 @@ function EntityPage({ view }: { view: EntityView }) {
 		};
 		const removeItem = (item: EntityRecord) =>
 			setItemLinks(itemRecords.filter((r) => r.path !== item.path).map((r) => `[[${linkTargetOf(r)}]]`));
-		const commitItemsOrder = (next: EntityRecord[]) =>
-			setItemLinks(next.map((r) => `[[${linkTargetOf(r)}]]`));
-		const writeItemDescription = (item: EntityRecord, value: string) => {
-			const f = plugin.app.vault.getFileByPath(item.path);
-			if (!f) return;
-			plugin.app.fileManager
-				.processFrontMatter(f, (fm: Record<string, unknown>) => setLoomKey(fm, FM.description, value))
-				.catch((e) => {
-					console.error('Loom Loom: failed to save item description', e);
-					new Notice(t('view.entity.items.descriptionSaveFailed'));
-				});
-		};
 		// A character-specific copy of the row's item: a new item note owned by
 		// this character (`record`). It replaces the original in this page's list
 		// and opens for editing its alternative description.
@@ -3158,106 +3146,65 @@ function EntityPage({ view }: { view: EntityView }) {
 					new Notice(t('view.entity.events.addFailed'));
 				});
 		};
-		const itemRow = (item: EntityRecord, i: number) => {
-			const grabbed = seqDrag?.group === 'items' && seqDrag.from === i;
-			const menuKey = 'item:' + item.path;
-			// A character-specific copy's name is derived (original + owner), so it
-			// is shown read-only here and can't be re-copied.
+		// A plain chip per item (2026-08-26, per user request — the old
+		// always-expanded inline editor read like a session-note entry, not the
+		// light chip list every other "entities on this page" section uses, e.g.
+		// "Items in sublocations" just beneath this; a later request dropped
+		// drag-reorder entirely too, so `loomItems`' own stored order is no
+		// longer meaningful — `setItemLinks` still writes the list in whatever
+		// order it's built, just never reordered by the user any more). Renaming
+		// and description-editing moved from here to the item's own page (opened
+		// via the chip itself). Right-click for Delete + — on a character page,
+		// for a non-copy item — "Replace with a character specific copy"; the
+		// chip's own ✕ already covers unlinking, so no separate "Remove" menu
+		// item.
+		const itemRow = (item: EntityRecord) => {
+			// A character-specific copy's name is derived (original + owner), so
+			// it can't be re-copied — the copy action is omitted for it.
 			const rowIsCopy = item.itemOrigin !== null;
+			const openItemMenu = (e: ReactMouseEvent) => {
+				e.preventDefault();
+				const menu = new Menu();
+				if (record.type === 'character' && !rowIsCopy) {
+					menu.addItem((mi) =>
+						mi
+							.setTitle(t('view.entity.items.replaceWithCopy'))
+							.setIcon('layers-2')
+							.onClick(() => void makeItemCopy(item))
+					);
+				}
+				menu.addItem((mi) =>
+					mi
+						.setTitle(t('view.entity.items.deleteThisItem'))
+						.setIcon('trash-2')
+						.onClick(() =>
+							new ConfirmModal(
+								plugin.app,
+								t('view.list.deleteConfirmTitle', { name: item.name }),
+								t('view.list.deleteMessageGeneral'),
+								() => {
+									const f = plugin.app.vault.getFileByPath(item.path);
+									if (!f) return;
+									void purgeEntityReferences(plugin, item.path, item.project).finally(() =>
+										plugin.app.fileManager.trashFile(f)
+									);
+								},
+								t('project.common.delete')
+							).open()
+						)
+				);
+				menu.showAtMouseEvent(e.nativeEvent);
+			};
 			return (
-				<div
-					key={item.path}
-					className={grabbed ? 'loom-locnote loom-locnote-dragging' : 'loom-locnote'}
-					style={seqRowStyle('items', i)}
-					data-seq-row=""
-				>
-					{seqGrip('items', i, itemRecords, commitItemsOrder)}
-					<div className="loom-locnote-body">
-						<div className="loom-locnote-head">
-							{rowIsCopy ? (
-								<span className="loom-hub-name loom-hub-name-static">{item.name}</span>
-							) : (
-								<input
-									type="text"
-									className="loom-hub-name"
-									defaultValue={item.name}
-									onBlur={(e) => renameEntity(item, e.target.value)}
-									onKeyDown={(e) => {
-										if (e.key === 'Enter') renameEntity(item, e.currentTarget.value);
-									}}
-								/>
-							)}
-							<button
-								className="loom-nav-btn"
-								aria-label={t('view.entity.common.openPage')}
-								onClick={() => view.openEntity(item.path)}
-							>
-								→
-							</button>
-							<div className="loom-shell-spacer" />
-							<div
-								className={
-									hubMenu === menuKey ? 'loom-hub-actions loom-hub-actions-open' : 'loom-hub-actions'
-								}
-							>
-								{record.type === 'character' && !rowIsCopy ? (
-									<button
-										className="loom-nav-btn loom-item-copy-btn"
-										aria-label={t('view.entity.items.replaceWithCopy')}
-										onClick={() => void makeItemCopy(item)}
-									>
-										<Icon name="layers-2" />
-									</button>
-								) : null}
-								<button
-									className="loom-nav-btn loom-entity-delete"
-									aria-label={t('view.entity.items.deleteThisItem')}
-									onClick={() =>
-										new ConfirmModal(
-											plugin.app,
-											t('view.list.deleteConfirmTitle', { name: item.name }),
-											t('view.list.deleteMessageGeneral'),
-											() => {
-												const f = plugin.app.vault.getFileByPath(item.path);
-												if (!f) return;
-												void purgeEntityReferences(plugin, item.path, item.project).finally(() =>
-													plugin.app.fileManager.trashFile(f)
-												);
-											},
-											t('project.common.delete')
-										).open()
-									}
-								>
-									<Icon name="trash-2" />
-								</button>
-								<button
-									className="loom-nav-btn"
-									aria-label={t('view.entity.items.removeFromPage')}
-									onClick={() => removeItem(item)}
-								>
-									✕
-								</button>
-							</div>
-							<button
-								className="loom-nav-btn"
-								aria-label={hubMenu === menuKey ? t('view.entity.common.closeActions') : t('view.entity.common.showActions')}
-								onClick={() => setHubMenu(hubMenu === menuKey ? null : menuKey)}
-							>
-								{hubMenu === menuKey ? '>' : '<'}
-							</button>
-						</div>
-						<div className="loom-note-text">
-							<HubNoteText
-								app={plugin.app}
-								initial={item.description}
-								names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
-								onOpenLink={openLinkTarget}
-								onCreateEntity={createLinkEntity}
-								onCommit={(v) => writeItemDescription(item, v)}
-							/>
-						</div>
-					</div>
-				</div>
+				<span key={item.path} onContextMenu={openItemMenu}>
+					<EntityChip
+						plugin={plugin}
+						record={item}
+						onOpen={() => view.openEntity(item.path)}
+						onRemove={() => removeItem(item)}
+						removeLabel={t('view.entity.items.removeFromPage')}
+					/>
+				</span>
 			);
 		};
 	const setMembershipField = (
@@ -4844,13 +4791,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					/>
 				</div>
 				{itemRecords.length > 0 ? (
-					<div
-						className={
-							seqDrag?.group === 'items' ? 'loom-note-list loom-subloc-dragging' : 'loom-note-list'
-						}
-					>
-						{itemRecords.map((item, i) => itemRow(item, i))}
-					</div>
+					<div className="loom-tag-row">{itemRecords.map((item) => itemRow(item))}</div>
 				) : null}
 				{inheritedGroups.length > 0 ? (
 					<div className="loom-inherited-items">

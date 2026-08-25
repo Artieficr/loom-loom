@@ -3750,21 +3750,6 @@ span.loom-row-caret {
 	max-width: 160px;
 }
 
-/* The svg-to-svg gap reads tighter than the gap flanking the narrow ✕/< text
-   glyphs; a small margin evens the copy→delete gap up to the remove→toggle one. */
-.loom-item-copy-btn {
-	margin-right: var(--size-2-2);
-}
-
-.loom-item-copy-btn .loom-icon {
-	display: flex;
-}
-
-.loom-item-copy-btn .loom-icon svg {
-	width: var(--icon-s);
-	height: var(--icon-s);
-}
-
 .loom-hub-name {
 	flex: 0 1 650px;
 }
