@@ -41,6 +41,7 @@ import {
 	renderInline,
 	renumberScenes,
 	sceneAtLine,
+	sceneBodyLineOffset,
 	sceneEndLine,
 	reorderScenesInSection,
 	reorderTopLevelEntries,
@@ -63,6 +64,7 @@ import {
 import { pdfPages, renderScreenplayPdf } from '../pdf';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { setLoomKey } from '../fm';
+import { queueWrite } from '../write-queue';
 import {
 	AltTextModal,
 	ConfirmModal,
@@ -1222,11 +1224,7 @@ function Script({ view }: { view: ScriptView }) {
 		if (!note) return;
 		const excerpt = sceneScriptText(text, scene.loomId);
 		if (excerpt === null) return;
-		const afterHeading = excerpt.split('\n').slice(1);
-		let blanks = 0;
-		while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
-		const bodyLineOffset = 1 + blanks;
-		const bodyLine = Math.max(0, line - scene.line - bodyLineOffset);
+		const bodyLine = Math.max(0, line - scene.line - sceneBodyLineOffset(excerpt));
 		window.localStorage.setItem(`loom-scene-script-line:${note.path}`, String(bodyLine));
 		view.openEntity(note.path);
 	};
@@ -3004,36 +3002,36 @@ export async function pushActTitles(plugin: LoomLoomPlugin, project: ProjectDef)
 	}
 }
 
-/** Serializes every `editScript` call against the SAME project's script file —
- *  a real, confirmed data-loss bug this fixes: `editScript` itself is a plain
- *  read-then-write (`vault.read` → `apply` → `vault.modify`) with no
- *  serialization of its own, and had no caller-side queue covering every
- *  entry point either (`editScriptAndSync`'s own callers — including
- *  `replaceAltContentInScript`/`stripAnnotationMarkerInScript`, called
- *  straight from an icon click with no queue in between — call it directly).
- *  Two overlapping calls (rapid-fire clicking an alt-text icon before the
- *  PREVIOUS swap's write had landed being the reported case) could each read
- *  the file BEFORE the other's write completed and then write back based on
- *  that stale copy — a classic lost-update race, not a logic bug in the swap
- *  itself. Mirrors `mutateScriptNotes`'s own per-path `writeQueues` Map
- *  (script-notes.ts) exactly, keyed by the same `scriptFilePath(project)` a
- *  fresh read/write pair would resolve to regardless of TFile identity. */
-const scriptWriteQueues = new Map<string, Promise<unknown>>();
-
 /**
  * Applies a change to the project's script file.
  *
  * The Scene page edits its own stretch of the script through this — the page is
  * a focused window onto the file rather than a copy of it, so there is exactly
  * one home for the writing and no sync to get wrong.
+ *
+ * Serialized (`queueWrite`, `'script'` registry keyed by `scriptFilePath`) —
+ * a real, confirmed data-loss bug this fixes: this was a plain read-then-write
+ * (`vault.read` → `apply` → `vault.modify`) with no serialization of its own,
+ * and had no caller-side queue covering every entry point either
+ * (`editScriptAndSync`'s own callers — including `replaceAltContentInScript`/
+ * `stripAnnotationMarkerInScript`, called straight from an icon click — call
+ * it directly). Two overlapping calls (rapid-fire clicking an alt-text icon
+ * before the PREVIOUS swap's write had landed being the reported case) could
+ * each read the file BEFORE the other's write completed and then write back
+ * based on that stale copy — a classic lost-update race, not a logic bug in
+ * the swap itself. `project.ts`'s own `editScriptFile` (used only by the
+ * Scene/Act creation modals, which can't import this module directly — see
+ * that function's own doc comment) keys into the SAME `'script'` registry by
+ * the same path, so a creation-modal write and an alt-text-cycling write
+ * against the same file now genuinely serialize against EACH OTHER too, not
+ * just against other calls within this module.
  */
 export async function editScript(
 	plugin: LoomLoomPlugin,
 	project: ProjectDef,
 	apply: (text: string) => string | null
 ): Promise<boolean> {
-	const path = scriptFilePath(project);
-	const run = (scriptWriteQueues.get(path) ?? Promise.resolve()).then(async () => {
+	return queueWrite('script', scriptFilePath(project), async () => {
 		const scriptFile = findScriptFile(plugin, project);
 		if (!scriptFile) return false;
 		try {
@@ -3048,11 +3046,6 @@ export async function editScript(
 			return false;
 		}
 	});
-	scriptWriteQueues.set(
-		path,
-		run.catch(() => {})
-	);
-	return run;
 }
 
 /**

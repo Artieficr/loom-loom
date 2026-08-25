@@ -68,6 +68,7 @@ import {
 import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
 import { ProjectDef, extractLinkpath, linkTargetOf } from './indexer';
 import { fmLoomValue, setLoomKey } from './fm';
+import { queueWrite } from './write-queue';
 import { recomputeEventLocks, waitForMetadataSync } from './gm-lock';
 import { SessionConflict, cascadeDecisionPointSession, setEventSession } from './gm-decision-point';
 import { canCreateProjectOfKind } from './license/gating';
@@ -1224,6 +1225,16 @@ export async function createEntity(
  * already imports FROM this module, so importing it back would be a cycle.
  * fountain.ts itself has no such problem (it depends on nothing), so every
  * actual script-editing function the modal below uses comes from there.
+ *
+ * Serialized against `editScript`'s OWN queue (`queueWrite`'s `'script'`
+ * registry, keyed by this same `fullPath`) — a real, confirmed gap this
+ * closes: without it, a creation-modal write here and an alt-text-cycling
+ * write through `editScript` could still race each other on the same file
+ * even after `editScript` itself gained internal serialization, since this
+ * function went through a completely separate, uncoordinated
+ * read-modify-write. `write-queue.ts` exists specifically so this module —
+ * which can't import script-view.tsx/book-view.tsx directly — can still
+ * share the SAME queue those two use.
  */
 async function editScriptFile(
 	plugin: LoomLoomPlugin,
@@ -1232,12 +1243,14 @@ async function editScriptFile(
 ): Promise<string | null> {
 	const path = normalizePath(`${project.name}.${SCRIPT_EXTENSION}`);
 	const fullPath = project.root === '' ? path : normalizePath(`${project.root}/${path}`);
-	const file = plugin.app.vault.getFileByPath(fullPath);
-	if (!file) return null;
-	const raw = await plugin.app.vault.read(file);
-	const next = apply(raw);
-	if (next !== raw) await plugin.app.vault.modify(file, next);
-	return next;
+	return queueWrite('script', fullPath, async () => {
+		const file = plugin.app.vault.getFileByPath(fullPath);
+		if (!file) return null;
+		const raw = await plugin.app.vault.read(file);
+		const next = apply(raw);
+		if (next !== raw) await plugin.app.vault.modify(file, next);
+		return next;
+	});
 }
 
 /**
@@ -1254,6 +1267,9 @@ async function editScriptFile(
  * `editBookAndSync`, not at creation time itself — which is exactly when a
  * freshly appended/moved chapter or act picks up its own unwanted blank
  * line in the first place.
+ *
+ * Serialized against `editBook`'s OWN queue the same way `editScriptFile`
+ * above is against `editScript`'s — see that function's own doc comment.
  */
 async function editBookFile(
 	plugin: LoomLoomPlugin,
@@ -1262,12 +1278,14 @@ async function editBookFile(
 ): Promise<string> {
 	const base = `${project.name}.${BOOK_EXTENSION}`;
 	const fullPath = normalizePath(project.root === '' ? base : `${project.root}/${base}`);
-	let file = plugin.app.vault.getFileByPath(fullPath);
-	if (!file) file = await plugin.app.vault.create(fullPath, '');
-	const raw = await plugin.app.vault.read(file);
-	const next = ensureBookIds(apply(raw)).text;
-	if (next !== raw) await plugin.app.vault.modify(file, next);
-	return next;
+	return queueWrite('book', fullPath, async () => {
+		let file = plugin.app.vault.getFileByPath(fullPath);
+		if (!file) file = await plugin.app.vault.create(fullPath, '');
+		const raw = await plugin.app.vault.read(file);
+		const next = ensureBookIds(apply(raw)).text;
+		if (next !== raw) await plugin.app.vault.modify(file, next);
+		return next;
+	});
 }
 
 /** Sentinel path for the "+ New act" pinned entry in the Scene creation

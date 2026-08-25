@@ -98,7 +98,14 @@ import {
 	type NavNode,
 	type ScriptSearchMatch,
 } from './script-view';
-import { ActChapterBlocks, deleteBookEntity, editBookAndSync, useBookAnnotations, useBookText } from './book-view';
+import {
+	ActChapterBlocks,
+	deleteBookEntity,
+	editBookAndSync,
+	openThisChapter,
+	useBookAnnotations,
+	useBookText,
+} from './book-view';
 import {
 	chapterBookText,
 	moveBookChapterToAct,
@@ -107,8 +114,15 @@ import {
 	replaceBookChapterBody,
 	reorderBookChaptersInAct,
 } from '../prose';
-import { AltTextEntry, CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
-import { CommentPopover } from './annotation-popover';
+import {
+	AltTextEntry,
+	CommentEntry,
+	mutateScriptNotes,
+	undecidedAltRows,
+	unresolvedCommentRows,
+	useScriptNotes,
+} from './script-notes';
+import { AlternativesBrowserPanel, CommentPopover, CommentsBrowserPanel } from './annotation-popover';
 import {
 	moveSceneToSection,
 	moveSceneBefore,
@@ -125,6 +139,7 @@ import {
 	parseSceneHeading,
 	reorderBranchGroup,
 	sceneAtLine,
+	sceneBodyLineOffset as computeSceneBodyLineOffset,
 	sceneEndLine,
 	type ParsedScript,
 } from '../fountain';
@@ -420,6 +435,20 @@ function EntityPage({ view }: { view: EntityView }) {
 			return Number.isFinite(n) && n >= 0 ? n : null;
 		})()
 	);
+	/** Comments/Alternatives browse-all panel, Chapter's own Preview — a
+	 *  confirmed gap this closes: this page never had one at all (only the
+	 *  disabled placeholder pair), even though Book's identical Preview
+	 *  surface already had a working one. Scoped to just `chapterExcerpt`
+	 *  (not the whole book) — the same "this page's own excerpt only"
+	 *  scope Scene's Fountain-side panel already uses, not Book's
+	 *  whole-document one, since a Chapter page is a single-chapter surface
+	 *  the same way a Scene page is a single-scene one. */
+	const [chapterSidePanel, setChapterSidePanel] = useState<'comments' | 'alt' | null>(null);
+	/** Scopes the browse panel's "jump to this text" DOM lookup to just
+	 *  Chapter's own rendered Preview — mirrors `sceneScriptEditorWrapRef`'s
+	 *  own reasoning (never accidentally match a DIFFERENT field mounted
+	 *  elsewhere in the same window). */
+	const chapterPreviewWrapRef = useRef<HTMLDivElement | null>(null);
 	/** Act (Prose) page's own Preview/Outline pill + search — sibling of the
 	 *  Chapter section's own state just above, kept separate from
 	 *  `actScriptMode`/`actScriptQuery` (Script-mode Act, a different feature
@@ -435,6 +464,14 @@ function EntityPage({ view }: { view: EntityView }) {
 			actBookTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 		});
 	};
+	/** Comments/Alternatives browse-all panel, Act's own Prose section — same
+	 *  confirmed gap as Chapter's Preview above (only the disabled placeholder
+	 *  pair existed). Scoped per-chapter and concatenated (see the row-list
+	 *  computation below, near `actChapters`) rather than over the whole
+	 *  book — this act's own chapters only, matching the "this page's own
+	 *  content" scope every other browse panel on this file uses. */
+	const [actBookSidePanel, setActBookSidePanel] = useState<'comments' | 'alt' | null>(null);
+	const actBookPreviewWrapRef = useRef<HTMLDivElement | null>(null);
 	const actBookCommitQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 	/** Same fix as `book-view.tsx`'s `queueBookEdit` (see its own doc comment
 	 *  — a straight port of `script-view.tsx`'s `commit`'s `.catch`
@@ -1284,21 +1321,11 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	/** Act's own Preview's right-click "Open this chapter" (`ActChapterBlocks`'s
 	 *  `onOpenChapter`, via `MarkdownField`'s own contextmenu handler) —
-	 *  mirrors `Book`'s own `openThisChapter` (book-view.tsx) exactly:
-	 *  resolves the chapter id to its backing note and hands off the clicked
-	 *  position through the exact `localStorage` key the Chapter page's own
-	 *  mount-time restore reads (`pendingChapterScrollLineRef` above) — a
-	 *  character offset, not a line, since Chapter's field has no line-based
-	 *  `scrollToLine`. `offset` is already in the same space Chapter's own
-	 *  page's field uses (both render `chapterBookText(bookText, chapterId)`
-	 *  verbatim), so no further translation is needed. */
-	const openThisChapter = (chapterId: string, offset: number) => {
-		if (!project) return;
-		const chapterRecord = plugin.indexer.getAll('chapter', project.root).find((r) => r.chapterId === chapterId);
-		if (!chapterRecord) return;
-		window.localStorage.setItem(`loom-chapter-script-line:${chapterRecord.path}`, String(offset));
-		view.openEntity(chapterRecord.path);
-	};
+	 *  `Book`'s own `openThisChapter` (book-view.tsx), shared rather than
+	 *  duplicated a second time (found byte-identical to a copy that used to
+	 *  live here). */
+	const openThisChapterFromAct = (chapterId: string, offset: number) =>
+		openThisChapter(plugin, project, view, chapterId, offset);
 
 	/** "+ Create …" from a [[ completion: type picker → creation modal with
 	 *  the short name prefilled; the finished entity links back in place. */
@@ -1363,6 +1390,28 @@ function EntityPage({ view }: { view: EntityView }) {
 		record.type === 'chapter' && bookText !== null && record.chapterId !== ''
 			? chapterBookText(bookText, record.chapterId)
 			: null;
+	/** Chapter's own browse-all panel row data — same shared
+	 *  `unresolvedCommentRows`/`undecidedAltRows` (script-notes.ts) Book uses,
+	 *  scoped to just `chapterExcerpt` (see `chapterSidePanel`'s own doc
+	 *  comment for why that scope, not the whole book). */
+	const chapterUnresolvedCommentRowsList =
+		chapterExcerpt !== null ? unresolvedCommentRows(chapterExcerpt, bookAnnotations.comments) : [];
+	const chapterUndecidedAltRowsList =
+		chapterExcerpt !== null ? undecidedAltRows(chapterExcerpt, bookAnnotations.altText) : [];
+	/** Always lands in Preview before scrolling — mirrors `Book`'s own
+	 *  `jumpToAnnotation` exactly (force the reading surface, not
+	 *  `MarkdownFieldHandle`'s narrower `scrollToPos`-only API, which has no
+	 *  selection/range concept the way Scene's live `FountainField` does). */
+	const jumpToChapterAnnotation = (span: AnnotationSpan) => {
+		setChapterSidePanel(null);
+		setChapterEditorMode('preview');
+		window.requestAnimationFrame(() => {
+			const el = chapterPreviewWrapRef.current?.querySelector(`[data-loom-annotation-content="${span.id}"]`);
+			if (!(el instanceof HTMLElement)) return;
+			el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+			if (span.kind === 'comment') bookAnnotations.handleOpenComment(span.id, el.getBoundingClientRect());
+		});
+	};
 	/** Script-recognized cast — `loomSceneCast`, derived from the script's own
 	 *  character cues by `syncScenes`, shown read-only (editing a scene's cast
 	 *  means writing the dialogue that names them, not this list). */
@@ -1427,13 +1476,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  lines separate the heading from the body), hence computing it instead
 	 *  of assuming "heading line + 1". */
 	const sceneBodyPages = sceneExcerpt !== null ? pdfPages(parseFountain(sceneExcerpt)) : [];
-	const sceneBodyLineOffset = (() => {
-		if (sceneExcerpt === null) return 0;
-		const afterHeading = sceneExcerpt.split('\n').slice(1);
-		let blanks = 0;
-		while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
-		return 1 + blanks;
-	})();
+	const sceneBodyLineOffset = sceneExcerpt !== null ? computeSceneBodyLineOffset(sceneExcerpt) : 0;
 	/** A fresh, EXCERPT-relative parse — `sceneNavTree` above uses `scriptParsed`
 	 *  (absolute line numbers), which don't line up with `sceneBodyPages`
 	 *  (paginated from `sceneExcerpt` alone, line 0 = the scene's own heading).
@@ -1540,6 +1583,43 @@ function EntityPage({ view }: { view: EntityView }) {
 		.getAll('chapter', record.project)
 		.filter((c) => c.chapterAct !== '' && plugin.indexer.resolve(c.chapterAct, c.path)?.path === record.path)
 		.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+	/** Act's own browse-all panel row data — computed PER CHAPTER (each via
+	 *  its own `chapterBookText` slice, the same text `ActChapterBlocks`
+	 *  itself renders from) and concatenated, rather than run once over the
+	 *  whole book: this scopes the panel to just this act's own chapters,
+	 *  and avoids feeding `unresolvedCommentRows`/`undecidedAltRows` a
+	 *  synthetic concatenation of unrelated chapters' text (their own
+	 *  `excerpt` field slices a context window around each match, which
+	 *  only makes sense within one real chapter's own prose). Ids are
+	 *  globally unique, so concatenating the RESULT lists is safe even
+	 *  though each call only sees one chapter's own text. */
+	const actChapterExcerpts =
+		bookText !== null
+			? (() => {
+					const book = bookText;
+					return actChapters
+						.map((ch) => (ch.chapterId !== '' ? chapterBookText(book, ch.chapterId) : null))
+						.filter((excerpt): excerpt is string => excerpt !== null);
+				})()
+			: [];
+	const actUnresolvedCommentRowsList = actChapterExcerpts.flatMap((excerpt) =>
+		unresolvedCommentRows(excerpt, bookAnnotations.comments)
+	);
+	const actUndecidedAltRowsList = actChapterExcerpts.flatMap((excerpt) =>
+		undecidedAltRows(excerpt, bookAnnotations.altText)
+	);
+	/** Always lands in Preview before scrolling — mirrors `Book`'s own
+	 *  `jumpToAnnotation`/Chapter's own `jumpToChapterAnnotation` exactly. */
+	const jumpToActBookAnnotation = (span: AnnotationSpan) => {
+		setActBookSidePanel(null);
+		setActBookMode('preview');
+		window.requestAnimationFrame(() => {
+			const el = actBookPreviewWrapRef.current?.querySelector(`[data-loom-annotation-content="${span.id}"]`);
+			if (!(el instanceof HTMLElement)) return;
+			el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+			if (span.kind === 'comment') bookAnnotations.handleOpenComment(span.id, el.getBoundingClientRect());
+		});
+	};
 	const isSession = roleOf(record.type) === 'anchor';
 	const isBeat = roleOf(record.type) === 'beat';
 	const vocab = ENTITY_TAGS[record.type];
@@ -6100,11 +6180,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									if (!note) return;
 									const excerpt = sceneScriptText(scriptText, scene.loomId);
 									if (excerpt === null) return;
-									const afterHeading = excerpt.split('\n').slice(1);
-									let blanks = 0;
-									while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
-									const bodyLineOffset = 1 + blanks;
-									const bodyLine = Math.max(0, absLine - scene.line - bodyLineOffset);
+									const bodyLine = Math.max(0, absLine - scene.line - computeSceneBodyLineOffset(excerpt));
 									window.localStorage.setItem(`loom-scene-script-line:${note.path}`, String(bodyLine));
 									view.openEntity(note.path);
 								};
@@ -6314,13 +6390,28 @@ function EntityPage({ view }: { view: EntityView }) {
 							/>
 						) : null}
 						<div className="loom-script-side-toggles">
-							{/* No browse-all panel yet — same as the Chapter section above;
-							    comments/alt-text spans inside each chapter block below are
-							    already live (click to open/cycle). */}
-							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseComments')}>
+							<button
+								className={
+									actBookSidePanel === 'comments' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
+								}
+								aria-label={
+									actBookSidePanel === 'comments'
+										? t('view.entity.script.hideComments')
+										: t('view.entity.script.browseComments')
+								}
+								onClick={() => setActBookSidePanel(actBookSidePanel === 'comments' ? null : 'comments')}
+							>
 								<Icon name="message-square" />
 							</button>
-							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseAlternatives')}>
+							<button
+								className={actBookSidePanel === 'alt' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+								aria-label={
+									actBookSidePanel === 'alt'
+										? t('view.entity.script.hideAlternatives')
+										: t('view.entity.script.browseAlternatives')
+								}
+								onClick={() => setActBookSidePanel(actBookSidePanel === 'alt' ? null : 'alt')}
+							>
 								<Icon name="repeat" fallback="arrow-right-left" />
 							</button>
 						</div>
@@ -6380,7 +6471,25 @@ function EntityPage({ view }: { view: EntityView }) {
 						// Same fixed-height (non-resizable) treatment Script-mode's own
 						// embedded Act/Scene sections use (`.loom-scene-pages`) — a
 						// nested page section, not the main BookView.
-						<div className="loom-screenplay loom-scene-pages">
+						<div className="loom-screenplay loom-scene-pages" ref={actBookPreviewWrapRef}>
+							{actBookSidePanel === 'comments' ? (
+								<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+									<CommentsBrowserPanel
+										rows={actUnresolvedCommentRowsList}
+										onJump={jumpToActBookAnnotation}
+										onClose={() => setActBookSidePanel(null)}
+									/>
+								</div>
+							) : null}
+							{actBookSidePanel === 'alt' ? (
+								<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+									<AlternativesBrowserPanel
+										rows={actUndecidedAltRowsList}
+										onJump={jumpToActBookAnnotation}
+										onClose={() => setActBookSidePanel(null)}
+									/>
+								</div>
+							) : null}
 							<div className="loom-book-page">
 								<ActChapterBlocks
 									plugin={plugin}
@@ -6395,7 +6504,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										</div>
 									}
 									annotations={bookAnnotations}
-									onOpenChapter={openThisChapter}
+									onOpenChapter={openThisChapterFromAct}
 								/>
 							</div>
 						</div>
@@ -7890,14 +7999,28 @@ function EntityPage({ view }: { view: EntityView }) {
 							}}
 						/>
 						<div className="loom-script-side-toggles">
-							{/* No browse-all panel yet (listing every unresolved
-							    comment/undecided alternative) — comments/alt-text
-							    themselves ARE live below: click a dashed-underlined span
-							    to open/cycle it. */}
-							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseComments')}>
+							<button
+								className={
+									chapterSidePanel === 'comments' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
+								}
+								aria-label={
+									chapterSidePanel === 'comments'
+										? t('view.entity.script.hideComments')
+										: t('view.entity.script.browseComments')
+								}
+								onClick={() => setChapterSidePanel(chapterSidePanel === 'comments' ? null : 'comments')}
+							>
 								<Icon name="message-square" />
 							</button>
-							<button className="loom-rel-filter" disabled aria-label={t('view.entity.script.browseAlternatives')}>
+							<button
+								className={chapterSidePanel === 'alt' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+								aria-label={
+									chapterSidePanel === 'alt'
+										? t('view.entity.script.hideAlternatives')
+										: t('view.entity.script.browseAlternatives')
+								}
+								onClick={() => setChapterSidePanel(chapterSidePanel === 'alt' ? null : 'alt')}
+							>
 								<Icon name="repeat" fallback="arrow-right-left" />
 							</button>
 						</div>
@@ -7929,7 +8052,25 @@ function EntityPage({ view }: { view: EntityView }) {
 								/>
 							</div>
 						) : (
-							<div className="loom-screenplay loom-scene-pages">
+							<div className="loom-screenplay loom-scene-pages" ref={chapterPreviewWrapRef}>
+								{chapterSidePanel === 'comments' ? (
+									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+										<CommentsBrowserPanel
+											rows={chapterUnresolvedCommentRowsList}
+											onJump={jumpToChapterAnnotation}
+											onClose={() => setChapterSidePanel(null)}
+										/>
+									</div>
+								) : null}
+								{chapterSidePanel === 'alt' ? (
+									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+										<AlternativesBrowserPanel
+											rows={chapterUndecidedAltRowsList}
+											onJump={jumpToChapterAnnotation}
+											onClose={() => setChapterSidePanel(null)}
+										/>
+									</div>
+								) : null}
 								<div className="loom-book-page">
 									<MarkdownField
 										app={plugin.app}
