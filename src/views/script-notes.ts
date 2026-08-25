@@ -18,6 +18,7 @@
 import { App, normalizePath, TFile } from 'obsidian';
 import { useEffect, useState } from 'react';
 import { SCRIPT_NOTES_FOLDER } from '../types';
+import { findAnnotationSpans, type AnnotationSpan } from '../fountain';
 import type LoomLoomPlugin from '../main';
 
 /** One comment. `comments` below is keyed by marker id -> CommentEntry[] — a
@@ -230,4 +231,55 @@ export function useScriptNotes(plugin: LoomLoomPlugin, project: ProjectRef | nul
 		};
 	}, [plugin, path]);
 	return notes;
+}
+
+/** A short single-line preview of a span's CURRENT wrapped text — a browser
+ *  panel row only needs enough to recognize the passage, not the whole
+ *  thing. Format-agnostic (works over `.fountain` or `.loomprose` text
+ *  alike, since `AnnotationSpan` offsets are just character positions). */
+function annotationExcerpt(text: string, span: AnnotationSpan): string {
+	const raw = text.slice(span.contentFrom, span.contentTo).replace(/\s+/g, ' ').trim();
+	return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
+}
+
+export interface UnresolvedCommentRow {
+	span: AnnotationSpan;
+	excerpt: string;
+	unresolvedEntries: CommentEntry[];
+}
+
+/** Comment spans with at least one still-unresolved reply — the same "needs
+ *  attention" filter driving the persistent span highlight (fountain-field.tsx/
+ *  markdown-field.tsx/fountain.ts), surfaced as a browsable list instead of a
+ *  passive color. A fully-resolved thread (or an id with no sidecar entry at
+ *  all yet) is left out — the whole point of this list is finding what's NOT
+ *  done. Shared by the Script view's own Comments browser panel and Book's
+ *  (script-view.tsx / book-view.tsx, both via `annotation-popover.tsx`'s
+ *  `CommentsBrowserPanel`) — pulled out here once Book needed the identical
+ *  logic, rather than a second copy. */
+export function unresolvedCommentRows(text: string, comments: Record<string, CommentEntry[]>): UnresolvedCommentRow[] {
+	return findAnnotationSpans(text)
+		.filter((s) => s.kind === 'comment')
+		.map((s) => ({
+			span: s,
+			excerpt: annotationExcerpt(text, s),
+			unresolvedEntries: (comments[s.id] ?? []).filter((e) => !e.resolved),
+		}))
+		.filter((x) => x.unresolvedEntries.length > 0);
+}
+
+export interface UndecidedAltRow {
+	span: AnnotationSpan;
+	excerpt: string;
+}
+
+/** Alt-text spans with no ACCEPTED option yet — "still in doubt," per the
+ *  `acceptedIndex`/`activeIndex` split above. A span someone is still
+ *  drafting through (or hasn't touched since creation) shows here; one with
+ *  a finalized choice drops off the list. Shared the same way as
+ *  `unresolvedCommentRows` above. */
+export function undecidedAltRows(text: string, altText: Record<string, AltTextEntry>): UndecidedAltRow[] {
+	return findAnnotationSpans(text)
+		.filter((s) => s.kind === 'alt' && (altText[s.id]?.acceptedIndex ?? null) === null)
+		.map((s) => ({ span: s, excerpt: annotationExcerpt(text, s) }));
 }

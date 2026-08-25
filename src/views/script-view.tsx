@@ -40,6 +40,7 @@ import {
 	removeScene,
 	renderInline,
 	renumberScenes,
+	sceneAtLine,
 	sceneEndLine,
 	reorderScenesInSection,
 	reorderTopLevelEntries,
@@ -51,7 +52,14 @@ import {
 	splitTitlePage,
 	wrapAnnotationMarkersForDisplay,
 } from '../fountain';
-import { AltTextEntry, CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
+import {
+	AltTextEntry,
+	CommentEntry,
+	mutateScriptNotes,
+	undecidedAltRows,
+	unresolvedCommentRows,
+	useScriptNotes,
+} from './script-notes';
 import { pdfPages, renderScreenplayPdf } from '../pdf';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { setLoomKey } from '../fm';
@@ -59,16 +67,14 @@ import {
 	AltTextModal,
 	ConfirmModal,
 	CreateEntityModal,
-	TextInputModal,
 	createEntity,
 	entityFileName,
 	purgeEntityReferences,
 } from '../project';
 import { LoomFileReactView } from './react-view';
 import { Icon, ViewShell, noProjectMessage, scrollIntoContainer } from './common';
-import { CommentPopover } from './annotation-popover';
+import { AlternativesBrowserPanel, CommentPopover, CommentsBrowserPanel } from './annotation-popover';
 import { useIndexVersion } from './hooks';
-import { FountainField, FountainFieldHandle } from './fountain-field';
 import type LoomLoomPlugin from '../main';
 
 /**
@@ -463,16 +469,15 @@ function Script({ view }: { view: ScriptView }) {
 	const project = file ? plugin.indexer.projectForPath(file.path) : undefined;
 
 	const [text, setText] = useState<string | null>(null);
-	/** Which pane the main area shows. Script/Pages are the paired toggle;
-	 *  Outline is a separate button on the far right of the same row (not
-	 *  part of that pill) that swaps in an act/scene drag-reorder tree
-	 *  instead. Remembered per file in `localStorage` — a UI preference, not
-	 *  vault data, same reasoning as the editor's own resized-height memory
-	 *  below — so reopening a script comes back to whichever pane was last
-	 *  open rather than always resetting to Script. */
-	const [mode, setMode] = useState<'script' | 'pages' | 'outline'>(() => {
+	/** Which pane the main area shows: the read-only Pages preview, or
+	 *  Outline (a separate button on the far right of the row) which swaps
+	 *  in an act/scene drag-reorder tree instead. Remembered per file in
+	 *  `localStorage` — a UI preference, not vault data — so reopening a
+	 *  script comes back to whichever pane was last open rather than always
+	 *  resetting to Pages. */
+	const [mode, setMode] = useState<'pages' | 'outline'>(() => {
 		const saved = file ? window.localStorage.getItem(`loom-script-mode:${file.path}`) : null;
-		return saved === 'pages' || saved === 'outline' ? saved : 'script';
+		return saved === 'outline' ? saved : 'pages';
 	});
 	/** Outline drag-reorder — same pointer-drag shape as the Act page's
 	 *  own scene reorder, generalized with a `group` key so it serves BOTH
@@ -587,11 +592,6 @@ function Script({ view }: { view: ScriptView }) {
 	 *  leaving an act note with nothing backing it in the script. Queuing
 	 *  guarantees commits land on disk in the order they were REQUESTED. */
 	const commitQueue = useRef<Promise<void>>(Promise.resolve());
-	/** The resizable wrapper around the live-preview editor (for the
-	 *  height-memory effect below) — not the editor itself, which is a CM6
-	 *  view mounted by `FountainField`, not a native resizable textarea. */
-	const editorWrapperRef = useRef<HTMLDivElement | null>(null);
-	const fountainFieldRef = useRef<FountainFieldHandle | null>(null);
 	const pagesRef = useRef<HTMLDivElement | null>(null);
 	/** Comment bodies + alt-text option lists, project-level (Entities/Script
 	 *  Notes/<Project> Script Notes.json) — kept live via `useScriptNotes`
@@ -619,22 +619,18 @@ function Script({ view }: { view: ScriptView }) {
 		if (!openComment) return;
 		const id = openComment.id;
 		const track = () => {
-			const editorContainer = editorWrapperRef.current;
-			const pagesContainer = pagesRef.current;
-			const icon =
-				editorContainer?.querySelector(`[data-loom-annotation-id="${id}"]`) ??
-				pagesContainer?.querySelector(`[data-loom-annotation-id="${id}"]`);
+			const container = pagesRef.current;
+			const icon = container?.querySelector(`[data-loom-annotation-id="${id}"]`);
 			if (!(icon instanceof HTMLElement)) {
 				setOpenComment(null);
 				return;
 			}
 			// The icon can still be IN THE DOM (and so pass the check above) while
 			// scrolled fully outside its own container's visible viewport — e.g.
-			// the CM6 gutter icon of a comment several screens up. Repositioning
-			// the popover to that clamped, effectively-arbitrary spot is what put
-			// it overlapping the tabs/search bar above the editor; closing it
-			// instead matches the icon actually leaving view.
-			const container = editorContainer?.contains(icon) ? editorContainer : pagesContainer;
+			// an icon several screens up. Repositioning the popover to that
+			// clamped, effectively-arbitrary spot is what put it overlapping the
+			// tabs/search bar above the page; closing it instead matches the
+			// icon actually leaving view.
 			const rect = icon.getBoundingClientRect();
 			if (container) {
 				const containerRect = container.getBoundingClientRect();
@@ -661,68 +657,46 @@ function Script({ view }: { view: ScriptView }) {
 	 *  three — including a re-click on the pane that's already active, which
 	 *  `switchMode`'s own same-mode early return would otherwise skip. */
 	const tabsRef = useRef<HTMLDivElement | null>(null);
-	/** A script line to land on once the Script pane is back — set when
-	 *  leaving Pages mode, consumed by the effect below once `FountainField`
-	 *  has remounted (it's torn down and rebuilt on every mode switch, so
-	 *  the scroll has to be applied after the fact, not inline). Also
-	 *  DOUBLES as the initial-open restore: seeded from `loom-script-line:
-	 *  <path>` in `localStorage` (the Script editor's own last-scrolled line,
-	 *  persisted on blur below) so a freshly-opened script — not just a
-	 *  Pages→Script toggle within the same session — lands back where the
-	 *  cursor was left rather than always at the top. The consuming effect
-	 *  below doesn't care which of the two set it. */
-	const pendingScrollLineRef = useRef<number | null>(
-		(() => {
-			if (!file) return null;
-			const saved = window.localStorage.getItem(`loom-script-line:${file.path}`);
-			const n = saved ? Number(saved) : NaN;
-			return Number.isFinite(n) && n >= 0 ? n : null;
-		})()
-	);
-	/** Same idea as `pendingScrollLineRef` just above, for the Comments/
-	 *  Alternatives browser panels' own "jump to this text" action, which
-	 *  needs a real SELECTION (not just a scroll position) and can be
-	 *  triggered from Pages or Outline mode, not only Script. */
-	const pendingSelectRangeRef = useRef<{ from: number; to: number } | null>(null);
-	useEffect(() => {
-		if (mode !== 'script') return;
-		const range = pendingSelectRangeRef.current;
-		if (!range) return;
-		pendingSelectRangeRef.current = null;
-		fountainFieldRef.current?.selectRange(range.from, range.to);
-	}, [mode]);
 
-	// Read the file once per path; afterwards the textarea is the source of
-	// truth until it's written back.
+	// Read the file once per path, then keep re-reading on every vault touch
+	// to it for as long as this view stays open. This used to load ONCE and
+	// otherwise trust `text` as "the source of truth until written back" — a
+	// real, confirmed bug from removing Script mode: that model dates from
+	// when Script mode's own live CM6 field genuinely WAS the authoritative
+	// copy (typing there updated `text` directly, so re-reading disk mid-edit
+	// would have clobbered unsaved keystrokes) — but Pages is now the ONLY
+	// reading surface and has no local editor of its own to protect; EVERY
+	// change reaches `text` from disk, externally (alt-text cycling, comment
+	// replies, a Scene/Act page's own edits, Outline drag-reorder…). Loading
+	// once and only re-syncing while Outline happened to be the active pane
+	// (the one place this WAS already handled, for the same "structural edit
+	// from elsewhere" reason) left Pages mode showing stale text after any
+	// write that landed while it was the active pane — a swap looked like it
+	// silently did nothing until the view was closed and reopened, when the
+	// one-time load effect ran fresh. `raw === onDisk.current` skips the
+	// no-op case (this view's own write echoing back through the same
+	// 'modify' event that triggered the write in the first place).
 	useEffect(() => {
 		if (!file) return;
-		if (loadedFor.current === file.path) return;
-		loadedFor.current = file.path;
-		void plugin.app.vault.read(file).then((raw) => {
-			onDisk.current = raw;
-			setText(raw);
-		});
-	}, [plugin, file]);
-
-	// Outline isn't an editing surface (unlike Script's live CM6 field, which
-	// must never have its value rewritten out from under an active cursor —
-	// see above), so it can safely re-sync from disk whenever it becomes the
-	// active pane. Without this, a structural edit made from somewhere ELSE
-	// (a Scene/Act page's own delete button, say) never reached this
-	// component's `text` state, and the Outline kept showing the pre-delete
-	// tree until the whole view happened to remount.
-	useEffect(() => {
-		if (mode !== 'outline' || !file) return;
 		let cancelled = false;
-		void plugin.app.vault.read(file).then((raw) => {
-			if (cancelled || raw === onDisk.current) return;
-			onDisk.current = raw;
-			setText(raw);
-		});
+		const read = () => {
+			void plugin.app.vault.read(file).then((raw) => {
+				if (cancelled || raw === onDisk.current) return;
+				loadedFor.current = file.path;
+				onDisk.current = raw;
+				setText(raw);
+			});
+		};
+		read();
+		const touched = (f: { path: string }) => {
+			if (f.path === file.path) read();
+		};
+		const refs = [plugin.app.vault.on('modify', touched), plugin.app.vault.on('create', touched)];
 		return () => {
 			cancelled = true;
+			for (const ref of refs) plugin.app.vault.offref(ref);
 		};
-	}, [mode, plugin, file]);
+	}, [plugin, file]);
 
 	// A floating panel that only closes from its own button feels stuck.
 	useEffect(() => {
@@ -735,27 +709,6 @@ function Script({ view }: { view: ScriptView }) {
 		document.addEventListener('mousedown', onDown);
 		return () => document.removeEventListener('mousedown', onDown);
 	}, [navOpen]);
-
-	// Remembers the editor's manually-resized height across reloads — a UI
-	// preference, not vault data, so it's kept in localStorage rather than
-	// project settings. Restored before the ResizeObserver starts watching so
-	// its own initial callback doesn't immediately overwrite what we just set.
-	// This resizes the WRAPPER (plain CSS `resize: vertical`), not the CM6
-	// view mounted inside it — a live-preview editor has no native resize
-	// handle the way a `<textarea>` does.
-	useEffect(() => {
-		if (mode !== 'script' || !file) return;
-		const editor = editorWrapperRef.current;
-		if (!editor) return;
-		const key = `loom-writer-editor-height:${file.path}`;
-		const saved = window.localStorage.getItem(key);
-		if (saved) editor.style.height = saved;
-		const observer = new ResizeObserver(() => {
-			if (editor.style.height) window.localStorage.setItem(key, editor.style.height);
-		});
-		observer.observe(editor);
-		return () => observer.disconnect();
-	}, [file?.path, mode]);
 
 	// Persists the mode-per-file memory above — separate from the read, which
 	// only needs to happen once (the lazy `useState` initializer), while this
@@ -790,26 +743,6 @@ function Script({ view }: { view: ScriptView }) {
 		if (page === 1) return; // already there, nothing to scroll
 		scrollIntoContainer(container, el, 'auto');
 	}, [mode, page, text]);
-
-	// Script/Pages scroll sync (the other direction, script view -> pages,
-	// happens inline in `switchMode` below since the pages DOM only needs a
-	// scrollIntoView, not a freshly-mounted CM6 view to hand a ref to).
-	// Also applies the initial-open restore seeded into `pendingScrollLineRef`
-	// above — `text` is in the dependency list for that case specifically:
-	// the ref's value is already set by the time this component FIRST
-	// commits (still showing the "Loading…" placeholder, before `text` has
-	// loaded), so `fountainFieldRef.current` is still null then; without
-	// retrying once `text` actually arrives (and `FountainField` exists to
-	// scroll), the pending line would never get consumed.
-	useEffect(() => {
-		if (mode !== 'script') return;
-		const line = pendingScrollLineRef.current;
-		if (line === null) return;
-		const field = fountainFieldRef.current;
-		if (!field) return; // not mounted yet — retry on the next relevant render
-		pendingScrollLineRef.current = null;
-		field.scrollToLine(line);
-	}, [mode, text]);
 
 	// Pages preview: the page-number readout should track manual scrolling, not
 	// just the explicit jump buttons — otherwise it silently goes stale the
@@ -970,108 +903,24 @@ function Script({ view }: { view: ScriptView }) {
 		void commit(next);
 	};
 
-	/** Persists whatever `fountainFieldRef` currently holds — for a caller
-	 *  that just dispatched a document change THROUGH the ref (alt-text
-	 *  cycling/drafting/accepting/deleting, all reachable from the gutter
-	 *  icon, the Pages-preview icon, or `AltTextModal`, none of which put
-	 *  real EDITOR FOCUS on this field) rather than by typing. Normal typing
-	 *  persists on blur (`onBlur={() => void commit(text)}` on the
-	 *  `FountainField` below); a change applied straight through the ref
-	 *  never focuses it in the first place, so that blur never fires, and
-	 *  without this the edit would sit in the live CM6 document only —
-	 *  gone the moment the file reloads from disk. Reads the FRESH text
-	 *  straight off the `EditorView` (`getValue`), not React's own `text`
-	 *  state, since whether that's re-rendered yet by the time this runs
-	 *  isn't guaranteed. */
-	const commitFieldEdit = () => {
-		const fresh = fountainFieldRef.current?.getValue();
-		if (fresh !== undefined) write(fresh);
-	};
-
-	/** A new comment marker was just inserted around a selection — open its
-	 *  popover immediately (no second click needed) so the user can type
-	 *  straight into its always-available reply box. Deliberately does NOT
-	 *  pre-create a sidecar entry: `entries: []` is what makes that reply box
-	 *  the thing the user lands in — writing an empty `CommentEntry` here
-	 *  used to be needed for the old single-comment popover's own "no text
-	 *  yet → start in edit mode" check, but the threaded redesign renders
-	 *  every entry as its own row, so a pre-created empty one showed up as a
-	 *  blank row instead of ever reaching the reply box. The marker was only
-	 *  just dispatched into the CM6 document THIS tick, but CM6 updates its
-	 *  DOM (including the gutter) synchronously as part of `view.dispatch`,
-	 *  so by the time this callback runs the icon already exists — still
-	 *  deferred one frame (rather than queried inline) purely to stay
-	 *  consistent with every other "find the rendered icon" lookup in this
-	 *  file (search-jump), not because it's actually needed here. */
-	const handleCreateComment = (id: string, _selectedText: string) => {
-		window.requestAnimationFrame(() => {
-			const icon =
-				editorWrapperRef.current?.querySelector(`[data-loom-annotation-id="${id}"]`) ??
-				pagesRef.current?.querySelector(`[data-loom-annotation-id="${id}"]`);
-			if (icon instanceof HTMLElement) handleOpenComment(id, icon.getBoundingClientRect());
-		});
-	};
-
-	/** A new alt-text marker was just inserted, wrapping the selection as
-	 *  option 0 (the wording that was already there). Immediately prompts for
-	 *  a SECOND option — same "picking the menu item opens something to type
-	 *  into" expectation as the comment flow above — via the same
-	 *  `TextInputModal` the right-click menu's own "Add alternative…" uses.
-	 *  Cancelling (closing the modal without submitting) undoes the WHOLE
-	 *  creation, not just the second option: a span stuck at one option is
-	 *  exactly the "nothing left to alternate between" case
-	 *  `handleDeleteAltOption` already strips back down to plain text, so
-	 *  backing out here does the same — remove the sidecar entry and strip
-	 *  the just-inserted marker pair, leaving the originally selected text
-	 *  untouched or annotated. */
-	const handleCreateAlt = (id: string, selectedText: string) => {
-		void mutateScriptNotes(plugin.app, project, (notes) => ({
-			...notes,
-			altText: { ...notes.altText, [id]: { id, options: [selectedText], activeIndex: 0, acceptedIndex: null } },
-		}));
-		new TextInputModal(plugin.app, {
-			title: t('view.entity.altText.addWordingTitle'),
-			placeholder: selectedText,
-			cta: t('project.common.add'),
-			multiline: true,
-			onSubmit: (value) => {
-				void mutateScriptNotes(plugin.app, project, (notes) => {
-					const cur = notes.altText[id];
-					if (!cur) return notes;
-					return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options: [...cur.options, value] } } };
-				});
-			},
-			onCancel: () => {
-				void mutateScriptNotes(plugin.app, project, (notes) => {
-					const { [id]: _dropped, ...rest } = notes.altText;
-					return { ...notes, altText: rest };
-				}).then(() => {
-					fountainFieldRef.current?.removeAnnotationMarkers(id);
-					commitFieldEdit();
-				});
-			},
-		}).open();
-	};
-
 	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
 
 	/** Closing the popover with nothing ever added to the thread abandons the
-	 *  whole comment creation, mirroring `handleCreateAlt`'s own cancel — a
-	 *  freshly inserted marker pair backed by no `comments[id]` entry (only
-	 *  `handleAddCommentReply` ever creates one) would otherwise sit in the
-	 *  document forever as a permanently-empty gutter icon with no thread
-	 *  behind it. Checks BOTH `scriptNotes` (an existing comment, reopened)
-	 *  and `commentsWithNewEntryRef` (a reply just added this session, ahead
-	 *  of the sidecar's own async round trip) — only when neither shows a
-	 *  reply does the span get torn back out. */
+	 *  whole comment creation — a freshly inserted marker pair backed by no
+	 *  `comments[id]` entry (only `handleAddCommentReply` ever creates one)
+	 *  would otherwise sit in the document forever as a permanently-empty
+	 *  gutter icon with no thread behind it. Checks BOTH `scriptNotes` (an
+	 *  existing comment, reopened) and `commentsWithNewEntryRef` (a reply
+	 *  just added this session, ahead of the sidecar's own async round trip)
+	 *  — only when neither shows a reply does the span get torn back out. */
 	const handleCloseComment = () => {
 		if (
+			project &&
 			openComment &&
 			!commentsWithNewEntryRef.current.has(openComment.id) &&
 			!scriptNotes.comments[openComment.id]
 		) {
-			fountainFieldRef.current?.removeAnnotationMarkers(openComment.id);
-			commitFieldEdit();
+			void stripAnnotationMarkerInScript(plugin, project, openComment.id);
 		}
 		setOpenComment(null);
 	};
@@ -1121,8 +970,7 @@ function Script({ view }: { view: ScriptView }) {
 			return { ...notes, comments: { ...notes.comments, [id]: next } };
 		}).then((next) => {
 			if (!next.comments[id]) {
-				fountainFieldRef.current?.removeAnnotationMarkers(id);
-				commitFieldEdit();
+				if (project) void stripAnnotationMarkerInScript(plugin, project, id);
 				// The marker pair (and so the whole span) is gone — a reply typed
 				// into the now-empty popover's box would have nothing left in the
 				// document to attach to, so close it rather than leave a dead end.
@@ -1149,55 +997,49 @@ function Script({ view }: { view: ScriptView }) {
 	};
 
 	/** The CURRENT live text between an alt-text span's markers, straight from
-	 *  the document (`text` React state, kept in sync with the CM6 editor on
-	 *  every keystroke) — not the sidecar's own stored copy, which is exactly
-	 *  the point: the active option's wording can be, and normally is, edited
-	 *  directly in the script rather than through `AltTextModal`, and that
-	 *  edit needs somewhere to land before the span switches away from it. */
-	const liveAltSpanText = (id: string): string | null => {
-		if (text === null) return null;
-		const span = findAnnotationSpans(text).find((s) => s.kind === 'alt' && s.id === id);
-		return span ? text.slice(span.contentFrom, span.contentTo) : null;
-	};
+	 *  the document — removed as part of the modular-only editing change
+	 *  (2026-08-25): this view has no live editable field of its own any
+	 *  more (Script mode is gone), so `text` is always just a downstream
+	 *  mirror of disk, refreshed asynchronously after a write — never a live
+	 *  typing buffer to reconcile a "hand-edit" against. Comparing an option's
+	 *  stored text against `text` here was actively harmful post-refactor: a
+	 *  second click landing before the previous swap's disk write had fully
+	 *  round-tripped back into `text` read the STALE pre-swap wording as if
+	 *  it were a hand-edit worth preserving, silently overwriting a different
+	 *  option's real text with it — the exact bug reported as "cycling turns
+	 *  every option into the same one." Scene's own editable field genuinely
+	 *  needs this reconciliation (entity-view.tsx's own `liveAltSpanText`/
+	 *  `syncOutgoingAltOption`, scoped to `sceneDraft` only) since typing
+	 *  directly into it IS live, unsaved-until-blur text; this view has
+	 *  nothing analogous to protect. */
 
-	/** Rewrites `cur`'s OUTGOING (currently active) option to match whatever
-	 *  is actually live in the document right now, before a swap moves away
-	 *  from it — shared by every handler below that changes `activeIndex`.
-	 *  Without this, a hand-edit typed directly into the active option's text
-	 *  (the normal way to revise it, not through the modal) never reached the
-	 *  sidecar: switching to a different option and back later would silently
-	 *  revert the edit, restoring the STALE text the sidecar last remembered
-	 *  instead of what was actually left on the page. */
-	const syncOutgoingAltOption = (id: string, cur: AltTextEntry): AltTextEntry => {
-		const live = liveAltSpanText(id);
-		if (live === null || live === cur.options[cur.activeIndex]) return cur;
-		const options = cur.options.slice();
-		options[cur.activeIndex] = live;
-		return { ...cur, options };
-	};
-
-	/** Left-click cycle: computes the next option and persists it, then calls
-	 *  back into the live `FountainField` (the only thing holding the actual
-	 *  `EditorView`) to apply the swap in the document. The next index is
-	 *  computed INSIDE `mutateScriptNotes`'s mutate callback, against its own
-	 *  freshly re-read file, not against the `scriptNotes` React state closed
+	/** Left-click cycle: computes the next option, persists it, then writes
+	 *  the swap into the document via `replaceAltContentInScript`. The next
+	 *  index is computed INSIDE `mutateScriptNotes`'s mutate callback, against its own
 	 *  over at click time — that state only catches up after a real vault
 	 *  read round-trip, so a click landing before it caught up (a fast
 	 *  double-click, or just a slow filesystem) would otherwise recompute the
 	 *  SAME "next" index every time and the cycle would stall after one step. */
 	const handleCycleAlt = (id: string) => {
+		if (!project) {
+			console.error('Loom Loom: handleCycleAlt called with no project', id);
+			return;
+		}
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur0 = notes.altText[id];
-			if (!cur0 || cur0.options.length === 0) return notes;
-			const cur = syncOutgoingAltOption(id, cur0);
+			const cur = notes.altText[id];
+			if (!cur) {
+				console.error('Loom Loom: handleCycleAlt found no sidecar entry for', id);
+				return notes;
+			}
+			if (cur.options.length < 2) {
+				console.error('Loom Loom: handleCycleAlt found < 2 options for', id, cur.options);
+				return notes;
+			}
 			const nextIndex = (cur.activeIndex + 1) % cur.options.length;
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: nextIndex } } };
 		}).then((next) => {
 			const cur = next.altText[id];
-			if (cur) {
-				fountainFieldRef.current?.replaceAltContent(id, cur.options[cur.activeIndex]);
-				commitFieldEdit();
-			}
+			if (cur) void replaceAltContentInScript(plugin, project, id, cur.options[cur.activeIndex]);
 		});
 	};
 
@@ -1207,22 +1049,12 @@ function Script({ view }: { view: ScriptView }) {
 	 *  chars, couldn't be scrolled, and only ever let you PICK an option, not
 	 *  rewrite one. The modal owns its own local copy of `options`/
 	 *  `activeIndex` and re-renders itself after every action, so it needs no
-	 *  React state here to track "is it open." **`syncOutgoingAltOption`
-	 *  patches the active row's text before handing it over** — `entry`
-	 *  itself is the sidecar's own stored copy, stale for the active option
-	 *  the instant it's hand-edited directly in the script (the sidecar only
-	 *  actually catches up lazily, on the next cycle/draft/accept SWAP), so
-	 *  opening the modal right after such an edit used to show the OLD
-	 *  wording for a beat until the next swap resynced it. This only patches
-	 *  what's DISPLAYED, not a write — the sidecar itself stays lazily synced
-	 *  exactly as before, still caught up for real the next time a swap
-	 *  actually happens. */
+	 *  React state here to track "is it open." */
 	const handleOpenAltMenu = (id: string) => {
 		const entry = scriptNotes.altText[id];
 		if (!entry) return;
-		const { options } = syncOutgoingAltOption(id, entry);
 		new AltTextModal(plugin.app, {
-			options,
+			options: entry.options,
 			activeIndex: entry.activeIndex,
 			acceptedIndex: entry.acceptedIndex,
 			onDraft: (index) => handleDraftAlt(id, index),
@@ -1239,17 +1071,14 @@ function Script({ view }: { view: ScriptView }) {
 	 *  `acceptedIndex`: choosing a different draft means the span is back to
 	 *  "still deciding," even if it had a finalized choice before. */
 	const handleDraftAlt = (id: string, index: number) => {
+		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur0 = notes.altText[id];
-			if (!cur0 || index < 0 || index >= cur0.options.length) return notes;
-			const cur = syncOutgoingAltOption(id, cur0);
+			const cur = notes.altText[id];
+			if (!cur || index < 0 || index >= cur.options.length) return notes;
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: null } } };
 		}).then((next) => {
 			const cur = next.altText[id];
-			if (cur) {
-				fountainFieldRef.current?.replaceAltContent(id, cur.options[cur.activeIndex]);
-				commitFieldEdit();
-			}
+			if (cur) void replaceAltContentInScript(plugin, project, id, cur.options[cur.activeIndex]);
 		});
 	};
 
@@ -1258,17 +1087,14 @@ function Script({ view }: { view: ScriptView }) {
 	 *  (see the Alternatives browser panel, which surfaces spans where this
 	 *  is still `null`). */
 	const handleAcceptAlt = (id: string, index: number) => {
+		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur0 = notes.altText[id];
-			if (!cur0 || index < 0 || index >= cur0.options.length) return notes;
-			const cur = syncOutgoingAltOption(id, cur0);
+			const cur = notes.altText[id];
+			if (!cur || index < 0 || index >= cur.options.length) return notes;
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: index } } };
 		}).then((next) => {
 			const cur = next.altText[id];
-			if (cur) {
-				fountainFieldRef.current?.replaceAltContent(id, cur.options[cur.activeIndex]);
-				commitFieldEdit();
-			}
+			if (cur) void replaceAltContentInScript(plugin, project, id, cur.options[cur.activeIndex]);
 		});
 	};
 
@@ -1277,6 +1103,7 @@ function Script({ view }: { view: ScriptView }) {
 	 *  edit too: the active option's stored text is supposed to always mirror
 	 *  what's actually on the page. */
 	const handleEditAltOption = (id: string, index: number, newText: string) => {
+		if (!project) return;
 		void mutateScriptNotes(plugin.app, project, (notes) => {
 			const cur = notes.altText[id];
 			if (!cur || index < 0 || index >= cur.options.length) return notes;
@@ -1285,10 +1112,7 @@ function Script({ view }: { view: ScriptView }) {
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options } } };
 		}).then((next) => {
 			const cur = next.altText[id];
-			if (cur && cur.activeIndex === index) {
-				fountainFieldRef.current?.replaceAltContent(id, newText);
-				commitFieldEdit();
-			}
+			if (cur && cur.activeIndex === index) void replaceAltContentInScript(plugin, project, id, newText);
 		});
 	};
 
@@ -1318,6 +1142,7 @@ function Script({ view }: { view: ScriptView }) {
 	 *  — then hands the fresh `AltTextEntry` back to the modal so it can
 	 *  re-render without duplicating this renumbering itself. */
 	const handleDeleteAltOption = (id: string, index: number) => {
+		if (!project) return Promise.resolve(undefined);
 		let strippedTo: string | null = null;
 		return mutateScriptNotes(plugin.app, project, (notes) => {
 			const cur = notes.altText[id];
@@ -1338,22 +1163,18 @@ function Script({ view }: { view: ScriptView }) {
 				else if (index < acceptedIndex) acceptedIndex -= 1;
 			}
 			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options, activeIndex, acceptedIndex } } };
-		}).then((next) => {
+		}).then(async (next) => {
 			if (strippedTo !== null) {
 				// The surviving option's text has to actually BE the live
 				// document content before the wrapper markers come out, or
 				// stripping would leave whichever text happened to be active
 				// (possibly the just-deleted option's) instead of the survivor.
-				fountainFieldRef.current?.replaceAltContent(id, strippedTo);
-				fountainFieldRef.current?.removeAnnotationMarkers(id);
-				commitFieldEdit();
+				await replaceAltContentInScript(plugin, project, id, strippedTo);
+				await stripAnnotationMarkerInScript(plugin, project, id);
 				return undefined;
 			}
 			const cur = next.altText[id];
-			if (cur) {
-				fountainFieldRef.current?.replaceAltContent(id, cur.options[cur.activeIndex]);
-				commitFieldEdit();
-			}
+			if (cur) await replaceAltContentInScript(plugin, project, id, cur.options[cur.activeIndex]);
 			return cur;
 		});
 	};
@@ -1387,12 +1208,28 @@ function Script({ view }: { view: ScriptView }) {
 	const sceneNote = (scene: ParsedScene): EntityRecord | undefined =>
 		sceneNotes.find((r) => r.sceneId === scene.loomId);
 
-	// What the `@[` inline entity-link autocomplete offers, and what its
-	// clicks resolve against — never auto-created, so only what already
-	// exists shows up here.
-	const entityOptions = (['character', 'faction', 'location', 'item'] as const).flatMap((et) =>
-		plugin.indexer.getAll(et, project.root).map((r) => ({ name: r.name, type: r.type, path: r.path }))
-	);
+	/** Pages preview's right-click "Open this scene" — resolves an absolute
+	 *  script line to its owning scene, works out where that scene's own
+	 *  editor should scroll to, and hands it off through the exact
+	 *  `localStorage` key the Scene page's own mount-time restore already
+	 *  reads (`pendingSceneScrollLineRef`, entity-view.tsx) — no new
+	 *  cross-view state channel needed, just seeding the same one a normal
+	 *  reopen already uses. */
+	const openThisScene = (line: number) => {
+		const scene = sceneAtLine(parsed, line);
+		if (!scene || scene.loomId === null) return;
+		const note = sceneNote(scene);
+		if (!note) return;
+		const excerpt = sceneScriptText(text, scene.loomId);
+		if (excerpt === null) return;
+		const afterHeading = excerpt.split('\n').slice(1);
+		let blanks = 0;
+		while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
+		const bodyLineOffset = 1 + blanks;
+		const bodyLine = Math.max(0, line - scene.line - bodyLineOffset);
+		window.localStorage.setItem(`loom-scene-script-line:${note.path}`, String(bodyLine));
+		view.openEntity(note.path);
+	};
 
 	// --- Outline panel ----------------------------------------------------
 	// Every top-level section already carrying its stable id — `ensureSceneIds`
@@ -1677,14 +1514,6 @@ function Script({ view }: { view: ScriptView }) {
 		return Math.max(offset, bodyPages.length - 1 + offset);
 	};
 
-	/** First rendered line on a typeset page — the inverse of `pageOfLine`,
-	 *  used to land the Script pane near where Pages was scrolled to. */
-	const lineOfPage = (target: number) => {
-		const idx = target - (titleFirst ? 2 : 1);
-		if (idx < 0 || idx >= bodyPages.length) return 0;
-		return bodyPages[idx][0]?.line ?? 0;
-	};
-
 	const gotoMatch = (index: number) => {
 		if (matches.length === 0) return;
 		const next = ((index % matches.length) + matches.length) % matches.length;
@@ -1693,11 +1522,7 @@ function Script({ view }: { view: ScriptView }) {
 		if (m.kind === 'text') {
 			setOpenComment(null);
 			setHighlightedAnnotationId(null);
-			if (mode === 'script') {
-				fountainFieldRef.current?.selectRange(m.offset, m.offset + query.length);
-			} else {
-				scrollToPage(pageOfLine(lineAt(m.offset)));
-			}
+			scrollToPage(pageOfLine(lineAt(m.offset)));
 			return;
 		}
 		const span = annotationSpans.find((s) => s.id === m.id);
@@ -1708,35 +1533,16 @@ function Script({ view }: { view: ScriptView }) {
 		} else {
 			setHighlightedAnnotationId(null);
 		}
-		if (mode === 'script') {
-			fountainFieldRef.current?.selectRange(span.contentFrom, span.contentFrom);
-			if (m.kind === 'comment') {
-				// Same "wait a frame, then find the rendered icon" trick the
-				// click handler doesn't need (it already has the icon under
-				// the pointer) — a keyboard/button-driven jump has no DOM
-				// element to hand `handleOpenComment` yet until CM6's gutter
-				// has actually redrawn for the newly-scrolled-to line.
-				window.requestAnimationFrame(() => {
-					const icon = editorWrapperRef.current?.querySelector(`[data-loom-annotation-id="${m.id}"]`);
-					if (icon instanceof HTMLElement) handleOpenComment(m.id, icon.getBoundingClientRect());
-				});
-			}
-		} else {
-			scrollToPage(pageOfLine(lineAt(span.from)));
-			if (m.kind === 'comment') {
-				window.requestAnimationFrame(() => {
-					const icon = pagesRef.current?.querySelector(`[data-loom-annotation-id="${m.id}"]`);
-					if (icon instanceof HTMLElement) handleOpenComment(m.id, icon.getBoundingClientRect());
-				});
-			}
+		scrollToPage(pageOfLine(lineAt(span.from)));
+		if (m.kind === 'comment') {
+			window.requestAnimationFrame(() => {
+				const icon = pagesRef.current?.querySelector(`[data-loom-annotation-id="${m.id}"]`);
+				if (icon instanceof HTMLElement) handleOpenComment(m.id, icon.getBoundingClientRect());
+			});
 		}
 	};
 
-	/** Scrolls the preview to a page (the pages all exist; navigation moves).
-	 *  `behavior` defaults to smooth for an explicit jump (Prev/Next, the page
-	 *  number field, search) — landing back where you were on a mode switch
-	 *  is a restore, not a jump, so `switchMode` passes 'auto' there instead
-	 *  of animating a scroll across the whole document on every toggle. */
+	/** Scrolls the preview to a page (the pages all exist; navigation moves). */
 	const scrollToPage = (target: number, behavior: ScrollBehavior = 'smooth') => {
 		setPage(target);
 		window.requestAnimationFrame(() => {
@@ -1749,35 +1555,13 @@ function Script({ view }: { view: ScriptView }) {
 		});
 	};
 
-	/** Persists the Script-mode editor's own scroll position — separate from
-	 *  `mode`/`page` above (those cover WHICH pane and, for Pages, which page;
-	 *  this covers where you actually were within the Script editor itself).
-	 *  Captured on the field's `onBlur`, the same moment `commit` already
-	 *  fires — every point the editor is genuinely left (a mode switch,
-	 *  clicking elsewhere, or closing the note), so this stays fresh without
-	 *  needing its own scroll listener. Read back into `pendingScrollLineRef`
-	 *  above (see its own comment) on the next fresh open. */
-	const saveScriptLine = () => {
-		if (!file) return;
-		const top = fountainFieldRef.current?.getTopLine();
-		if (top === undefined) return;
-		window.localStorage.setItem(`loom-script-line:${file.path}`, String(top));
-	};
-
-	const jumpToLine = (line: number) => {
-		if (mode === 'pages') {
-			scrollToPage(pageOfLine(line));
-			return;
-		}
-		const offset = text.split('\n').slice(0, line).join('\n').length + (line > 0 ? 1 : 0);
-		fountainFieldRef.current?.selectRange(offset, offset);
-	};
+	const jumpToLine = (line: number) => scrollToPage(pageOfLine(line));
 
 	/** Jumps to the Title page — Pages preview renders it as its own page 1
 	 *  (when there's anything to show), so that's a plain page scroll there;
-	 *  Script/Outline both render the real `<details>` above the tabs
-	 *  regardless of mode, so there it's opened (native `<details>` stays
-	 *  collapsed until told otherwise) and scrolled into view. */
+	 *  Outline renders the real `<details>` above the tabs regardless of
+	 *  mode, so there it's opened (native `<details>` stays collapsed until
+	 *  told otherwise) and scrolled into view. */
 	const jumpToTitlePage = () => {
 		if (mode === 'pages') {
 			if (titleFirst) scrollToPage(1);
@@ -1789,36 +1573,17 @@ function Script({ view }: { view: ScriptView }) {
 		el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	};
 
-	/** The Script/Pages toggle keeps roughly the same spot in the document
-	 *  across a switch, rather than always landing back at the top. Leaving
-	 *  Pages stashes a target line for the effect above to apply once
-	 *  `FountainField` remounts; leaving Script can scroll immediately since
-	 *  the pages markup, once mounted, needs nothing handed to it but a
-	 *  `scrollIntoView`. Outline (the standalone button, not part of that
-	 *  pill) is a plain swap either direction — it's a management list, not a
-	 *  reading position to preserve. */
-	const switchMode = (next: 'script' | 'pages' | 'outline') => {
-		if (next === mode) return;
-		if (next === 'pages') {
-			const topLine = mode === 'script' ? fountainFieldRef.current?.getTopLine() : undefined;
-			setMode('pages');
-			// 'instant', not 'auto' — the container has `scroll-behavior: smooth`
-			// for the ordinary jump navigation below, and 'auto' explicitly
-			// means "defer to that CSS property", so it would animate anyway.
-			if (topLine !== undefined) scrollToPage(pageOfLine(topLine), 'instant');
-		} else if (next === 'script' && mode === 'pages') {
-			pendingScrollLineRef.current = lineOfPage(currentPage);
-			setMode('script');
-		} else {
-			setMode(next);
-		}
+	/** Outline is a plain swap either direction — it's a management list, not
+	 *  a reading position to preserve. */
+	const switchMode = (next: 'pages' | 'outline') => {
+		if (next !== mode) setMode(next);
 	};
 
 	/** Scrolls the outer view so the tabs row lands at the top — called on
 	 *  every tab click, independent of whether the mode actually changes
 	 *  (a re-click on the already-active tab still scrolls). */
 	const scrollTabsIntoView = () => tabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-	const clickTab = (next: 'script' | 'pages' | 'outline') => {
+	const clickTab = (next: 'pages' | 'outline') => {
 		scrollTabsIntoView();
 		switchMode(next);
 	};
@@ -2095,45 +1860,32 @@ function Script({ view }: { view: ScriptView }) {
 	// function bounded to just one scene's line range.
 	const navTree: NavNode = buildNavTree(parsed);
 
-	/** Comment spans with at least one still-unresolved reply — the same
-	 *  "needs attention" filter driving the persistent span highlight (see
-	 *  fountain-field.tsx/fountain.ts), just surfaced as a browsable list
-	 *  here instead of a passive color. A fully-resolved thread (or an id
-	 *  with no sidecar entry at all yet) is left out entirely — the whole
-	 *  point of this panel is finding what's NOT done. */
-	const unresolvedCommentSpans = annotationSpans
-		.filter((s) => s.kind === 'comment')
-		.map((s) => ({ span: s, unresolvedEntries: (scriptNotes.comments[s.id] ?? []).filter((e) => !e.resolved) }))
-		.filter((x) => x.unresolvedEntries.length > 0);
-
-	/** Alt-text spans with no ACCEPTED option yet — "still in doubt," per the
-	 *  `acceptedIndex`/`activeIndex` split (script-notes.ts). A span someone
-	 *  is still drafting through (or hasn't touched since creation) shows
-	 *  here; one with a finalized choice drops off the list. */
-	const undecidedAltSpans = annotationSpans.filter(
-		(s) => s.kind === 'alt' && (scriptNotes.altText[s.id]?.acceptedIndex ?? null) === null
-	);
-
-	/** A short single-line preview of a span's CURRENT wrapped text — panel
-	 *  rows only need enough to recognize the passage, not the whole thing. */
-	const excerptOf = (span: AnnotationSpan): string => {
-		const raw = text.slice(span.contentFrom, span.contentTo).replace(/\s+/g, ' ').trim();
-		return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
-	};
+	// Comments/Alternatives browser panels' own row data — shared with Book's
+	// identical panels (script-notes.ts's `unresolvedCommentRows`/
+	// `undecidedAltRows`, rendered here via `CommentsBrowserPanel`/
+	// `AlternativesBrowserPanel`, annotation-popover.tsx).
+	const unresolvedCommentRowsList = unresolvedCommentRows(text, scriptNotes.comments);
+	const undecidedAltRowsList = undecidedAltRows(text, scriptNotes.altText);
 
 	/** Both browser panels' own "jump to this text" action — closes whichever
-	 *  side panel is open, then selects the span's full range in the Script
-	 *  editor. Forces a switch INTO Script mode from Pages/Outline first
-	 *  (`pendingSelectRangeRef`, applied once `FountainField` remounts) since
-	 *  "gets selected" only means something there; already being in Script
-	 *  mode just selects immediately. */
+	 *  side panel is open, switches to Pages if Outline is active, and
+	 *  scrolls to the span's page. A comment span also opens its popover
+	 *  (same "wait a frame, then find the rendered icon" lookup `gotoMatch`
+	 *  uses); an alt-text span just highlights its icon — there's no popover
+	 *  for alt-text, only the right-click picker. */
 	const jumpToAnnotation = (span: AnnotationSpan) => {
 		openSidePanel(null);
-		if (mode === 'script') {
-			fountainFieldRef.current?.selectRange(span.contentFrom, span.contentTo);
+		switchMode('pages');
+		scrollToPage(pageOfLine(lineAt(span.from)));
+		if (span.kind === 'comment') {
+			setHighlightedAnnotationId(null);
+			window.requestAnimationFrame(() => {
+				const icon = pagesRef.current?.querySelector(`[data-loom-annotation-id="${span.id}"]`);
+				if (icon instanceof HTMLElement) handleOpenComment(span.id, icon.getBoundingClientRect());
+			});
 		} else {
-			pendingSelectRangeRef.current = { from: span.contentFrom, to: span.contentTo };
-			switchMode('script');
+			setOpenComment(null);
+			setHighlightedAnnotationId(span.id);
 		}
 	};
 
@@ -2183,70 +1935,18 @@ function Script({ view }: { view: ScriptView }) {
 					</aside>
 				) : null}
 				{commentsPanelOpen ? (
-					<aside className="loom-script-nav">
-						<div className="loom-script-nav-head">
-							{t('view.entity.script.unresolvedComments')}
-							<button
-								className="loom-rel-filter"
-								aria-label={t('view.entity.script.hideComments')}
-								onClick={() => setCommentsPanelOpen(false)}
-							>
-								<Icon name="chevron-left" />
-							</button>
-						</div>
-						{unresolvedCommentSpans.length === 0 ? (
-							<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
-						) : (
-							unresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
-								<div key={span.id} className="loom-script-comments-panel-group">
-									<button
-										className="loom-script-nav-act loom-script-comments-panel-excerpt"
-										onClick={() => jumpToAnnotation(span)}
-									>
-										{excerptOf(span)}
-									</button>
-									<div className="loom-script-comments-panel-nested">
-										{unresolvedEntries.map((entry) => (
-											<button
-												key={entry.id + entry.createdAt}
-												className="loom-script-comments-panel-reply"
-												onClick={() => jumpToAnnotation(span)}
-											>
-												{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
-											</button>
-										))}
-									</div>
-								</div>
-							))
-						)}
-					</aside>
+					<CommentsBrowserPanel
+						rows={unresolvedCommentRowsList}
+						onJump={jumpToAnnotation}
+						onClose={() => setCommentsPanelOpen(false)}
+					/>
 				) : null}
 				{altPanelOpen ? (
-					<aside className="loom-script-nav">
-						<div className="loom-script-nav-head">
-							{t('view.entity.script.unfinalizedAlternatives')}
-							<button
-								className="loom-rel-filter"
-								aria-label={t('view.entity.script.hideAlternatives')}
-								onClick={() => setAltPanelOpen(false)}
-							>
-								<Icon name="chevron-left" />
-							</button>
-						</div>
-						{undecidedAltSpans.length === 0 ? (
-							<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
-						) : (
-							undecidedAltSpans.map((span) => (
-								<button
-									key={span.id}
-									className="loom-script-nav-act loom-script-comments-panel-excerpt"
-									onClick={() => jumpToAnnotation(span)}
-								>
-									{excerptOf(span)}
-								</button>
-							))
-						)}
-					</aside>
+					<AlternativesBrowserPanel
+						rows={undecidedAltRowsList}
+						onJump={jumpToAnnotation}
+						onClose={() => setAltPanelOpen(false)}
+					/>
 				) : null}
 			</div>
 	);
@@ -2289,55 +1989,6 @@ function Script({ view }: { view: ScriptView }) {
 					</details>
 
 					<div className="loom-writer-tabs" ref={tabsRef}>
-						<div className="loom-seg">
-							<button
-								className={mode === 'script' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-								onClick={() => clickTab('script')}
-							>
-								{scriptLabel()}
-							</button>
-							<button
-								className={mode === 'pages' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-								onClick={() => clickTab('pages')}
-							>
-								{t('view.entity.script.pagesPreview')}
-							</button>
-						</div>
-						{/* Comments/Alternatives browser panels — standalone icon toggles
-						    next to the Script/Pages pill (not part of it: this doesn't
-						    change what document is shown, just opens the same overlaid
-						    side-panel slot the nav toggle uses). Mutually exclusive with
-						    each other and the nav panel via `openSidePanel`. */}
-						<div className="loom-script-side-toggles">
-							<button
-								className={commentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-								aria-label={commentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
-								onClick={() => openSidePanel(commentsPanelOpen ? null : 'comments')}
-							>
-								<Icon name="message-square" />
-							</button>
-							<button
-								className={altPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-								aria-label={altPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
-								onClick={() => openSidePanel(altPanelOpen ? null : 'alt')}
-							>
-								<Icon name="repeat" fallback="arrow-right-left" />
-							</button>
-						</div>
-						<div className="loom-shell-spacer" />
-						{/* Deliberately NOT part of the Script/Pages pill above — that pair
-						    is one logical toggle over the same document, while this swaps
-						    in a management list (act/scene order), so it gets its own
-						    standalone button on the far side of the row. */}
-						<button
-							className={mode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
-							onClick={() => clickTab('outline')}
-						>
-							{t('view.entity.script.outline')}
-						</button>
-					</div>
-
-					<div className="loom-writer-toolbar">
 						{mode !== 'outline' ? (
 							<>
 								<div className="loom-search-wrap">
@@ -2385,21 +2036,54 @@ function Script({ view }: { view: ScriptView }) {
 								>
 									<Icon name="chevron-down" />
 								</button>
-								{/* After the buttons, not before — so their position doesn't
-								    shift when this text appears/disappears/changes length. */}
-								<span className="loom-writer-stat">
-									{query.trim() === ''
-										? ''
-										: matches.length === 0
-											? t('view.entity.script.noMatches')
-											: t('view.entity.script.matchCount', {
-													current: (matchIndex % matches.length) + 1,
-													total: matches.length,
-												})}
-								</span>
 							</>
 						) : null}
+						{/* Comments/Alternatives browser panels — standalone icon toggles
+						    (this doesn't change what document is shown, just opens the
+						    same overlaid side-panel slot the nav toggle uses). Mutually
+						    exclusive with each other and the nav panel via `openSidePanel`. */}
+						<div className="loom-script-side-toggles">
+							<button
+								className={commentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+								aria-label={commentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
+								onClick={() => openSidePanel(commentsPanelOpen ? null : 'comments')}
+							>
+								<Icon name="message-square" />
+							</button>
+							<button
+								className={altPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+								aria-label={altPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
+								onClick={() => openSidePanel(altPanelOpen ? null : 'alt')}
+							>
+								<Icon name="repeat" fallback="arrow-right-left" />
+							</button>
+						</div>
+						{mode !== 'outline' ? (
+							// After the icons, not before the search box — so the icons'
+							// position doesn't shift when this text appears/disappears/
+							// changes length.
+							<span className="loom-writer-stat">
+								{query.trim() === ''
+									? ''
+									: matches.length === 0
+										? t('view.entity.script.noMatches')
+										: t('view.entity.script.matchCount', {
+												current: (matchIndex % matches.length) + 1,
+												total: matches.length,
+											})}
+							</span>
+						) : null}
 						<div className="loom-shell-spacer" />
+						{/* Pages is the sole read-only reading view now — this is the one
+						    remaining toggle, swapping in the act/scene drag-reorder tree
+						    instead. Sits to the LEFT of the page-swiper/creation-button
+						    group below, not on the far right — those own that slot. */}
+						<button
+							className={mode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
+							onClick={() => clickTab('outline')}
+						>
+							{t('view.entity.script.outline')}
+						</button>
 						{mode === 'pages' ? (
 							<>
 								<button
@@ -2685,7 +2369,7 @@ function Script({ view }: { view: ScriptView }) {
 									})()}
 								</div>
 							</div>
-					) : mode === 'pages' ? (
+					) : (
 						// Every page in one scroller, like a PDF viewer: the page box
 						// navigates by scrolling to a page rather than swapping which
 						// one exists, so reading straight through still works.
@@ -2722,52 +2406,7 @@ function Script({ view }: { view: ScriptView }) {
 								onOpenComment={handleOpenComment}
 								onCycleAlt={handleCycleAlt}
 								onOpenAltMenu={handleOpenAltMenu}
-								highlightedAnnotationId={highlightedAnnotationId}
-							/>
-						</div>
-					) : (
-						<div className="loom-writer-editor" ref={editorWrapperRef}>
-							{navPanel}
-							<FountainField
-								ref={fountainFieldRef}
-								value={text}
-								onChange={setText}
-								onBlur={() => {
-									saveScriptLine();
-									void commit(text);
-								}}
-								characters={parsed.characters}
-								locations={parsed.locations}
-								entityOptions={entityOptions}
-								ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
-								onOpenCharacter={(name) => {
-									if (!project) return;
-									const match = plugin.indexer
-										.getAll('character', project.root)
-										.find((c) => c.name.trim().toLowerCase() === name.trim().toLowerCase());
-									if (match) view.openEntity(match.path);
-								}}
-								onOpenLocation={(sceneLoomId) => {
-									const note = sceneNotes.find((r) => r.sceneId === sceneLoomId);
-									if (!note || note.sceneLocation === '') return;
-									const loc = plugin.indexer.resolve(note.sceneLocation, note.path);
-									if (loc) view.openEntity(loc.path);
-								}}
-								onOpenAct={(actLoomId) => {
-									if (!project) return;
-									const act = plugin.indexer
-										.getAll('act', project.root)
-										.find((c) => c.actId === actLoomId);
-									if (act) view.openEntity(act.path);
-								}}
-								onOpenEntity={(path) => view.openEntity(path)}
-								comments={scriptNotes.comments}
-								altText={scriptNotes.altText}
-								onCreateComment={handleCreateComment}
-								onCreateAlt={handleCreateAlt}
-								onOpenComment={handleOpenComment}
-								onCycleAlt={handleCycleAlt}
-								onOpenAltMenu={handleOpenAltMenu}
+								onOpenScene={openThisScene}
 								highlightedAnnotationId={highlightedAnnotationId}
 							/>
 						</div>
@@ -2913,6 +2552,7 @@ export function PagesPreviewBody({
 	onOpenComment,
 	onCycleAlt,
 	onOpenAltMenu,
+	onOpenScene,
 	highlightedAnnotationId,
 }: {
 	pages: FountainElement[][];
@@ -2932,6 +2572,14 @@ export function PagesPreviewBody({
 	onOpenComment: (id: string, anchorRect: DOMRect) => void;
 	onCycleAlt: (id: string) => void;
 	onOpenAltMenu: (id: string) => void;
+	/** Right-click "Open this scene" on a line — `line` is whatever line
+	 *  numbering `rawText` itself uses (the main Script view's own Pages
+	 *  passes absolute script lines; Act's own Pages passes lines relative
+	 *  to its own excerpt) — the caller resolves it, this component only
+	 *  ever hands back the clicked element's own `el.line`. Optional: the
+	 *  Scene page's own excerpt preview never passes it — a right-click
+	 *  there would only ever resolve back to the scene already being read. */
+	onOpenScene?: (line: number) => void;
 	/** A marker id a search match currently points at — its icon gets a
 	 *  highlight class (an alt-text match's icon, or a comment's icon while
 	 *  its popover is being auto-opened) without touching the document. */
@@ -2969,7 +2617,26 @@ export function PagesPreviewBody({
 							);
 							const lineSpans = spansByLine.get(el.line) ?? [];
 							return (
-								<div key={j} className="loom-sp-line-wrap" data-line={el.line}>
+								<div
+									key={j}
+									className="loom-sp-line-wrap"
+									data-line={el.line}
+									onContextMenu={
+										onOpenScene
+											? (e) => {
+													e.preventDefault();
+													const menu = new Menu();
+													menu.addItem((i) =>
+														i
+															.setTitle(t('view.script.openThisSceneAction'))
+															.setIcon('corner-up-right')
+															.onClick(() => onOpenScene(el.line))
+													);
+													menu.showAtMouseEvent(e.nativeEvent);
+												}
+											: undefined
+									}
+								>
 									{el.type === 'scene-heading' ? (
 										<p className="loom-sp-scene-heading">
 											<span dangerouslySetInnerHTML={{ __html: html }} />
@@ -2995,10 +2662,19 @@ export function PagesPreviewBody({
 																: 'loom-sp-annotation-icon'
 														}
 														onClick={(e) => {
+															// Real reported bug: without this, the click also
+															// bubbled up to `.loom-sp-line-wrap`'s own
+															// `onContextMenu` for "Open this scene" — right-clicking
+															// this icon showed THAT menu instead of the alt-text
+															// one, since `e.preventDefault()` alone (below) stops
+															// the browser's native menu but never stops React event
+															// BUBBLING to a parent handler.
+															e.stopPropagation();
 															if (s.kind === 'comment') onOpenComment(s.id, e.currentTarget.getBoundingClientRect());
 															else onCycleAlt(s.id);
 														}}
 														onContextMenu={(e) => {
+															e.stopPropagation();
 															if (s.kind !== 'alt') return;
 															e.preventDefault();
 															onOpenAltMenu(s.id);
@@ -3048,7 +2724,17 @@ export function useScriptText(plugin: LoomLoomPlugin, project: ProjectDef | null
 				setText(null);
 				return;
 			}
-			void plugin.app.vault.cachedRead(scriptFile).then((raw) => {
+			// `vault.read`, never `cachedRead` — a real, confirmed bug this
+			// fixes: `cachedRead` can lag behind a write THIS SAME SESSION
+			// just made (the 'modify' event here can fire before Obsidian's
+			// own read cache has caught up with it), so a just-written
+			// alt-text swap looked like it silently reverted — the write
+			// itself was correct (confirmed by the sidecar/modal already
+			// reflecting it, and by a fresh reopen showing the right text),
+			// only THIS hook's own read was stale. Same reasoning
+			// script-notes.ts's `mutateScriptNotes`/`useScriptNotes` already
+			// document for the identical pitfall.
+			void plugin.app.vault.read(scriptFile).then((raw) => {
 				if (!cancelled) setText(raw);
 			});
 		};
@@ -3318,6 +3004,22 @@ export async function pushActTitles(plugin: LoomLoomPlugin, project: ProjectDef)
 	}
 }
 
+/** Serializes every `editScript` call against the SAME project's script file —
+ *  a real, confirmed data-loss bug this fixes: `editScript` itself is a plain
+ *  read-then-write (`vault.read` → `apply` → `vault.modify`) with no
+ *  serialization of its own, and had no caller-side queue covering every
+ *  entry point either (`editScriptAndSync`'s own callers — including
+ *  `replaceAltContentInScript`/`stripAnnotationMarkerInScript`, called
+ *  straight from an icon click with no queue in between — call it directly).
+ *  Two overlapping calls (rapid-fire clicking an alt-text icon before the
+ *  PREVIOUS swap's write had landed being the reported case) could each read
+ *  the file BEFORE the other's write completed and then write back based on
+ *  that stale copy — a classic lost-update race, not a logic bug in the swap
+ *  itself. Mirrors `mutateScriptNotes`'s own per-path `writeQueues` Map
+ *  (script-notes.ts) exactly, keyed by the same `scriptFilePath(project)` a
+ *  fresh read/write pair would resolve to regardless of TFile identity. */
+const scriptWriteQueues = new Map<string, Promise<unknown>>();
+
 /**
  * Applies a change to the project's script file.
  *
@@ -3330,19 +3032,27 @@ export async function editScript(
 	project: ProjectDef,
 	apply: (text: string) => string | null
 ): Promise<boolean> {
-	const scriptFile = findScriptFile(plugin, project);
-	if (!scriptFile) return false;
-	try {
-		const raw = await plugin.app.vault.read(scriptFile);
-		const next = apply(raw);
-		if (next === null || next === raw) return false;
-		await plugin.app.vault.modify(scriptFile, next);
-		return true;
-	} catch (e) {
-		console.error('Loom Loom: could not edit the script', e);
-		new Notice(t('view.script.editWriteFailed'));
-		return false;
-	}
+	const path = scriptFilePath(project);
+	const run = (scriptWriteQueues.get(path) ?? Promise.resolve()).then(async () => {
+		const scriptFile = findScriptFile(plugin, project);
+		if (!scriptFile) return false;
+		try {
+			const raw = await plugin.app.vault.read(scriptFile);
+			const next = apply(raw);
+			if (next === null || next === raw) return false;
+			await plugin.app.vault.modify(scriptFile, next);
+			return true;
+		} catch (e) {
+			console.error('Loom Loom: could not edit the script', e);
+			new Notice(t('view.script.editWriteFailed'));
+			return false;
+		}
+	});
+	scriptWriteQueues.set(
+		path,
+		run.catch(() => {})
+	);
+	return run;
 }
 
 /**
@@ -3402,6 +3112,52 @@ export async function editScriptAndSync(
 		}
 	}
 	return changed;
+}
+
+/** Replaces an alt-text span's wrapped content, wherever in the script it
+ *  lives — used by every alt-text mutation handler above (cycling/drafting/
+ *  accepting/editing an option), none of which have a live `FountainField`
+ *  to dispatch a CM6 transaction through now that Script mode no longer
+ *  exists: finding the span across the whole raw text and writing it back
+ *  via `editScriptAndSync` works regardless of where the field would have
+ *  been, mirroring `book-view.tsx`'s own `replaceAltContentInBook`. */
+export async function replaceAltContentInScript(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	id: string,
+	text: string
+): Promise<void> {
+	const changed = await editScriptAndSync(plugin, project, (raw) => {
+		const span = findAnnotationSpans(raw).find((s) => s.kind === 'alt' && s.id === id);
+		if (!span) return null;
+		return raw.slice(0, span.contentFrom) + text + raw.slice(span.contentTo);
+	});
+	// Diagnostic: this should always find a live span for an id the sidecar
+	// just cycled — if it doesn't, `editScript` silently no-ops (by design,
+	// for genuinely-absent targets elsewhere) and the swap never reaches
+	// disk, with nothing else to signal why. Surfacing it here rather than
+	// leaving it silent while tracking down a reported "cycling does
+	// nothing" bug.
+	if (!changed) console.error('Loom Loom: replaceAltContentInScript found no live span for', id);
+}
+
+/** Strips ONE marker pair by id, leaving its wrapped content untouched — the
+ *  whole-script-text counterpart of `fountain-field.tsx`'s imperative
+ *  `removeAnnotationMarkers` (a CM6 transaction dispatched through a live
+ *  view), for the same reason `replaceAltContentInScript` above needs one:
+ *  no live field to dispatch through, so this finds the span across the
+ *  whole raw text via `editScriptAndSync` instead. Mirrors `book-view.tsx`'s
+ *  `stripAnnotationMarkerInBook`. */
+export async function stripAnnotationMarkerInScript(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	id: string
+): Promise<void> {
+	await editScriptAndSync(plugin, project, (raw) => {
+		const span = findAnnotationSpans(raw).find((s) => s.id === id);
+		if (!span) return null;
+		return raw.slice(0, span.from) + raw.slice(span.contentFrom, span.contentTo) + raw.slice(span.to);
+	});
 }
 
 /**

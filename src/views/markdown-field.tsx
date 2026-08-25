@@ -791,19 +791,23 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	/** A comment span was left-clicked — open its popover anchored to the
 	 *  given screen rect. Also called in `readOnly` mode (pure read). */
 	onOpenComment?: (id: string, anchorRect: DOMRect) => void;
-	/** An alt-text span was left-clicked — cycle to the next option. Not
-	 *  called in `readOnly` mode. `outgoingLiveText` is whatever the currently
-	 *  active option's span actually contains in the LIVE document at the
-	 *  moment of the swap — the active option's wording is ordinarily edited
-	 *  by hand directly in the text (see fountain.ts's own architecture note),
-	 *  and this field has no imperative handle a caller could otherwise use to
-	 *  read it back before the swap discards it; only differs from the
-	 *  sidecar's own stored text for that option when such a hand-edit hasn't
-	 *  been persisted yet, mirroring `script-view.tsx`'s own
+	/** An alt-text span was left-clicked — cycle to the next option. Also
+	 *  called in `readOnly` mode, where this field itself makes no document
+	 *  change (`onChange` is a no-op there) — the caller applies the swap
+	 *  out of band instead (see `cycleAltInPlace`'s own doc comment).
+	 *  `outgoingLiveText` is whatever the currently active option's span
+	 *  actually contains in the LIVE document at the moment of the swap —
+	 *  the active option's wording is ordinarily edited by hand directly in
+	 *  the text (see fountain.ts's own architecture note), and this field
+	 *  has no imperative handle a caller could otherwise use to read it back
+	 *  before the swap discards it; only differs from the sidecar's own
+	 *  stored text for that option when such a hand-edit hasn't been
+	 *  persisted yet, mirroring `script-view.tsx`'s own
 	 *  `syncOutgoingAltOption`/`liveAltSpanText` pair for the same reason. */
 	onCycleAlt?: (id: string, outgoingLiveText: string) => void;
 	/** An alt-text span was right-clicked — open its option picker
-	 *  (`AltTextModal`, project.ts). Not called in `readOnly` mode. */
+	 *  (`AltTextModal`, project.ts). Also called in `readOnly` mode — the
+	 *  modal's own callbacks are what write the change, not this field. */
 	onOpenAltMenu?: (id: string) => void;
 	/** A marker id a search match currently points at — its span gets a
 	 *  highlight class without touching the document. */
@@ -818,6 +822,18 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	 *  leaves it unset and is unaffected (no heading in their text carries
 	 *  this marker anyway). */
 	onOpenHeading?: (loomId: string, level: number) => void;
+	/** Right-click anywhere in a `readOnly` field's own content — offers
+	 *  "Open this chapter", the Preview-side counterpart to `onOpenHeading`'s
+	 *  Ctrl/Cmd-click (a `readOnly` field has no editable content to place a
+	 *  caret in, so a plain right-click needs no modifier gating the way a
+	 *  content click in an editable field does). `offset` is the clicked
+	 *  character position in THIS field's own document — `ActChapterBlocks`
+	 *  (book-view.tsx) is the one caller, and passes it straight through
+	 *  since its own chapter excerpt is already the whole field's document
+	 *  (no cross-document line math needed, unlike Fountain's flat single
+	 *  buffer). Never called in an editable field — right-clicking there
+	 *  opens the Comment/Alternative-text creation menu instead. */
+	onOpenChapter?: (offset: number) => void;
 	/** Renders a right-side CM6 gutter (mirrors `fountain-field.tsx`'s own
 	 *  `annotationGutter`) — one icon per comment/alt-text span that STARTS
 	 *  on a given line, click opens/cycles it, right-click opens an alt-text
@@ -852,6 +868,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	onOpenAltMenu,
 	highlightedAnnotationId,
 	onOpenHeading,
+	onOpenChapter,
 	annotationGutter: showAnnotationGutter,
 }, ref) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
@@ -886,6 +903,8 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	onOpenAltMenuRef.current = onOpenAltMenu;
 	const highlightedAnnotationIdRef = useRef(highlightedAnnotationId ?? null);
 	highlightedAnnotationIdRef.current = highlightedAnnotationId ?? null;
+	const onOpenChapterRef = useRef(onOpenChapter);
+	onOpenChapterRef.current = onOpenChapter;
 	const onOpenHeadingRef = useRef(onOpenHeading);
 	onOpenHeadingRef.current = onOpenHeading;
 
@@ -927,20 +946,24 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 				scopePushed = false;
 			}
 		};
-		/** Cycles an alt-text span to its next option IN PLACE — shared by the
-		 *  content click (`openLinkOnMousedown`, below) and the gutter icon
-		 *  click (`annotationGutterExt`'s own `domEventHandlers.click`), which
-		 *  both need to do the exact same "swap the document, then tell the
-		 *  caller to persist the new `activeIndex`" work. This field has no
+		/** Cycles an alt-text span to its next option — shared by the content
+		 *  click (`openLinkOnMousedown`, below) and the gutter icon click
+		 *  (`annotationGutterExt`'s own `domEventHandlers.click`). In an
+		 *  EDITABLE field this dispatches the swap IN PLACE (this field has no
 		 *  imperative handle a caller could dispatch through the way
 		 *  `fountain-field.tsx`'s `replaceAltContent` lets `script-view.tsx`'s
-		 *  own `handleCycleAlt` do it from OUTSIDE the field — so the swap
-		 *  happens right here instead, and `onCycleAlt` is called purely so
-		 *  the caller persists the sidecar's new `activeIndex`. No-ops (but
-		 *  still reports the click as handled) when there's only one option —
-		 *  nothing to cycle TO — or in `readOnly` mode. */
+		 *  own `handleCycleAlt` do it from OUTSIDE the field, so the swap
+		 *  happens right here instead) and `onCycleAlt` is called purely so
+		 *  the caller persists the sidecar's new `activeIndex`. In a `readOnly`
+		 *  field there's nothing here to dispatch a change through in the
+		 *  first place (`onChange` is a no-op) — `onCycleAlt` still fires with
+		 *  the outgoing live text, and the caller (`ActChapterBlocks`'s own
+		 *  read-only cycle handler) applies the swap itself, out of band, via
+		 *  a raw-text write; this field's own `value` picks the result up on
+		 *  the next re-render like any other external change. Also no-ops
+		 *  (but still reports the click as handled) when there's only one
+		 *  option — nothing to cycle TO. */
 		const cycleAltInPlace = (view: EditorView, id: string) => {
-			if (readOnly) return;
 			const entry = altTextRef.current[id];
 			if (entry && entry.options.length > 1) {
 				const nextIndex = (entry.activeIndex + 1) % entry.options.length;
@@ -953,9 +976,11 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 					// option's wording. `onCycleAlt`'s caller persists this back
 					// into the sidecar's own copy before advancing `activeIndex`.
 					const outgoingLiveText = view.state.doc.sliceString(span.contentFrom, span.contentTo);
-					view.dispatch({
-						changes: { from: span.contentFrom, to: span.contentTo, insert: entry.options[nextIndex] },
-					});
+					if (!readOnly) {
+						view.dispatch({
+							changes: { from: span.contentFrom, to: span.contentTo, insert: entry.options[nextIndex] },
+						});
+					}
 					onCycleAltRef.current?.(id, outgoingLiveText);
 					return;
 				}
@@ -1182,13 +1207,12 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 							const id = el.dataset.loomAnnotationId;
 							if (el.dataset.loomAnnotationKind === 'comment') {
 								onOpenCommentRef.current?.(id, el.getBoundingClientRect());
-							} else if (!readOnly) {
+							} else {
 								cycleAltInPlace(gutterView, id);
 							}
 							return true;
 						},
 						contextmenu: (gutterView, line, event) => {
-							if (readOnly) return false;
 							const target = event.target instanceof Element ? event.target : null;
 							const el = target?.closest('[data-loom-annotation-id][data-loom-annotation-kind="alt"]');
 							if (!(el instanceof HTMLElement) || !el.dataset.loomAnnotationId) return false;
@@ -1484,6 +1508,22 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 										displayTextOf(v.state.sliceDoc(range.from, range.to))
 									);
 									event.preventDefault();
+									return true;
+								},
+								contextmenu: (event, v) => {
+									if (!onOpenChapterRef.current) return false;
+									const pos = v.posAtCoords({ x: event.clientX, y: event.clientY });
+									if (pos === null) return false;
+									event.preventDefault();
+									const callback = onOpenChapterRef.current;
+									const menu = new Menu();
+									menu.addItem((i) =>
+										i
+											.setTitle(t('view.script.openThisChapterAction'))
+											.setIcon('corner-up-right')
+											.onClick(() => callback(pos))
+									);
+									menu.showAtMouseEvent(event);
 									return true;
 								},
 							}),

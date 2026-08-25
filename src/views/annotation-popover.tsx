@@ -2,7 +2,8 @@ import { Menu } from 'obsidian';
 import { MouseEvent as ReactMouseEvent, ReactElement, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { t } from '../i18n';
-import { CommentEntry } from './script-notes';
+import { CommentEntry, UnresolvedCommentRow, UndecidedAltRow } from './script-notes';
+import { AnnotationSpan } from '../fountain';
 import { Icon } from './common';
 
 const POPOVER_W = 320;
@@ -191,5 +192,96 @@ export function CommentPopover({
 			</div>
 		</div>,
 		document.body
+	);
+}
+
+/**
+ * The "Comments" browse-all side panel — every comment span with at least
+ * one still-unresolved reply, grouped with its own unresolved replies
+ * underneath. Shared by the Script view's own panel and Book's identical one
+ * (script-view.tsx / book-view.tsx) — the two differ only in `onJump`'s own
+ * navigation (Script scrolls a Pages-mode page number; Book scrolls to a
+ * rendered `[data-loom-annotation-content]` element), which the caller
+ * supplies rather than this component knowing about either.
+ */
+export function CommentsBrowserPanel({
+	rows,
+	onJump,
+	onClose,
+}: {
+	rows: UnresolvedCommentRow[];
+	onJump: (span: AnnotationSpan) => void;
+	onClose: () => void;
+}): ReactElement {
+	return (
+		<aside className="loom-script-nav">
+			<div className="loom-script-nav-head">
+				{t('view.entity.script.unresolvedComments')}
+				<button className="loom-rel-filter" aria-label={t('view.entity.script.hideComments')} onClick={onClose}>
+					<Icon name="chevron-left" />
+				</button>
+			</div>
+			{rows.length === 0 ? (
+				<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
+			) : (
+				rows.map(({ span, excerpt, unresolvedEntries }) => (
+					<div key={span.id} className="loom-script-comments-panel-group">
+						<button className="loom-script-nav-act loom-script-comments-panel-excerpt" onClick={() => onJump(span)}>
+							{excerpt}
+						</button>
+						<div className="loom-script-comments-panel-nested">
+							{unresolvedEntries.map((entry) => (
+								<button
+									key={entry.id + entry.createdAt}
+									className="loom-script-comments-panel-reply"
+									onClick={() => onJump(span)}
+								>
+									{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
+								</button>
+							))}
+						</div>
+					</div>
+				))
+			)}
+		</aside>
+	);
+}
+
+/**
+ * The "Alternatives" browse-all side panel — every alt-text span with no
+ * ACCEPTED option yet ("still in doubt"). Same sharing reasoning as
+ * `CommentsBrowserPanel` above.
+ */
+export function AlternativesBrowserPanel({
+	rows,
+	onJump,
+	onClose,
+}: {
+	rows: UndecidedAltRow[];
+	onJump: (span: AnnotationSpan) => void;
+	onClose: () => void;
+}): ReactElement {
+	return (
+		<aside className="loom-script-nav">
+			<div className="loom-script-nav-head">
+				{t('view.entity.script.unfinalizedAlternatives')}
+				<button className="loom-rel-filter" aria-label={t('view.entity.script.hideAlternatives')} onClick={onClose}>
+					<Icon name="chevron-left" />
+				</button>
+			</div>
+			{rows.length === 0 ? (
+				<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
+			) : (
+				rows.map(({ span, excerpt }) => (
+					<button
+						key={span.id}
+						className="loom-script-nav-act loom-script-comments-panel-excerpt"
+						onClick={() => onJump(span)}
+					>
+						{excerpt}
+					</button>
+				))
+			)}
+		</aside>
 	);
 }
