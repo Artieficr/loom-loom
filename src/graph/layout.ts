@@ -173,7 +173,19 @@ export function computeGraphLayout(
 	manualY?: ReadonlyMap<string, number>,
 	/** When set, only these entity paths are laid out (the graph filter's
 	 *  "separate graph" mode) — the rest are dropped entirely. */
-	restrictTo?: ReadonlySet<string>
+	restrictTo?: ReadonlySet<string>,
+	/** GM projects only (`features(config).eventPlanning`) — whether an
+	 *  Event's status (`eventKind`) should drive its edge line style
+	 *  (dashed/locked). A real, confirmed bug fixed 2026-08-25: this used to
+	 *  apply unconditionally to ANY project — `eventKind === ''` (the value
+	 *  every Player-project Event reads as, since that UI never writes the
+	 *  field at all) fell into the SAME branch as an explicit `'planned'`,
+	 *  so every Player-project event connection rendered dashed too, even
+	 *  though Player events have no status concept to visualize. Callers
+	 *  must pass this explicitly; it defaults to `false` (plain solid
+	 *  edges, the pre-GM-kind behavior) rather than inferring it from the
+	 *  record data itself. */
+	gmEventStyling: boolean = false
 ): GraphLayout {
 	const { raw, neighbors } = collectEdges(indexer, projectRoot, restrictTo);
 
@@ -261,16 +273,23 @@ export function computeGraphLayout(
 		arrowA: e.arrowUpper,
 		arrowB: e.arrowLower,
 		route: toRoute(e),
-		lineStyle: eventLineStyle(e.upper.record.type === 'event' ? e.upper.record : e.lower.record),
+		lineStyle: eventLineStyle(
+			e.upper.record.type === 'event' ? e.upper.record : e.lower.record,
+			gmEventStyling
+		),
 	}));
 	return { nodes: allNodes, edges, neighbors, width, height: bottom };
 }
 
-/** GM projects: the line style an edge touching `record` should carry —
- *  `undefined` (plain solid) unless `record` is itself an Event, and then
- *  only for Planned/Locked (Happened/Lore stay plain solid too). See
- *  `RoutedEdge.lineStyle`'s own doc comment. */
-function eventLineStyle(record: EntityRecord): 'dashed' | 'locked' | undefined {
+/** GM projects only (`gmEventStyling`): the line style an edge touching
+ *  `record` should carry — `undefined` (plain solid) unless `record` is
+ *  itself an Event, and then only for Planned/Locked (Happened/Lore stay
+ *  plain solid too). Always `undefined` when `gmEventStyling` is false —
+ *  Player/Writer events have no status concept, so their connections must
+ *  never pick up this styling regardless of what `eventKind` happens to
+ *  read as. See `RoutedEdge.lineStyle`'s own doc comment. */
+function eventLineStyle(record: EntityRecord, gmEventStyling: boolean): 'dashed' | 'locked' | undefined {
+	if (!gmEventStyling) return undefined;
 	if (record.type !== 'event') return undefined;
 	if (record.eventKind === 'locked') return 'locked';
 	if (record.eventKind === 'planned' || record.eventKind === '') return 'dashed';

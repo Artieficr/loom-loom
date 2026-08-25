@@ -6953,7 +6953,30 @@ div.loom-scene-script {
 	flex-grow: 1 !important;
 }
 
-.loom-view .loom-book-page .loom-md-field .cm-gutters {
+/* CONFIRMED real bug, found via live console diagnostics (2026-08-26), not a guess:
+   this rule used to target the bare `.cm-gutters` class, which CM6 ALSO applies —
+   unconditionally, even with zero "before"-side gutters registered — to a second,
+   completely EMPTY wrapper (`.cm-gutters.cm-gutters-before`), CM6's left-edge gutter
+   container, a sibling of the one this rule actually means to affect
+   (`.cm-gutters.cm-gutters-after`, which alone holds our real annotation-icon gutter).
+   In NORMAL (non-absolute) flex flow that empty wrapper is harmless — zero children,
+   effectively zero width, just sitting inertly at the start of the flex row. But once
+   `position: absolute` applied to IT too, CM6's own base theme's
+   `.cm-gutters-before { inset-inline-start: 0 }` (previously INERT — that property only
+   does anything once the element is positioned) activated for the first time — combined
+   with THIS rule's own `right` offset and `width: auto`, the browser had to solve the
+   classic "left AND right both specified, width auto" case, which computes an intrinsic
+   `width` to fill the ENTIRE span between them — i.e. the empty wrapper stretched to
+   cover the WHOLE content column (plus the extra margin offset), invisible (no
+   background, no children) but still very much there, sitting at CM6's own base-theme
+   `z-index: 200` — swallowing every click across the whole page. That's the actual root
+   cause behind BOTH "right-click does nothing" and "body text isn't selectable" reported
+   this round — confirmed directly from a user-run `element.closest('.cm-gutters')` check
+   that resolved to `cm-gutters cm-gutters-before`, not the actual body text. Scoping the
+   selector to `.cm-gutters-after` specifically (CM6's own class for the side:'after'
+   gutter our code actually configures) is the fix — the before-side wrapper is now never
+   touched by this rule again and stays in its normal, harmless, zero-width flow state. */
+.loom-view .loom-book-page .loom-md-field .cm-gutters.cm-gutters-after {
 	position: absolute !important;
 	top: 0;
 	right: -0.95in;

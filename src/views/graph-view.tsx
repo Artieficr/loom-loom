@@ -48,7 +48,7 @@ import {
 } from './common';
 import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
-import { projectRoleType, projectTypes, roleOf } from '../project-kind';
+import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
 import { t, tn } from '../i18n';
 
 type Camera = GraphCamera;
@@ -588,7 +588,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				...Object.entries(project ? plugin.settings.graphManualY[project.root] ?? {} : {}),
 				...(liveManual.current ? [[liveManual.current.id, liveManual.current.y] as const] : []),
 			]),
-			restrictTo
+			restrictTo,
+			features(project?.config).eventPlanning
 		);
 
 	const fullLayout = useMemo(
