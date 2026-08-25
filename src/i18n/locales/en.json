@@ -705,6 +705,8 @@
 			"ofCount": "of {count}",
 			"newPageBreakAction": "+ New page breaker",
 			"pageBreakLabel": "Page break",
+			"openThisSceneAction": "Open this scene",
+			"openThisChapterAction": "Open this chapter",
 			"outlineNoActsPre": "No acts yet — a ",
 			"outlineNoActsPost": " line starts one.",
 			"expandScenesAria": "Expand scenes",

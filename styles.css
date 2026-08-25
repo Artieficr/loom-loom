@@ -5822,19 +5822,22 @@ span.loom-row-caret {
 	padding: 0.4em 0;
 }
 
+/* One merged row per Script/Book/Act/Scene/Chapter toolbar (mode pill, search
+   + prev/next + match count, Comments/Alternatives toggles, Outline button,
+   and — Pages mode / Outline mode only — a page-swiper or "+ New …" creation
+   buttons) — `gap` gives every one of those groups even breathing room
+   without each needing its own margin. */
 .loom-view .loom-writer-tabs {
 	display: flex;
 	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.4em;
 	margin: 0.5em 0;
 }
 
-/* Comments/Alternatives toggle buttons — a clear gap from the Script/Pages
-   pill they sit next to, so they don't read as an extra pair of segments
-   glued onto it. */
 .loom-view .loom-script-side-toggles {
 	display: flex;
 	gap: var(--size-2-2);
-	margin-left: var(--size-4-3);
 }
 
 /* The Outline button: standalone on the far right of the tabs row, not part
@@ -6019,13 +6022,6 @@ span.loom-row-caret {
 	height: 0;
 	margin: 0 0.5em;
 	border-bottom: 1px dashed var(--background-modifier-border);
-}
-
-.loom-view .loom-writer-toolbar {
-	display: flex;
-	align-items: center;
-	gap: 0.4em;
-	margin-bottom: 0.5em;
 }
 
 /* Fixed rather than flex:1 — Script and Pages preview carry different sets of
@@ -6467,6 +6463,15 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
    chapter's page card came out squat and wide instead of reading as a
    sheet — 1in top/bottom padding against almost no text left barely any
    visible height at all. */
+/* Reverted to symmetric padding — an asymmetric attempt (0.4in right vs
+   1.25in left, to free up room for the annotation gutter and widen the
+   paragraph text) made the whole page read as visibly off-center/offset to
+   the right, a real reported regression. Left as symmetric 1.25in both
+   sides; the text-width/gutter-position asks from that attempt are
+   unaddressed again until there's a way to do it without breaking page
+   symmetry (likely needs the gutter absolutely positioned into the margin,
+   the way Fountain's own `.loom-sp-annotation-icons` does, rather than
+   stealing padding asymmetrically). */
 .loom-view .loom-book-page {
 	position: relative;
 	background: #fff;
@@ -6907,10 +6912,67 @@ div.loom-scene-script {
 	min-width: 2em;
 }
 
+/* `.loom-book-page`'s own gutter needs a DIFFERENT treatment than the
+   generic rule above: taken out of `.cm-scroller`'s flex layout entirely
+   (`position: absolute`, anchored to `.cm-scroller`'s own `position:
+   relative` — CM6's base theme already sets that) and reached into the
+   page's existing right margin, mirroring how Fountain's own
+   `.loom-sp-annotation-icons` reaches into ITS page's margin. This is what
+   should let `.cm-content` below grow to the SAME width as
+   `.loom-field-sep`/the Act title's own separator lines. A previous version
+   of this rule (position: absolute + a plain negative `right`) did NOT
+   actually achieve either goal in testing — text still wrapped narrower
+   than the separators and the icon still sat squeezed against it, an
+   unresolved regression flagged across several rounds. Root cause, found by
+   re-deriving CM6's actual box model rather than guessing another offset:
+   `.cm-scroller` carries `overflow-x: auto` from CM6's own base theme (kept
+   for the general in-flow case, where a gutter really can need horizontal
+   scroll room) — that turns `.cm-scroller` into a clipping container for
+   ALL its descendants, absolutely positioned ones included, so a gutter
+   pushed out to `right: -0.7in` was being cropped right back down to
+   `.cm-scroller`'s own right edge, visible only as the sliver that fit
+   inside it — explaining why the icon still read as "squeezed against the
+   text" even once it was structurally out of the flex flow. `overflow:
+   visible` below removes that clipping — safe specifically because these
+   Preview fields are auto-height with no internal scroll of their own (the
+   whole `.loom-book-page` sheet scrolls as part of the outer
+   `.loom-screenplay` instead), so `overflow-x: auto` was never doing
+   anything useful here in the first place. `!important` on the sizing rules
+   is deliberate, not decorative — this codebase has hit CM6's own injected
+   base-theme styles silently outranking a same-or-higher-specificity
+   external rule before (see the Obsidian-settings-declarative-CSS precedent
+   noted elsewhere in this project), and this specific rule already failed
+   silently once without an obvious static explanation; `!important` removes
+   that whole class of doubt rather than trusting cascade order again. */
+.loom-view .loom-book-page .loom-md-field .cm-scroller {
+	overflow: visible !important;
+}
+
+.loom-view .loom-book-page .loom-md-field .cm-content {
+	width: 100% !important;
+	flex-grow: 1 !important;
+}
+
+.loom-view .loom-book-page .loom-md-field .cm-gutters {
+	position: absolute !important;
+	top: 0;
+	right: -0.95in;
+	min-width: 0 !important;
+	width: auto !important;
+}
+
 .loom-md-gutter-icons {
 	display: flex;
 	gap: 2px;
 	padding-left: 0.3em;
+	/* A real reported bug: clicking fast enough on this icon triggered the
+	   browser's own triple-click-selects-paragraph behavior (affects the
+	   comment icon too, though its own handler still fires correctly despite
+	   it) — pure CSS, unlike an `onMouseDown preventDefault()` attempt tried
+	   and reverted earlier this session, which correlated with clicks
+	   stopping working altogether. `user-select: none` carries none of that
+	   risk since it never touches event handling at all. */
+	user-select: none;
 }
 
 .loom-md-gutter-icon {
@@ -6958,6 +7020,10 @@ div.loom-scene-script {
 	right: -0.7in;
 	display: flex;
 	gap: 2px;
+	/* Same fast-click-selects-text fix as `.loom-md-gutter-icons` — pure CSS,
+	   see that rule's own doc comment for why this replaced an
+	   `onMouseDown preventDefault()` attempt instead of stacking one. */
+	user-select: none;
 }
 
 .loom-view .loom-sp-annotation-icon {
@@ -7076,7 +7142,14 @@ div.loom-scene-script {
 	cursor: ew-resize;
 	touch-action: none;
 	pointer-events: auto;
-	z-index: var(--layer-menu);
+	/* `--layer-popover` (below `--layer-modal`), not `--layer-menu` — a real
+	   reported bug: Obsidian's own z-index scale actually places
+	   `--layer-menu` ABOVE `--layer-modal`, so these handles (a right-click
+	   on the same commented span opens `AltTextModal`, project.ts, WHILE
+	   they're still visible underneath) rendered on top of that modal
+	   instead of behind it. A purely editor-level affordance should never
+	   outrank an actual modal dialog. */
+	z-index: var(--layer-popover);
 }
 
 .loom-fountain-annotation-handle:hover,
@@ -7095,7 +7168,8 @@ div.loom-scene-script {
 	width: 2px;
 	background: var(--interactive-accent);
 	pointer-events: none;
-	z-index: var(--layer-menu);
+	/* Same fix/reasoning as the handles themselves, just above. */
+	z-index: var(--layer-popover);
 	display: none;
 }
 

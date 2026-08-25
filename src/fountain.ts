@@ -606,11 +606,24 @@ function looksLikeTransition(line: string): boolean {
 	return text === text.toUpperCase() && /[A-Za-z]/.test(text) && /TO:$/.test(text);
 }
 
-/** Strips inline notes and boneyard comments from displayed text. */
+/** Strips Fountain's own generic inline `[[note]]` syntax and boneyard
+ *  comments from displayed action/character/dialogue text. **Must NOT touch
+ *  our own `[[loom:…]]`/`[[loom-comment:…]]`/`[[loom-alt:…]]` markers** — a
+ *  real, confirmed bug this fix corrects: the un-excluded regex used to strip
+ *  ANY `[[…]]` span unconditionally, including our own annotation markers,
+ *  which meant `element.text` (and everything downstream of it —
+ *  `elementText`, `PagesPreviewBody`'s `wrapAnnotationMarkersForDisplay`)
+ *  never actually SAW a comment/alt-text span once parsed, even though the
+ *  raw script text still had it. The live CM6 editor never hit this (it reads
+ *  `view.state.doc.toString()` directly, never through this function), which
+ *  is why the underline/icon always worked there but silently never appeared
+ *  in Pages preview — this was pre-existing, not introduced by this session's
+ *  editor-removal work, just newly visible now that Pages is the only
+ *  reading surface for those views. */
 function stripAnnotations(text: string): string {
 	return text
 		.replace(/\/\*[\s\S]*?\*\//g, '')
-		.replace(/\[\[[\s\S]*?\]\]/g, '')
+		.replace(/\[\[(?!\/?loom[-:])[\s\S]*?\]\]/g, '')
 		.trim();
 }
 
@@ -771,6 +784,21 @@ export function parseFountain(text: string): ParsedScript {
 		// strips ANY `[[...]]` from action/character/dialogue text regardless
 		// of position, and `parseSceneHeading` now strips markers internally.
 		const cls = line.replace(ANNOTATION_MARKER_RE, '');
+		// A second, LOOM-MARKER-PRESERVING view of the same line — for
+		// EXTRACTING `text` on element types below that slice straight from
+		// `cls` (synopsis/centered/transition/lyrics), never for
+		// classification (that stays `cls`, deliberately, so a marker
+		// sitting at a line's start still can't throw off `startsWith`
+		// checks). A real, confirmed bug this fixes: slicing `cls` itself for
+		// `text` meant `stripAnnotations`' own loom-marker exclusion (see its
+		// own doc comment) never applied to these four element types — only
+		// action/character/dialogue (which route through `stripAnnotations`
+		// on the RAW line, not `cls`) got it. A `>`-prefixed credit line
+		// wrapping part of its text in `[[loom-alt:…]]` lost the markers
+		// entirely once parsed, the same underline-never-appears symptom
+		// `stripAnnotations` already fixed for action/dialogue text, just
+		// for a different element type reaching it through a different path.
+		const clsKeepLoom = stripAnnotations(line);
 
 		if (inBoneyard) {
 			if (line.includes('*/')) inBoneyard = false;
@@ -825,28 +853,28 @@ export function parseFountain(text: string): ParsedScript {
 			continue;
 		}
 		if (cls.startsWith('=')) {
-			elements.push({ type: 'synopsis', text: cls.slice(1).trim(), line: i });
+			elements.push({ type: 'synopsis', text: clsKeepLoom.slice(1).trim(), line: i });
 			i++;
 			continue;
 		}
 		// Centered: `> text <`. Must be checked before forced transitions.
 		if (cls.startsWith('>') && cls.endsWith('<')) {
-			elements.push({ type: 'centered', text: cls.slice(1, -1).trim(), line: i });
+			elements.push({ type: 'centered', text: clsKeepLoom.slice(1, -1).trim(), line: i });
 			i++;
 			continue;
 		}
 		if (cls.startsWith('>')) {
-			elements.push({ type: 'transition', text: cls.slice(1).trim(), line: i });
+			elements.push({ type: 'transition', text: clsKeepLoom.slice(1).trim(), line: i });
 			i++;
 			continue;
 		}
 		if (cls.startsWith('!')) {
-			elements.push({ type: 'action', text: stripAnnotations(cls.slice(1)), line: i });
+			elements.push({ type: 'action', text: stripAnnotations(clsKeepLoom.slice(1)), line: i });
 			i++;
 			continue;
 		}
 		if (cls.startsWith('~')) {
-			elements.push({ type: 'lyrics', text: cls.slice(1).trim(), line: i });
+			elements.push({ type: 'lyrics', text: clsKeepLoom.slice(1).trim(), line: i });
 			i++;
 			continue;
 		}

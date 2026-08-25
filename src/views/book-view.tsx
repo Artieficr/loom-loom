@@ -37,20 +37,26 @@ import {
 	purgeEntityReferences,
 } from '../project';
 import { LoomFileReactView } from './react-view';
-import { MarkdownField, MarkdownFieldHandle } from './markdown-field';
+import { MarkdownField } from './markdown-field';
 import {
 	Icon,
 	ViewShell,
 	buildEntityLinkNames,
 	buildLinkTargetLabels,
-	openCreateLinkEntity,
 	openEntityLink,
 } from './common';
 import { useIndexVersion } from './hooks';
 import { t } from '../i18n';
-import { cleanAnnotationMarkers, findAnnotationSpans, liveAnnotationIds } from '../fountain';
-import { AltTextEntry, CommentEntry, mutateScriptNotes, useScriptNotes } from './script-notes';
-import { CommentPopover } from './annotation-popover';
+import { AnnotationSpan, cleanAnnotationMarkers, findAnnotationSpans, liveAnnotationIds } from '../fountain';
+import {
+	AltTextEntry,
+	CommentEntry,
+	mutateScriptNotes,
+	undecidedAltRows,
+	unresolvedCommentRows,
+	useScriptNotes,
+} from './script-notes';
+import { AlternativesBrowserPanel, CommentPopover, CommentsBrowserPanel } from './annotation-popover';
 import type { LinkOption } from './link-textarea';
 import type LoomLoomPlugin from '../main';
 
@@ -99,6 +105,17 @@ export async function appendChapterToBook(plugin: LoomLoomPlugin, project: Proje
 	await plugin.app.vault.modify(file, appendBookChapter(raw, title));
 }
 
+/** Serializes every `editBook` call against the same project's Book file —
+ *  same fix, same reasoning as `editScript`'s own `scriptWriteQueues`
+ *  (script-view.tsx): `replaceAltContentInBook`/`stripAnnotationMarkerInBook`
+ *  call `editBookAndSync` straight from an icon click, bypassing
+ *  `queueBookEdit` entirely (that queue only ever covered the Editor field's
+ *  own buffered draft and Outline's reorders), so two overlapping calls
+ *  could each read the file before the other's write landed and silently
+ *  lose one of them — the confirmed real cause of a reported "both alt-text
+ *  options turned into the same text" data-loss bug from rapid clicking. */
+const bookWriteQueues = new Map<string, Promise<unknown>>();
+
 /**
  * Applies a change to the project's Book file. Mirrors `editScript`.
  */
@@ -107,18 +124,26 @@ export async function editBook(
 	project: ProjectDef,
 	apply: (text: string) => string | null
 ): Promise<boolean> {
-	const file = findBookFile(plugin, project);
-	if (!file) return false;
-	try {
-		const raw = await plugin.app.vault.read(file);
-		const next = apply(raw);
-		if (next === null || next === raw) return false;
-		await plugin.app.vault.modify(file, next);
-		return true;
-	} catch (e) {
-		console.error('Loom Loom: could not edit the book', e);
-		return false;
-	}
+	const path = bookFilePath(project);
+	const run = (bookWriteQueues.get(path) ?? Promise.resolve()).then(async () => {
+		const file = findBookFile(plugin, project);
+		if (!file) return false;
+		try {
+			const raw = await plugin.app.vault.read(file);
+			const next = apply(raw);
+			if (next === null || next === raw) return false;
+			await plugin.app.vault.modify(file, next);
+			return true;
+		} catch (e) {
+			console.error('Loom Loom: could not edit the book', e);
+			return false;
+		}
+	});
+	bookWriteQueues.set(
+		path,
+		run.catch(() => {})
+	);
+	return run;
 }
 
 /**
@@ -467,7 +492,12 @@ export function useBookText(plugin: LoomLoomPlugin, project: ProjectDef | null):
 				setText(null);
 				return;
 			}
-			void plugin.app.vault.cachedRead(file).then((raw) => {
+			// `vault.read`, never `cachedRead` — same fix, same reasoning as
+			// `script-view.tsx`'s own `useScriptText` (a real, confirmed bug:
+			// a just-landed write's own 'modify' event can fire before
+			// Obsidian's read cache has caught up with it, so a just-written
+			// alt-text swap silently looked reverted here too).
+			void plugin.app.vault.read(file).then((raw) => {
 				if (!cancelled) setText(raw);
 			});
 		};
@@ -545,7 +575,11 @@ async function liveBookAltSpanText(plugin: LoomLoomPlugin, project: ProjectDef, 
 	// the caller's own `syncOutgoingBookAltOption` no-ops and shows the
 	// sidecar's last-known text instead, same as before this sync existed.
 	try {
-		const raw = await plugin.app.vault.cachedRead(file);
+		// `vault.read`, not `cachedRead` — cheap insurance against the same
+		// staleness class as `useBookText`'s own fix, even though this
+		// particular read already had a documented "essentially never
+		// happens in practice" tolerance for it.
+		const raw = await plugin.app.vault.read(file);
 		const span = findAnnotationSpans(raw).find((s) => s.kind === 'alt' && s.id === id);
 		return span ? raw.slice(span.contentFrom, span.contentTo) : null;
 	} catch (e) {
@@ -780,6 +814,41 @@ export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef |
 		});
 	};
 
+	/** `ActChapterBlocks`'s own read-only cycle: `handleCycleAlt` above
+	 *  assumes the caller's own field already committed the swap to disk —
+	 *  true for the buffered/per-keystroke-committing Editor and Chapter
+	 *  fields, false for a read-only field (`onChange` is a no-op there, so
+	 *  nothing writes the sidecar's chosen text back into the document by
+	 *  itself). Mirrors `handleOpenAltMenu`'s own already-correct shape
+	 *  instead: write the sidecar, then explicitly call
+	 *  `replaceAltContentInBook` to apply the swap. **Deliberately ignores
+	 *  the `outgoingLiveText` parameter `cycleAltInPlace` (markdown-field.tsx)
+	 *  passes** — a real, reported bug this fixes: a read-only field's own
+	 *  doc is a downstream MIRROR of disk, never a live typing buffer (there
+	 *  is nothing to hand-edit in `readOnly` mode), so it can lag behind the
+	 *  PREVIOUS cycle's own write by the time a second click lands. The
+	 *  earlier version compared `outgoingLiveText` against the stored option
+	 *  and treated any mismatch as a hand-edit worth preserving — but a
+	 *  mismatch here only ever meant "this field hasn't caught up yet,"
+	 *  and preserving it overwrote a DIFFERENT (not-yet-displayed) option's
+	 *  real text with stale wording, collapsing two options to the same
+	 *  string after a couple of quick clicks. Always trusting the sidecar's
+	 *  own stored text (never comparing against the field) is correct here:
+	 *  there is no other source of truth a read-only field could diverge
+	 *  from. */
+	const handleCycleAltReadOnly = (id: string) => {
+		if (!project) return;
+		void mutateScriptNotes(plugin.app, project, (file) => {
+			const entry = file.altText[id];
+			if (!entry || entry.options.length < 2) return file;
+			const activeIndex = (entry.activeIndex + 1) % entry.options.length;
+			return { ...file, altText: { ...file.altText, [id]: { ...entry, activeIndex, acceptedIndex: null } } };
+		}).then((next) => {
+			const cur = next.altText[id];
+			if (cur) void replaceAltContentInBook(plugin, project, id, cur.options[cur.activeIndex]);
+		});
+	};
+
 	const handleOpenAltMenu = (id: string) => {
 		if (!project) return;
 		const entry0 = scriptNotes.altText[id];
@@ -897,6 +966,7 @@ export function useBookAnnotations(plugin: LoomLoomPlugin, project: ProjectDef |
 		handleDeleteCommentEntry,
 		handleAddCommentReply,
 		handleCycleAlt,
+		handleCycleAltReadOnly,
 		handleOpenAltMenu,
 	};
 }
@@ -924,6 +994,7 @@ export function ActChapterBlocks({
 	emptyMessage,
 	annotations,
 	highlightedAnnotationId,
+	onOpenChapter,
 }: {
 	plugin: LoomLoomPlugin;
 	bookText: string | null;
@@ -933,9 +1004,18 @@ export function ActChapterBlocks({
 	onOpenLink: (target: string, newTab?: boolean) => void;
 	emptyMessage: ReactElement;
 	/** Comments/alternative-text — optional, same as `MarkdownField`'s own
-	 *  props (omitting it leaves every chapter's field exactly as before). */
+	 *  props (omitting it leaves every chapter's field exactly as before).
+	 *  Alt-text cycling/picking uses `handleCycleAltReadOnly` (not
+	 *  `handleCycleAlt`, which assumes the caller's own field already
+	 *  committed the swap to disk — never true for these read-only
+	 *  fields). */
 	annotations?: ReturnType<typeof useBookAnnotations>;
 	highlightedAnnotationId?: string | null;
+	/** Right-click "Open this chapter" on a position within a chapter's own
+	 *  block — passed straight through to that chapter's `MarkdownField`
+	 *  (`onOpenChapter`'s own doc comment there). Optional: the Chapter
+	 *  page's own standalone Preview has nothing further to open FROM. */
+	onOpenChapter?: (chapterId: string, offset: number) => void;
 }): ReactElement {
 	if (chapters.length === 0) return emptyMessage;
 	return (
@@ -962,8 +1042,11 @@ export function ActChapterBlocks({
 							comments={annotations?.comments}
 							altText={annotations?.altText}
 							onOpenComment={annotations?.handleOpenComment}
+							onCycleAlt={annotations?.handleCycleAltReadOnly}
+							onOpenAltMenu={annotations?.handleOpenAltMenu}
 							highlightedAnnotationId={highlightedAnnotationId}
 							annotationGutter
+							onOpenChapter={onOpenChapter ? (offset) => onOpenChapter(ch.chapterId, offset) : undefined}
 						/>
 					</div>
 				);
@@ -995,26 +1078,13 @@ export class BookView extends LoomFileReactView {
 }
 
 /**
- * The whole-book view: Editor is a SINGLE unified `MarkdownField` over the
- * raw whole-book text (Act/Chapter `#`/`##` headings render inline via that
- * field's own heading decoration, same as any other markdown heading — no
- * per-chapter boxes, no per-act dividers), mirroring `ScriptView`'s own one
- * continuous `FountainField`. Preview and Outline still show every Act in
- * order with its own Chapters (`ActChapterBlocks` for Preview's read-only
- * blocks; a drag-reorder tree for Outline) — Preview's per-chapter framing
- * reads fine there since nothing is being edited, and Outline is a
- * structural tree, not prose.
- *
- * Typing only updates the CM6 buffer and `bookDraftRef` — never the vault —
- * and the actual write happens on blur (`commitBookDraft`, fired on a real
- * blur AND on the teardown blur when Editor unmounts switching to Preview/
- * Outline), queued through `bookCommitQueueRef`/`queueBookEdit` so a
- * structural edit (Outline reorder) can't land out of order against a
- * still-in-flight draft commit. Mirrors `ScriptView`'s own
- * `text`/`onBlur`/`commitQueue` exactly — the reason THAT design commits on
- * blur rather than every keystroke (performance and race-avoidance over a
- * whole document, not just one small excerpt) applies here too now that
- * Editor is one buffer instead of many small independent ones.
+ * The whole-book view: Preview shows every Act in order with its own
+ * Chapters (`ActChapterBlocks`, read-only) and Outline is a drag-reorder
+ * tree — the only two panes; editing happens on the Chapter entity page's
+ * own field (the one remaining live editor for Prose), never here.
+ * `bookCommitQueueRef`/`queueBookEdit` still serializes Outline's own
+ * reorders so two structural edits in flight at once can't land out of
+ * order.
  *
  * Cross-act chapter dragging is deliberately NOT supported (Outline mode) —
  * same "v1 ships same-act reorder only" scope call as the Act page's own
@@ -1038,7 +1108,6 @@ function Book({ view }: { view: BookView }): ReactElement {
 	 *  Editor→Preview/Outline switch), queued so an overlapping structural
 	 *  edit (Outline reorder, "+ New act") lands in request order instead of
 	 *  racing a still-in-flight commit. */
-	const bookDraftRef = useRef<string | null>(null);
 	const bookCommitQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 	/** A real, confirmed gap against `script-view.tsx`'s own `commit` (see
 	 *  that function's doc comment — this is a straight port of its `.catch`
@@ -1049,7 +1118,8 @@ function Book({ view }: { view: BookView }): ReactElement {
 	 *  `.then()` on an already-rejected promise never runs its callback, that
 	 *  one failure would silently wedge EVERY edit queued after it for the
 	 *  rest of this `Book` component's lifetime, with nothing visible to the
-	 *  user beyond "my edits stopped landing." */
+	 *  user beyond "my edits stopped landing." Outline's own reorders are the
+	 *  only thing still going through this queue. */
 	const queueBookEdit = (apply: (text: string) => string | null) => {
 		if (!project) return;
 		const run = bookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
@@ -1057,16 +1127,10 @@ function Book({ view }: { view: BookView }): ReactElement {
 			console.error('Loom Loom: could not commit a book edit', e);
 		});
 	};
-	const commitBookDraft = () => {
-		const draft = bookDraftRef.current;
-		bookDraftRef.current = null;
-		if (draft === null) return;
-		queueBookEdit(() => draft);
-	};
 
-	const [mode, setMode] = useState<'editor' | 'preview' | 'outline'>(() => {
+	const [mode, setMode] = useState<'preview' | 'outline'>(() => {
 		const saved = file ? window.localStorage.getItem(`loom-book-mode:${file.path}`) : null;
-		return saved === 'preview' || saved === 'outline' ? saved : 'editor';
+		return saved === 'outline' ? saved : 'preview';
 	});
 	useEffect(() => {
 		if (file) window.localStorage.setItem(`loom-book-mode:${file.path}`, mode);
@@ -1083,73 +1147,26 @@ function Book({ view }: { view: BookView }): ReactElement {
 	const [highlightedAnnotationId, setHighlightedAnnotationId] = useState<string | null>(null);
 	const contentRef = useRef<HTMLDivElement | null>(null);
 	const [collapsedActs, setCollapsedActs] = useState<Set<string>>(new Set());
-
-	/** Editor mode's own box — fixed height, resizable, scrolls internally,
-	 *  remembered per file — mirrors Script's `.loom-writer-editor` exactly
-	 *  (same class, same `loom-*-editor-height:<path>` localStorage
-	 *  mechanism), restored before the ResizeObserver starts watching so its
-	 *  own first callback doesn't immediately overwrite what was just set. */
-	const editorWrapperRef = useRef<HTMLDivElement | null>(null);
-	/** The unified Editor field's own imperative handle — used by the
-	 *  comment/alt-text search's `gotoMatch` to scroll a match into view
-	 *  BEFORE looking up its rendered DOM element, since CM6 only renders
-	 *  `visibleRanges`: a match currently scrolled out of view otherwise has
-	 *  no DOM element yet for that lookup to find. */
-	const bookFieldRef = useRef<MarkdownFieldHandle | null>(null);
-	useEffect(() => {
-		if (mode !== 'editor' || !file) return;
-		const editor = editorWrapperRef.current;
-		if (!editor) return;
-		const key = `loom-book-editor-height:${file.path}`;
-		const saved = window.localStorage.getItem(key);
-		if (saved) editor.style.height = saved;
-		const observer = new ResizeObserver(() => {
-			if (editor.style.height) window.localStorage.setItem(key, editor.style.height);
-		});
-		observer.observe(editor);
-		return () => observer.disconnect();
-	}, [file, mode]);
+	/** Comments/Alternatives browse-all panels — mirrors Script's own
+	 *  `openSidePanel` exclusivity (script-view.tsx), just without a 'nav'
+	 *  option, since Book has no equivalent overlay nav tree (Outline is a
+	 *  whole separate mode here, not a toggled panel). */
+	const [sidePanel, setSidePanel] = useState<'comments' | 'alt' | null>(null);
 
 	/** Preview mode's own scroller — mirrors Script's `.loom-screenplay`. */
 	const previewWrapperRef = useRef<HTMLDivElement | null>(null);
 
-	/** Switching Editor<->Preview keeps roughly the same READING position —
-	 *  mirrors Script's Script<->Pages scroll sync in spirit, simplified: Book
-	 *  has no per-field CM6 ref the way `FountainField` exposes (each chapter
-	 *  is its own `MarkdownField` instance, and that field has no imperative
-	 *  handle at all), so exact line-level restore isn't available. Both
-	 *  modes render the SAME acts/chapters in the SAME order, though, so a
-	 *  scroll-height FRACTION carries over close enough in practice. */
-	const pendingScrollFractionRef = useRef<number | null>(null);
 	/** Scrolls the tabs row into view on every click — mirrors Script's own
 	 *  `clickTab`/`clickActTab` (`scrollTabsIntoView`), even a re-click of the
 	 *  pane already active, so working in BookView from wherever the page
 	 *  happens to be scrolled is one click away. */
 	const tabsRef = useRef<HTMLDivElement | null>(null);
-	const switchMode = (next: 'editor' | 'preview' | 'outline') => {
-		if (next !== mode) {
-			const fromBox = mode === 'editor' ? editorWrapperRef.current : mode === 'preview' ? previewWrapperRef.current : null;
-			if (fromBox && (next === 'editor' || next === 'preview')) {
-				const range = fromBox.scrollHeight - fromBox.clientHeight;
-				pendingScrollFractionRef.current = range > 0 ? fromBox.scrollTop / range : 0;
-			}
-			setMode(next);
-		}
+	const switchMode = (next: 'preview' | 'outline') => {
+		if (next !== mode) setMode(next);
 		window.requestAnimationFrame(() => {
 			tabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 		});
 	};
-	useEffect(() => {
-		const fraction = pendingScrollFractionRef.current;
-		if (fraction === null) return;
-		const toBox = mode === 'editor' ? editorWrapperRef.current : mode === 'preview' ? previewWrapperRef.current : null;
-		if (!toBox) return;
-		pendingScrollFractionRef.current = null;
-		window.requestAnimationFrame(() => {
-			const range = toBox.scrollHeight - toBox.clientHeight;
-			if (range > 0) toBox.scrollTop = fraction * range;
-		});
-	}, [mode, bookText]);
 
 	// --- generic loomSeq drag-reorder, mirrors entity-view.tsx's own seqGrip
 	// (a third independent copy of this pattern, same as script-view.tsx's
@@ -1231,24 +1248,24 @@ function Book({ view }: { view: BookView }): ReactElement {
 		openEntityLink(plugin, view, file.path, target, newTab);
 	};
 
-	/** Ctrl/Cmd+click on an Act (`level === 1`)/Chapter (`level === 2`)
-	 *  heading in the unified editor (`MarkdownField`'s own `onOpenHeading`)
-	 *  — resolves the heading's `[[loom:<id>]]` marker to its backing note
-	 *  and opens it, restoring the click-to-open affordance the old per-
-	 *  chapter `ActChapterBlocks` Editor blocks had via their heading
-	 *  buttons. */
-	const openBookHeading = (loomId: string, level: number) => {
+	/** Preview's right-click "Open this chapter" (`ActChapterBlocks`'s
+	 *  `onOpenChapter`, via `MarkdownField`'s own contextmenu handler) —
+	 *  resolves the chapter id to its backing note and hands off the
+	 *  clicked position through the exact `localStorage` key the Chapter
+	 *  page's own mount-time restore reads (`pendingChapterScrollLineRef`,
+	 *  entity-view.tsx — a character offset, not a line, since Chapter's
+	 *  field has no line-based `scrollToLine`), mirroring
+	 *  `PagesPreviewBody`'s own "Open this scene" (script-view.tsx). `offset`
+	 *  is already in the same space Chapter's own page's field uses —
+	 *  both render `chapterBookText(bookText, chapterId)` verbatim, with no
+	 *  further offset translation the way Fountain's heading-stripped
+	 *  excerpts need. */
+	const openThisChapter = (chapterId: string, offset: number) => {
 		if (!project) return;
-		const type = level === 1 ? 'act' : 'chapter';
-		const record = plugin.indexer
-			.getAll(type, project.root)
-			.find((r) => (type === 'act' ? r.actId : r.chapterId) === loomId);
-		if (record) view.openEntity(record.path);
-	};
-
-	const createLinkEntity = (entered: string, insert: (linkInsert: string) => void) => {
-		if (!project) return;
-		openCreateLinkEntity(plugin, project, entered, insert);
+		const record = plugin.indexer.getAll('chapter', project.root).find((r) => r.chapterId === chapterId);
+		if (!record) return;
+		window.localStorage.setItem(`loom-chapter-script-line:${record.path}`, String(offset));
+		view.openEntity(record.path);
 	};
 
 	if (!project) {
@@ -1359,21 +1376,37 @@ function Book({ view }: { view: BookView }): ReactElement {
 		setMatchIndex(next);
 		const m = bookMatches[next];
 		setHighlightedAnnotationId(m.kind === 'altOption' ? m.id : null);
-		// Editor mode is ONE unified CM6 buffer over the whole book now — it
-		// only renders `visibleRanges`, so a match currently scrolled out of
-		// view has no DOM element yet for the query below to find. Scroll the
-		// field itself to the match's real document position FIRST (Preview
-		// mode still renders every chapter's own small field in full, so this
-		// never applies there).
-		if (mode === 'editor' && bookText !== null) {
-			const span = findAnnotationSpans(bookText).find((s) => s.id === m.id);
-			if (span) bookFieldRef.current?.scrollToPos(span.contentFrom);
-		}
 		window.requestAnimationFrame(() => {
 			const el = contentRef.current?.querySelector(`[data-loom-annotation-content="${m.id}"]`);
 			if (!(el instanceof HTMLElement)) return;
 			el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 			if (m.kind === 'comment') annotations.handleOpenComment(m.id, el.getBoundingClientRect());
+		});
+	};
+
+	// Comments/Alternatives browse-all panels' own row data — shared with
+	// Script's identical panels (script-notes.ts's `unresolvedCommentRows`/
+	// `undecidedAltRows`, rendered via `CommentsBrowserPanel`/
+	// `AlternativesBrowserPanel`, annotation-popover.tsx). Computed over the
+	// WHOLE book text — `findAnnotationSpans` doesn't need to be scoped to a
+	// chapter for this, ids are globally unique and the DOM lookup below
+	// resolves by id regardless of which chapter's own excerpt originally
+	// discovered it.
+	const unresolvedCommentRowsList = bookText !== null ? unresolvedCommentRows(bookText, annotations.comments) : [];
+	const undecidedAltRowsList = bookText !== null ? undecidedAltRows(bookText, annotations.altText) : [];
+
+	/** Both browse-all panels' own "jump to this text" action — mirrors
+	 *  `gotoMatch` above exactly (same DOM lookup, same comment-popover
+	 *  open), just entered from a panel row instead of a search step. */
+	const jumpToAnnotation = (span: AnnotationSpan) => {
+		setSidePanel(null);
+		switchMode('preview');
+		setHighlightedAnnotationId(span.kind === 'alt' ? span.id : null);
+		window.requestAnimationFrame(() => {
+			const el = contentRef.current?.querySelector(`[data-loom-annotation-content="${span.id}"]`);
+			if (!(el instanceof HTMLElement)) return;
+			el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+			if (span.kind === 'comment') annotations.handleOpenComment(span.id, el.getBoundingClientRect());
 		});
 	};
 
@@ -1401,29 +1434,6 @@ function Book({ view }: { view: BookView }): ReactElement {
 			<div className="loom-writer-layout">
 				<div className="loom-writer-main" ref={contentRef}>
 					<div className="loom-writer-tabs" ref={tabsRef}>
-						<div className="loom-seg">
-							<button
-								className={mode === 'editor' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-								onClick={() => switchMode('editor')}
-							>
-								{t('view.entity.script.editorLabel')}
-							</button>
-							<button
-								className={mode === 'preview' ? 'loom-seg-btn loom-seg-on' : 'loom-seg-btn'}
-								onClick={() => switchMode('preview')}
-							>
-								{t('view.entity.script.pagesPreview')}
-							</button>
-						</div>
-						<div className="loom-shell-spacer" />
-						<button
-							className={mode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
-							onClick={() => switchMode('outline')}
-						>
-							{t('view.entity.script.outline')}
-						</button>
-					</div>
-					<div className="loom-writer-toolbar">
 						{mode !== 'outline' ? (
 							<>
 								<div className="loom-search-wrap">
@@ -1478,19 +1488,52 @@ function Book({ view }: { view: BookView }): ReactElement {
 								>
 									<Icon name="chevron-down" />
 								</button>
-								<span className="loom-writer-stat">
-									{query.trim() === ''
-										? ''
-										: bookMatches.length === 0
-											? t('view.entity.script.noMatches')
-											: t('view.entity.script.matchCount', {
-													current: (matchIndex % bookMatches.length) + 1,
-													total: bookMatches.length,
-												})}
-								</span>
 							</>
 						) : null}
+						<div className="loom-script-side-toggles">
+							{/* Mirrors Script's own pair (script-view.tsx) exactly, down to
+							    the shared `CommentsBrowserPanel`/`AlternativesBrowserPanel`
+							    components (annotation-popover.tsx) rendered below —
+							    mutually exclusive with each other via `sidePanel`. */}
+							<button
+								className={sidePanel === 'comments' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+								aria-label={sidePanel === 'comments' ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
+								onClick={() => setSidePanel(sidePanel === 'comments' ? null : 'comments')}
+							>
+								<Icon name="message-square" />
+							</button>
+							<button
+								className={sidePanel === 'alt' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+								aria-label={sidePanel === 'alt' ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
+								onClick={() => setSidePanel(sidePanel === 'alt' ? null : 'alt')}
+							>
+								<Icon name="repeat" fallback="arrow-right-left" />
+							</button>
+						</div>
+						{mode !== 'outline' ? (
+							<span className="loom-writer-stat">
+								{query.trim() === ''
+									? ''
+									: bookMatches.length === 0
+										? t('view.entity.script.noMatches')
+										: t('view.entity.script.matchCount', {
+												current: (matchIndex % bookMatches.length) + 1,
+												total: bookMatches.length,
+											})}
+							</span>
+						) : null}
 						<div className="loom-shell-spacer" />
+						{/* Preview is the sole read-only reading view now — this is the
+						    one remaining toggle, swapping in the act/chapter
+						    drag-reorder tree instead. Sits to the LEFT of the
+						    creation-button group below, not on the far right — those
+						    own that slot. */}
+						<button
+							className={mode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
+							onClick={() => switchMode('outline')}
+						>
+							{t('view.entity.script.outline')}
+						</button>
 						<button
 							className="loom-rel-add"
 							onClick={() => new CreateEntityModal(plugin, 'chapter', project, {}).open()}
@@ -1635,48 +1678,26 @@ function Book({ view }: { view: BookView }): ReactElement {
 								})
 							)}
 						</div>
-					) : mode === 'editor' ? (
-						<div className="loom-writer-editor loom-book-writer-editor" ref={editorWrapperRef}>
-							{bookText === null ? (
-								<div className="loom-attendance-empty">{t('view.script.noActsYetBook')}</div>
-							) : (
-								<MarkdownField
-									ref={bookFieldRef}
-									app={plugin.app}
-									value={bookText}
-									names={linkNames}
-									linkLabels={linkLabels}
-									ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
-									onOpenLink={openLinkTarget}
-									onCreateEntity={createLinkEntity}
-									onChange={(v) => {
-										bookDraftRef.current = v;
-									}}
-									onBlur={commitBookDraft}
-									comments={annotations.comments}
-									altText={annotations.altText}
-									onCreateComment={annotations.handleCreateComment}
-									onCreateAlt={annotations.handleCreateAlt}
-									onOpenComment={annotations.handleOpenComment}
-									onCycleAlt={annotations.handleCycleAlt}
-									onOpenAltMenu={(id) => {
-										// `AltTextModal`'s Draft/Accept/edit-option callbacks read
-										// the CURRENT on-disk text (`replaceAltContentInBook`) — flush
-										// any not-yet-committed draft first, or a modal action taken
-										// right after typing could read stale text and have its own
-										// write clobbered back out by the draft's own (later-queued)
-										// commit.
-										commitBookDraft();
-										annotations.handleOpenAltMenu(id);
-									}}
-									highlightedAnnotationId={highlightedAnnotationId}
-									onOpenHeading={openBookHeading}
-									annotationGutter
-								/>
-							)}
-						</div>
 					) : (
 						<div className="loom-screenplay" ref={previewWrapperRef}>
+							{sidePanel === 'comments' ? (
+								<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+									<CommentsBrowserPanel
+										rows={unresolvedCommentRowsList}
+										onJump={jumpToAnnotation}
+										onClose={() => setSidePanel(null)}
+									/>
+								</div>
+							) : null}
+							{sidePanel === 'alt' ? (
+								<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
+									<AlternativesBrowserPanel
+										rows={undecidedAltRowsList}
+										onJump={jumpToAnnotation}
+										onClose={() => setSidePanel(null)}
+									/>
+								</div>
+							) : null}
 							{acts.length === 0 ? (
 								<div className="loom-book-page">
 									<div className="loom-attendance-empty">{t('view.script.noActsYetBook')}</div>
@@ -1705,6 +1726,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 													}
 													annotations={annotations}
 													highlightedAnnotationId={highlightedAnnotationId}
+													onOpenChapter={openThisChapter}
 												/>
 											</div>
 										))}
