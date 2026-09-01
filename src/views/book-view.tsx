@@ -1198,11 +1198,10 @@ function Book({ view }: { view: BookView }): ReactElement {
 	 *  pane already active, so working in BookView from wherever the page
 	 *  happens to be scrolled is one click away. */
 	const tabsRef = useRef<HTMLDivElement | null>(null);
+	const scrollTabsIntoView = () => tabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	const switchMode = (next: 'preview' | 'outline') => {
 		if (next !== mode) setMode(next);
-		window.requestAnimationFrame(() => {
-			tabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-		});
+		window.requestAnimationFrame(scrollTabsIntoView);
 	};
 
 	// --- generic loomSeq drag-reorder, mirrors entity-view.tsx's own seqGrip
