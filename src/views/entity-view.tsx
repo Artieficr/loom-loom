@@ -6187,6 +6187,15 @@ function EntityPage({ view }: { view: EntityView }) {
 								return (
 									<>
 										<div className="loom-writer-tabs" ref={actScriptTabsRef}>
+											<button
+												className="loom-rel-filter"
+												aria-label={t('view.entity.script.focusToolbar')}
+												onClick={() =>
+													actScriptTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+												}
+											>
+												<Icon name="focus" />
+											</button>
 											{actScriptMode !== 'outline' ? (
 												<>
 											<div className="loom-search-wrap">
@@ -6375,6 +6384,13 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : record.type === 'act' && bookMode && project ? (
 				<div className="loom-field loom-field-sep">
 					<div className="loom-writer-tabs" ref={actBookTabsRef}>
+						<button
+							className="loom-rel-filter"
+							aria-label={t('view.entity.script.focusToolbar')}
+							onClick={() => actBookTabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+						>
+							<Icon name="focus" />
+						</button>
 						{actBookMode !== 'outline' ? (
 							<input
 								type="search"
