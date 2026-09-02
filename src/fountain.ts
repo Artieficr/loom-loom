@@ -228,6 +228,23 @@ const ENTITY_LINK_RE = /@\[([^\]|]+)(?:\|([^\]]+))?\]/g;
 const BRANCH_TAG_RE = /^=\s*branch:\s*(.+)$/i;
 
 /**
+ * `= gather` — a plugin-specific convention closing a branch group: everything
+ * after it, until the next real section/scene heading, stops being attributed
+ * to the last branch. Modeled on ink's "gather" concept (the dominant real
+ * convention for "branches converge back to one thread" in interactive
+ * narrative tooling) rather than invented from scratch, and — like `= branch:`
+ * — rides Fountain's own non-exporting synopsis line syntax so it's inert in
+ * any other Fountain app. No id: it always closes whichever branch frame is
+ * currently open, never a specific one.
+ */
+const GATHER_TAG_RE = /^gather$/i;
+
+/** Whether a synopsis element's own text (already `=`-stripped) is a `= gather` marker. */
+export function isGatherText(text: string): boolean {
+	return GATHER_TAG_RE.test(text.trim());
+}
+
+/**
  * Every `@[...]` span in `text`, with string offsets for decoration.
  *
  * `nameFrom`/`nameTo` and `displayFrom`/`displayTo` are the RAW (untrimmed)
@@ -992,6 +1009,21 @@ export function parseFountain(text: string): ParsedScript {
 				loomId: sec?.loomId ?? null,
 				branchGroup: sec?.branchGroup ?? null,
 			});
+			continue;
+		}
+		if (element.type === 'synopsis' && isGatherText(element.text)) {
+			// Closes whichever branch frame is currently open — doesn't close the
+			// current SCENE (a gather resumes the same scene's main thread, it
+			// never starts a new one) and creates no element of its own. This is
+			// the whole fix: `nextSectionAtLevel` already bounds a branch
+			// section's own SPAN correctly; the actual gap was that content after
+			// a resolved choice point kept being attributed to the last branch
+			// via `branchLoomId`, below, with nothing to stop it short of a new
+			// scene heading (which already force-closes an open branch frame,
+			// same idea, just for the "a new scene started" trigger instead).
+			while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].branchGroup !== null) {
+				sectionStack.pop();
+			}
 			continue;
 		}
 		if (element.type === 'page-break') {
@@ -1804,46 +1836,635 @@ export function reorderScenesInSection(
 }
 
 /**
+ * The NUMBERING scope for a decision point's shared `= branch:` value —
+ * `IDENTIFIER-SUBIDENTIFIER`, stripping a trailing `-<number-or-override>`
+ * segment when the value parses as exactly three non-empty dash-joined
+ * segments (the modular branch editor's own composed shape). Falls back to
+ * the WHOLE value, unchanged, for anything else.
+ *
+ * This is purely a NUMBERING concept, never a GROUPING one: `PROLOGUE-DP-01`
+ * and `PROLOGUE-DP-02` are two entirely separate decision points that happen
+ * to share the `PROLOGUE-DP` combo — only the trailing segment tells them
+ * apart. Every branch WITHIN one decision point still shares one
+ * byte-identical `= branch:` value (`reorderBranchGroup`/`branchGroupBounds`
+ * below group by exact equality, unchanged from how this always worked),
+ * copied verbatim to every sibling from branch 1's own fields, never
+ * differing by number within a group. This function only answers "which
+ * OTHER decision points does this one's number need to stay sequential
+ * against."
+ */
+export function branchComboKey(value: string): string {
+	const parts = value.split('-');
+	if (parts.length === 3 && parts.every((p) => p.trim() !== '')) {
+		return `${parts[0]}-${parts[1]}`;
+	}
+	return value;
+}
+
+/** Every sibling section in one decision point (exact `= branch:` value
+ *  equality), plus where its block starts/ends and where its `= gather` line
+ *  (if any) currently sits — found fresh from the parse, never stored. The
+ *  one shared "what's in this decision point" read behind gather placement,
+ *  branch removal, and cut/paste. */
+export interface BranchGroupBounds {
+	/** In document order. */
+	branches: (ParsedSection & { loomId: string })[];
+	start: number;
+	/** Exclusive — `nextSectionAtLevel` off the last branch, or EOF. */
+	end: number;
+	gatherLine: number | null;
+}
+
+export function branchGroupBounds(parsed: ParsedScript, groupId: string): BranchGroupBounds | null {
+	const branches = parsed.sections
+		.filter((sec): sec is ParsedSection & { loomId: string } => sec.branchGroup === groupId && sec.loomId !== null)
+		.sort((a, b) => a.line - b.line);
+	if (branches.length === 0) return null;
+	const last = branches[branches.length - 1];
+	const lastElement = parsed.elements[parsed.elements.length - 1];
+	// The STRUCTURAL bound — the next section at this depth, or EOF — is
+	// exactly the pre-`= gather` behavior (a lone/un-gathered group's last
+	// branch swallows everything after it, the very bug this feature exists
+	// to fix). Once a gather line exists inside that structural span, the
+	// group's real end is right AFTER it — content past a gather is no
+	// longer part of the group, structural bound or not.
+	// `+ 1`: this is an EXCLUSIVE upper bound, so using the last element's
+	// own line unmodified would exclude that very element from the gather
+	// search below whenever `= gather` itself is the last thing in the
+	// document (no trailing scene text after it) — a real off-by-one caught
+	// by testing, not a hypothetical.
+	const structuralEnd = nextSectionAtLevel(parsed, last.line, last.level) ?? (lastElement?.line ?? last.line) + 1;
+	const gather = parsed.elements.find(
+		(el): el is FountainElement & { type: 'synopsis' } =>
+			el.type === 'synopsis' && isGatherText(el.text) && el.line >= branches[0].line && el.line < structuralEnd
+	);
+	const end = gather ? gather.line + 1 : structuralEnd;
+	return { branches, start: branches[0].line, end, gatherLine: gather?.line ?? null };
+}
+
+/**
+ * The next available number for a NEW decision point using a given
+ * identifier+subidentifier combo — one past the highest bare-number decision
+ * point already using that combo anywhere in the document (1 if none yet).
+ * A text-override decision point (`…-KEY`) doesn't count and never blocks a
+ * number from being reused. Decision points are deduplicated by their own
+ * exact `= branch:` value first — several sibling branches share ONE value
+ * and must only count once.
+ */
+export function nextComboNumber(parsed: ParsedScript, comboKey: string): number {
+	const seen = new Set<string>();
+	let max = 0;
+	for (const sec of parsed.sections) {
+		if (sec.branchGroup === null || branchComboKey(sec.branchGroup) !== comboKey) continue;
+		if (seen.has(sec.branchGroup)) continue;
+		seen.add(sec.branchGroup);
+		const parts = sec.branchGroup.split('-');
+		if (parts.length === 3 && /^\d+$/.test(parts[2])) max = Math.max(max, Number(parts[2]));
+	}
+	return max + 1;
+}
+
+/**
+ * Document-order cascading renumber for DECISION POINTS (not individual
+ * branches — every branch within one decision point shares ONE value, and
+ * this rewrites all of them together), direct sibling of `renumberScenes`: a
+ * decision point whose value parses as `IDENTIFIER-SUBIDENTIFIER-<bare
+ * number>` is kept sequential (1..N) among every OTHER decision point
+ * sharing its combo, ordered by each one's own first branch's line; a
+ * text-override decision point (`…-KEY`) is left untouched and does NOT
+ * consume a counter slot, so `…-1, …-KEY, …-2` falls out naturally. A combo
+ * with no numbered decision point at all (every hand-typed legacy branch
+ * sharing one identical non-numeric value, e.g. `CAR-ITEMS-GLOVEBOX`) is
+ * untouched — there's nothing for this to renumber. Idempotent and cheap
+ * enough to run on every commit, same trigger `renumberScenes` already uses.
+ */
+export function renumberBranchGroups(text: string): string {
+	const parsed = parseFountain(text);
+	const lines = text.split(/\r?\n/);
+	// One decision point = one distinct `= branch:` value, however many
+	// sibling sections share it.
+	const pointsByValue = new Map<string, { firstLine: number; sectionLines: number[] }>();
+	for (const sec of parsed.sections) {
+		if (sec.branchGroup === null) continue;
+		const entry = pointsByValue.get(sec.branchGroup);
+		if (entry) {
+			entry.firstLine = Math.min(entry.firstLine, sec.line);
+			entry.sectionLines.push(sec.line);
+		} else {
+			pointsByValue.set(sec.branchGroup, { firstLine: sec.line, sectionLines: [sec.line] });
+		}
+	}
+	const byCombo = new Map<string, { value: string; firstLine: number; sectionLines: number[] }[]>();
+	for (const [value, entry] of pointsByValue) {
+		const key = branchComboKey(value);
+		if (!byCombo.has(key)) byCombo.set(key, []);
+		byCombo.get(key)!.push({ value, ...entry });
+	}
+	for (const [key, points] of byCombo) {
+		points.sort((a, b) => a.firstLine - b.firstLine);
+		let n = 0;
+		for (const point of points) {
+			const parts = point.value.split('-');
+			if (parts.length !== 3 || !/^\d+$/.test(parts[2])) continue;
+			n += 1;
+			// Numeric comparison, not string comparison — a hand-typed
+			// zero-padded number ("01") that's already in the right SEQUENCE
+			// position is left completely alone, padding and all; only a
+			// number genuinely out of sequence gets rewritten (to the
+			// unpadded form). Without this, every existing "01"/"02"/...
+			// style decision point in the vault would get silently stripped
+			// to "1"/"2"/... the very first time this ran, on content
+			// nobody asked to have reformatted.
+			if (Number(parts[2]) === n) continue;
+			const wanted = `${key}-${n}`;
+			for (const secLine of point.sectionLines) {
+				const tagLine = secLine + 1;
+				if (BRANCH_TAG_RE.test(lines[tagLine]?.trim() ?? '')) {
+					lines[tagLine] = `= branch: ${wanted}`;
+				}
+			}
+		}
+	}
+	return lines.join('\n');
+}
+
+/**
+ * Removes one branch from its decision point. Mirrors
+ * `handleDeleteAltOption`'s "shrink below minimum → flatten, strip the
+ * wrapper" contract exactly (script-view.tsx): a decision point with only
+ * ONE section left is no longer a choice point, so the survivor's
+ * `= branch:` tag, its printed `>**Title**<` label (nothing else will
+ * regenerate it once untagged), and the decision point's own `= gather` line
+ * are all removed, leaving an ordinary untagged section behind.
+ */
+export function removeBranchFromGroup(text: string, sectionId: string): string | null {
+	const parsed = parseFountain(text);
+	const section = parsed.sections.find((sec) => sec.loomId === sectionId && sec.branchGroup !== null);
+	if (!section || section.branchGroup === null) return null;
+	const groupId = section.branchGroup;
+	const bounds = branchGroupBounds(parsed, groupId);
+	if (!bounds) return null;
+	const isLastBranch = bounds.branches[bounds.branches.length - 1].loomId === sectionId;
+
+	const lines = text.split(/\r?\n/);
+	// Removing the group's own LAST branch has to stop its own span BEFORE
+	// an existing gather line, not the raw structural end — the gather
+	// belongs to the GROUP, not to whichever branch happened to carry it in
+	// its own trailing span, and must survive this removal (ending up,
+	// unmoved but shifted up by the removed span's length, correctly right
+	// after whichever branch is now last — nothing further to reposition).
+	// A non-last branch's own span is already correctly bounded by its next
+	// sibling's own heading regardless of gather.
+	const removeEnd =
+		isLastBranch && bounds.gatherLine !== null
+			? bounds.gatherLine
+			: (nextSectionAtLevel(parsed, section.line, section.level) ?? lines.length);
+	lines.splice(section.line, removeEnd - section.line);
+
+	const remaining = bounds.branches.filter((b) => b.loomId !== sectionId);
+	if (remaining.length >= 2) {
+		return lines.join('\n');
+	}
+
+	if (remaining.length === 0) {
+		// The group's only/last branch is gone — there's no surviving
+		// section carrying this `groupId` left for `branchGroupBounds`
+		// (which requires at least one matching branch to find anything at
+		// all, gather included) to locate it by, unlike the `=== 1` path
+		// below. A real, reported bug: an orphaned `= gather` was left
+		// behind forever, unreachable by any later cleanup, once this case
+		// went unhandled — increasingly common since `insertBranch` now
+		// gives every lone branch a gather from the moment it's created
+		// (own doc comment), not just once a real second branch arrives.
+		// Fixed directly from what's already known, no re-parse needed:
+		// when this branch WAS the group's last one and a gather existed,
+		// `removeEnd` above was deliberately set to stop BEFORE it (see
+		// that assignment's own comment) so the gather survives the
+		// splice — which means it now sits at exactly `section.line` in
+		// `lines`: everything from `section.line` up to the old gather
+		// line was just removed, so the gather shifts down to fill that
+		// exact spot. Strip it (and the blank line directly above it, if
+		// any) the same way the `>= 1`-remaining cleanup below does.
+		if (bounds.gatherLine !== null) {
+			let removeFrom = section.line;
+			if (removeFrom > 0 && lines[removeFrom - 1]?.trim() === '') removeFrom--;
+			lines.splice(removeFrom, section.line - removeFrom + 1);
+		}
+		return lines.join('\n');
+	}
+
+	// Down to 1 sibling: the group is no longer a choice point. Strip the
+	// group's own gather line (and the blank line directly above it, if
+	// any) — its line number is still valid pre-splice math below since
+	// it's re-found against the ALREADY-spliced text.
+	let result = lines.join('\n');
+	const afterRemoval = parseFountain(result);
+	const stillBounds = branchGroupBounds(afterRemoval, groupId);
+	if (stillBounds?.gatherLine !== null && stillBounds?.gatherLine !== undefined) {
+		const l2 = result.split(/\r?\n/);
+		let removeFrom = stillBounds.gatherLine;
+		if (removeFrom > 0 && l2[removeFrom - 1]?.trim() === '') removeFrom--;
+		l2.splice(removeFrom, stillBounds.gatherLine - removeFrom + 1);
+		result = l2.join('\n');
+	}
+	if (remaining.length === 1) {
+		const survivorId = remaining[0].loomId;
+		const reparsed = parseFountain(result);
+		const survivor = reparsed.sections.find((sec) => sec.loomId === survivorId);
+		if (survivor) {
+			const l3 = result.split(/\r?\n/);
+			const tagLine = survivor.line + 1;
+			if (BRANCH_TAG_RE.test(l3[tagLine]?.trim() ?? '')) l3.splice(tagLine, 1);
+			// The printed `>**Title**<` label, and any blank line directly
+			// above it, sit right beneath where the tag was.
+			let at = survivor.line + 1;
+			while (at < l3.length && l3[at].trim() === '') at++;
+			if (at < l3.length && /^>.*<$/.test(l3[at].trim())) {
+				let removeFrom = at;
+				if (removeFrom > survivor.line + 1 && l3[removeFrom - 1]?.trim() === '') removeFrom--;
+				l3.splice(removeFrom, at - removeFrom + 1);
+			}
+			result = l3.join('\n');
+		}
+	}
+	return result;
+}
+
+/**
  * Reorders every sibling section sharing ONE branch-point identifier
- * (`= branch: <id>`) to match `orderedSectionIds` exactly — the Scene page's
- * own Outline uses this, scoped to a single decision point: a branch from a
- * DIFFERENT identifier is never touched, mirroring the nav panel's own
- * `branchPoint` grouping (script-view.tsx's `buildNavTree`) — dragging a
- * branch into a different choice point wouldn't have a coherent meaning, so
- * it's simply not offered.
+ * (`= branch: <id>`, byte-identical — this is one decision point's own
+ * shared value, never shared with a DIFFERENT decision point even when both
+ * use the same identifier+subidentifier combo, which only the trailing
+ * number/text disambiguates) to match `orderedSectionIds` exactly — the
+ * Scene page's own Outline uses this, scoped to a single decision point: a
+ * branch from a DIFFERENT identifier is never touched, mirroring the nav
+ * panel's own `branchPoint` grouping (script-view.tsx's `buildNavTree`) —
+ * dragging a branch into a different choice point wouldn't have a coherent
+ * meaning, so it's simply not offered.
  *
  * Mirrors `reorderScenesInSection` one level further in: each branch's
  * ENTIRE block (its heading through everything nested beneath it, bounded by
  * `nextSectionAtLevel` rather than a fixed level so it works regardless of
  * how deep the branch sits) travels as one unit, captured up front and
- * spliced back in the requested order.
+ * spliced back in the requested order. A `= gather` line is the GROUP's own
+ * closing marker, not any one branch's content, and physically travels
+ * along with whichever block currently holds it (the block belonging to
+ * whichever branch was ORIGINALLY last) — so it's stripped out of wherever
+ * it lands inside the captured blocks and re-appended exactly once, after
+ * the whole rebuilt sequence, rather than trusting it to already sit after
+ * the NEW last branch.
  */
 export function reorderBranchGroup(text: string, groupId: string, orderedSectionIds: string[]): string | null {
 	const parsed = parseFountain(text);
-	const branches = parsed.sections
-		.filter((sec): sec is ParsedSection & { loomId: string } => sec.branchGroup === groupId && sec.loomId !== null)
-		.sort((a, b) => a.line - b.line);
-	if (branches.length === 0) return null;
+	const bounds = branchGroupBounds(parsed, groupId);
+	if (!bounds) return null;
+	const branches = bounds.branches;
 	const lines = text.split(/\r?\n/);
-	const trueEnd = (sec: ParsedSection) => nextSectionAtLevel(parsed, sec.line, sec.level) ?? lines.length;
+	const lastId = branches[branches.length - 1].loomId;
+	// Every branch but the last is already correctly bounded by its next
+	// sibling's own heading (untouched by gather); the last branch's own
+	// capture has to stop at the group's real end (`bounds.end`, gather-
+	// aware) or it would swallow trailing scene text through EOF — the exact
+	// bug `= gather` exists to fix.
+	const trueEnd = (sec: ParsedSection & { loomId: string }) =>
+		sec.loomId === lastId ? bounds.end : (nextSectionAtLevel(parsed, sec.line, sec.level) ?? lines.length);
 
 	const insertAt = branches[0].line;
-	const removeEnd = trueEnd(branches[branches.length - 1]);
+	const removeEnd = bounds.end;
 	const blocks = new Map<string, string[]>(branches.map((sec) => [sec.loomId, lines.slice(sec.line, trueEnd(sec))]));
 
 	const order = [
 		...orderedSectionIds.filter((id) => blocks.has(id)),
 		...branches.map((sec) => sec.loomId).filter((id) => !orderedSectionIds.includes(id)),
 	];
+	const hadGather = bounds.gatherLine !== null;
 	const rebuilt: string[] = [];
 	for (const id of order) {
 		const block = blocks.get(id);
 		if (!block) continue;
-		const clean = trimTrailingBlankLines(block);
+		let clean = trimTrailingBlankLines(block);
+		const gatherIdx = clean.findIndex((l) => l.trim() === '= gather');
+		if (gatherIdx !== -1) {
+			const from = gatherIdx > 0 && clean[gatherIdx - 1].trim() === '' ? gatherIdx - 1 : gatherIdx;
+			clean = trimTrailingBlankLines([...clean.slice(0, from), ...clean.slice(gatherIdx + 1)]);
+		}
 		rebuilt.push(...clean, '');
 	}
+	if (hadGather) rebuilt.push('= gather', '');
 
 	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
+	return lines.join('\n');
+}
+
+/**
+ * The decision point (its exact `= branch:` value) whose span covers `line`
+ * (0-indexed), or `null` if `line` isn't inside any branch group's overall
+ * range — the reverse lookup `branchGroupBounds` doesn't provide on its own
+ * (that one takes a known group id; this takes an arbitrary document
+ * position). Checks the WHOLE group span (`branchGroupBounds`'s gather-
+ * inclusive `start`/`end`), not each individual branch's own sub-range, so a
+ * right-click landing on the blank line BETWEEN two sibling branches — the
+ * group's own visual "joint" in the overlay — still resolves to the
+ * enclosing decision point. The modular branch editor's own right-click
+ * menu (fountain-field.tsx) uses this to decide whether "Cut branch group"
+ * applies at the clicked position.
+ */
+export function branchGroupAtLine(parsed: ParsedScript, line: number): string | null {
+	const seen = new Set<string>();
+	for (const sec of parsed.sections) {
+		if (sec.branchGroup === null || seen.has(sec.branchGroup)) continue;
+		seen.add(sec.branchGroup);
+		const bounds = branchGroupBounds(parsed, sec.branchGroup);
+		if (bounds && line >= bounds.start && line < bounds.end) return sec.branchGroup;
+	}
+	return null;
+}
+
+/**
+ * Rewrites one decision point's `= branch:` value on EVERY sibling sharing
+ * the old value, in one pass — the primitive behind the branch composer's
+ * editable Identifier/Subidentifier/Number fields (branch-overlay.tsx):
+ * every branch within a decision point shares one byte-identical value
+ * copied verbatim from branch 1, so an edit always has to move together,
+ * mirroring the per-decision-point rewrite `renumberBranchGroups` already
+ * does. Returns `null` if nothing in the document currently carries
+ * `oldValue` (a stale read racing a concurrent edit).
+ */
+export function setBranchTagValue(text: string, oldValue: string, newValue: string): string | null {
+	if (oldValue === newValue) return null;
+	const parsed = parseFountain(text);
+	const lines = text.split(/\r?\n/);
+	let changed = false;
+	for (const sec of parsed.sections) {
+		if (sec.branchGroup !== oldValue) continue;
+		const tagLine = sec.line + 1;
+		if (BRANCH_TAG_RE.test(lines[tagLine]?.trim() ?? '')) {
+			lines[tagLine] = `= branch: ${newValue}`;
+			changed = true;
+		}
+	}
+	return changed ? lines.join('\n') : null;
+}
+
+/**
+ * Rewrites just the identifier+subidentifier portion of a decision point's
+ * value, leaving its own trailing number/override segment untouched — what
+ * editing branch 1's Identifier/Subidentifier fields writes through, once
+ * the value already parses as the composer's own 3-segment shape
+ * (`IDENTIFIER-SUBIDENTIFIER-N`). A legacy free-text value (anything else)
+ * has no decomposed fields to edit in the first place — callers only reach
+ * this once they've already confirmed the 3-segment shape themselves (the
+ * same check `branchComboKey` makes), so a value that doesn't parse that way
+ * here is a caller bug, not a normal case, and returns `null`.
+ */
+export function rewriteComboPrefix(
+	text: string,
+	oldValue: string,
+	newIdentifier: string,
+	newSubidentifier: string
+): string | null {
+	const parts = oldValue.split('-');
+	if (parts.length !== 3 || parts.some((p) => p.trim() === '')) return null;
+	return setBranchTagValue(text, oldValue, `${newIdentifier}-${newSubidentifier}-${parts[2]}`);
+}
+
+/**
+ * Inserts a brand-new branch section — heading, `= branch:` tag, and its own
+ * printed `>**Title**<` label — either as a fresh decision point of its own,
+ * or as a new sibling joining an EXISTING one. The label is written directly
+ * here rather than left for `applyBranchLabels` to backfill: a caller going
+ * through `editScriptAndSync` never runs that pass (see that function's own
+ * doc comment for why it was added there for a RENAME instead of relying on
+ * this function).
+ *
+ * `anchor: { line }` (a brand-new decision point, a `new-group` draft):
+ * inserts right AFTER `line` — the empty line the user right-clicked to
+ * create it, itself left untouched so it keeps serving as the required
+ * blank line before the new heading. Gets its own `= gather` immediately
+ * (own doc comment on the `'line' in anchor` branch below has the full
+ * reasoning — it terminates the new section's span so it can't swallow
+ * whatever scene prose already followed the cursor) even though a single
+ * branch isn't really a choice point yet; `removeBranchFromGroup` strips it
+ * back out if the branch never gets a sibling. Heading level is fixed at 3
+ * (`###`), matching every existing decision point in real use (branches
+ * always sit nested inside a scene's own body, never at the act/section
+ * level).
+ *
+ * `anchor: { afterGroupId }` (`new-branch`, joining an existing decision
+ * point — `fields.branchValue` is expected to already equal `afterGroupId`
+ * verbatim, copied by the caller from branch 1's own value, never composed
+ * fresh here): if the group already has a `= gather` line, the new branch
+ * lands right before it, becoming the new last branch; if this is the
+ * group's SECOND branch (no gather exists yet), the new block lands right
+ * after the first branch's own content and a fresh `= gather` is appended
+ * immediately after it — the one moment a gather is created, mirroring
+ * `= gather`'s own "no gather until 2 branches" rule on the insert side.
+ * Matches the group's own existing heading level (`bounds.branches[0].level`),
+ * never a fixed one, so joining a group nested at some other depth still
+ * lines up with its siblings.
+ *
+ * Returns `null` when the anchor doesn't resolve — an unknown
+ * `afterGroupId`, most likely a stale draft racing a concurrent edit.
+ */
+export function insertBranch(
+	text: string,
+	anchor: { line: number } | { afterGroupId: string },
+	fields: {
+		title: string;
+		branchValue: string;
+		/** A caller-supplied id, used verbatim instead of rolling a fresh one
+		 *  here — for a caller that needs to know the new section's id
+		 *  SYNCHRONOUSLY, before this (necessarily async, disk-round-tripping)
+		 *  call ever resolves. `entity-view.tsx`'s `handleAddBranch` is the
+		 *  one caller: it needs the id immediately to mark that branch's
+		 *  Title field as "pending focus" in the SAME tick "+" is clicked, or
+		 *  the field can already have mounted (seeding its masked-blank
+		 *  display from a still-`null` pending id) by the time a
+		 *  post-write re-parse would otherwise have discovered it — a real,
+		 *  reported bug ("Untitled" showing as literal text instead of
+		 *  masking blank). Still re-checked against the actual `parsed` set
+		 *  below rather than trusted blindly, so a caller that got it
+		 *  slightly stale (unlikely — `newSceneId()`'s own space is huge)
+		 *  still can't produce a genuine collision. */
+		id?: string;
+	}
+): string | null {
+	const parsed = parseFountain(text);
+	const seen = allLoomIds(parsed);
+	const id = fields.id && !seen.has(fields.id) ? fields.id : freshLoomId(seen);
+	const title = fields.title.trim();
+	const label = `>**${title}**<`;
+
+	if ('line' in anchor) {
+		const lines = text.split(/\r?\n/);
+		if (anchor.line < 0 || anchor.line > lines.length) return null;
+		// A `= gather` right away, even though a single branch isn't really a
+		// choice point yet — a real, reported bug fixed here: with no gather
+		// (or any other heading-level marker) to terminate it, this new `###`
+		// section has nothing bounding its own span short of the next
+		// same/higher-level heading or EOF, so it silently swallowed whatever
+		// scene prose happened to already sit below the cursor's own blank
+		// line, folding it into the branch's own body instead of leaving it
+		// as ordinary scene text after the branch. This is the exact bug
+		// `= gather` exists to fix (see `reorderBranchGroup`'s own comment on
+		// this same failure mode for the identical reasoning) — it's just
+		// never been applied at CREATION time before, only once a real second
+		// branch arrives via `afterGroupId` below. `removeBranchFromGroup`
+		// still strips a group's gather back out once it's down to 0 or 1
+		// branch again, so a lone branch that never gets a sibling ends up
+		// exactly where it always has — this only changes what exists
+		// TRANSIENTLY between creation and either a second branch or a
+		// deletion, never the steady state.
+		const block = [`### ${title} [[loom:${id}]]`, `= branch: ${fields.branchValue}`, '', label, '', '= gather', ''];
+		lines.splice(anchor.line + 1, 0, ...block);
+		return lines.join('\n');
+	}
+
+	const bounds = branchGroupBounds(parsed, anchor.afterGroupId);
+	if (!bounds) return null;
+	const level = bounds.branches[0].level;
+	const heading = `${'#'.repeat(level)} ${title} [[loom:${id}]]`;
+	const tag = `= branch: ${fields.branchValue}`;
+	const lines = text.split(/\r?\n/);
+
+	if (bounds.gatherLine !== null) {
+		const insertAt = bounds.gatherLine;
+		const needsLeadingBlank = lines[insertAt - 1]?.trim() !== '';
+		lines.splice(insertAt, 0, ...(needsLeadingBlank ? [''] : []), heading, tag, '', label, '');
+		return lines.join('\n');
+	}
+
+	const insertAt = bounds.end;
+	const needsLeadingBlank = insertAt > 0 && lines[insertAt - 1]?.trim() !== '';
+	lines.splice(insertAt, 0, ...(needsLeadingBlank ? [''] : []), heading, tag, '', label, '', '= gather', '');
+	return lines.join('\n');
+}
+
+/**
+ * Captures a whole decision point — every sibling branch AND its own
+ * `= gather` line if it has one (`branchGroupBounds`'s gather-inclusive
+ * `end`) — as one block, and removes it from the document. The write half
+ * of "Cut branch group": `cut` is what the caller stashes in its own
+ * in-memory clipboard (deliberately never the OS clipboard — see the
+ * feature's own plan doc for why), `text` is what gets written back. No
+ * renumbering of what's left behind here — the next commit's own
+ * `renumberBranchGroups` cascade closes whatever gap this leaves on its own.
+ */
+export function cutBranchGroup(text: string, groupId: string): { text: string; cut: string } | null {
+	const parsed = parseFountain(text);
+	const bounds = branchGroupBounds(parsed, groupId);
+	if (!bounds) return null;
+	const lines = text.split(/\r?\n/);
+	const block = trimTrailingBlankLines(lines.slice(bounds.start, bounds.end));
+	lines.splice(bounds.start, bounds.end - bounds.start);
+	return { text: lines.join('\n'), cut: block.join('\n') };
+}
+
+/**
+ * Splices a previously-cut decision point block back in right after `line`,
+ * verbatim — its own `= gather` (if it had one) travels with it already
+ * correctly positioned, nothing to reposition. Returns `null` when `line`
+ * no longer points at an empty line by the time this actually runs (a
+ * concurrent edit landed between the right-click and the paste) — the
+ * caller Notices this rather than silently doing nothing, matching the
+ * annotation-overlap rejection pattern elsewhere in this codebase.
+ */
+export function pasteBranchGroup(text: string, line: number, block: string): string | null {
+	const lines = text.split(/\r?\n/);
+	if (line < 0 || line >= lines.length || lines[line].trim() !== '') return null;
+	lines.splice(line + 1, 0, ...block.split(/\r?\n/), '');
+	return lines.join('\n');
+}
+
+/** The line right after a branch section's own `= branch:` tag AND printed
+ *  `>**Title**<` label (whichever of the two currently exist — mirrors
+ *  `applyBranchLabels`'s own tolerant walk, which finds the same boundary to
+ *  know where ITS OWN label belongs), WITHOUT consuming any blank lines past
+ *  it. Deliberately stops there rather than also walking past the blank(s)
+ *  separating the label from the body: a first version did, and clamping
+ *  that walk to `spanEnd` (needed for a branch whose body is currently
+ *  empty) silently discarded which line the separating blank actually
+ *  lived at whenever the label's own trailing blank happened to sit AT
+ *  `spanEnd` itself (the branch is the last in the document with nothing
+ *  after it, or the last branch before a gather) — `replaceBranchBody`
+ *  would then insert new body content BEFORE that still-physically-present
+ *  blank rather than after it, producing `label` immediately glued to the
+ *  new body text with the "separator" blank stranded AFTER it instead. The
+ *  fix used here matches `replaceSceneBody`'s own contract: never try to
+ *  detect or reuse whatever blank spacing currently exists — the WRITE side
+ *  always inserts its own canonical single blank, and the READ side just
+ *  skips past however many blanks happen to be there right now. */
+function branchLabelEndLine(lines: string[], sectionLine: number): number {
+	let at = sectionLine + 1;
+	if (at < lines.length && BRANCH_TAG_RE.test(lines[at].trim())) at++;
+	while (at < lines.length && lines[at].trim() === '') at++;
+	if (at < lines.length && /^>.*<$/.test(lines[at].trim())) at++;
+	return at;
+}
+
+/** A branch's own content span end (exclusive) — the next sibling's own
+ *  heading line, or, for the LAST branch, right where the group's `= gather`
+ *  line sits (NOT `bounds.end`, which is one PAST gather — that inclusive
+ *  bound is what `reorderBranchGroup`'s own block-capture wants, since it
+ *  explicitly strips the gather text back out of what it captures; a body
+ *  read/write must never include the group's own closing marker as if it
+ *  were prose). Falls back to `bounds.end` only when there's no gather
+ *  either (a lone, still-ungathered branch). */
+function branchSpanEnd(
+	bounds: BranchGroupBounds,
+	idx: number
+): number {
+	if (idx + 1 < bounds.branches.length) return bounds.branches[idx + 1].line;
+	return bounds.gatherLine ?? bounds.end;
+}
+
+/**
+ * One specific branch's own BODY text — everything after its heading,
+ * `= branch:` tag, and printed label, through the line before its next
+ * sibling's own heading (or the group's own gather line, for the LAST
+ * branch) — never the tag/label/heading/gather themselves. The modular
+ * branch editor's own opaque overlay panel (branch-overlay.tsx) reads this
+ * to feed its body textarea, mirroring `sceneScriptText`'s own heading-vs-
+ * body split for a Scene.
+ */
+export function branchBodyText(text: string, sectionId: string): string | null {
+	const parsed = parseFountain(text);
+	const section = parsed.sections.find((sec) => sec.loomId === sectionId && sec.branchGroup !== null);
+	if (!section || section.branchGroup === null) return null;
+	const bounds = branchGroupBounds(parsed, section.branchGroup);
+	if (!bounds) return null;
+	const idx = bounds.branches.findIndex((b) => b.loomId === sectionId);
+	const spanEnd = branchSpanEnd(bounds, idx);
+	const lines = text.split(/\r?\n/);
+	let bodyStart = Math.min(branchLabelEndLine(lines, section.line), spanEnd);
+	while (bodyStart < spanEnd && lines[bodyStart].trim() === '') bodyStart++;
+	return lines
+		.slice(bodyStart, spanEnd)
+		.join('\n')
+		.replace(/\s+$/, '');
+}
+
+/**
+ * Replaces one branch's own BODY text in place, leaving its heading,
+ * `= branch:` tag, and printed label untouched — the write half of
+ * `branchBodyText`, mirroring `replaceSceneBody`'s own heading-preserving
+ * contract exactly: splice starts right after the label (`branchLabelEndLine`,
+ * never trying to detect/reuse whatever blank spacing currently sits there —
+ * see that function's own doc comment for the bug this avoids) and always
+ * inserts a fresh canonical blank both before and after the new body.
+ */
+export function replaceBranchBody(text: string, sectionId: string, body: string): string | null {
+	const parsed = parseFountain(text);
+	const section = parsed.sections.find((sec) => sec.loomId === sectionId && sec.branchGroup !== null);
+	if (!section || section.branchGroup === null) return null;
+	const bounds = branchGroupBounds(parsed, section.branchGroup);
+	if (!bounds) return null;
+	const idx = bounds.branches.findIndex((b) => b.loomId === sectionId);
+	const spanEnd = branchSpanEnd(bounds, idx);
+	const lines = text.split(/\r?\n/);
+	const labelEnd = Math.min(branchLabelEndLine(lines, section.line), spanEnd);
+	const next = body.replace(/\s+$/, '').split('\n');
+	lines.splice(labelEnd, spanEnd - labelEnd, '', ...next, '');
 	return lines.join('\n');
 }
 

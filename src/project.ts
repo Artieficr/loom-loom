@@ -3904,8 +3904,15 @@ export class ConfirmModal extends Modal {
 				// mod-warning by class: setWarning() is deprecated and its
 				// replacement (setDestructive) is 1.13/Catalyst-only.
 				btn.setButtonText(this.confirmText).onClick(() => {
-					this.close();
+					// Obsidian's own `Modal.close()` calls `onClose()`
+					// synchronously on desktop, so a caller wrapping this in a
+					// Promise that reads a flag from inside `onClose` (see
+					// `confirmDialog`, entity-view.tsx) only ever sees that
+					// flag's value as of THIS point — `onConfirm` has to run
+					// before `close()`, not after, or the flag it sets always
+					// arrives one tick too late to be read.
 					void this.onConfirm();
+					this.close();
 				});
 				btn.buttonEl.addClass('mod-warning');
 			});
