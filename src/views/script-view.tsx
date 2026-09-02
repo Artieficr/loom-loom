@@ -39,6 +39,7 @@ import {
 	removePageBreak,
 	removeScene,
 	renderInline,
+	renumberBranchGroups,
 	renumberScenes,
 	sceneAtLine,
 	sceneBodyLineOffset,
@@ -791,7 +792,10 @@ function Script({ view }: { view: ScriptView }) {
 		// Keeps an existing #N# production-numbering scheme sequential even when
 		// the scene was added by plain typing here, not through a structural
 		// drag/move action — a no-op when nothing in the script is numbered.
-		const renumberedRaw = renumberScenes(withIds.text);
+		// `renumberBranchGroups` is the same idea one level in: cascades every
+		// branch group's own numeric ids sequentially per combo, a no-op for
+		// any combo with nothing numeric to renumber.
+		const renumberedRaw = renumberBranchGroups(renumberScenes(withIds.text));
 		// Strips any LONE surviving comment/alt-text marker (a partial delete
 		// took out only one half of a pair) — must run before either write
 		// point below, and its output has to flow through both, or a stray
@@ -3073,10 +3077,18 @@ export async function editScriptAndSync(
 	// `cleanAnnotationMarkers` rides along too — a structural edit (move,
 	// delete, heading rewrite) is exactly the kind of change that can leave a
 	// comment/alt-text marker orphaned, same reasoning as `runCommit`'s own
-	// pass in the main Script view.
+	// pass in the main Script view. `applyBranchLabels` rides along for the
+	// identical reason `runCommit` already runs it: a branch's printed
+	// `>**Title**<` marker is auto-derived from its OWN heading text, with no
+	// separate note field the way an Act's `loomDisplayTitle` has — a title
+	// rename through `renameSectionTitle` (the Scene page's own Branch
+	// composer uses this) would otherwise leave that printed label stale
+	// until the main Script view was next opened and committed.
 	const changed = await editScript(plugin, project, (raw) => {
 		const applied = apply(raw);
-		return applied === null ? null : cleanAnnotationMarkers(renumberScenes(applied)).text;
+		return applied === null
+			? null
+			: cleanAnnotationMarkers(applyBranchLabels(renumberBranchGroups(renumberScenes(applied)))).text;
 	});
 	if (changed) {
 		const scriptFile = findScriptFile(plugin, project);

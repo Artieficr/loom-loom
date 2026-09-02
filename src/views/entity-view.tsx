@@ -75,6 +75,7 @@ import { ConnectedEntities } from './connected-entities';
 import { LinkOption } from './link-textarea';
 import { MarkdownField, type MarkdownFieldHandle } from './markdown-field';
 import { FountainField, FountainFieldHandle } from './fountain-field';
+import { BranchDraft, BranchOverlay } from './branch-overlay';
 import { extractLinkpath, linkTargetOf, memberEntryLinkpath } from '../indexer';
 import { evaluateEvent, recomputeEventLocks, waitForMetadataSync } from '../gm-lock';
 import { cascadeDecisionPointSession, reconcileSessionBeforeLink } from '../gm-decision-point';
@@ -142,7 +143,18 @@ import {
 	sceneBodyLineOffset as computeSceneBodyLineOffset,
 	sceneEndLine,
 	type ParsedScript,
+	branchComboKey,
+	collectLoomIds,
+	cutBranchGroup,
+	freshLoomId,
+	insertBranch,
+	nextComboNumber,
+	pasteBranchGroup,
+	removeBranchFromGroup,
+	replaceBranchBody,
+	setBranchTagValue,
 } from '../fountain';
+import { getBranchClipboard, setBranchClipboard } from './branch-clipboard';
 import { pdfPages } from '../pdf';
 import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
 import type LoomLoomPlugin from '../main';
@@ -913,6 +925,233 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  editor happens to be mounted at once across different open panes. */
 	const sceneScriptEditorWrapRef = useRef<HTMLDivElement | null>(null);
 	const sceneScriptPagesRef = useRef<HTMLDivElement | null>(null);
+	/** Bumped on every CM6 update where the field's own viewport/geometry
+	 *  actually changed (`FountainField`'s `onGeometryChange`) — the one
+	 *  signal `BranchOverlay` has no other way to see, since it's a plain
+	 *  React component with no access to CM6's own update stream. Passed
+	 *  down as a prop so a change re-triggers its positioning effect, same
+	 *  as `text` changing. */
+	const [sceneScriptGeometryVersion, setSceneScriptGeometryVersion] = useState(0);
+	/** The modular branch editor's still-open drafts (`BranchOverlay.tsx`) —
+	 *  co-located with the Script section's own refs above, same reasoning:
+	 *  a page is only ever showing one Scene at a time, so there's no
+	 *  cross-component coordination to do. Cleared to `[]` on record change
+	 *  via the same reset the Scene page's other per-record state already
+	 *  gets (see the effect below) — a draft's CM6 anchor lives in the OTHER
+	 *  Scene's own `FountainField` instance and would be meaningless here. */
+	const [branchDrafts, setBranchDrafts] = useState<BranchDraft[]>([]);
+	useEffect(() => {
+		setBranchDrafts([]);
+	}, [record?.path]);
+	/** The section id of a branch just created via `handleAddBranch`, still
+	 *  waiting for its own Title field to claim the one-shot "show blank,
+	 *  not the underlying `'Untitled'` placeholder" treatment — see that
+	 *  function's own doc comment. Reset alongside `branchDrafts` for the
+	 *  same reason (meaningless once the page moves to a different Scene). */
+	const [pendingBranchTitleFocusId, setPendingBranchTitleFocusId] = useState<string | null>(null);
+	useEffect(() => {
+		setPendingBranchTitleFocusId(null);
+	}, [record?.path]);
+	/** Extra `padding-top` (pixels, keyed by branch section id) the Scene's
+	 *  own `FountainField` reserves right after each branch's span, so its
+	 *  `BranchOverlay` panel can be genuinely taller than the raw span
+	 *  without overlapping whatever follows — see branch-overlay.tsx's own
+	 *  top doc comment ("A branch's card can be genuinely TALLER..."). Reset
+	 *  alongside `branchDrafts` for the same reason (meaningless once the
+	 *  page moves to a different Scene). */
+	const [sceneBranchSpacers, setSceneBranchSpacers] = useState<Record<string, number>>({});
+	useEffect(() => {
+		setSceneBranchSpacers({});
+	}, [record?.path]);
+	/** Applies a patch to one draft and, once its required fields are all
+	 *  filled, transitions it to a real branch (`insertBranch`, fountain.ts)
+	 *  through `editScriptAndSync` — the same "operate on fresh disk text,
+	 *  never on `sceneDraft`" pattern every other structural Scene-page edit
+	 *  already uses (`setSceneHeadingParts`'s own call sites), so this needs
+	 *  no special handling for `sceneDraft` possibly holding uncommitted
+	 *  prose edits: the live `FountainField`'s own "sync external value only
+	 *  while unfocused" convention (fountain-field.tsx) is what reconciles
+	 *  the two once the field next loses focus, same as it always has. */
+	/** A draft field changed — updates state only, never commits. Committing
+	 *  used to happen automatically the instant `title`/`identifier`/
+	 *  `subidentifier` all became non-empty, which meant typing the FIRST
+	 *  character of whichever of the three happened to be filled in LAST
+	 *  wrote the branch immediately, mid-keystroke, before the user had
+	 *  finished typing that field — a real, reported complaint. Committing
+	 *  is now exclusively `handleCommitBranchDraft`'s job, fired only by the
+	 *  draft's own explicit "Create" button. */
+	const handleBranchDraftField = (id: string, patch: Partial<BranchDraft>) => {
+		setBranchDrafts((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+	};
+	/** The draft's own "Create" button — the one place a `new-group` draft
+	 *  actually becomes a real branch (see `handleBranchDraftField`'s own
+	 *  doc comment for why this is no longer automatic). A no-op if the
+	 *  required fields (title/identifier/subidentifier) aren't all filled —
+	 *  the button itself is disabled in that state too, this is just the
+	 *  same guard against a stale click racing a field clearing back out. */
+	const handleCommitBranchDraft = (id: string) => {
+		const draft = branchDrafts.find((d) => d.id === id);
+		if (!draft) return;
+		const title = draft.title.trim();
+		const ready = title !== '' && draft.identifier.trim() !== '' && draft.subidentifier.trim() !== '';
+		if (!ready || !project) return;
+		setBranchDrafts((prev) => prev.filter((d) => d.id !== id));
+		const anchorLine = sceneScriptEditorRef.current?.getDraftAnchorLine(id);
+		sceneScriptEditorRef.current?.clearDraftAnchor(id);
+		if (anchorLine === null || anchorLine === undefined) return;
+		void editScriptAndSync(plugin, project, (raw) => {
+			const parsed = parseFountain(raw);
+			// The draft's anchor line is relative to `sceneDraft` (the SCENE'S
+			// OWN excerpt, heading stripped) — `editScriptAndSync` hands
+			// `apply` the FULL script text, so the anchor has to be
+			// re-expressed as a whole-document line before `insertBranch` can
+			// use it. `sceneBodyLineOffset` (this component's own shared
+			// helper) is the exact same "how many lines does the scene's own
+			// heading/body-start occupy" math every other excerpt-relative-to-
+			// whole-document translation here uses.
+			const scene = parsed.scenes.find((s) => s.loomId === record?.sceneId);
+			if (!scene) return null;
+			const wholeDocLine = scene.line + computeSceneBodyLineOffset(sceneExcerpt ?? '') + anchorLine;
+			const numberOrOverride =
+				draft.numberOverride.trim() ||
+				String(nextComboNumber(parsed, branchComboKey(`${draft.identifier.trim()}-${draft.subidentifier.trim()}-1`)));
+			const branchValue = `${draft.identifier.trim()}-${draft.subidentifier.trim()}-${numberOrOverride}`;
+			return insertBranch(raw, { line: wholeDocLine }, { title, branchValue });
+		});
+	};
+	const handleDismissBranchDraft = (id: string) => {
+		sceneScriptEditorRef.current?.clearDraftAnchor(id);
+		setBranchDrafts((prev) => prev.filter((d) => d.id !== id));
+	};
+	const handleCreateBranchDraft = (pos: number) => {
+		const id = sceneScriptEditorRef.current?.createDraftAnchor(pos);
+		if (!id) return;
+		setBranchDrafts((prev) => [...prev, { id, title: '', identifier: '', subidentifier: '', numberOverride: '' }]);
+	};
+	/** The group's own "+" — writes a real new branch to the document
+	 *  IMMEDIATELY (no draft/staging step at all), titled with a literal
+	 *  `'Untitled'` placeholder, then focuses its Title field
+	 *  (`pendingBranchTitleFocusId`, claimed by `BranchTitleField`'s own
+	 *  `autoFocusEmpty`, which shows that field blank rather than literally
+	 *  "Untitled" until something is actually typed).
+	 *
+	 *  This USED TO stage a `kind: 'new-branch'` draft instead, committed
+	 *  only once its Title field's `ready` check passed — which, for a
+	 *  join-existing-group branch, needed nothing but a non-empty title, so
+	 *  it silently became a real section the instant the FIRST character
+	 *  landed in that field: a visible, jarring "the card you're typing into
+	 *  just turned into a different card" moment (a real, reported
+	 *  complaint) despite the panel looking identical before and after.
+	 *  Creating it for real up front and masking the placeholder instead
+	 *  removes that mode switch entirely — the card is always the SAME real
+	 *  card, start to finish.
+	 *
+	 *  No `ready`/ `insertBranch`-on-edit path is needed here the way
+	 *  `handleBranchDraftField` still has for a brand-new decision point
+	 *  (`new-group`, from the editor's own right-click) — unlike that case,
+	 *  a join-existing-group branch has nothing else to fill in first
+	 *  (`identifier`/`subidentifier`/`numberOverride` are inherited verbatim
+	 *  from the group, never composed), so there was never a real reason to
+	 *  wait.
+	 *
+	 *  **The new section's id is rolled HERE, synchronously, not learned by
+	 *  re-parsing the file after the write lands** — a real, reported bug
+	 *  from the first version of this: `editScriptAndSync` does real
+	 *  disk-round-tripping work (write, re-read, `syncScenes`, sidecar
+	 *  pruning) before its promise ever resolves, and the Scene page's own
+	 *  reactive `text` (from `useScriptText`'s vault-modify listener) can
+	 *  pick up the raw file write and mount the new card LONG before that —
+	 *  seeding `BranchTitleField`'s masked-blank display from a still-`null`
+	 *  pending id, so it showed the literal `'Untitled'` text instead of
+	 *  masking it. Rolling the id up front and calling
+	 *  `setPendingBranchTitleFocusId` BEFORE the `await` guarantees it's
+	 *  already in React state by the time any reactive re-render — however
+	 *  fast — could possibly mount that card. `insertBranch` (fountain.ts)
+	 *  re-validates the id against the actual `parsed` set at write time
+	 *  regardless (its own `id?` doc comment), so a caller-supplied id is
+	 *  never trusted blindly. */
+	const handleAddBranch = async (groupId: string) => {
+		if (!project || !scriptParsed) return;
+		const newId = freshLoomId(collectLoomIds(scriptParsed.scenes, scriptParsed.sections, scriptParsed.pageBreaks));
+		setPendingBranchTitleFocusId(newId);
+		const ok = await editScriptAndSync(plugin, project, (raw) =>
+			insertBranch(raw, { afterGroupId: groupId }, { title: 'Untitled', branchValue: groupId, id: newId })
+		);
+		if (!ok) setPendingBranchTitleFocusId(null);
+	};
+	const handleRenameBranchTitle = (sectionId: string, newTitle: string) => {
+		if (!project) return;
+		void editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, sectionId, newTitle));
+	};
+	const handleSetBranchCombo = (groupId: string, identifier: string, subidentifier: string, numberOrOverride: string) => {
+		if (!project) return;
+		void editScriptAndSync(plugin, project, (raw) =>
+			setBranchTagValue(raw, groupId, `${identifier}-${subidentifier}-${numberOrOverride}`)
+		);
+	};
+	const handleSetBranchRaw = (groupId: string, newValue: string) => {
+		if (!project) return;
+		void editScriptAndSync(plugin, project, (raw) => setBranchTagValue(raw, groupId, newValue));
+	};
+	const handleSetBranchBody = (sectionId: string, newBody: string) => {
+		if (!project) return;
+		void editScriptAndSync(plugin, project, (raw) => replaceBranchBody(raw, sectionId, newBody));
+	};
+	const handleCutBranchGroupInScene = (groupId: string) => {
+		if (!project) return;
+		void editScriptAndSync(plugin, project, (raw) => {
+			const result = cutBranchGroup(raw, groupId);
+			if (!result) return null;
+			setBranchClipboard(result.cut);
+			return result.text;
+		});
+	};
+	/** The trash icon on a branch card's own `###` row — deletes just THIS
+	 *  branch, unlike "Cut branch group" (which keeps the whole group
+	 *  recoverable via paste): real prose is genuinely lost, so this confirms
+	 *  first (`confirmDialog`, defined further down this component but
+	 *  already safe to reference here — it's only actually read once this
+	 *  handler is CALLED, by which point the whole component body, including
+	 *  that declaration, has already run). */
+	const handleDeleteBranchInScene = (sectionId: string) => {
+		if (!project) return;
+		void confirmDialog(
+			t('view.script.branch.deleteBranchConfirmTitle'),
+			t('view.script.branch.deleteBranchConfirmDetail'),
+			t('view.script.branch.deleteBranchConfirmButton')
+		).then((confirmed) => {
+			if (!confirmed) return;
+			// `setSceneBody(null)` afterward, same as the outer field's own
+			// blur-commit — `sceneDraft` falls back to `sceneBody`, a locally
+			// buffered override, whenever it's non-null; without clearing it
+			// here too, a delete landing while that buffer still holds an
+			// UNCOMMITTED edit from the outer field would keep `sceneDraft`
+			// (and so every branch card's own re-derived `text`) pinned to
+			// the stale pre-delete value regardless of what the write just
+			// changed on disk.
+			void editScriptAndSync(plugin, project, (raw) => removeBranchFromGroup(raw, sectionId)).then((ok) => {
+				if (!ok) {
+					new Notice(t('view.script.editWriteFailed'));
+					return;
+				}
+				setSceneBody(null);
+			});
+		});
+	};
+	const handlePasteBranchGroupInScene = (line: number) => {
+		if (!project) return;
+		const block = getBranchClipboard();
+		if (!block) return;
+		void editScriptAndSync(plugin, project, (raw) => {
+			const parsed = parseFountain(raw);
+			const scene = parsed.scenes.find((s) => s.loomId === record?.sceneId);
+			if (!scene) return null;
+			const wholeDocLine = scene.line + computeSceneBodyLineOffset(sceneExcerpt ?? '') + line;
+			const result = pasteBranchGroup(raw, wholeDocLine, block);
+			if (result === null) new Notice(t('view.script.branch.pasteRejected'));
+			return result;
+		});
+	};
 	/** Scrolled into view on every tab click (mirrors the main Script view's
 	 *  `tabsRef`/`scrollTabsIntoView`) so switching Script/Pages always lands
 	 *  the section in a convenient spot to work in, not wherever the page
@@ -7857,6 +8096,35 @@ function EntityPage({ view }: { view: EntityView }) {
 														onCycleAlt={handleCycleAlt}
 														onOpenAltMenu={handleOpenAltMenu}
 														highlightedAnnotationId={highlightedAnnotationId}
+														onGeometryChange={() => setSceneScriptGeometryVersion((v) => v + 1)}
+														onCreateBranch={handleCreateBranchDraft}
+														onPasteBranchGroup={handlePasteBranchGroupInScene}
+														branchClipboardAvailable={getBranchClipboard() !== null}
+														branchSpacers={sceneBranchSpacers}
+													/>
+													<BranchOverlay
+														fieldRef={sceneScriptEditorRef}
+														wrapRef={sceneScriptEditorWrapRef}
+														text={sceneDraft}
+														geometryVersion={sceneScriptGeometryVersion}
+														drafts={branchDrafts}
+														onDraftField={handleBranchDraftField}
+														onDismissDraft={handleDismissBranchDraft}
+													onCreateDraft={handleCommitBranchDraft}
+														onRenameBranchTitle={handleRenameBranchTitle}
+														onSetBranchCombo={handleSetBranchCombo}
+														onSetBranchRaw={handleSetBranchRaw}
+														onSetBranchBody={handleSetBranchBody}
+														onAddBranch={(groupId) => void handleAddBranch(groupId)}
+														pendingTitleFocusId={pendingBranchTitleFocusId}
+														onTitleFocusConsumed={() => setPendingBranchTitleFocusId(null)}
+														onCutBranchGroup={handleCutBranchGroupInScene}
+													onDeleteBranch={handleDeleteBranchInScene}
+														characters={scriptParsed?.characters ?? []}
+														locations={scriptParsed?.locations ?? []}
+														entityOptions={entityOptions}
+														ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
+														onSpacerNeedsChange={setSceneBranchSpacers}
 													/>
 												</div>
 											) : sceneScriptMode === 'pages' ? (

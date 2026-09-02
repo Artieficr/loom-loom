@@ -766,7 +766,23 @@
 			"importFailed": "Could not import the script. See console for details.",
 			"contextMenu": {
 				"comment": "Comment",
-				"altText": "Alternative text…"
+				"altText": "Alternative text…",
+				"createBranch": "Create new branch",
+				"cutBranchGroup": "Cut branch group",
+				"pasteBranchGroup": "Paste branch group"
+			},
+			"branch": {
+				"titlePlaceholder": "Branch title",
+				"identifierPlaceholder": "Identifier",
+				"subidentifierPlaceholder": "Subidentifier",
+				"numberPlaceholder": "Number (auto)",
+				"createButton": "Create",
+				"addBranchAria": "Add a branch to this decision point",
+				"pasteRejected": "Can only paste a branch group onto an empty line.",
+				"deleteBranchAria": "Delete this branch",
+				"deleteBranchConfirmTitle": "Delete this branch?",
+				"deleteBranchConfirmDetail": "Its title, identifier, and body text are permanently removed from the script. This can't be undone.",
+				"deleteBranchConfirmButton": "Delete"
 			},
 			"overlapNotice": {
 				"resize": "Can't resize a comment span to partially overlap another one.",

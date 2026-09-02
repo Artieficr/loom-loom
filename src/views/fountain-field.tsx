@@ -1,5 +1,5 @@
-import { EditorSelection, EditorState } from '@codemirror/state';
-import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, gutter, keymap } from '@codemirror/view';
+import { EditorSelection, EditorState, StateEffect, StateField } from '@codemirror/state';
+import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, gutter, keymap, tooltips } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import {
 	CompletionContext,
@@ -13,6 +13,7 @@ import { ForwardedRef, forwardRef, useEffect, useImperativeHandle, useRef } from
 import { t } from '../i18n';
 import {
 	ElementType,
+	branchGroupAtLine,
 	findAnnotationSpans,
 	findEntityLinks,
 	findOrphanPairs,
@@ -231,7 +232,71 @@ export interface FountainFieldHandle {
 	 *  span even though the popover now showed nothing. A no-op if the id no
 	 *  longer resolves to a live span. */
 	removeAnnotationMarkers: (id: string) => void;
+	/** The live `EditorView`, or `null` before the field has mounted — the
+	 *  narrow escape hatch `BranchOverlay` (branch-overlay.tsx) needs to
+	 *  position its own real-DOM cards over this field's content and dispatch
+	 *  its own transactions into it. Deliberately a plain getter, not a
+	 *  ready/destroyed callback pair: a caller with its own deferred
+	 *  scheduling loop (mirroring `AnnotationHandlesOverlay`'s own, below)
+	 *  just re-reads this on its next scheduled tick if it's momentarily
+	 *  null, the same way every OTHER method here already re-reads
+	 *  `viewRef.current` fresh rather than trusting a cached reference. */
+	getView: () => EditorView | null;
+	/** Registers a new `new-group` branch draft's insertion point at the
+	 *  document position `pos` (a character offset, from the right-click that
+	 *  opened it) and returns a fresh id for it — `branch-overlay.tsx`'s own
+	 *  `BranchDraft.id`. The position is tracked live inside this editor's own
+	 *  `draftAnchors` `StateField`, remapped through every subsequent edit
+	 *  (`tr.changes.mapPos`) so it survives concurrent typing elsewhere in the
+	 *  document while the draft sits open — unlike a plain stored line number,
+	 *  which would silently go stale the moment a line above it is added or
+	 *  removed. A `new-branch` draft (joining an EXISTING decision point) has
+	 *  no need for this: its position is always "wherever that group's own
+	 *  `= gather` line (or last branch) currently is," freshly re-derived from
+	 *  `branchGroupBounds` on every read. */
+	createDraftAnchor: (pos: number) => string;
+	/** The draft's CURRENT 0-based line — re-read from the live, remapped
+	 *  position on every call, never cached — or `null` if the field hasn't
+	 *  mounted or the anchor was already cleared. */
+	getDraftAnchorLine: (id: string) => number | null;
+	/** Drops a draft's tracked anchor once it transitions to a real branch (no
+	 *  longer needed — the branch's own `[[loom:<id>]]` marker takes over) or
+	 *  is abandoned (blurred empty, explicitly dismissed) — nothing else was
+	 *  ever written to the document for a still-open draft, so there's no
+	 *  further cleanup needed beyond forgetting the tracked position itself. */
+	clearDraftAnchor: (id: string) => void;
 }
+
+/** `new-group` branch-draft anchor tracking (`FountainFieldHandle`'s own
+ *  `createDraftAnchor`/`getDraftAnchorLine`/`clearDraftAnchor`) — a small
+ *  `Map<draftId, characterOffset>` kept as ordinary CM6 document state so it
+ *  rides along `tr.changes.mapPos` on every transaction, CM6's own idiom for
+ *  keeping a position valid across concurrent edits (the same mechanism CM6
+ *  itself uses internally for cursors/marks) — the one thing a plain React
+ *  ref holding a raw line number could never do safely. */
+const setDraftAnchor = StateEffect.define<{ id: string; pos: number }>();
+const clearDraftAnchorEffect = StateEffect.define<string>();
+const draftAnchors = StateField.define<Map<string, number>>({
+	create: () => new Map(),
+	update(value, tr) {
+		let next = value;
+		if (tr.docChanged && next.size > 0) {
+			next = new Map(Array.from(next, ([id, pos]) => [id, tr.changes.mapPos(pos)]));
+		}
+		for (const effect of tr.effects) {
+			if (effect.is(setDraftAnchor)) {
+				next = new Map(next);
+				next.set(effect.value.id, effect.value.pos);
+			} else if (effect.is(clearDraftAnchorEffect)) {
+				if (next.has(effect.value)) {
+					next = new Map(next);
+					next.delete(effect.value);
+				}
+			}
+		}
+		return next;
+	},
+});
 
 export const FountainField = forwardRef(function FountainField(
 	{
@@ -255,6 +320,13 @@ export const FountainField = forwardRef(function FountainField(
 		highlightedAnnotationId,
 		ambientSuggestDismissMs,
 		ambientExcludeEntityName,
+		onGeometryChange,
+		onCreateBranch,
+		onPasteBranchGroup,
+		branchClipboardAvailable,
+		branchSpacers,
+		showAnnotationGutter = true,
+		escapeOverflowForTooltips = false,
 	}: {
 		value: string;
 		onChange: (value: string) => void;
@@ -320,6 +392,72 @@ export const FountainField = forwardRef(function FountainField(
 		 *  Character/Faction/Location/Item's own embedded Script section;
 		 *  the main Script view (no single "current entity") leaves it unset. */
 		ambientExcludeEntityName?: string;
+		/** Fires on every CM6 update where `viewportChanged || geometryChanged`
+		 *  — i.e. exactly the signal `AnnotationHandlesOverlay`'s own
+		 *  `update()` (below) already uses to know it needs to resync.
+		 *  `BranchOverlay` (branch-overlay.tsx) is the one consumer: as a
+		 *  plain React component with no access to CM6's update stream, DOM
+		 *  events alone (scroll/resize) weren't enough to catch every moment
+		 *  CM6's own internal layout genuinely changes — a real, reported bug
+		 *  where cards rendered a few pixels off on first mount and only
+		 *  self-corrected on the next scroll (which happens to force CM6 to
+		 *  reprocess its own viewport) is exactly this gap. */
+		onGeometryChange?: () => void;
+		/** A right-click landed on an EMPTY line, not inside any existing
+		 *  branch group — offers "Create new branch" (the modular branch
+		 *  editor's `new-group` draft). Passed the clicked document position
+		 *  (a character offset) so the caller can hand it straight to
+		 *  `createDraftAnchor`. */
+		onCreateBranch?: (pos: number) => void;
+		/** A right-click landed on an EMPTY line and the caller's own
+		 *  in-memory branch clipboard (`branchClipboardAvailable`) has
+		 *  something in it — offers "Paste branch group", passed the 0-based
+		 *  line clicked. The caller re-validates the line is STILL empty at
+		 *  paste time (`pasteBranchGroup`, fountain.ts) rather than trusting
+		 *  this snapshot, in case a concurrent edit landed in between. */
+		onPasteBranchGroup?: (line: number) => void;
+		/** Whether the caller's own branch clipboard currently holds a cut
+		 *  decision point — gates whether "Paste branch group" is offered at
+		 *  all. A plain boolean, not the clipboard's own content: this field
+		 *  never needs to read what's IN it, only whether the menu item
+		 *  should appear. */
+		branchClipboardAvailable?: boolean;
+		/** Extra vertical space (pixels), keyed by a branch section's own
+		 *  `[[loom:<id>]]`, to reserve as `padding-bottom` on that branch's own
+		 *  `= branch: <id>` synopsis line — how `branch-overlay.tsx`'s opaque
+		 *  panels grow a branch's real document span to match what their own
+		 *  header UI + nested body actually need, without touching the
+		 *  document's real text. `BranchOverlay`'s own `onSpacerNeedsChange` is
+		 *  the one source for this map; see that file's own top doc comment
+		 *  ("A branch's card can be genuinely TALLER...") for the full
+		 *  mechanism this prop is the write-side of. */
+		branchSpacers?: Record<string, number>;
+		/** Whether to mount the right-side comment/alt-text gutter at all —
+		 *  default `true` (every existing caller: the main Script view, the
+		 *  Scene/Act pages). `branch-overlay.tsx`'s nested body field sets
+		 *  this `false`: it never wires up `comments`/`altText`, so the
+		 *  gutter would render as a permanently empty column — and, being
+		 *  CM6's own `gutter()` extension, it still reserves real horizontal
+		 *  space for that column regardless of whether any line ever has a
+		 *  marker, narrowing `.cm-content`'s own available width on the side
+		 *  it sits on (`side: 'after'`, i.e. the right) relative to a field
+		 *  with no gutter at all. */
+		showAnnotationGutter?: boolean;
+		/** Mounts CM6's own `tooltips({ parent: document.body })` extension —
+		 *  default `false` for every existing caller (CM6's own default
+		 *  tooltip container is fine for a field that isn't itself nested
+		 *  inside a clipped ancestor). `branch-overlay.tsx`'s nested body
+		 *  field sets this `true`: CM6's default tooltip host lives INSIDE
+		 *  this field's own DOM, which sits inside `.loom-branch-body-field`'s
+		 *  `overflow: hidden` (and, further up, Obsidian's own workspace-leaf
+		 *  DOM, which applies CSS `contain` — the same thing that re-bases a
+		 *  bare `position: fixed` to the leaf instead of the true viewport,
+		 *  documented on `BranchOverlay`'s own top doc comment for why THAT
+		 *  overlay is portalled to `document.body` too). Without this, the
+		 *  character-cue/INT.-EXT. autocomplete popup renders fixed to that
+		 *  same re-based, clipped context — squeezed into the narrow card and
+		 *  cut off — instead of floating freely over the real viewport. */
+		escapeOverflowForTooltips?: boolean;
 	},
 	ref: ForwardedRef<FountainFieldHandle>
 ) {
@@ -347,6 +485,16 @@ export const FountainField = forwardRef(function FountainField(
 	const highlightedAnnotationIdRef = useRef(highlightedAnnotationId ?? null);
 	const ambientDismissMsRef = useRef(ambientSuggestDismissMs ?? 0);
 	const ambientExcludeNameRef = useRef(ambientExcludeEntityName);
+	const onGeometryChangeRef = useRef(onGeometryChange);
+	const onCreateBranchRef = useRef(onCreateBranch);
+	const onPasteBranchGroupRef = useRef(onPasteBranchGroup);
+	const branchClipboardAvailableRef = useRef(branchClipboardAvailable ?? false);
+	const branchSpacersRef = useRef(branchSpacers ?? {});
+	onGeometryChangeRef.current = onGeometryChange;
+	onCreateBranchRef.current = onCreateBranch;
+	onPasteBranchGroupRef.current = onPasteBranchGroup;
+	branchClipboardAvailableRef.current = branchClipboardAvailable ?? false;
+	branchSpacersRef.current = branchSpacers ?? {};
 	onChangeRef.current = onChange;
 	onBlurRef.current = onBlur;
 	charactersRef.current = characters;
@@ -411,6 +559,22 @@ export const FountainField = forwardRef(function FountainField(
 					{ from: span.from, to: span.contentFrom, insert: '' },
 				],
 			});
+		},
+		getView: () => viewRef.current,
+		createDraftAnchor: (pos: number) => {
+			const id = `branch-draft-${Math.random().toString(36).slice(2)}`;
+			viewRef.current?.dispatch({ effects: setDraftAnchor.of({ id, pos }) });
+			return id;
+		},
+		getDraftAnchorLine: (id: string) => {
+			const view = viewRef.current;
+			if (!view) return null;
+			const pos = view.state.field(draftAnchors, false)?.get(id);
+			if (pos === undefined) return null;
+			return view.state.doc.lineAt(pos).number - 1;
+		},
+		clearDraftAnchor: (id: string) => {
+			viewRef.current?.dispatch({ effects: clearDraftAnchorEffect.of(id) });
 		},
 	}));
 
@@ -760,6 +924,32 @@ export const FountainField = forwardRef(function FountainField(
 				}
 			}
 
+			// The modular branch editor's own vertical spacers (`branchSpacers`
+			// prop, above) — reserves real screen space as pure `padding-bottom`
+			// on a branch's own `= branch: <id>` synopsis line (the line
+			// directly beneath its own heading, present on EVERY branch in a
+			// group, first or last), with no effect on the document's actual
+			// text. Targeting this branch's own synopsis line rather than
+			// whatever follows its span means every branch always has a line
+			// to pad — a group's LAST branch has nothing structurally
+			// guaranteed to sit right after its own span (`branchGroupBounds`'s
+			// `end` can land past the document's last line), which the branch
+			// synopsis line, always present, sidesteps entirely. `BranchOverlay`
+			// (branch-overlay.tsx) is the one source for this map.
+			for (const [loomId, px] of Object.entries(branchSpacersRef.current)) {
+				if (!(px > 0)) continue;
+				const sec = parsed.sections.find((s) => s.loomId === loomId);
+				if (!sec || sec.branchGroup === null) continue;
+				const cmLine = sec.line + 2; // 0-based synopsis line (sec.line + 1) as a CM6 1-based line number
+				if (cmLine < 1 || cmLine > docLines) continue;
+				const docLine = view.state.doc.line(cmLine);
+				entries.push({
+					from: docLine.from,
+					to: docLine.from,
+					deco: Decoration.line({ attributes: { style: `padding-bottom: ${px}px` } }),
+				});
+			}
+
 			for (const span of scanEmphasis(text)) entries.push(span);
 			for (const span of scanEntityLinks(text, view.state.selection, view.hasFocus, entityOptionsRef.current)) {
 				entries.push(span);
@@ -1075,28 +1265,79 @@ export const FountainField = forwardRef(function FountainField(
 		 *  rather than attempted, keeping every span well-nested. */
 		const openContextMenu = (view: EditorView, event: MouseEvent): boolean => {
 			const sel = view.state.selection.main;
-			if (sel.empty) return false;
-			event.preventDefault();
-			const spans = findAnnotationSpans(view.state.doc.toString());
-			const overlaps = spans.some((s) => partiallyOverlaps(sel.from, sel.to, s.from, s.to));
-			if (overlaps) {
-				new Notice(t('view.script.overlapNotice.create'));
+			if (!sel.empty) {
+				event.preventDefault();
+				const spans = findAnnotationSpans(view.state.doc.toString());
+				const overlaps = spans.some((s) => partiallyOverlaps(sel.from, sel.to, s.from, s.to));
+				if (overlaps) {
+					new Notice(t('view.script.overlapNotice.create'));
+				}
+				const menu = new Menu();
+				menu.addItem((item) =>
+					item
+						.setTitle(t('view.script.contextMenu.comment'))
+						.setIcon('message-square')
+						.setDisabled(overlaps)
+						.onClick(() => insertMarkerPair(view, 'comment', sel.from, sel.to))
+				);
+				menu.addItem((item) =>
+					item
+						.setTitle(t('view.script.contextMenu.altText'))
+						.setIcon('arrow-right-left')
+						.setDisabled(overlaps)
+						.onClick(() => insertMarkerPair(view, 'alt', sel.from, sel.to))
+				);
+				menu.showAtMouseEvent(event);
+				return true;
 			}
+
+			// No selection — the modular branch editor's own menu items,
+			// resolved from the CLICKED position rather than the caret (a
+			// right-click doesn't move the caret the way a left-click does).
+			// Safe to call `posAtCoords` here: this fires from an ordinary DOM
+			// `contextmenu` event handler, not from inside CM6's own
+			// update/measure lifecycle (the crash this codebase already
+			// guards against elsewhere never applies to a plain event
+			// handler like this one). Only "Create new branch"/"Paste branch
+			// group" are offered here — "Cut branch group" now lives on
+			// `branch-overlay.tsx`'s own per-card right-click instead, since
+			// that overlay's cards are fully opaque and `pointer-events: auto`
+			// (a real, reported course-correction from an earlier transparent/
+			// click-through design): a right-click anywhere inside an EXISTING
+			// branch's span can no longer reach this handler at all in
+			// ordinary use, it's intercepted by the card sitting on top of it.
+			// `branchGroupAtLine` stays as a defensive guard against the brief
+			// window before that overlay's own first `sync()` has run, so
+			// "Create new branch"/"Paste" can't fire on a line that, in
+			// reality, already belongs to a branch group.
+			const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+			if (pos === null) return false;
+			const parsed = parseFountain(view.state.doc.toString());
+			const line0 = view.state.doc.lineAt(pos).number - 1;
+			const isEmptyLine = view.state.doc.line(line0 + 1).text.trim() === '';
+			if (!isEmptyLine || branchGroupAtLine(parsed, line0) !== null) return false;
 			const menu = new Menu();
-			menu.addItem((item) =>
-				item
-					.setTitle(t('view.script.contextMenu.comment'))
-					.setIcon('message-square')
-					.setDisabled(overlaps)
-					.onClick(() => insertMarkerPair(view, 'comment', sel.from, sel.to))
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle(t('view.script.contextMenu.altText'))
-					.setIcon('arrow-right-left')
-					.setDisabled(overlaps)
-					.onClick(() => insertMarkerPair(view, 'alt', sel.from, sel.to))
-			);
+			let hasItem = false;
+			if (onCreateBranchRef.current) {
+				hasItem = true;
+				menu.addItem((item) =>
+					item
+						.setTitle(t('view.script.contextMenu.createBranch'))
+						.setIcon('git-branch-plus')
+						.onClick(() => onCreateBranchRef.current?.(pos))
+				);
+			}
+			if (branchClipboardAvailableRef.current && onPasteBranchGroupRef.current) {
+				hasItem = true;
+				menu.addItem((item) =>
+					item
+						.setTitle(t('view.script.contextMenu.pasteBranchGroup'))
+						.setIcon('clipboard-paste')
+						.onClick(() => onPasteBranchGroupRef.current?.(line0))
+				);
+			}
+			if (!hasItem) return false;
+			event.preventDefault();
 			menu.showAtMouseEvent(event);
 			return true;
 		};
@@ -1230,10 +1471,12 @@ export const FountainField = forwardRef(function FountainField(
 					EditorView.lineWrapping,
 					scrollWithinEditor,
 					fountainDecorations,
-					annotationGutter,
+					...(showAnnotationGutter ? [annotationGutter] : []),
+					...(escapeOverflowForTooltips ? [tooltips({ parent: document.body })] : []),
 					annotationHandlesOverlay,
 					linkSuggestExt,
 					entityBracketPairing,
+					draftAnchors,
 					autocompletion({
 						override: [intExtCompletion, characterCompletion, locationCompletion, entityLinkCompletion],
 						icons: false,
@@ -1242,6 +1485,7 @@ export const FountainField = forwardRef(function FountainField(
 					EditorView.updateListener.of((update) => {
 						if (update.docChanged) onChangeRef.current(update.state.doc.toString());
 						if (update.focusChanged && !update.view.hasFocus) onBlurRef.current?.();
+						if (update.viewportChanged || update.geometryChanged) onGeometryChangeRef.current?.();
 						// A bare `selectionSet` also fires for plain Up/Down-arrow
 						// cursor motion (CM6 annotates keyboard cursor movement as
 						// user event "select", vs. a real click's "select.pointer") —
@@ -1352,16 +1596,17 @@ export const FountainField = forwardRef(function FountainField(
 	}, [value]);
 
 	// A comment's resolved state (or an alt-text's option list, or which id a
-	// search match currently highlights) can change from the caller's own
-	// popover/search UI without any document edit — the gutter's icon still
-	// needs to redraw, so a no-op transaction carrying `refreshAnnotations`
-	// nudges it (see the gutter's own `lineMarkerChange`, inside the mount
-	// effect).
+	// search match currently highlights, or a branch's own spacer amount) can
+	// change from the caller's own popover/search/measurement pass without
+	// any document edit — the gutter's icon (or the branch spacer's own
+	// `padding-top`) still needs to redraw, so a no-op transaction carrying
+	// `refreshAnnotations` nudges it (see the gutter's own `lineMarkerChange`,
+	// inside the mount effect).
 	useEffect(() => {
 		const view = viewRef.current;
 		if (!view) return;
 		view.dispatch({ effects: refreshAnnotations.of(null) });
-	}, [comments, altText, highlightedAnnotationId]);
+	}, [comments, altText, highlightedAnnotationId, branchSpacers]);
 
 	return <div className="loom-fountain-field" ref={hostRef} />;
 });
