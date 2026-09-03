@@ -27,7 +27,7 @@ import {
 } from '../types';
 import { formatLoomDate, groupNameOf } from '../calendar';
 import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
-import { createScriptFile, scriptFilePath as scriptPathOf } from './script-view';
+import { createScriptFile, scriptFilePath as scriptPathOf } from './script-buffer';
 import { createBookFile, findBookFile } from './book-view';
 import { QUICK_NOTES_ICON, QuickNotesPanel, useQuickNotesToggle } from './quick-notes';
 import { ProjectDef, linkTargetOf } from '../indexer';

@@ -1608,6 +1608,86 @@ export function replaceActBody(text: string, actId: string, body: string): strin
 	return lines.join('\n');
 }
 
+/** A scene's own body (heading-stripped, leading blanks skipped — the exact
+ *  slice `sceneScriptText`+`sceneBodyOf` (script-view.tsx/entity-view.tsx)
+ *  produce for the Scene page's own editable buffer), read from an
+ *  ARBITRARY whole-script `text` rather than from disk — the piece
+ *  `reconcileScriptText` (below) needs but that live pair can't provide
+ *  directly, since they're script-view.tsx-resident and this has to stay in
+ *  fountain.ts (dependency-free, node-testable). `null` when `sceneId`
+ *  doesn't resolve in `text` — the caller's own signal that the region this
+ *  buffer was tracking no longer exists in whatever text it's being
+ *  compared against (e.g. the scene was deleted by an external change). */
+function sceneBodyFromWholeScript(text: string, sceneId: string): string | null {
+	const parsed = parseFountain(text);
+	const scene = parsed.scenes.find((sc) => sc.loomId === sceneId);
+	if (!scene) return null;
+	const excerpt = text
+		.split(/\r?\n/)
+		.slice(scene.line, sceneEndLine(parsed, scene))
+		.join('\n');
+	return excerpt.split('\n').slice(sceneBodyLineOffset(excerpt)).join('\n');
+}
+
+/** What `reconcileScriptText` (below) decided to do — `'echo'`/`'adopt'`
+ *  need no further action beyond updating the buffer's own bookkeeping;
+ *  `'merged'`/`'local-wins'` both produce a NEW `text` that differs from
+ *  what's now on disk and needs pushing back out via a flush. */
+export type ScriptReconcileResult =
+	| { kind: 'echo' }
+	| { kind: 'adopt'; text: string }
+	| { kind: 'merged'; text: string }
+	| { kind: 'local-wins'; text: string };
+
+/**
+ * Decides how to fold a genuine EXTERNAL disk change (another device via
+ * file sync — Dropbox, iCloud, Syncthing, Obsidian Sync, or a hand-edit
+ * outside Obsidian — anything that isn't this session's own just-confirmed
+ * write, regardless of which sync tool's `vault.on('modify')` event
+ * triggered the check) into the in-memory script buffer
+ * (`script-buffer.ts`), which may itself hold an unflushed local edit at
+ * the same moment.
+ *
+ * `lastFlushed` is the text as of the last confirmed disk write — the echo
+ * baseline (`external === lastFlushed` means this is our own write landing
+ * back, never a real external change, no matter what wrote it) AND the
+ * three-way-merge base.
+ *
+ * Reuses the SAME region-scoped bias `replaceSceneBody` already proves
+ * correct at write time (splice only the actively-edited scene's own body
+ * into a fresh read, leave everything else in the file as-is) rather than
+ * inventing a new merge strategy — generalized here to the reconciliation
+ * direction instead of only the flush direction.
+ *
+ * **Scope boundary, stated explicitly rather than silently underbuilt**:
+ * this only ever protects the ONE scene named by `activeRegion` — the
+ * Scene page currently open, if any (`registerActiveRegion`,
+ * script-buffer.ts). A second simultaneously-open split-pane Scene, or a
+ * structural op that's still mid-flight when an external write lands (a
+ * narrow window — only the Scene body's own typing is genuinely debounced
+ * today; everything else already commits near-immediately), falls through
+ * to `'local-wins'`: the in-memory buffer wins wholesale over the external
+ * change, which then gets pushed back out on the next flush. Not a true
+ * merge for that rarer case, by design.
+ */
+export function reconcileScriptText(
+	local: string,
+	lastFlushed: string,
+	external: string,
+	activeRegion: { sceneId: string } | null
+): ScriptReconcileResult {
+	if (external === lastFlushed) return { kind: 'echo' };
+	if (local === lastFlushed) return { kind: 'adopt', text: external };
+	if (activeRegion) {
+		const localBody = sceneBodyFromWholeScript(local, activeRegion.sceneId);
+		if (localBody !== null) {
+			const merged = replaceSceneBody(external, activeRegion.sceneId, localBody);
+			if (merged !== null) return { kind: 'merged', text: merged };
+		}
+	}
+	return { kind: 'local-wins', text: local };
+}
+
 /** Removes a scene — heading and body — from the script entirely. */
 export function removeScene(text: string, sceneId: string): string | null {
 	const parsed = parseFountain(text);

@@ -94,11 +94,11 @@ import {
 	replaceAltContentInScript,
 	sceneScriptText,
 	stripAnnotationMarkerInScript,
-	useScriptText,
 	type NavItem,
 	type NavNode,
 	type ScriptSearchMatch,
 } from './script-view';
+import { mutateScriptBuffer, registerActiveRegion, scheduleFlush, useScriptBuffer } from './script-buffer';
 import {
 	ActChapterBlocks,
 	deleteBookEntity,
@@ -374,7 +374,22 @@ function EntityPage({ view }: { view: EntityView }) {
 	// The project's script, for a Scene page's read-only excerpt. Read here (a
 	// hook, so it can't sit behind the early returns below) and unused by every
 	// other entity type.
-	const scriptText = useScriptText(plugin, project);
+	const scriptText = useScriptBuffer(plugin, project);
+	/** Marks this scene as the buffer's one actively-protected region while
+	 *  its page is open — `reconcileScriptText` (fountain.ts) uses this to
+	 *  merge an external change against JUST this scene's own body instead
+	 *  of falling back to "local wins wholesale" when both sides changed at
+	 *  once. Cleared on unmount/navigating to a different record so a closed
+	 *  Scene page never keeps protecting a region nobody's looking at (and a
+	 *  DIFFERENT scene's page, opened next, correctly takes over). A hook, so
+	 *  it can't sit behind the early return below — mirrors `scriptText`/
+	 *  `bookText`'s own reasoning just above/below it, no-ops for every
+	 *  other entity type via the `sceneId`-empty guard inside. */
+	useEffect(() => {
+		if (!project || !record || record.type !== 'scene' || record.sceneId === '') return;
+		registerActiveRegion(plugin, project, { sceneId: record.sceneId });
+		return () => registerActiveRegion(plugin, project, null);
+	}, [plugin, project, record?.type, record?.sceneId]);
 	/** The project's Book, for a Chapter/Act page's Editor section — same
 	 *  role `scriptText` plays for Script mode, unused by every other
 	 *  entity type. */
@@ -904,51 +919,25 @@ function EntityPage({ view }: { view: EntityView }) {
 				plugin.indexer.getAll(t, project.root).map((r) => ({ name: r.name, type: r.type, path: r.path }))
 			)
 		: [];
-	/** Draft of the scene's script body (everything under its heading). */
-	const [sceneBody, setSceneBody] = useState<string | null>(null);
-	/** A real, reported data-loss risk fixed here: the field's own commit
-	 *  used to happen ONLY on blur, which — same class of problem
-	 *  `saveDescription`/`saveBody` (above/below) were already fixed for,
-	 *  see THEIR OWN "no blur-style moment that reliably fires before
-	 *  navigation" comment — depends on a specific lifecycle event actually
-	 *  firing; a user who kept typing without ever clicking away (or whose
-	 *  navigation click happened to land on something that doesn't steal
-	 *  DOM focus, the exact "Menu items are non-focusable divs" gotcha
-	 *  `handleCutBranchGroupInScene` above already had to work around) could
-	 *  lose an entire unsaved session. This is a plain idle-debounced
-	 *  BACKUP write, not a replacement for the onBlur commit below — it
-	 *  never touches `sceneBody`/`setSceneBody` itself, so there's no race
-	 *  with newer keystrokes arriving while an older debounced write is
-	 *  still in flight (`editScriptAndSync`'s own per-file write queue,
-	 *  write-queue.ts, serializes the two writes safely if they do overlap).
-	 *  `sceneId`/`proj` are passed fresh on each CALL (from the current
-	 *  render's own `onChange`) rather than captured at closure-creation
-	 *  time, so the memoized closure only needs to stay stable for `plugin`
-	 *  (a true singleton) — no risk of it going stale against a `record`/
-	 *  `project` that changes identity across renders the way most objects
-	 *  in this component do. */
-	const saveSceneScript = useMemo(() => {
-		let timer = 0;
-		return (sceneId: string, proj: ProjectDef, value: string) => {
-			window.clearTimeout(timer);
-			timer = window.setTimeout(() => {
-				void editScriptAndSync(plugin, proj, (raw) => replaceSceneBody(raw, sceneId, value));
-			}, 600);
-		};
-	}, [plugin]);
-	/** The "real," full commit — writes immediately (no debounce) and clears
-	 *  the local buffer once it lands, same as every other branch mutation
-	 *  in this component. Shared by the field's own `onBlur` and by
-	 *  `onChange`'s own `urgent` case: a real, reported bug — pasting a
-	 *  branch, undoing it (Ctrl+Z), then pasting AGAIN before
-	 *  `saveSceneScript`'s own 600ms debounce fired read stale (pre-undo)
-	 *  disk content, since the undo only ever reverted the LOCAL CM6
-	 *  buffer — silently reviving the "undone" branch and leaving TWO
-	 *  instead of one. An undo/redo transaction can't wait out a debounce;
-	 *  it has to land on disk before anything else (paste included) might
-	 *  read fresh from there. */
-	const commitSceneScript = (sceneId: string, proj: ProjectDef, value: string) => {
-		void editScriptAndSync(plugin, proj, (raw) => replaceSceneBody(raw, sceneId, value)).then(() => setSceneBody(null));
+	/** Writes a keystroke straight into the project's shared in-memory script
+	 *  buffer (`script-buffer.ts`) — synchronous, no read-modify-write race
+	 *  window against disk at all — then schedules the background flush:
+	 *  debounced while merely typing (matches `saveDescription`/`saveBody`'s
+	 *  own idle-debounce elsewhere in this component), immediate for an
+	 *  `urgent` change. `urgent` covers undo/redo transactions specifically
+	 *  — a real, reported bug this exists to fix: pasting a branch, undoing
+	 *  it (Ctrl+Z), then pasting again before a debounced write had reached
+	 *  disk used to read stale (pre-undo) content, since the undo only ever
+	 *  reverted the LOCAL CM6 buffer while disk still held the old text —
+	 *  silently reviving the "undone" branch and leaving two instead of one.
+	 *  Replaces the old `saveSceneScript`/`commitSceneScript` pair and the
+	 *  local `sceneBody` override they existed to protect: `scriptText` (the
+	 *  buffer itself, via `useScriptBuffer` above) now reflects every
+	 *  keystroke immediately, so `sceneDraft` below reads straight off it —
+	 *  nothing left to reconcile on blur. */
+	const writeSceneScript = (sceneId: string, proj: ProjectDef, value: string, urgent: boolean) => {
+		mutateScriptBuffer(plugin, proj, (raw) => replaceSceneBody(raw, sceneId, value));
+		scheduleFlush(plugin, proj, urgent ? undefined : { debounceMs: 600 });
 	};
 	/** Scene page's Script section: same Script/Pages preview + search pattern
 	 *  as the main Script view, scoped to just this scene's own excerpt.
@@ -1092,7 +1081,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  from the first version of this: `editScriptAndSync` does real
 	 *  disk-round-tripping work (write, re-read, `syncScenes`, sidecar
 	 *  pruning) before its promise ever resolves, and the Scene page's own
-	 *  reactive `text` (from `useScriptText`'s vault-modify listener) can
+	 *  reactive `text` (from `useScriptBuffer`'s shared buffer) can
 	 *  pick up the raw file write and mount the new card LONG before that —
 	 *  seeding `BranchHeaderRowWidget`'s masked-blank display from a
 	 *  still-`null` pending id, so it showed the literal `'Untitled'` text
@@ -1206,20 +1195,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			t('view.script.branch.deleteBranchConfirmButton')
 		).then((confirmed) => {
 			if (!confirmed) return;
-			// `setSceneBody(null)` afterward, same as the outer field's own
-			// blur-commit — `sceneDraft` falls back to `sceneBody`, a locally
-			// buffered override, whenever it's non-null; without clearing it
-			// here too, a delete landing while that buffer still holds an
-			// UNCOMMITTED edit from the outer field would keep `sceneDraft`
-			// (and so every branch card's own re-derived `text`) pinned to
-			// the stale pre-delete value regardless of what the write just
-			// changed on disk.
 			void editScriptAndSync(plugin, project, (raw) => removeBranchFromGroup(raw, sectionId)).then((ok) => {
-				if (!ok) {
-					new Notice(t('view.script.editWriteFailed'));
-					return;
-				}
-				setSceneBody(null);
+				if (!ok) new Notice(t('view.script.editWriteFailed'));
 			});
 		});
 	};
@@ -1827,7 +1804,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	// content the user typed at the end of their own scene, branch groups'
 	// own trailing `= gather` blank line included.
 	const sceneBodyOf = (excerpt: string) => excerpt.split('\n').slice(computeSceneBodyLineOffset(excerpt)).join('\n');
-	const sceneDraft = sceneBody ?? (sceneExcerpt === null ? '' : sceneBodyOf(sceneExcerpt));
+	const sceneDraft = sceneExcerpt === null ? '' : sceneBodyOf(sceneExcerpt);
 	/** Same Script/Pages scroll sync as the main Script view, scoped to this
 	 *  scene's own pagination (`pdfPages` run on just the excerpt, not the
 	 *  whole document — a scene's own "page 1" isn't its real position in the
@@ -8181,10 +8158,8 @@ function EntityPage({ view }: { view: EntityView }) {
 														ref={sceneScriptEditorRef}
 														value={sceneDraft}
 														onChange={(value, urgent) => {
-															setSceneBody(value);
 															if (!project || !record) return;
-															if (urgent) commitSceneScript(record.sceneId, project, value);
-															else saveSceneScript(record.sceneId, project, value);
+															writeSceneScript(record.sceneId, project, value, urgent);
 														}}
 														onBlur={() => {
 															// Scroll-position memory — see the identical comment
@@ -8193,8 +8168,12 @@ function EntityPage({ view }: { view: EntityView }) {
 															if (top !== undefined) {
 																window.localStorage.setItem(`loom-scene-script-line:${record.path}`, String(top));
 															}
-															if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
-															commitSceneScript(record.sceneId, project, sceneDraft);
+															// The buffer already has every keystroke (`onChange`
+															// above writes synchronously) — blur just flushes it
+															// to disk right away rather than waiting out the
+															// idle debounce, a no-op if nothing's pending.
+															if (!project) return;
+															scheduleFlush(plugin, project);
 														}}
 														characters={scriptParsed?.characters ?? []}
 														entityOptions={entityOptions}

@@ -1,4 +1,4 @@
-import { Menu, Notice, TFile, normalizePath } from 'obsidian';
+import { Menu, Notice, normalizePath } from 'obsidian';
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement, useEffect, useMemo, useRef, useState } from 'react';
 import { t, tn } from '../i18n';
 import {
@@ -19,10 +19,7 @@ import {
 	ParsedScript,
 	TitlePage,
 	appendPageBreak,
-	applyBranchLabels,
 	applyDisplayTitles,
-	cleanAnnotationMarkers,
-	collapseBranchBlankLines,
 	elementText,
 	ensureSceneIds,
 	findAnnotationSpans,
@@ -40,8 +37,6 @@ import {
 	removePageBreak,
 	removeScene,
 	renderInline,
-	renumberBranchGroups,
-	renumberScenes,
 	sceneAtLine,
 	sceneBodyLineOffset,
 	sceneEndLine,
@@ -66,7 +61,16 @@ import {
 import { pdfPages, renderScreenplayPdf } from '../pdf';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { setLoomKey } from '../fm';
-import { queueWrite } from '../write-queue';
+import {
+	editScript,
+	findScriptFile,
+	flushScriptBufferNow,
+	mutateScriptBuffer,
+	prepareScriptText,
+	registerPostFlushHook,
+	scheduleFlush,
+	useScriptBuffer,
+} from './script-buffer';
 import {
 	AltTextModal,
 	ConfirmModal,
@@ -80,36 +84,6 @@ import { Icon, ViewShell, noProjectMessage, scrollIntoContainer } from './common
 import { AlternativesBrowserPanel, CommentPopover, CommentsBrowserPanel } from './annotation-popover';
 import { useIndexVersion } from './hooks';
 import type LoomLoomPlugin from '../main';
-
-/**
- * The project's Fountain script: `<root>/<Project>.fountain`, registered like
- * the .loom home file rather than stored as markdown.
- *
- * Two reasons it can't be a .md note. Fountain's note syntax **is** `[[…]]`, so
- * Obsidian would index every non-exporting script note as a wikilink and fill
- * the graph with them. And an own extension round-trips byte-for-byte with
- * Better Fountain / Highland / Fade In, which is what makes "Open in external
- * app" honest rather than a lossy export.
- */
-export function scriptFilePath(project: ProjectDef): string {
-	const base = `${project.name}.${SCRIPT_EXTENSION}`;
-	return normalizePath(project.root === '' ? base : `${project.root}/${base}`);
-}
-
-/** The project's script file, or null when it hasn't been created yet. */
-export function findScriptFile(plugin: LoomLoomPlugin, project: ProjectDef): TFile | null {
-	return plugin.app.vault.getFileByPath(scriptFilePath(project));
-}
-
-/** Creates the script with a title page seeded from the project name. */
-export async function createScriptFile(plugin: LoomLoomPlugin, project: ProjectDef): Promise<TFile> {
-	const existing = findScriptFile(plugin, project);
-	if (existing) return existing;
-	const content = [`Title: ${project.name}`, 'Credit: Written by', 'Author:', 'Draft date:', '', ''].join(
-		'\n'
-	);
-	return plugin.app.vault.create(scriptFilePath(project), content);
-}
 
 export class ScriptView extends LoomFileReactView {
 	getViewType(): string {
@@ -472,7 +446,11 @@ function Script({ view }: { view: ScriptView }) {
 	const file = view.file;
 	const project = file ? plugin.indexer.projectForPath(file.path) : undefined;
 
-	const [text, setText] = useState<string | null>(null);
+	/** The project's canonical, live in-memory script text — `script-buffer.ts`'s
+	 *  shared buffer, not a local copy. Every mutation below goes through
+	 *  `mutateScriptBuffer`/`write` rather than `setText`; this view has no
+	 *  state of its own to keep in sync any more. */
+	const text = useScriptBuffer(plugin, project ?? null);
 	/** Which pane the main area shows: the read-only Pages preview, or
 	 *  Outline (a separate button on the far right of the row) which swaps
 	 *  in an act/scene drag-reorder tree instead. Remembered per file in
@@ -574,28 +552,9 @@ function Script({ view }: { view: ScriptView }) {
 	 *  alt-text's icon, or a comment's icon while its popover is being
 	 *  auto-opened. Cleared on a plain text match. */
 	const [highlightedAnnotationId, setHighlightedAnnotationId] = useState<string | null>(null);
-	/** Guards against writing back the text we just read. */
-	const loadedFor = useRef<string | null>(null);
-	/** The text last written to (or read from) disk, so a no-op commit doesn't
-	 *  rewrite the file — a rewrite re-uploads it through the user's sync. */
-	const onDisk = useRef<string | null>(null);
-	/** Paths already given their one post-load commit pass. */
+	/** Paths already given their one post-load ensure-ids/sync pass — see the
+	 *  effect below. */
 	const committedFor = useRef<string | null>(null);
-	/** Serializes every `commit` call — each one does real async work
-	 *  (`vault.modify`, `syncScenes`), and without a queue two overlapping
-	 *  calls could interleave their disk writes out of order. Concretely: the
-	 *  live editor unmounts on every Script → Pages/Outline switch, and CM6
-	 *  losing focus as part of that teardown fires `onBlur` (its own
-	 *  `commit(text)`, using whatever text was current at that moment); an
-	 *  action taken right after switching — e.g. the toolbar's own
-	 *  "+ New act" — starts a SECOND commit with the new content. Without
-	 *  ordering, if the first (older, unmount-triggered) commit's
-	 *  `vault.modify` happened to land after the second's, it silently wrote
-	 *  the OLDER content back over the just-added act — even though
-	 *  `syncScenes` inside the second commit had already created its note,
-	 *  leaving an act note with nothing backing it in the script. Queuing
-	 *  guarantees commits land on disk in the order they were REQUESTED. */
-	const commitQueue = useRef<Promise<void>>(Promise.resolve());
 	const pagesRef = useRef<HTMLDivElement | null>(null);
 	/** Comment bodies + alt-text option lists, project-level (Entities/Script
 	 *  Notes/<Project> Script Notes.json) — kept live via `useScriptNotes`
@@ -662,45 +621,10 @@ function Script({ view }: { view: ScriptView }) {
 	 *  `switchMode`'s own same-mode early return would otherwise skip. */
 	const tabsRef = useRef<HTMLDivElement | null>(null);
 
-	// Read the file once per path, then keep re-reading on every vault touch
-	// to it for as long as this view stays open. This used to load ONCE and
-	// otherwise trust `text` as "the source of truth until written back" — a
-	// real, confirmed bug from removing Script mode: that model dates from
-	// when Script mode's own live CM6 field genuinely WAS the authoritative
-	// copy (typing there updated `text` directly, so re-reading disk mid-edit
-	// would have clobbered unsaved keystrokes) — but Pages is now the ONLY
-	// reading surface and has no local editor of its own to protect; EVERY
-	// change reaches `text` from disk, externally (alt-text cycling, comment
-	// replies, a Scene/Act page's own edits, Outline drag-reorder…). Loading
-	// once and only re-syncing while Outline happened to be the active pane
-	// (the one place this WAS already handled, for the same "structural edit
-	// from elsewhere" reason) left Pages mode showing stale text after any
-	// write that landed while it was the active pane — a swap looked like it
-	// silently did nothing until the view was closed and reopened, when the
-	// one-time load effect ran fresh. `raw === onDisk.current` skips the
-	// no-op case (this view's own write echoing back through the same
-	// 'modify' event that triggered the write in the first place).
-	useEffect(() => {
-		if (!file) return;
-		let cancelled = false;
-		const read = () => {
-			void plugin.app.vault.read(file).then((raw) => {
-				if (cancelled || raw === onDisk.current) return;
-				loadedFor.current = file.path;
-				onDisk.current = raw;
-				setText(raw);
-			});
-		};
-		read();
-		const touched = (f: { path: string }) => {
-			if (f.path === file.path) read();
-		};
-		const refs = [plugin.app.vault.on('modify', touched), plugin.app.vault.on('create', touched)];
-		return () => {
-			cancelled = true;
-			for (const ref of refs) plugin.app.vault.offref(ref);
-		};
-	}, [plugin, file]);
+	// The read side is entirely `useScriptBuffer`'s job now (above) — its own
+	// `vault.on('modify'|'create')` listener keeps `text` current for as long
+	// as ANY view/component subscribes to this project's buffer, this one
+	// included, so there is no separate per-view read effect left here.
 
 	// A floating panel that only closes from its own button feels stuck.
 	useEffect(() => {
@@ -778,107 +702,17 @@ function Script({ view }: { view: ScriptView }) {
 	// so this hook always runs, same reasoning as `parsed` just above.
 	const bodyPages = useMemo(() => (parsed === null ? [] : pdfPages(parsed)), [parsed]);
 
-	/**
-	 * Writes the script, gives every heading an id, and mirrors the scenes into
-	 * notes. Both steps are idempotent and purely additive.
-	 *
-	 * Deliberately NOT debounced-while-typing: `ensureSceneIds` appends
-	 * `[[loom:…]]` to heading lines, and rewriting the textarea's value mid-edit
-	 * would yank the caret to the end. It runs on load and on blur instead, so
-	 * the text only changes underneath the user when they've stopped typing.
-	 */
-	const runCommit = async (raw: string) => {
-		if (!file || !project) return;
-		const withIds = ensureSceneIds(raw);
-		// Keeps an existing #N# production-numbering scheme sequential even when
-		// the scene was added by plain typing here, not through a structural
-		// drag/move action — a no-op when nothing in the script is numbered.
-		// `renumberBranchGroups` is the same idea one level in: cascades every
-		// branch group's own numeric ids sequentially per combo, a no-op for
-		// any combo with nothing numeric to renumber.
-		const renumberedRaw = renumberBranchGroups(renumberScenes(withIds.text));
-		// Strips any LONE surviving comment/alt-text marker (a partial delete
-		// took out only one half of a pair) — must run before either write
-		// point below, and its output has to flow through both, or a stray
-		// token from an OLDER commit could linger even after this one lands.
-		const cleaned = cleanAnnotationMarkers(renumberedRaw);
-		const renumbered = cleaned.text;
-		const changed = withIds.changed || renumbered !== withIds.text;
-		if (renumbered !== onDisk.current) {
-			await plugin.app.vault.modify(file, renumbered);
-			onDisk.current = renumbered;
-		}
-		if (changed) setText(renumbered);
-		await syncScenes(plugin, project, parseFountain(renumbered), renumbered);
-
-		// The one thing that flows the other way: an act's display title.
-		// Fountain sections never export, so a title that must appear in the PDF
-		// has to be emitted as a separate centered-bold line — the note owns it,
-		// and this is what puts it into the script. Falls back to the act's
-		// own name (the `#` section's title) when the display title is left
-		// blank, so the exported line is never simply dropped — a blank display
-		// title always renders something, and a script re-imported later still
-		// carries a title to reattach against.
-		const titles = new Map<string, string>();
-		for (const act of plugin.indexer.getAll('act', project.root)) {
-			if (act.actId !== '') {
-				titles.set(act.actId, act.displayTitle.trim() !== '' ? act.displayTitle : act.name);
-			}
-		}
-		// Branch sections get the same treatment, auto-derived from their own
-		// title text rather than a note field — there's no Branch note to own
-		// one — so a branch's printed marker stays in sync purely from its
-		// heading, kept separate from the act-title pass above.
-		const titled = collapseBranchBlankLines(applyBranchLabels(applyDisplayTitles(renumbered, titles)));
-		if (titled !== onDisk.current) {
-			await plugin.app.vault.modify(file, titled);
-			onDisk.current = titled;
-			setText(titled);
-		}
-
-		// Prune the sidecar of any comment/alt-text entry whose marker id is
-		// no longer backed by a live pair in the text that just landed —
-		// deleting the commented/alt-texted span (both markers included)
-		// needs no special handling of its own, this is what actually clears
-		// the now-orphaned data out afterward, run against the TRUE final
-		// text (post-titles), not the intermediate `renumbered`.
-		const liveIds = liveAnnotationIds(titled);
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			let touched = false;
-			const comments = { ...notes.comments };
-			for (const id of Object.keys(comments)) {
-				if (!liveIds.has(id)) {
-					delete comments[id];
-					touched = true;
-				}
-			}
-			const altText = { ...notes.altText };
-			for (const id of Object.keys(altText)) {
-				if (!liveIds.has(id)) {
-					delete altText[id];
-					touched = true;
-				}
-			}
-			return touched ? { ...notes, comments, altText } : notes;
-		});
-	};
-
-	/** Enqueues a commit behind whatever's already running, so overlapping
-	 *  calls land on disk in request order instead of racing (see
-	 *  `commitQueue`'s own comment). Errors are swallowed on the QUEUE only
-	 *  — not from this call's own returned promise, so an awaited caller
-	 *  (`importScript`) still sees a real rejection — otherwise one failed
-	 *  commit would wedge every commit after it. */
-	const commit = (raw: string): Promise<void> => {
-		const run = commitQueue.current.then(() => runCommit(raw));
-		commitQueue.current = run.catch(() => {});
-		return run;
-	};
-
-	// Load, then one commit pass so a script dropped in from elsewhere gets its
-	// ids and its Scene notes without anyone having to touch it.
+	// Load, then one ensure-ids/sync pass so a script dropped in from elsewhere
+	// gets its ids and its Scene notes without anyone having to touch it — the
+	// same job `runCommit` used to do on every load, now split between the
+	// buffer's own flush pipeline (renumber/label/clean, `prepareScriptText`)
+	// and this effect's own two extra steps: `ensureSceneIds` (the buffer's
+	// flush never assigns fresh ids on its own — every OTHER mutation already
+	// hands it text with ids already present) and `pushActTitles` (the act
+	// display-title→script pass, which needs `syncScenes` to have already run
+	// so a brand-new/renamed act's record exists to read a title from).
 	useEffect(() => {
-		if (!file || !project || text === null || loadedFor.current !== file.path) return;
+		if (!file || !project || text === null) return;
 		if (committedFor.current === file.path) return;
 		committedFor.current = file.path;
 		const path = file.path;
@@ -892,12 +726,21 @@ function Script({ view }: { view: ScriptView }) {
 		// settled index first is the same guard the startup migration already
 		// uses for the same reason. `rebuildNow()` coalesces with an in-flight
 		// pass, so this is free once the index is already built.
-		void plugin.indexer.rebuildNow().then(() => {
+		void plugin.indexer.rebuildNow().then(async () => {
 			// The view may have moved on to a different file while this awaited.
 			if (committedFor.current !== path) return;
-			// Runs once per file; `commit` deliberately closes over live state
-			// rather than joining the dependency list, which would re-fire it.
-			void commit(text);
+			const withIds = ensureSceneIds(text);
+			if (withIds.changed) {
+				mutateScriptBuffer(plugin, project, () => withIds.text);
+				await flushScriptBufferNow(plugin, project);
+			} else {
+				// Nothing to write, but still run the sync/prune pass once per
+				// open — self-heals e.g. a Scene note deleted out from under an
+				// already-id'd heading, matching the old `runCommit`'s own
+				// every-open behavior even when the text itself needs no change.
+				await pruneOrphanedAnnotations(plugin, project, withIds.text);
+			}
+			await pushActTitles(plugin, project);
 		});
 	}, [file?.path, project?.root, text !== null]);
 
@@ -905,9 +748,11 @@ function Script({ view }: { view: ScriptView }) {
 	if (!project) return <>{noProjectMessage()}</>;
 	if (text === null || parsed === null) return <div className="loom-empty">{t('view.script.loading')}</div>;
 
+	/** In-memory mutation + background flush — every structural edit in this
+	 *  component calls this with the already-computed next text. */
 	const write = (next: string) => {
-		setText(next);
-		void commit(next);
+		mutateScriptBuffer(plugin, project, () => next);
+		scheduleFlush(plugin, project);
 	};
 
 	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
@@ -1747,11 +1592,16 @@ function Script({ view }: { view: ScriptView }) {
 			() =>
 				void (async () => {
 					try {
-						await plugin.app.vault.modify(file, result.text);
-						onDisk.current = result.text;
-						setText(result.text);
-						committedFor.current = null;
-						await commit(result.text);
+						// One buffer mutation + flush replaces the old two-write
+						// sequence (a direct `vault.modify` immediately followed by
+						// `commit`'s own renumber/clean/sync pass) — `ensureSceneIds`
+						// here covers any newly-imported heading `reattachSceneIds`
+						// didn't match against a known scene, `flushScriptBufferNow`'s
+						// own `prepareScriptText` pipeline covers the rest.
+						const withIds = ensureSceneIds(result.text);
+						mutateScriptBuffer(plugin, project, () => withIds.text);
+						await flushScriptBufferNow(plugin, project);
+						await pushActTitles(plugin, project);
 						new Notice(tn('view.script.importedNotice', incoming.scenes.length, { name: sourceName }));
 					} catch (err) {
 						console.error('Loom Loom: import failed', err);
@@ -2708,56 +2558,6 @@ export function PagesPreviewBody({
 	);
 }
 
-/**
- * The project's script text, kept current.
- *
- * Lets a Scene page show its own stretch of the script without duplicating any
- * of it into the note: the .fountain file stays the single source of the
- * writing, and the note carries only the metadata around it.
- */
-export function useScriptText(plugin: LoomLoomPlugin, project: ProjectDef | null): string | null {
-	const [text, setText] = useState<string | null>(null);
-	const path = project ? scriptFilePath(project) : null;
-	useEffect(() => {
-		if (path === null) return;
-		let cancelled = false;
-		const read = () => {
-			const scriptFile = plugin.app.vault.getFileByPath(path);
-			if (!scriptFile) {
-				setText(null);
-				return;
-			}
-			// `vault.read`, never `cachedRead` — a real, confirmed bug this
-			// fixes: `cachedRead` can lag behind a write THIS SAME SESSION
-			// just made (the 'modify' event here can fire before Obsidian's
-			// own read cache has caught up with it), so a just-written
-			// alt-text swap looked like it silently reverted — the write
-			// itself was correct (confirmed by the sidecar/modal already
-			// reflecting it, and by a fresh reopen showing the right text),
-			// only THIS hook's own read was stale. Same reasoning
-			// script-notes.ts's `mutateScriptNotes`/`useScriptNotes` already
-			// document for the identical pitfall.
-			void plugin.app.vault.read(scriptFile).then((raw) => {
-				if (!cancelled) setText(raw);
-			});
-		};
-		read();
-		const touched = (f: { path: string }) => {
-			if (f.path === path) read();
-		};
-		const refs = [
-			plugin.app.vault.on('modify', touched),
-			plugin.app.vault.on('create', touched),
-			plugin.app.vault.on('delete', touched),
-		];
-		return () => {
-			cancelled = true;
-			for (const ref of refs) plugin.app.vault.offref(ref);
-		};
-	}, [plugin, path]);
-	return text;
-}
-
 /** One node in the script navigation tree — an act or a nested `##`/`###`
  *  section (a branch-tagged one carries its own `branchGroup`). */
 export interface NavNode {
@@ -3021,50 +2821,39 @@ export async function pushActTitles(plugin: LoomLoomPlugin, project: ProjectDef)
 }
 
 /**
- * Applies a change to the project's script file.
- *
- * The Scene page edits its own stretch of the script through this — the page is
- * a focused window onto the file rather than a copy of it, so there is exactly
- * one home for the writing and no sync to get wrong.
- *
- * Serialized (`queueWrite`, `'script'` registry keyed by `scriptFilePath`) —
- * a real, confirmed data-loss bug this fixes: this was a plain read-then-write
- * (`vault.read` → `apply` → `vault.modify`) with no serialization of its own,
- * and had no caller-side queue covering every entry point either
- * (`editScriptAndSync`'s own callers — including `replaceAltContentInScript`/
- * `stripAnnotationMarkerInScript`, called straight from an icon click — call
- * it directly). Two overlapping calls (rapid-fire clicking an alt-text icon
- * before the PREVIOUS swap's write had landed being the reported case) could
- * each read the file BEFORE the other's write completed and then write back
- * based on that stale copy — a classic lost-update race, not a logic bug in
- * the swap itself. `project.ts`'s own `editScriptFile` (used only by the
- * Scene/Act creation modals, which can't import this module directly — see
- * that function's own doc comment) keys into the SAME `'script'` registry by
- * the same path, so a creation-modal write and an alt-text-cycling write
- * against the same file now genuinely serialize against EACH OTHER too, not
- * just against other calls within this module.
+ * Re-syncs Scene/Act notes from `raw` (`syncScenes`) and prunes the
+ * comment/alt-text sidecar of any marker id no longer live in it — the
+ * post-write half of `editScriptAndSync`, pulled out for the same reuse
+ * reason as `prepareScriptText` above.
  */
-export async function editScript(
-	plugin: LoomLoomPlugin,
-	project: ProjectDef,
-	apply: (text: string) => string | null
-): Promise<boolean> {
-	return queueWrite('script', scriptFilePath(project), async () => {
-		const scriptFile = findScriptFile(plugin, project);
-		if (!scriptFile) return false;
-		try {
-			const raw = await plugin.app.vault.read(scriptFile);
-			const next = apply(raw);
-			if (next === null || next === raw) return false;
-			await plugin.app.vault.modify(scriptFile, next);
-			return true;
-		} catch (e) {
-			console.error('Loom Loom: could not edit the script', e);
-			new Notice(t('view.script.editWriteFailed'));
-			return false;
+export async function pruneOrphanedAnnotations(plugin: LoomLoomPlugin, project: ProjectDef, raw: string): Promise<void> {
+	await syncScenes(plugin, project, parseFountain(raw), raw);
+	const liveIds = liveAnnotationIds(raw);
+	void mutateScriptNotes(plugin.app, project, (notes) => {
+		let touched = false;
+		const comments = { ...notes.comments };
+		for (const id of Object.keys(comments)) {
+			if (!liveIds.has(id)) {
+				delete comments[id];
+				touched = true;
+			}
 		}
+		const altText = { ...notes.altText };
+		for (const id of Object.keys(altText)) {
+			if (!liveIds.has(id)) {
+				delete altText[id];
+				touched = true;
+			}
+		}
+		return touched ? { ...notes, comments, altText } : notes;
 	});
 }
+
+// Registered once at module load so `script-buffer.ts` can run this same
+// sync/prune pass after a flush without importing this module back (which
+// would cycle — this file already imports `editScript`/`findScriptFile`/
+// `prepareScriptText` FROM script-buffer.ts, above).
+registerPostFlushHook(pruneOrphanedAnnotations);
 
 /**
  * Like `editScript`, but also re-syncs Scene/Act notes from the result.
@@ -3083,52 +2872,15 @@ export async function editScriptAndSync(
 	project: ProjectDef,
 	apply: (text: string) => string | null
 ): Promise<boolean> {
-	// Renumbering rides along with every structural edit: a move/reorder
-	// physically relocates a scene's block, number included, so an existing
-	// `#N#` numbering scheme is kept sequential rather than traveling with
-	// the scene to its new, wrong position. A script with no numbers at all
-	// is untouched (`renumberScenes` is a no-op when nothing is numbered).
-	// `cleanAnnotationMarkers` rides along too — a structural edit (move,
-	// delete, heading rewrite) is exactly the kind of change that can leave a
-	// comment/alt-text marker orphaned, same reasoning as `runCommit`'s own
-	// pass in the main Script view. `applyBranchLabels` rides along for the
-	// identical reason `runCommit` already runs it: a branch's printed
-	// `>**Title**<` marker is auto-derived from its OWN heading text, with no
-	// separate note field the way an Act's `loomDisplayTitle` has — a title
-	// rename through `renameSectionTitle` (the Scene page's own Branch
-	// composer uses this) would otherwise leave that printed label stale
-	// until the main Script view was next opened and committed.
 	const changed = await editScript(plugin, project, (raw) => {
 		const applied = apply(raw);
-		return applied === null
-			? null
-			: cleanAnnotationMarkers(collapseBranchBlankLines(applyBranchLabels(renumberBranchGroups(renumberScenes(applied)))))
-					.text;
+		return applied === null ? null : prepareScriptText(applied);
 	});
 	if (changed) {
 		const scriptFile = findScriptFile(plugin, project);
 		if (scriptFile) {
 			const raw = await plugin.app.vault.read(scriptFile);
-			await syncScenes(plugin, project, parseFountain(raw), raw);
-			const liveIds = liveAnnotationIds(raw);
-			void mutateScriptNotes(plugin.app, project, (notes) => {
-				let touched = false;
-				const comments = { ...notes.comments };
-				for (const id of Object.keys(comments)) {
-					if (!liveIds.has(id)) {
-						delete comments[id];
-						touched = true;
-					}
-				}
-				const altText = { ...notes.altText };
-				for (const id of Object.keys(altText)) {
-					if (!liveIds.has(id)) {
-						delete altText[id];
-						touched = true;
-					}
-				}
-				return touched ? { ...notes, comments, altText } : notes;
-			});
+			await pruneOrphanedAnnotations(plugin, project, raw);
 		}
 	}
 	return changed;

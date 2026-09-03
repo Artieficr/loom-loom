@@ -62,7 +62,8 @@ import {
 	recordLabel,
 } from './common';
 import { resolveProject, useIndexVersion } from './hooks';
-import { deleteScriptEntity, useScriptText } from './script-view';
+import { deleteScriptEntity } from './script-view';
+import { useScriptBuffer } from './script-buffer';
 import { deleteBookEntity } from './book-view';
 import { liveActIds, liveSceneIds, parseFountain } from '../fountain';
 
@@ -236,7 +237,7 @@ function EntityList({
 	// Only characters offer "Sort: appearance", but the hook has to run
 	// unconditionally (React's rules of hooks) — reading the script for every
 	// OTHER entity type is wasted work, so it's gated to just that case.
-	const scriptTextForSort = useScriptText(plugin, type === 'character' ? project : null);
+	const scriptTextForSort = useScriptBuffer(plugin, type === 'character' ? project : null);
 	/** A character's first CUE line in the script, keyed by lowercased name —
 	 *  built once per script change rather than re-parsing on every sort
 	 *  comparison. */
@@ -257,10 +258,7 @@ function EntityList({
 	// text (rather than through the Scene/Act page's own fields, which
 	// keep the same `[[loom:id]]` across a rename) loses its script backing
 	// and never gets cleaned up automatically (`syncScenes` is additive-only).
-	const scriptTextForOrphans = useScriptText(
-		plugin,
-		type === 'scene' || type === 'act' ? project : null
-	);
+	const scriptTextForOrphans = useScriptBuffer(plugin, type === 'scene' || type === 'act' ? project : null);
 	const liveScriptIds = useMemo(() => {
 		if ((type !== 'scene' && type !== 'act') || scriptTextForOrphans === null) return null;
 		const parsed = parseFountain(scriptTextForOrphans);
