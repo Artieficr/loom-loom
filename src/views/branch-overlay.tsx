@@ -1,48 +1,28 @@
-import {
-	ForwardedRef,
-	ReactElement,
-	RefObject,
-	forwardRef,
-	useCallback,
-	useEffect,
-	useImperativeHandle,
-	useLayoutEffect,
-	useMemo,
-	useRef,
-	useState,
-} from 'react';
+import { ReactElement, RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Menu } from 'obsidian';
-import { EditorView, repositionTooltips } from '@codemirror/view';
-import {
-	ParsedSection,
-	branchBodyText,
-	branchComboKey,
-	branchGroupBounds,
-	decomposeBranchValue,
-	nextComboNumber,
-	parseFountain,
-} from '../fountain';
-import { FountainField, FountainFieldHandle } from './fountain-field';
-import { Icon } from './common';
-import { EntityType } from '../types';
+import { branchComboKey, nextComboNumber, parseFountain } from '../fountain';
+import { FountainFieldHandle } from './fountain-field';
 import { t } from '../i18n';
 
 /**
- * The modular branch editor's own overlay: `position: fixed` OPAQUE panels
- * drawn on top of the live Fountain editor's own raw text, sourced from the
- * SAME `EditorView` `FountainField` already owns — never a second copy of
- * the document, never a CM6 decoration/widget replacing the branch's own
- * content (see this feature's plan doc,
- * `~/.claude/plans/mighty-popping-turing.md`, for the full architecture
- * decision). A branch is FULLY operated through its own panel here — Title,
- * decomposed Identifier/Subidentifier/Number on branch 1, and its own prose
- * BODY (dialogue/action, a real nested `FountainField` — see
- * `BranchBodyField`'s own doc comment) — every card is a solid, opaque,
- * self-sufficient data-entry surface (`pointer-events: auto`, `overflow:
- * hidden`); the live CM6 text underneath a branch's own span is completely
- * covered and never directly interacted with. A `new-group`/`new-branch`
- * DRAFT (not yet written to the document) uses the same opaque-card shape.
+ * The modular branch editor's DRAFT overlay: `position: fixed` OPAQUE panels
+ * drawn on top of the live Fountain editor for a still-open, not-yet-written
+ * `BranchDraft` — a brand-new decision point/branch being staged before it
+ * becomes real document text. Sourced from the SAME `EditorView`
+ * `FountainField` already owns, never a second copy of the document.
+ *
+ * **A REAL, already-committed branch group does NOT render here any more.**
+ * It used to (the same opaque-card shape, for every group in the document
+ * unconditionally) — that path was replaced by embedded CM6 decorations
+ * rendered directly over the group's own real text (`fountain-field.tsx`'s
+ * "Embedded branch cards" doc comment, `buildBranchGroupDecorations`), which
+ * is what let Cut/Copy/paste and text-selection safety work against the
+ * actual document instead of an opaque duplicate floating over it. This file
+ * keeps exactly what a draft still needs: a way to show and edit a group
+ * that has no real span to decorate yet. Once a draft is committed
+ * (`onCreateDraft`), it's written straight to the document and immediately
+ * renders through the embedded path instead — this overlay never draws it
+ * again.
  *
  * Faithfully mirrors `AnnotationHandlesOverlay`'s (fountain-field.tsx)
  * scheduling: every EXPENSIVE trigger (doc/geometry change, resize,
@@ -55,10 +35,10 @@ import { t } from '../i18n';
  * callback.
  *
  * **Scrolling is deliberately NOT one of those expensive triggers**: `sync()`
- * computes each card's position as a DOCUMENT-relative `top` (`screen top at
- * sync time` + `the scrollTop at that moment`, i.e. "where this card would
- * sit if `scrollTop` were 0") rather than a viewport-relative one, and every
- * card renders inside one shared `trackRef` div that gets `transform:
+ * computes each draft's anchor position as a DOCUMENT-relative `top` (`screen
+ * top at sync time` + `the scrollTop at that moment`, i.e. "where this card
+ * would sit if `scrollTop` were 0") rather than a viewport-relative one, and
+ * every card renders inside one shared `trackRef` div that gets `transform:
  * translateY(-scrollTop)` applied DIRECTLY (bypassing React entirely) by a
  * plain, un-debounced `scroll` listener on `view.scrollDOM`. That single
  * `transform` write is the only thing that has to track a fast scroll
@@ -67,16 +47,11 @@ import { t } from '../i18n';
  * genuine content/geometry changes, occasionally re-confirming (and
  * correcting any drift in) the values the transform is built from.
  *
- * **Clipping is a real CSS `overflow: hidden`, not manual clamp math**: every
- * card gets its real, UNCLAMPED height, and a fixed "window" div — sized to
- * `visibleClipRect(view.scrollDOM)`, `overflow: hidden` — does the actual
- * visual trimming, exactly like a normal scrollable region clips its
- * content, so a card scrolls out from under that edge the way ordinary
- * document text does (its header included — the header is just the card's
- * first child, not independently pinned to anything). `topClamped`/
- * `bottomClamped` (`BranchCardRect`) exist purely to decide whether to draw
- * a rounded/bordered edge (a real document-span boundary) vs. a flat one (a
- * mid-span clip line) — they never affect where anything is positioned.
+ * **Clipping is a real CSS `overflow: hidden`, not manual clamp math**: the
+ * fixed "window" div — sized to `visibleClipRect(view.scrollDOM)`,
+ * `overflow: hidden` — does the actual visual trimming, exactly like a
+ * normal scrollable region clips its content, so a draft's card scrolls out
+ * from under that edge the way ordinary document text does.
  *
  * **Portalled to `document.body`** (`createPortal`, same reasoning as
  * `CommentPopover`/`timeline-strip.tsx`'s own tooltip): Obsidian's
@@ -88,56 +63,13 @@ import { t } from '../i18n';
  *
  * Unlike `AnnotationHandlesOverlay` (a CM6 `ViewPlugin` imperatively managing
  * plain DOM spans), this is an ordinary React component: it needs real
- * `<input>`/`<textarea>`/button elements with ordinary React event handling,
- * which doesn't fit that imperative-DOM-node style. Rendered DOM is
- * React-owned (cleaned up by React's own unmount, not manual `.remove()`
- * calls), so the specific leak `AnnotationHandlesOverlay`'s own
- * `destroyed`/`isConnected` guards exist for doesn't apply the same way here
- * — the `destroyed` ref below only guards against a stale `setState` call
- * landing after unmount, a much smaller concern.
- *
- * **Every branch group in the document gets a mounted card, unconditionally**
- * — never gated on proximity to the current scroll position. The fixed clip
- * window's `overflow: hidden` keeps every off-screen card invisible without
- * needing to avoid mounting it.
- *
- * **A branch's card can be genuinely TALLER than its real document span**
- * (`branchSpacers`, threaded into the caller's own main `FountainField` —
- * see that file's own doc comment on the prop): the panel's own header UI
- * (`###`/Title, `= branch:`/combo row, the `>**Title**<` preview)
- * and, on a group's last card, its footer (`= gather` + the "+" button)
- * don't correspond to any extra document height by themselves — a real span
- * only reserves what its own heading/`= branch:` synopsis lines take up,
- * which is less than header + footer need. `BranchOverlay` measures each
- * card's own header height, footer height (when present), and its nested
- * body's natural content height, and reports any shortfall upward; the
- * caller's main editor then reserves that many extra pixels as
- * `padding-bottom` on this branch's OWN `= branch: <id>` synopsis line —
- * genuine screen space with zero effect on the actual document text, so the
- * branch's real span grows to match what the panel needs instead of the
- * panel being squeezed into what the span happens to already provide.
- *
- * **A real consequence of going fully opaque/`pointer-events: auto`**: a
- * right-click anywhere inside a branch's own card can no longer pass
- * through to the live CM6 editor beneath it. Two different surfaces answer
- * it, covering the two different kinds of area a card actually has: the
- * card's OWN chrome (header, margins — this file's own `onContextMenu`)
- * offers "Cut branch group"/"Copy branch group" directly; a right-click
- * landing INSIDE the nested body (`BranchBodyField`'s own real `FountainField`
- * instance) reaches `fountain-field.tsx`'s own `openContextMenu` instead,
- * which offers the SAME two actions under its ordinary Cut/Copy items once
- * it's told which group it belongs to (`branchGroupId`, that file's own doc
- * comment) — replacing that field's usual per-selection text semantics
- * entirely, not adding a third option beside them. That field's own handler
- * also calls `event.stopPropagation()`, so a body-level right-click is
- * handled ONCE, never bubbling up to also trigger this card's own handler on
- * top of it. `fountain-field.tsx` only offers "Create new branch"/"Paste
- * branch group" on a genuinely empty line OUTSIDE any existing group's span
- * — which, in ordinary use, this overlay's own opaque cards make
- * unreachable-by-construction anyway (the click never gets past the panel to
- * begin with); `branchGroupAtLine` (fountain.ts) stays there purely as
- * defensive belt-and-suspenders for the brief window before this component's
- * first `sync()` has run.
+ * `<input>`/button elements with ordinary React event handling, which
+ * doesn't fit that imperative-DOM-node style. Rendered DOM is React-owned
+ * (cleaned up by React's own unmount, not manual `.remove()` calls), so the
+ * specific leak `AnnotationHandlesOverlay`'s own `destroyed`/`isConnected`
+ * guards exist for doesn't apply the same way here — the `destroyed` ref
+ * below only guards against a stale `setState` call landing after unmount, a
+ * much smaller concern.
  */
 
 /** A brand-new decision point not yet written to the document —
@@ -175,84 +107,17 @@ export interface BranchDraft {
  *  by this factor). */
 const CARD_WIDEN_FACTOR = 1.17;
 
-interface BranchCardRect {
-	/** The section's own `[[loom:<id>]]` — stable across a group's own
-	 *  reorder/renumber, unlike its current `= branch:` value. */
-	sectionId: string;
-	groupId: string;
-	/** This branch's own current heading title — what the Title field
-	 *  edits. */
-	title: string;
-	/** This branch's own current body text (`branchBodyText`, fountain.ts)
-	 *  — what the nested body `FountainField` edits. */
-	body: string;
-	/** DOCUMENT-relative top (screen top at last `sync()`, converted to "as
-	 *  if `view.scrollDOM.scrollTop` were 0" by adding that scrollTop back
-	 *  in) — a value that stays correct across ordinary CM6-internal
-	 *  scrolling with NO recompute, because the shared scroll-tracking
-	 *  `<div>` this card renders inside (`trackRef`, below) gets its own
-	 *  `transform: translateY(-scrollTop)` applied directly on every native
-	 *  `scroll` event, synchronously, bypassing React entirely — the only
-	 *  thing that has to track a live scroll gesture in real time. */
-	top: number;
-	/** The branch's real, UNCLAMPED height (`screenBottom - screenTop` at
-	 *  sync time) — never shrunk to "however much is currently visible."
-	 *  Clipping is a real CSS `overflow: hidden` on the fixed "window" div
-	 *  this card's track renders inside (sized to `clipRect`), not manual
-	 *  top/height math, so a card (header included) scrolls out from under
-	 *  the window's edge the way ordinary document text does. */
-	height: number;
-	left: number;
-	width: number;
-	/** The real text column's own true width (pre-`CARD_WIDEN_FACTOR`,
-	 *  matching the real editor's own `.cm-content` exactly) — what
-	 *  `BranchBodyField` pins its nested field's rendered width to,
-	 *  regardless of the card's own wider outer box. */
-	contentWidth: number;
-	/** The margin the widened card carries on each side of that text column
-	 *  (`(width - contentWidth) / 2`) — applied as the header/gather row's
-	 *  own `padding-left`, so the `###`/`= branch:`/`= gather` labels start
-	 *  at the SAME x position the real body text does, rather than at
-	 *  whatever smaller fixed inset the header's own padding would
-	 *  otherwise use. */
-	contentMargin: number;
-	position: 'only' | 'first' | 'middle' | 'last';
-	/** Whether this edge's TRUE position (independent of current scroll) is
-	 *  ever going to sit outside the clip window — computed once at sync
-	 *  time from the same screen coordinates `top`/`height` are derived
-	 *  from. A clamped edge never draws a border/radius (see the render
-	 *  function below): a closed rounded corner there would misleadingly
-	 *  read as "this is where the branch really ends" when it's only where
-	 *  the window happens to cut off. May go one `sync()` pass stale during
-	 *  an active scroll gesture (it doesn't update on the cheap per-scroll
-	 *  transform tick) — self-corrects the moment scrolling settles and the
-	 *  debounced `sync()` runs again, which is an acceptable trade for
-	 *  keeping the hot scroll path free of per-card arithmetic. */
-	topClamped: boolean;
-	bottomClamped: boolean;
-	/** True when either edge fell back to `view.lineBlockAt`'s own estimated
-	 *  height map instead of a real `coordsAtPos` measurement (see `docTop`/
-	 *  `docBottom` below) — CM6 only measures positions it has actually
-	 *  rendered, so an off-screen (virtualized) branch card falls back here
-	 *  even though every branch gets a rect unconditionally, "visible or
-	 *  not" (this file's own `sync()` doc comment). The estimate does NOT
-	 *  reflect this branch's own `padding-bottom` spacer (fountain-field.tsx
-	 *  never actually renders/lays out a virtualized line, so its height-map
-	 *  entry stays at the unpadded guess) — the spacer-shortfall effect below
-	 *  MUST skip an estimated rect entirely rather than trust its `height`,
-	 *  or it computes a "shortfall" against a height that can never grow no
-	 *  matter how much spacer is added, requesting more every pass forever
-	 *  (confirmed: this was a real runaway-growth bug, `currentSpacer`
-	 *  climbing without bound while `naturalHeight` went arbitrarily
-	 *  negative, for every off-screen branch in a longer script). */
-	estimated: boolean;
-}
-
 /** A still-open draft's on-screen anchor — just a `top`/`left`/`width`, no
  *  `bottom`/height: a draft has no real document content to measure a span
  *  from yet, so its card's height is purely whatever its own editable
- *  fields need (`height: auto`), unlike a real `BranchCardRect`. `top` is
- *  document-relative, same convention as `BranchCardRect.top` above. */
+ *  fields need (`height: auto`). `top` is DOCUMENT-relative (screen top at
+ *  last `sync()`, converted to "as if `view.scrollDOM.scrollTop` were 0" by
+ *  adding that scrollTop back in) — a value that stays correct across
+ *  ordinary CM6-internal scrolling with NO recompute, because the shared
+ *  scroll-tracking `<div>` every draft card renders inside (`trackRef`,
+ *  below) gets its own `transform: translateY(-scrollTop)` applied directly
+ *  on every native `scroll` event, synchronously, bypassing React entirely —
+ *  the only thing that has to track a live scroll gesture in real time. */
 interface DraftCardRect {
 	draftId: string;
 	top: number;
@@ -333,8 +198,8 @@ export interface BranchOverlayProps {
 	 *  alone don't fire for every moment CM6's OWN internal layout settles
 	 *  (most commonly, right after mount, before web fonts fully resolve). */
 	geometryVersion?: number;
-	/** Still-open drafts (state owned by the caller) — rendered alongside
-	 *  the real cards, at their own tracked/derived anchor position. */
+	/** Still-open drafts (state owned by the caller) — the only thing this
+	 *  component renders, each at its own tracked/derived anchor position. */
 	drafts: BranchDraft[];
 	/** A draft's field changed — the caller applies the patch to its own
 	 *  state, nothing more; committing is a SEPARATE, explicit step
@@ -354,87 +219,6 @@ export interface BranchOverlayProps {
 	 *  outside its own card) — the caller drops it from `drafts` and clears
 	 *  its CM6 anchor (`new-group` only). */
 	onDismissDraft: (id: string) => void;
-	/** A branch's own Title field was edited — `renameSectionTitle`
-	 *  (fountain.ts) through `editScriptAndSync`. */
-	onRenameBranchTitle: (sectionId: string, newTitle: string) => void;
-	/** Branch 1's decomposed Identifier/Subidentifier/Number fields were
-	 *  edited — every sibling sharing the group's value moves together
-	 *  (`setBranchTagValue`, fountain.ts). */
-	onSetBranchCombo: (groupId: string, identifier: string, subidentifier: string, numberOrOverride: string) => void;
-	/** Branch 1's single plain field (a legacy value that doesn't decompose
-	 *  into 3 segments) was edited — rewrites the raw value verbatim. */
-	onSetBranchRaw: (groupId: string, newValue: string) => void;
-	/** A branch's own body field was edited (`replaceBranchBody`,
-	 *  fountain.ts). */
-	onSetBranchBody: (sectionId: string, newBody: string) => void;
-	/** The group's own "+" (rendered on its last card) — the caller
-	 *  (`entity-view.tsx`'s `handleAddBranch`) writes a real new branch to
-	 *  the document immediately, no draft/staging step; see that function's
-	 *  own doc comment. */
-	onAddBranch: (groupId: string) => void;
-	/** The section id of a branch just created via `onAddBranch`, still
-	 *  waiting for its Title field to claim the one-shot "show blank, not
-	 *  the underlying `'Untitled'` placeholder, and steal focus" treatment
-	 *  — see `BranchTitleField`'s own `autoFocusEmpty` doc comment. `null`
-	 *  the rest of the time (no branch is currently pending this). */
-	pendingTitleFocusId?: string | null;
-	/** Fired once, the instant the pending id above has actually been
-	 *  claimed by its own Title field's first mount — the caller clears its
-	 *  own pending-id state so a LATER remount of that same field (e.g.
-	 *  switching Script mode away and back) can never wrongly re-blank a
-	 *  branch that already has a real title by then. */
-	onTitleFocusConsumed?: () => void;
-	/** A card's own right-click "Cut branch group" — see this file's own top
-	 *  doc comment for why this lives here now instead of
-	 *  `fountain-field.tsx`'s `openContextMenu`. Also threaded straight into
-	 *  each card's own nested `BranchBodyField`, so a right-click INSIDE the
-	 *  body reaches the identical handler. */
-	onCutBranchGroup: (groupId: string) => void;
-	/** "Copy branch group" — same clipboard as `onCutBranchGroup`, but the
-	 *  source stays in the document. Threaded the same two ways. */
-	onCopyBranchGroup: (groupId: string) => void;
-	/** The trash icon on a card's own `###` row — deletes just THIS branch
-	 *  (`removeBranchFromGroup`, fountain.ts), not the whole group the way
-	 *  "Cut branch group" does. The caller confirms before calling this (real
-	 *  prose is lost, unlike a cut, which survives in the branch clipboard). */
-	onDeleteBranch: (sectionId: string) => void;
-	/** Existing character names, fed straight through to each card's own
-	 *  embedded `FountainField` body — same list the caller's own main
-	 *  script editor already passes, so the character-cue autocomplete
-	 *  behaves identically inside a branch's body. See `BranchBodyField`'s
-	 *  own doc comment for why the body is a real nested `FountainField` at
-	 *  all, not a plain textarea. */
-	characters: string[];
-	/** `@[` inline entity-link autocomplete/resolution — same shape/source
-	 *  as the caller's own main editor's `entityOptions` prop. */
-	entityOptions?: { name: string; type: EntityType; path: string }[];
-	/** Ambient link-suggester dismiss delay — same setting the caller's own
-	 *  main editor reads (`plugin.settings.ambientLinkSuggestDismissMs`). */
-	ambientSuggestDismissMs?: number;
-	/** Reports, after every render, how many extra pixels of `padding-top`
-	 *  each branch (keyed by its own `[[loom:<id>]]`) needs reserved right
-	 *  after its own span in the caller's REAL document — see this file's
-	 *  own top doc comment ("A branch's card can be genuinely TALLER...")
-	 *  for the full reasoning. The caller feeds the returned map straight
-	 *  into its own main `FountainField`'s `branchSpacers` prop
-	 *  (fountain-field.tsx), which is what actually reserves the space; this
-	 *  callback only ever fires with a genuinely changed map (a shallow diff
-	 *  against what was last reported, tolerant of sub-pixel jitter), so a
-	 *  caller storing it in `useState` doesn't need its own extra guard
-	 *  against redundant re-renders. */
-	onSpacerNeedsChange?: (spacers: Record<string, number>) => void;
-	/** Default `true` — set `false` by a caller whose own `FountainField`
-	 *  renders every REAL branch group itself (`embeddedBranchCards`,
-	 *  fountain-field.tsx), so this component's own opaque cards would just
-	 *  double up on top of that. Still-open DRAFTS (`drafts`, above) keep
-	 *  rendering regardless — a draft has no backing document content yet,
-	 *  so there's nothing for the embedded renderer to show in its place.
-	 *  Deliberately only gates the RENDER, not the underlying measurement
-	 *  pass (`sync()`'s own `rects` computation) — that logic is delicate
-	 *  enough (see this file's own top doc comment on scroll timing) that
-	 *  skipping it selectively wasn't worth the risk for what's a small,
-	 *  Scene-page-only perf cost. */
-	renderRealCards?: boolean;
 }
 
 export function BranchOverlay({
@@ -446,33 +230,14 @@ export function BranchOverlay({
 	onDraftField,
 	onCreateDraft,
 	onDismissDraft,
-	onRenameBranchTitle,
-	onSetBranchCombo,
-	onSetBranchRaw,
-	onSetBranchBody,
-	onAddBranch,
-	pendingTitleFocusId,
-	onTitleFocusConsumed,
-	onCutBranchGroup,
-	onCopyBranchGroup,
-	onDeleteBranch,
-	characters,
-	entityOptions,
-	ambientSuggestDismissMs,
-	onSpacerNeedsChange,
-	renderRealCards = true,
 }: BranchOverlayProps): ReactElement | null {
-	const [rects, setRects] = useState<BranchCardRect[]>([]);
 	const [draftRects, setDraftRects] = useState<DraftCardRect[]>([]);
 	/** A fresh parse of the live document text, memoized purely for the
 	 *  draft panel's own Number field PREVIEW below (`nextComboNumber`) —
-	 *  independent of `sync()`'s own internal `parsed` (a separate local
-	 *  const, recomputed on every scroll/geometry sync pass for layout
-	 *  purposes), since this only needs to react to genuine document
-	 *  content changes, not scroll/resize. `parseFountain` is cheap and
-	 *  dependency-free, already re-run per keystroke elsewhere in this
-	 *  codebase (the Outline panel), so a second parse here costs nothing
-	 *  worth avoiding. */
+	 *  only needs to react to genuine document content changes, not
+	 *  scroll/resize. `parseFountain` is cheap and dependency-free, already
+	 *  re-run per keystroke elsewhere in this codebase (the Outline panel),
+	 *  so a second parse here costs nothing worth avoiding. */
 	const parsedForPreview = useMemo(() => parseFountain(text), [text]);
 	const [clipWindow, setClipWindow] = useState<ClipWindow | null>(null);
 	/** The Scene page's own nav/comments/alt-text side panel (`.loom-script-nav-sticky`,
@@ -487,16 +252,6 @@ export function BranchOverlay({
 	const [obscureRect, setObscureRect] = useState<{ right: number; bottom: number } | null>(null);
 	const destroyedRef = useRef(false);
 	const syncQueuedRef = useRef(false);
-	/** Per-card header/footer/body measurement refs (keyed by section id) —
-	 *  read by the `useLayoutEffect` below, right after `rects` commits to the
-	 *  DOM, to compute `onSpacerNeedsChange`'s own map. Plain mutable `Map`s,
-	 *  not React state — nothing here needs to trigger a re-render on its
-	 *  own. `footerElsRef` only ever holds an entry for a group's LAST card
-	 *  (the `= gather` row, present there and nowhere else). */
-	const headerElsRef = useRef(new Map<string, HTMLDivElement>());
-	const footerElsRef = useRef(new Map<string, HTMLDivElement>());
-	const bodyHandlesRef = useRef(new Map<string, BranchBodyFieldHandle>());
-	const lastReportedSpacersRef = useRef<Record<string, number>>({});
 	/** Each currently-open draft's own `.loom-branch-card-draft` DOM node,
 	 *  keyed by its own id — used only by the outside-click cancel effect
 	 *  right below. Plain callback-ref map, not React state: nothing here
@@ -529,13 +284,6 @@ export function BranchOverlay({
 	 *  this file's own top doc comment for why its `transform` is the thing
 	 *  that actually tracks a live scroll gesture, not `sync()`/React. */
 	const trackRef = useRef<HTMLDivElement | null>(null);
-	/** A title still being typed (not yet committed on blur), keyed by
-	 *  section id — lets `.loom-branch-title-preview` update on every
-	 *  keystroke instead of only once the Title field's own commit lands.
-	 *  Never explicitly cleared: once set, it's always either equal to the
-	 *  latest keystroke or (after commit) equal to `r.title` anyway, so
-	 *  there's nothing to revert to. */
-	const [liveTitleOverrides, setLiveTitleOverrides] = useState<Record<string, string>>({});
 	/** The window div's own node, tracked purely so `setWindowRef` (below)
 	 *  can remove its listener from the PREVIOUS node before attaching to a
 	 *  new one. */
@@ -710,80 +458,12 @@ export function BranchOverlay({
 		};
 	}, []);
 
-	// Measures each card's own header height and its nested body's natural
-	// content height right after `rects` commits to the DOM, and reports any
-	// shortfall (content taller than the space the card's real document span
-	// currently allocates for the body) to the caller via
-	// `onSpacerNeedsChange` — see this file's own top doc comment ("A
-	// branch's card can be genuinely TALLER...") for the full mechanism.
-	// `useLayoutEffect`, not `useEffect`: it needs to read real layout
-	// (`getBoundingClientRect`/`scrollHeight`, both plain DOM reads, never
-	// CM6's own `coordsAtPos`/`posAtCoords` measurement cache) synchronously
-	// after the DOM updates, which is exactly what `useLayoutEffect`
-	// guarantees and `useEffect` doesn't.
-	useLayoutEffect(() => {
-		if (!onSpacerNeedsChange) return;
-		const prevSpacers = lastReportedSpacersRef.current;
-		const next: Record<string, number> = {};
-		for (const r of rects) {
-			const headerEl = headerElsRef.current.get(r.sectionId);
-			const bodyHandle = bodyHandlesRef.current.get(r.sectionId);
-			if (!headerEl || !bodyHandle) continue;
-			if (r.estimated) {
-				// `r.height` came from CM6's own estimated line-height map
-				// (`BranchCardRect.estimated`'s own doc comment) — a
-				// virtualized/off-screen line's height never grows to
-				// reflect this branch's own applied `padding-bottom` spacer,
-				// so subtracting a "current spacer" back out of it below
-				// would measure an ever-growing shortfall against a height
-				// that can never catch up: this was a real, confirmed
-				// runaway-growth bug (spacer climbing without bound, once
-				// per `sync()`, for every branch scrolled out of view).
-				// Leave whatever spacer this branch already has untouched
-				// until it's actually rendered/measured again.
-				const carried = prevSpacers[r.sectionId];
-				if (carried !== undefined) next[r.sectionId] = carried;
-				continue;
-			}
-			const headerHeight = headerEl.getBoundingClientRect().height;
-			const footerHeight = footerElsRef.current.get(r.sectionId)?.getBoundingClientRect().height ?? 0;
-			// `r.height` already reflects whatever spacer is CURRENTLY applied
-			// (the real document already carries that `padding-bottom` on this
-			// branch's `= branch:` line) — subtracting it back out gives the
-			// NATURAL, unpadded span every time, so `extra` always measures
-			// against the same fixed baseline regardless of how much padding
-			// is already applied. This is load-bearing, not a nicety: computing
-			// against the padded span directly has no fixed point (fixing a
-			// shortfall grows `r.height`, which makes the fix measure as
-			// unnecessary, which removes it, which recreates the shortfall) —
-			// don't simplify this back to `r.height - headerHeight - footerHeight`.
-			// Only trustworthy for a REAL (non-`estimated`) measurement — see
-			// the `r.estimated` branch above.
-			const currentSpacer = prevSpacers[r.sectionId] ?? 0;
-			const naturalHeight = r.height - currentSpacer;
-			const available = naturalHeight - headerHeight - footerHeight;
-			const contentHeight = bodyHandle.getContentHeight();
-			const extra = Math.ceil(contentHeight - available);
-			if (extra > 1) next[r.sectionId] = extra;
-		}
-		const prevKeys = Object.keys(prevSpacers);
-		const nextKeys = Object.keys(next);
-		const changed =
-			prevKeys.length !== nextKeys.length ||
-			nextKeys.some((k) => Math.abs((prevSpacers[k] ?? 0) - next[k]) > 1);
-		if (changed) {
-			lastReportedSpacersRef.current = next;
-			onSpacerNeedsChange(next);
-		}
-	}, [rects, onSpacerNeedsChange]);
-
 	useEffect(() => {
 		const sync = () => {
 			if (destroyedRef.current) return;
 			const view = fieldRef.current?.getView();
 			const wrap = wrapRef.current;
 			if (!view || !wrap || !view.dom.isConnected) {
-				setRects([]);
 				setDraftRects([]);
 				setClipWindow(null);
 				setObscureRect(null);
@@ -803,17 +483,10 @@ export function BranchOverlay({
 			// schedules a fresh `sync()` that recomputes and shows the cards
 			// again.
 			if (view.dom.offsetParent === null) {
-				setRects([]);
 				setDraftRects([]);
 				setClipWindow(null);
 				setObscureRect(null);
 				return;
-			}
-
-			const parsed = parseFountain(text);
-			const groupIds = new Set<string>();
-			for (const sec of parsed.sections) {
-				if (sec.branchGroup !== null && sec.loomId !== null) groupIds.add(sec.branchGroup);
 			}
 
 			// `wrap` (`.loom-scene-script`) is the full-width shell — the nav
@@ -821,12 +494,11 @@ export function BranchOverlay({
 			// actual Fountain text renders in a centered, `max-width: 6in`
 			// column (`.loom-fountain-field .cm-content`, styles.css) narrower
 			// than that shell. `view.contentDOM` IS that column, so its own rect
-			// is what a card's own left/width need to match — a card only
+			// is what a draft card's own left/width need to match — a card only
 			// covers the real text, never the wider shell around it, so the
 			// pointer-events-none clip window (below) leaves the margins on
 			// either side free for the mouse to keep scrolling the editor
-			// normally, and a card's own nested `FountainField` gets exactly
-			// the same available width the real editor's `.cm-content` does.
+			// normally.
 			const contentRect = view.contentDOM.getBoundingClientRect();
 			// The clip boundary every card is trimmed against, separately from
 			// sizing — walks every scrollable ancestor (see `visibleClipRect`'s
@@ -838,7 +510,6 @@ export function BranchOverlay({
 			// Notes, even its own tab bar).
 			const clipRect = visibleClipRect(view.scrollDOM);
 			if (clipRect.bottom <= clipRect.top || clipRect.right <= clipRect.left) {
-				setRects([]);
 				setDraftRects([]);
 				setClipWindow(null);
 				setObscureRect(null);
@@ -892,42 +563,15 @@ export function BranchOverlay({
 			// screen position, applied directly to `trackRef` on every scroll
 			// tick — see this file's own top doc comment for the full reasoning.
 			const scrollTop = view.scrollDOM.scrollTop;
-			const docLen = view.state.doc.length;
 			const docLines = view.state.doc.lines;
 
 			/** `coordsAtPos` first, `lineBlockAt` only as a fallback for a
 			 *  position `coordsAtPos` can't measure at all (genuinely
 			 *  off-screen/virtualized content — see `docCorrection`'s own doc
-			 *  comment above for why that fallback exists). `coordsAtPos`
-			 *  calls `readMeasured()`, forcing CM6 to finish any pending
-			 *  layout work before returning — load-bearing for the spacer
-			 *  feedback loop (`onSpacerNeedsChange` above), which measures
-			 *  `r.height` right after inserting a spacer to see if more room
-			 *  is still needed: an estimate that hasn't caught up with that
-			 *  very edit yet reads as "still short," requests more, and never
-			 *  converges. **The `lineBlockAt` fallback path is NOT confined to
-			 *  the currently-visible branch** — every branch gets a rect
-			 *  unconditionally (this file's own `sync()` doc comment), so a
-			 *  branch scrolled out of view routes through here on every sync,
-			 *  and its `padding-bottom` spacer (only ever actually laid out
-			 *  for rendered, non-virtualized lines) never moves this estimate
-			 *  no matter how large the spacer grows — an earlier version of
-			 *  this comment assumed otherwise and was wrong; that wrong
-			 *  assumption is what let the spacer effect's runaway-growth bug
-			 *  ship (see `BranchCardRect.estimated`'s own doc comment for the
-			 *  fix). Both functions report whether they took this path so the
-			 *  caller can react. */
-			const docTop = (pos: number): { value: number; estimated: boolean } => {
+			 *  comment above for why that fallback exists). */
+			const docTop = (pos: number): number => {
 				const coords = view.coordsAtPos(pos, 1);
-				return coords
-					? { value: coords.top - clipRect.top + scrollTop, estimated: false }
-					: { value: view.lineBlockAt(pos).top + docCorrection, estimated: true };
-			};
-			const docBottom = (pos: number): { value: number; estimated: boolean } => {
-				const coords = view.coordsAtPos(pos, -1);
-				return coords
-					? { value: coords.bottom - clipRect.top + scrollTop, estimated: false }
-					: { value: view.lineBlockAt(pos).bottom + docCorrection, estimated: true };
+				return coords ? coords.top - clipRect.top + scrollTop : view.lineBlockAt(pos).top + docCorrection;
 			};
 
 			/** The document-relative top of 0-based line `line0`'s own start —
@@ -941,7 +585,7 @@ export function BranchOverlay({
 				try {
 					const fromLine = Math.min(Math.max(line0, 0) + 1, docLines);
 					const fromPos = view.state.doc.line(fromLine).from;
-					return docTop(fromPos).value;
+					return docTop(fromPos);
 				} catch (e) {
 					console.error('Loom Loom: branch overlay could not read layout this frame', e);
 					return null;
@@ -951,96 +595,12 @@ export function BranchOverlay({
 			// The card's own OUTER box is deliberately WIDER than the real text
 			// column (`CARD_WIDEN_FACTOR`) — a card whose border sits flush
 			// against the text on both sides reads as cramped, with no
-			// breathing room around the panel's own header/gather rows. The
-			// text column itself (`contentWidth`) is kept at its own true,
-			// unwidened value and centered within the wider card —
-			// `BranchBodyField` applies it as an explicit pixel width on its
-			// own inner wrapper, an exact number carried straight from this
-			// measurement rather than reconstructed via CSS `max-width`
-			// matching on the nested field's own side.
+			// breathing room around the draft's own fields. The text column
+			// itself (`contentWidth`) is kept at its own true, unwidened value
+			// and centered within the wider card.
 			const contentWidth = contentRect.width;
 			const width = contentWidth * CARD_WIDEN_FACTOR;
 			const left = contentRect.left - clipRect.left - (width - contentWidth) / 2;
-			// Every branch group in the document gets a rect, unconditionally —
-			// never gated on proximity to the current scroll position, so a
-			// branch always shows its panel rather than its own raw underlying
-			// text before the user scrolls close to it. The fixed clip window's
-			// `overflow: hidden` keeps every off-screen card invisible without
-			// needing to skip mounting it.
-
-			const next: BranchCardRect[] = [];
-			for (const groupId of groupIds) {
-				const bounds = branchGroupBounds(parsed, groupId);
-				if (!bounds) continue;
-				bounds.branches.forEach((sec: ParsedSection & { loomId: string }, i: number) => {
-					const spanEnd = i + 1 < bounds.branches.length ? bounds.branches[i + 1].line : bounds.end;
-					const fromLine = Math.min(sec.line + 1, docLines);
-					let top: number | null = null;
-					let bottom: number | null = null;
-					let estimated = false;
-					try {
-						const fromPos = view.state.doc.line(fromLine).from;
-						// `spanEnd` (0-indexed, exclusive) needs the same +1 as
-						// `fromLine` to become a CM6 line number — EXCEPT when
-						// it points one past the very last line in the text
-						// (a real, reported bug: a group's `= gather` landing
-						// as the literal last line of the Scene's own excerpt,
-						// with no trailing blank line after it, has no "line
-						// spanEnd+1" to find the start of — `doc.line()` on an
-						// out-of-range number throws, and the fallback used to
-						// silently clamp one line SHORT, excluding gather from
-						// the box entirely). `doc.length` (the raw end-of-
-						// document character offset) is always valid and
-						// exactly what's wanted here regardless.
-						const toPos = spanEnd >= docLines ? docLen : view.state.doc.line(spanEnd + 1).from;
-						const topResult = docTop(fromPos);
-						const bottomResult = docBottom(Math.max(toPos - 1, fromPos));
-						top = topResult.value;
-						bottom = bottomResult.value;
-						estimated = topResult.estimated || bottomResult.estimated;
-					} catch (e) {
-						console.error('Loom Loom: branch overlay could not read layout this frame', e);
-					}
-					if (top === null || bottom === null || bottom <= top) return;
-					// Real (unclamped) boundary-vs-window check, purely for
-					// border/radius decisions — see `BranchCardRect.topClamped`'s
-					// own doc comment. Positioning itself never clamps any more;
-					// the fixed clip window's `overflow: hidden` does that
-					// visually, so a card scrolled fully out of the visible clip
-					// area still scrolls back into view for free (the shared
-					// `trackRef` transform, not a recompute) the moment it's
-					// scrolled back to. Both `top`/`bottom` are already in the
-					// "as if scrollTop were 0" space `docCorrection` produces, so
-					// the window's own visible band in that SAME space is simply
-					// `[scrollTop, scrollTop + windowHeight]`.
-					const topClamped = top < scrollTop;
-					const bottomClamped = bottom > scrollTop + windowHeight;
-					next.push({
-						sectionId: sec.loomId,
-						groupId,
-						title: sec.text,
-						body: branchBodyText(text, sec.loomId) ?? '',
-						top,
-						height: bottom - top,
-						left,
-						width,
-						contentWidth,
-						contentMargin: (width - contentWidth) / 2,
-						topClamped,
-						bottomClamped,
-						estimated,
-						position:
-							bounds.branches.length === 1
-								? 'only'
-								: i === 0
-									? 'first'
-									: i === bounds.branches.length - 1
-										? 'last'
-										: 'middle',
-					});
-				});
-			}
-			setRects(next);
 
 			const nextDrafts: DraftCardRect[] = [];
 			for (const draft of drafts) {
@@ -1056,55 +616,17 @@ export function BranchOverlay({
 			applyTrackTransform();
 		};
 
-		/** The cheap half of the split: reads the CURRENT scroll position
-		 *  directly and writes it straight to `trackRef`'s own `transform`,
-		 *  bypassing React/state entirely — the one thing that has to track a
-		 *  fast scroll gesture with zero perceptible lag. Never calls
-		 *  `coordsAtPos`/reads layout, so it's safe to run on every native
-		 *  `scroll` event with no debouncing at all.
-		 *
-		 *  Also calls CM6's own `repositionTooltips` on the FOCUSED branch
-		 *  body's own `EditorView`, if any — a nested field never scrolls
-		 *  NATIVELY (its own `scrollDOM.scrollTop` never changes; the whole
-		 *  card moves via this very `transform`, entirely outside that
-		 *  field's own knowledge), so CM6 has no other way to learn that its
-		 *  own autocomplete popup's anchor position just moved on screen.
-		 *  Without this, an open popup freezes at wherever it first appeared
-		 *  instead of tracking the branch's own scroll the way the popup in
-		 *  an ordinary (natively-scrolling) `FountainField` already does.
-		 *  **Scoped to the one focused field, not every mounted card**: only
-		 *  a focused `EditorView` can possibly have an open tooltip/
-		 *  completion popup to begin with, and this runs on EVERY native
-		 *  `scroll` tick (plus, while the cursor sits over a card, on every
-		 *  wheel-forwarded scrollTop write too — see `onWindowWheelRef`) —
-		 *  looping every mounted body unconditionally added real main-thread
-		 *  work to the one path that has to stay cheap enough for zero
-		 *  perceptible lag, confirmed as a real contributor to a "scrolling
-		 *  feels floaty/steppy on a card vs. buttery over the real editor"
-		 *  report: hovering a card runs BOTH this listener (via the scrollTop
-		 *  write it triggers) AND the wheel handler's own per-frame work,
-		 *  doubling the per-tick cost right where it was already highest.
-		 *  `hasFocus` is a plain property read, no layout involved. Wrapped
-		 *  in try/catch as a backstop, matching every other CM6-layout-
-		 *  touching call in this codebase — `repositionTooltips` reads real
-		 *  layout, and this runs from a plain native `scroll` listener,
-		 *  outside CM6's own update cycle, which is the safe case, but
-		 *  there's no reason not to be defensive here too. */
+		/** Reads the CURRENT scroll position directly and writes it straight to
+		 *  `trackRef`'s own `transform`, bypassing React/state entirely — the
+		 *  one thing that has to track a fast scroll gesture with zero
+		 *  perceptible lag. Never calls `coordsAtPos`/reads layout, so it's
+		 *  safe to run on every native `scroll` event with no debouncing at
+		 *  all. */
 		const applyTrackTransform = () => {
 			const view = fieldRef.current?.getView();
 			const track = trackRef.current;
 			if (!view || !track) return;
 			track.style.transform = `translateY(${-view.scrollDOM.scrollTop}px)`;
-			for (const handle of bodyHandlesRef.current.values()) {
-				const bodyView = handle.getView();
-				if (!bodyView || !bodyView.hasFocus) continue;
-				try {
-					repositionTooltips(bodyView);
-				} catch (e) {
-					console.error('Loom Loom: branch body field could not reposition its own tooltip', e);
-				}
-				break;
-			}
 		};
 
 		const scheduleSync = () => {
@@ -1233,12 +755,7 @@ export function BranchOverlay({
 		};
 	}, [text, fieldRef, wrapRef, geometryVersion, drafts]);
 
-	if (!clipWindow || (rects.length === 0 && draftRects.length === 0)) return null;
-
-	const lastByGroup = new Map<string, BranchCardRect>();
-	for (const r of rects) {
-		if (r.position === 'last' || r.position === 'only') lastByGroup.set(r.groupId, r);
-	}
+	if (!clipWindow || draftRects.length === 0) return null;
 
 	return createPortal(
 		// The fixed "window": `overflow: hidden` sized to `clipWindow`
@@ -1272,160 +789,6 @@ export function BranchOverlay({
 			    to move in real time to stay in sync with the editor's own
 			    scroll. */}
 			<div className="loom-branch-track" ref={trackRef}>
-			{renderRealCards && rects.map((r) => {
-				// The group's true top/bottom (first/only and last/only,
-				// respectively) get the plain panel radius + a real border —
-				// but ONLY when that edge isn't itself clamped by the visible
-				// clip (see `BranchCardRect.topClamped`/`bottomClamped`'s own
-				// doc comment: a clamped edge means the branch's REAL boundary
-				// is off-screen, so drawing a closed rounded corner right at
-				// the clip line would misleadingly claim that's where the
-				// branch actually ends). An internal joint (a 'middle' card's
-				// both edges, or 'first'/'last' card's OTHER edge) never gets a
-				// border — it's not a real boundary — but still gets the
-				// larger joint radius when genuinely unclamped, reading as one
-				// continuous connected group.
-				const isTopBoundary = r.position === 'only' || r.position === 'first';
-				const isBottomBoundary = r.position === 'only' || r.position === 'last';
-				const topRadius = r.topClamped ? '0' : isTopBoundary ? 'var(--radius-m)' : 'var(--loom-branch-joint-radius)';
-				const bottomRadius = r.bottomClamped
-					? '0'
-					: isBottomBoundary
-						? 'var(--radius-m)'
-						: 'var(--loom-branch-joint-radius)';
-				// A 'middle'/'last' card's own top edge is a real seam between
-				// two branches (a joint radius, never the group's own rounded
-				// corner) and gets a divider too, matching every other section
-				// transition in this card (the gather row's own `border-top`) —
-				// only a clamped edge (the branch's real boundary is off-screen)
-				// suppresses it, same as the group's outer edges above.
-				const showTopBorder = !r.topClamped;
-				const showBottomBorder = isBottomBoundary && !r.bottomClamped;
-				const isLastOfGroup = lastByGroup.get(r.groupId)?.sectionId === r.sectionId;
-				return (
-					<div
-						key={r.sectionId}
-						className="loom-branch-card"
-						style={{
-							top: r.top,
-							left: r.left,
-							width: r.width,
-							height: r.height,
-							borderTopLeftRadius: topRadius,
-							borderTopRightRadius: topRadius,
-							borderBottomLeftRadius: bottomRadius,
-							borderBottomRightRadius: bottomRadius,
-							borderTopStyle: showTopBorder ? 'dashed' : 'none',
-							borderBottomStyle: showBottomBorder ? 'dashed' : 'none',
-						}}
-						data-loom-branch-group={r.groupId}
-						onContextMenu={(e) => {
-							// Only reached for a right-click on the card's own
-							// chrome (header, margins) — a click landing inside
-							// the nested body never bubbles this far, stopped at
-							// `fountain-field.tsx`'s own `openContextMenu` (see
-							// this file's own top doc comment).
-							e.preventDefault();
-							const menu = new Menu();
-							menu.addItem((item) =>
-								item
-									.setTitle(t('view.script.contextMenu.cutBranchGroup'))
-									.setIcon('scissors')
-									.onClick(() => onCutBranchGroup(r.groupId))
-							);
-							menu.addItem((item) =>
-								item
-									.setTitle(t('view.script.contextMenu.copyBranchGroup'))
-									.setIcon('copy')
-									.onClick(() => onCopyBranchGroup(r.groupId))
-							);
-							menu.showAtMouseEvent(e.nativeEvent);
-						}}
-					>
-						<div
-							className="loom-branch-card-header"
-							style={{ paddingLeft: r.contentMargin }}
-							ref={(el) => {
-								if (el) headerElsRef.current.set(r.sectionId, el);
-								else headerElsRef.current.delete(r.sectionId);
-							}}
-						>
-							<div className="loom-branch-label-row">
-								<span className="loom-branch-label loom-branch-label-section">###</span>
-								<BranchTitleField
-									key={`title-${r.sectionId}`}
-									value={r.title}
-									onCommit={(v) => onRenameBranchTitle(r.sectionId, v)}
-									onDraftChange={(v) => setLiveTitleOverrides((prev) => ({ ...prev, [r.sectionId]: v }))}
-									autoFocusEmpty={r.sectionId === pendingTitleFocusId}
-									onAutoFocusConsumed={onTitleFocusConsumed}
-								/>
-								<button
-									type="button"
-									className="clickable-icon loom-branch-delete-btn"
-									aria-label={t('view.script.branch.deleteBranchAria')}
-									onClick={() => onDeleteBranch(r.sectionId)}
-								>
-									<Icon name="trash-2" />
-								</button>
-							</div>
-							<div className="loom-branch-label-row">
-								<span className="loom-branch-label loom-branch-label-synopsis">= branch:</span>
-								<BranchComboFields
-									key={`combo-${r.groupId}`}
-									value={r.groupId}
-									readOnly={!isTopBoundary}
-									onCommitCombo={(identifier, sub, num) => onSetBranchCombo(r.groupId, identifier, sub, num)}
-									onCommitRaw={(v) => onSetBranchRaw(r.groupId, v)}
-								/>
-							</div>
-							<div className="loom-branch-title-preview">
-								&gt;
-								<span className="loom-branch-title-preview-bold">
-									**{liveTitleOverrides[r.sectionId] ?? r.title}**
-								</span>
-								&lt;
-							</div>
-						</div>
-						<BranchBodyField
-							key={`body-${r.sectionId}`}
-							ref={(h) => {
-								if (h) bodyHandlesRef.current.set(r.sectionId, h);
-								else bodyHandlesRef.current.delete(r.sectionId);
-							}}
-							value={r.body}
-							onCommit={(v) => onSetBranchBody(r.sectionId, v)}
-							contentWidth={r.contentWidth}
-							characters={characters}
-							entityOptions={entityOptions}
-							ambientSuggestDismissMs={ambientSuggestDismissMs}
-							groupId={r.groupId}
-							onCutBranchGroup={onCutBranchGroup}
-							onCopyBranchGroup={onCopyBranchGroup}
-						/>
-						{isLastOfGroup ? (
-							<div
-								className="loom-branch-gather-row"
-								style={{ paddingLeft: r.contentMargin }}
-								ref={(el) => {
-									if (el) footerElsRef.current.set(r.sectionId, el);
-									else footerElsRef.current.delete(r.sectionId);
-								}}
-							>
-								<span className="loom-branch-gather-label">= gather</span>
-								<button
-									type="button"
-									className="loom-branch-add-btn"
-									aria-label={t('view.script.branch.addBranchAria')}
-									onClick={() => onAddBranch(r.groupId)}
-								>
-									+
-								</button>
-							</div>
-						) : null}
-					</div>
-				);
-			})}
 			{draftRects.map((dr) => {
 				const draft = drafts.find((d) => d.id === dr.draftId);
 				if (!draft) return null;
@@ -1521,275 +884,5 @@ export function BranchOverlay({
 			</div>
 		</div>,
 		document.body
-	);
-}
-
-/** A single branch's editable Title field — plain local state, seeded from
- *  (and re-seeded whenever, via the `key` the caller passes) the current
- *  committed heading text, committed on blur/Enter — the same shape every
- *  other single-line text field in this codebase uses (`commitDisplayTitle`,
- *  entity-view.tsx). `onDraftChange`, called on every keystroke (unlike
- *  `onCommit`, which only fires on blur/Enter), is what lets the card's own
- *  `>**Title**<` preview track what's being typed in real time instead of
- *  jumping to the new value only once the field is actually committed.
- *
- *  **`autoFocusEmpty`** is the "just created via '+', still carrying the
- *  literal placeholder title `'Untitled'`" case (`entity-view.tsx`'s
- *  `handleAddBranch`/`pendingBranchTitleFocusId`) — the branch is ALREADY
- *  real in the document by the time this ever renders (no draft/staging
- *  step any more), but showing "Untitled" sitting in the field would read
- *  as real content to type AROUND rather than OVER. Seeds `draft` blank
- *  instead of `value` and focuses the field, purely at THIS component's own
- *  first mount (the caller's `key={title-${sectionId}}` guarantees that
- *  mount happens exactly once per branch's whole lifetime, so there's no
- *  risk of this re-triggering later once the branch has a real title) —
- *  every other behavior is completely unchanged: the very first keystroke
- *  lands in an empty field exactly like typing over a native `<input
- *  placeholder>` would, `onCommit` still only fires on blur/Enter with
- *  whatever was actually typed, and blurring with nothing typed reveals the
- *  real stored value (`'Untitled'`) via the existing `else setDraft(value)`
- *  branch below, exactly like leaving any other field untouched. */
-function BranchTitleField({
-	value,
-	onCommit,
-	onDraftChange,
-	autoFocusEmpty,
-	onAutoFocusConsumed,
-}: {
-	value: string;
-	onCommit: (v: string) => void;
-	onDraftChange?: (v: string) => void;
-	autoFocusEmpty?: boolean;
-	onAutoFocusConsumed?: () => void;
-}): ReactElement {
-	const [draft, setDraft] = useState(autoFocusEmpty ? '' : value);
-	useEffect(() => {
-		// Mount-only — `autoFocusEmpty` only ever matters at this field's
-		// very first mount, per this component's own doc comment above.
-		if (autoFocusEmpty) onAutoFocusConsumed?.();
-	}, []);
-	return (
-		<input
-			type="text"
-			className="loom-branch-input loom-branch-title-input"
-			value={draft}
-			autoFocus={autoFocusEmpty}
-			onChange={(e) => {
-				setDraft(e.target.value);
-				onDraftChange?.(e.target.value);
-			}}
-			onBlur={() => {
-				const trimmed = draft.trim();
-				if (trimmed !== '' && trimmed !== value) onCommit(trimmed);
-				else setDraft(value);
-			}}
-			onKeyDown={(e) => {
-				if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-			}}
-		/>
-	);
-}
-
-/** A branch's own prose BODY (dialogue/action) — a real nested `FountainField`
- *  (buffered locally, committed on blur, same contract every other field in
- *  this file uses), rendering the same bold/uppercase character cues,
- *  indents, and italics the surrounding script gets, so the card reads as an
- *  editable piece of the script rather than a plain form field dropped into
- *  it.
- *
- *  Deliberately narrower than the main script's own `FountainField`: no
- *  comments/alt-text (`showAnnotationGutter={false}` too — an unused
- *  gutter is still a real column CM6 reserves space for, which would throw
- *  off `contentWidth` below), no click-to-open character/scene/act/entity
- *  navigation, and — critically — no `onCreateBranch`/`onPasteBranchGroup`
- *  (a branch's body must never itself offer to nest ANOTHER decision point
- *  inside it). `characters`/`entityOptions`/`ambientSuggestDismissMs` are
- *  threaded straight through from the caller's own main editor so the cue
- *  autocomplete and ambient link suggester behave identically here.
- *  `escapeOverflowForTooltips` is on — see that prop's own doc comment
- *  (fountain-field.tsx) for why the autocomplete popup needs to escape this
- *  field's own clipped context entirely rather than just repositioning
- *  within it.
- *
- *  `contentWidth` is applied as an explicit pixel `width` on the inner
- *  `.loom-branch-body-inner` wrapper — NOT `max-width`, and not left for
- *  `.loom-fountain-field .cm-content`'s own generic `max-width: 6in` rule to
- *  land on independently: the card's own outer box is wider than the real
- *  text column (`CARD_WIDEN_FACTOR`), so this wrapper is what actually pins
- *  the rendered text to the real editor's own exact width, centered within
- *  the wider card via `margin: 0 auto`. `flex: 1` (styles.css) fills
- *  whatever vertical space the card's own header (Title + `= branch:` combo
- *  row) leaves; `.loom-branch-body-field`'s own `overflow: hidden` is a
- *  backstop for a still-uncorrected height shortfall (see `BranchOverlay`'s
- *  own `onSpacerNeedsChange` and this file's top doc comment — the caller
- *  reserves the real space needed instead), not the primary mechanism.
- *
- *  Exposes `getContentHeight` (its nested field's own `scrollDOM.
- *  scrollHeight`, the natural — unclipped — height its current text needs)
- *  via a forwarded ref, read by `BranchOverlay`'s own measurement pass. */
-interface BranchBodyFieldHandle {
-	/** The nested field's own natural (unclipped) content height in pixels —
-	 *  `0` before the field has mounted. */
-	getContentHeight: () => number;
-	/** The nested field's own live `EditorView`, or `null` before it's
-	 *  mounted — `BranchOverlay`'s `applyTrackTransform` (its own doc
-	 *  comment explains why) uses this to call CM6's `repositionTooltips` on
-	 *  every scroll tick, the one thing that makes this field's own
-	 *  autocomplete popup track the card's externally-driven `transform`
-	 *  instead of freezing at whatever screen position it first opened at. */
-	getView: () => EditorView | null;
-}
-
-const BranchBodyField = forwardRef(function BranchBodyField(
-	{
-		value,
-		onCommit,
-		contentWidth,
-		characters,
-		entityOptions,
-		ambientSuggestDismissMs,
-		groupId,
-		onCutBranchGroup,
-		onCopyBranchGroup,
-	}: {
-		value: string;
-		onCommit: (v: string) => void;
-		contentWidth: number;
-		characters: string[];
-		entityOptions?: { name: string; type: EntityType; path: string }[];
-		ambientSuggestDismissMs?: number;
-		/** This card's own decision-point group id — passed straight through
-		 *  as the nested `FountainField`'s `branchGroupId`, which is what
-		 *  repurposes ITS OWN Cut/Copy menu items into whole-group operations.
-		 *  See that prop's own doc comment (fountain-field.tsx). */
-		groupId: string;
-		onCutBranchGroup: (groupId: string) => void;
-		onCopyBranchGroup: (groupId: string) => void;
-	},
-	ref: ForwardedRef<BranchBodyFieldHandle>
-): ReactElement {
-	const [draft, setDraft] = useState(value);
-	const fieldRef = useRef<FountainFieldHandle | null>(null);
-	useImperativeHandle(ref, () => ({
-		getContentHeight: () => fieldRef.current?.getView()?.scrollDOM.scrollHeight ?? 0,
-		getView: () => fieldRef.current?.getView() ?? null,
-	}));
-	return (
-		<div className="loom-branch-body-field">
-			<div className="loom-branch-body-inner" style={{ width: contentWidth }}>
-				<FountainField
-					ref={fieldRef}
-					value={draft}
-					onChange={setDraft}
-					onBlur={() => {
-						if (draft !== value) onCommit(draft);
-					}}
-					characters={characters}
-					entityOptions={entityOptions}
-					ambientSuggestDismissMs={ambientSuggestDismissMs}
-					showAnnotationGutter={false}
-					escapeOverflowForTooltips
-					branchGroupId={groupId}
-					onCutBranchGroup={onCutBranchGroup}
-					onCopyBranchGroup={onCopyBranchGroup}
-				/>
-			</div>
-		</div>
-	);
-});
-
-/** Branch 1's own Identifier/Subidentifier/Number-or-override fields — shown
- *  decomposed (three separate inputs, joined by a literal "-" matching the
- *  real `IDENTIFIER-SUBIDENTIFIER-NUMBER` text) when the group's current
- *  value parses as the composer's own 3-segment shape, or as ONE plain field
- *  for a legacy hand-typed value that doesn't. Each of the three decomposed
- *  fields commits independently on blur, always composing from the CURRENT
- *  values of all three (an untouched field falls back to its own
- *  already-committed segment, never blanks it) — `setBranchTagValue`
- *  rewrites every sibling in the group together.
- *
- *  `readOnly` renders EVERY non-first branch's own copy of this same row —
- *  a real `= branch: <id>` line sits under every branch section in the
- *  group, not just the first, all carrying the identical value (that's what
- *  groups them); showing it disabled/greyed on every branch keeps the panel
- *  a faithful mirror of what the real script text actually looks like there,
- *  while still only accepting edits through the one (first branch's) live
- *  copy — editing any other branch's own line directly would just be
- *  overwritten the moment it cascades from branch 1's real edit anyway. */
-function BranchComboFields({
-	value,
-	readOnly,
-	onCommitCombo,
-	onCommitRaw,
-}: {
-	value: string;
-	readOnly?: boolean;
-	onCommitCombo: (identifier: string, subidentifier: string, numberOrOverride: string) => void;
-	onCommitRaw: (v: string) => void;
-}): ReactElement {
-	const decomposed = decomposeBranchValue(value);
-	const [identifier, setIdentifier] = useState(decomposed?.identifier ?? '');
-	const [subidentifier, setSubidentifier] = useState(decomposed?.subidentifier ?? '');
-	const [numberOverride, setNumberOverride] = useState(decomposed?.number ?? '');
-	const [raw, setRaw] = useState(value);
-
-	if (!decomposed) {
-		return (
-			<input
-				type="text"
-				className="loom-branch-input loom-branch-raw-input"
-				value={raw}
-				disabled={readOnly}
-				onChange={(e) => setRaw(e.target.value)}
-				onBlur={() => {
-					const trimmed = raw.trim();
-					if (trimmed !== '' && trimmed !== value) onCommitRaw(trimmed);
-					else setRaw(value);
-				}}
-			/>
-		);
-	}
-
-	const commit = (nextIdentifier: string, nextSub: string, nextNum: string) => {
-		const i = nextIdentifier.trim() || decomposed.identifier;
-		const s = nextSub.trim() || decomposed.subidentifier;
-		const n = nextNum.trim() || decomposed.number;
-		if (i !== decomposed.identifier || s !== decomposed.subidentifier || n !== decomposed.number) {
-			onCommitCombo(i, s, n);
-		}
-	};
-
-	return (
-		<div className="loom-branch-combo-row">
-			<input
-				type="text"
-				className="loom-branch-input"
-				placeholder={t('view.script.branch.identifierPlaceholder')}
-				value={identifier}
-				disabled={readOnly}
-				onChange={(e) => setIdentifier(e.target.value)}
-				onBlur={() => commit(identifier, subidentifier, numberOverride)}
-			/>
-			<span className="loom-branch-combo-sep">-</span>
-			<input
-				type="text"
-				className="loom-branch-input"
-				placeholder={t('view.script.branch.subidentifierPlaceholder')}
-				value={subidentifier}
-				disabled={readOnly}
-				onChange={(e) => setSubidentifier(e.target.value)}
-				onBlur={() => commit(identifier, subidentifier, numberOverride)}
-			/>
-			<span className="loom-branch-combo-sep">-</span>
-			<input
-				type="text"
-				className="loom-branch-input loom-branch-number-input"
-				placeholder={t('view.script.branch.numberPlaceholder')}
-				value={numberOverride}
-				disabled={readOnly}
-				onChange={(e) => setNumberOverride(e.target.value)}
-				onBlur={() => commit(identifier, subidentifier, numberOverride)}
-			/>
-		</div>
 	);
 }
