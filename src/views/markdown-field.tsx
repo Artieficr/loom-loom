@@ -1572,7 +1572,12 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 							// lowest precedence so an open completion still accepts on Tab.
 							keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
 							EditorView.updateListener.of((update) => {
-								if (update.docChanged) onChangeRef.current(update.state.doc.toString());
+								// Excludes the external-value-sync effect's own dispatch —
+								// see that dispatch's own doc comment for the bug this
+								// guard fixes (mirrors the identical fix in fountain-field.tsx).
+								if (update.docChanged && !update.transactions.some((tr) => tr.isUserEvent('loom.externalSync'))) {
+									onChangeRef.current(update.state.doc.toString());
+								}
 								if (update.focusChanged) {
 									if (update.view.hasFocus) pushScope();
 									else {
@@ -1652,13 +1657,21 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	}, []);
 
 	// External value changes (index updates, other writers) sync in unless the
-	// user is typing right here.
+	// user is typing right here. Tagged `userEvent: 'loom.externalSync'` so
+	// the update listener's own `onChange` firing (below) can skip it — see
+	// that check's own doc comment (this file, and the identical fix in
+	// fountain-field.tsx) for the real bug this prevents: without it, this
+	// programmatic resync fires `onChange` exactly like real typing would,
+	// which for a caller holding its own buffered-until-blur draft state
+	// (Scene's `sceneBody`, the pattern this fix was found chasing) silently
+	// freezes that draft at one snapshot forever, invisible to every LATER
+	// external change.
 	useEffect(() => {
 		const view = viewRef.current;
 		if (!view || view.hasFocus) return;
 		const current = view.state.doc.toString();
 		if (current !== value) {
-			view.dispatch({ changes: { from: 0, to: current.length, insert: value } });
+			view.dispatch({ changes: { from: 0, to: current.length, insert: value }, userEvent: 'loom.externalSync' });
 		}
 	}, [value]);
 

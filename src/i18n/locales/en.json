@@ -483,8 +483,7 @@
 				"actNotInScript": "This act isn't in the script yet.",
 				"noChaptersYetPre": "No chapters yet — a heading under this ",
 				"noChaptersYetPost": " section in the book creates them.",
-				"noBranchStructurePre": "No branch structure in this scene yet — a nested heading tagged with",
-				"noBranchStructurePost": " right beneath it creates one.",
+				"noBranchStructure": "No branch structure in this scene yet — right-click a blank line in the script and choose \"Create new branch\" to start one.",
 				"sceneNotInScript": "This scene isn't in the script yet."
 			},
 			"relationships": {
@@ -765,11 +764,18 @@
 			"importedNotice_other": "Imported {count} scenes from \"{name}\".",
 			"importFailed": "Could not import the script. See console for details.",
 			"contextMenu": {
+				"cut": "Cut",
+				"copy": "Copy",
+				"paste": "Paste",
 				"comment": "Comment",
 				"altText": "Alternative text…",
 				"createBranch": "Create new branch",
 				"cutBranchGroup": "Cut branch group",
-				"pasteBranchGroup": "Paste branch group"
+				"copyBranchGroup": "Copy branch group",
+				"pasteBranchGroup": "Paste branch group",
+				"branchSlotDisabledReason": "(place the cursor on an empty line)",
+				"clipboardReadFailed": "Couldn't read the clipboard.",
+				"clipboardWriteFailed": "Couldn't write to the clipboard."
 			},
 			"branch": {
 				"titlePlaceholder": "Branch title",

@@ -145,6 +145,7 @@ import {
 	type ParsedScript,
 	branchComboKey,
 	collectLoomIds,
+	copyBranchGroup,
 	cutBranchGroup,
 	freshLoomId,
 	insertBranch,
@@ -1106,6 +1107,20 @@ function EntityPage({ view }: { view: EntityView }) {
 			return result.text;
 		});
 	};
+	/** The read-only sibling of the above — leaves the group in the document,
+	 *  reading through `editScriptAndSync`'s own fresh-from-disk `raw` purely
+	 *  for a consistent read (returning `null` always, so nothing is ever
+	 *  written back). A later paste of what this stashes renumbers/re-ids
+	 *  itself automatically if the source is still around by then
+	 *  (`pasteBranchGroup`, fountain.ts) — nothing extra to do here. */
+	const handleCopyBranchGroupInScene = (groupId: string) => {
+		if (!project) return;
+		void editScriptAndSync(plugin, project, (raw) => {
+			const block = copyBranchGroup(raw, groupId);
+			if (block) setBranchClipboard(block);
+			return null;
+		});
+	};
 	/** The trash icon on a branch card's own `###` row — deletes just THIS
 	 *  branch, unlike "Cut branch group" (which keeps the whole group
 	 *  recoverable via paste): real prose is genuinely lost, so this confirms
@@ -1138,18 +1153,50 @@ function EntityPage({ view }: { view: EntityView }) {
 			});
 		});
 	};
+	/** Pastes a cut-or-copied decision point, then hands the field's own new
+	 *  body straight to `replaceBody` (fountain-field.tsx) once the write
+	 *  lands — a direct imperative sync, not the normal reactive
+	 *  `scriptText` round trip. That distinction matters here specifically:
+	 *  `sceneScriptText` unconditionally strips trailing whitespace from a
+	 *  scene's excerpt, which would erase the two blank lines
+	 *  `pasteBranchGroup` reserves as a landing spot the INSTANT they become
+	 *  the scene's own trailing content (a real, reported bug — the safe
+	 *  cursor line computed against the round-tripped, re-stripped excerpt
+	 *  pointed at a line that no longer existed there, landing the cursor
+	 *  back under the branch card). Computing the new body directly from
+	 *  `result.text` inside `apply` — before any such round trip — and
+	 *  pushing it into the field ourselves sidesteps the erasure entirely. */
 	const handlePasteBranchGroupInScene = (line: number) => {
 		if (!project) return;
 		const block = getBranchClipboard();
 		if (!block) return;
+		let pastedBody: string | null = null;
+		let pastedCursorLine: number | null = null;
 		void editScriptAndSync(plugin, project, (raw) => {
 			const parsed = parseFountain(raw);
 			const scene = parsed.scenes.find((s) => s.loomId === record?.sceneId);
 			if (!scene) return null;
-			const wholeDocLine = scene.line + computeSceneBodyLineOffset(sceneExcerpt ?? '') + line;
-			const result = pasteBranchGroup(raw, wholeDocLine, block);
-			if (result === null) new Notice(t('view.script.branch.pasteRejected'));
-			return result;
+			const bodyOffset = scene.line + computeSceneBodyLineOffset(sceneExcerpt ?? '');
+			const result = pasteBranchGroup(raw, bodyOffset + line, block);
+			if (result === null) {
+				new Notice(t('view.script.branch.pasteRejected'));
+				return null;
+			}
+			const newParsed = parseFountain(result.text);
+			const newScene = newParsed.scenes.find((s) => s.loomId === record?.sceneId);
+			if (newScene) {
+				const newExcerptUntrimmed = result.text
+					.split('\n')
+					.slice(newScene.line, sceneEndLine(newParsed, newScene))
+					.join('\n');
+				pastedBody = sceneBodyOf(newExcerptUntrimmed);
+				pastedCursorLine = result.cursorLine - newScene.line - computeSceneBodyLineOffset(newExcerptUntrimmed);
+			}
+			return result.text;
+		}).then((ok) => {
+			if (ok && pastedBody !== null && pastedCursorLine !== null) {
+				sceneScriptEditorRef.current?.replaceBody(pastedBody, pastedCursorLine);
+			}
 		});
 	};
 	/** Scrolled into view on every tab click (mirrors the main Script view's
@@ -1701,7 +1748,15 @@ function EntityPage({ view }: { view: EntityView }) {
 			: null;
 	// The heading line is the script's, not the note's — only what follows it is
 	// editable here, so the title and its hidden id can't be typed over.
-	const sceneBodyOf = (excerpt: string) => excerpt.split('\n').slice(1).join('\n').trim();
+	// Leading blanks skipped via `computeSceneBodyLineOffset` (shared with the
+	// excerpt-to-whole-document line math everywhere else in this component)
+	// rather than a bare `.trim()` — trimming the WHOLE joined string would
+	// also eat TRAILING blanks, which `sceneScriptText` already strips before
+	// this ever runs in the normal (read-from-disk) path, so this changes
+	// nothing there; it matters for `handlePasteBranchGroupInScene`'s own
+	// direct, untrimmed injection (`replaceBody`), which deliberately keeps
+	// trailing blank lines a `.trim()` here would otherwise erase again.
+	const sceneBodyOf = (excerpt: string) => excerpt.split('\n').slice(computeSceneBodyLineOffset(excerpt)).join('\n');
 	const sceneDraft = sceneBody ?? (sceneExcerpt === null ? '' : sceneBodyOf(sceneExcerpt));
 	/** Same Script/Pages scroll sync as the main Script view, scoped to this
 	 *  scene's own pagination (`pdfPages` run on just the excerpt, not the
@@ -8069,7 +8124,6 @@ function EntityPage({ view }: { view: EntityView }) {
 															).then(() => setSceneBody(null));
 														}}
 														characters={scriptParsed?.characters ?? []}
-														locations={scriptParsed?.locations ?? []}
 														entityOptions={entityOptions}
 														ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
 														onOpenCharacter={(name) => {
@@ -8119,9 +8173,9 @@ function EntityPage({ view }: { view: EntityView }) {
 														pendingTitleFocusId={pendingBranchTitleFocusId}
 														onTitleFocusConsumed={() => setPendingBranchTitleFocusId(null)}
 														onCutBranchGroup={handleCutBranchGroupInScene}
+														onCopyBranchGroup={handleCopyBranchGroupInScene}
 													onDeleteBranch={handleDeleteBranchInScene}
 														characters={scriptParsed?.characters ?? []}
-														locations={scriptParsed?.locations ?? []}
 														entityOptions={entityOptions}
 														ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
 														onSpacerNeedsChange={setSceneBranchSpacers}
@@ -8151,8 +8205,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														sceneOutlineTree.items.map((item) => renderSceneOutlineItem(item))
 													) : (
 														<div className="loom-attendance-empty">
-															{t('view.entity.script.noBranchStructurePre')}{' '}
-															<code>= branch: &lt;id&gt;</code>{t('view.entity.script.noBranchStructurePost')}
+															{t('view.entity.script.noBranchStructure')}
 														</div>
 													)}
 												</div>

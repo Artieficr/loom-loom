@@ -59,7 +59,6 @@ import { LinkSuggestEntry, buildLinkSuggestExtension } from './link-suggest-cm6'
  *  with `markdown-field.tsx` rather than duplicated. */
 
 const LOOM_ID_RE = /\s*\[\[loom:[A-Za-z0-9]+\]\]/;
-const INTEXT_OPTIONS = ['INT.', 'EXT.', 'INT./EXT.', 'EST.'];
 /** Mirrors `SCENE_PREFIXES` in fountain.ts (not exported — this only needs
  *  to recognize a heading-shaped START, not fully replicate scene parsing). */
 const SCENE_PREFIX_RE = /^(?:INT\.?\/EXT\.?|INT\/EXT\.?|I\/E\.?|INT\.?|EXT\.?|EST\.?)\s+/i;
@@ -82,9 +81,8 @@ function overlapsClosedEntityLink(line: string, from: number, to: number): boole
 }
 
 /** Cheap heuristic — skip ambient suggestions on scene-heading/character-cue/
- *  transition lines, which already have their own dedicated autocompletes
- *  (`intExtCompletion`/`characterCompletion`, below) with different
- *  semantics (a heading's location text isn't prose to hyperlink inline).
+ *  transition lines, which already have their own dedicated autocomplete
+ *  (`characterCompletion`, below) or aren't prose to hyperlink inline at all.
  *  Deliberately NOT a full `parseFountain` classification — cheap enough to
  *  run on every trigger, and a false positive/negative here is low-stakes
  *  (worst case: a suggestion shows up somewhere slightly redundant, never a
@@ -232,6 +230,23 @@ export interface FountainFieldHandle {
 	 *  span even though the popover now showed nothing. A no-op if the id no
 	 *  longer resolves to a live span. */
 	removeAnnotationMarkers: (id: string) => void;
+	/** Replaces the ENTIRE document with `newValue` and places the cursor at
+	 *  `cursorLine` (0-based) — unconditionally, bypassing the normal
+	 *  `value`-prop-diffing "sync external value only while unfocused"
+	 *  effect entirely (never gated on focus, never tagged
+	 *  `loom.externalSync`, so this genuinely counts as a real edit and
+	 *  fires `onChange` like any other). The one case that needs this: a
+	 *  caller (Scene's own "Paste branch group") that just computed EXACTLY
+	 *  what this field's body should show, in memory, from a write it's
+	 *  about to make. Going through the normal reactive path instead would
+	 *  mean round-tripping through disk first — and the Scene page's own
+	 *  `sceneScriptText` unconditionally strips ALL trailing whitespace from
+	 *  a scene's excerpt, which erases any trailing blank line meant as a
+	 *  landing spot the moment that content becomes the scene's own last
+	 *  line, before the user ever gets a chance to type into it and make it
+	 *  non-blank. Dispatching the exact in-memory text directly, before any
+	 *  such round trip, sidesteps that erasure completely. */
+	replaceBody: (newValue: string, cursorLine: number) => void;
 	/** The live `EditorView`, or `null` before the field has mounted — the
 	 *  narrow escape hatch `BranchOverlay` (branch-overlay.tsx) needs to
 	 *  position its own real-DOM cards over this field's content and dispatch
@@ -304,7 +319,6 @@ export const FountainField = forwardRef(function FountainField(
 		onChange,
 		onBlur,
 		characters,
-		locations,
 		entityOptions,
 		onOpenCharacter,
 		onOpenLocation,
@@ -325,6 +339,9 @@ export const FountainField = forwardRef(function FountainField(
 		onPasteBranchGroup,
 		branchClipboardAvailable,
 		branchSpacers,
+		branchGroupId,
+		onCutBranchGroup,
+		onCopyBranchGroup,
 		showAnnotationGutter = true,
 		escapeOverflowForTooltips = false,
 	}: {
@@ -337,13 +354,10 @@ export const FountainField = forwardRef(function FountainField(
 		 *  offers names that already exist (creating a brand new one is
 		 *  still just typing it; the parser doesn't need it pre-declared). */
 		characters: string[];
-		/** Existing top-level location names, for the scene-heading
-		 *  location autocomplete (offered once an INT./EXT. prefix is typed). */
-		locations: string[];
 		/** Characters/factions/locations/items offered by the `@[` inline
 		 *  entity-link autocomplete and resolved for click-to-navigate — unlike
-		 *  `characters`/`locations` above, an `@[...]` link never auto-creates,
-		 *  so only entities that already exist are ever offered. */
+		 *  `characters` above, an `@[...]` link never auto-creates, so only
+		 *  entities that already exist are ever offered. */
 		entityOptions?: { name: string; type: EntityType; path: string }[];
 		/** A character cue line was clicked. */
 		onOpenCharacter?: (name: string) => void;
@@ -432,6 +446,33 @@ export const FountainField = forwardRef(function FountainField(
 		 *  ("A branch's card can be genuinely TALLER...") for the full
 		 *  mechanism this prop is the write-side of. */
 		branchSpacers?: Record<string, number>;
+		/** Set ONLY by `branch-overlay.tsx`'s `BranchBodyField` — the section
+		 *  id of the decision-point branch this nested field's own body BELONGS
+		 *  to. Its one effect: `openContextMenu`'s Cut/Copy items stop meaning
+		 *  "the current text selection" and mean "this whole decision point"
+		 *  instead, always enabled regardless of selection — right-clicking
+		 *  ANYWHERE inside a branch's body (not just its card's own header/
+		 *  margins, which never reach this field at all) reaches for the same
+		 *  whole-group operation a user would expect from a card that reads as
+		 *  one object, not a loose bag of paragraphs. Plain per-selection
+		 *  text cut/copy is still reachable via the keyboard (Ctrl/Cmd+X/C) —
+		 *  only the right-click MENU'S meaning changes here. Undefined (the
+		 *  main Script view, the Scene/Act pages' own top-level editor) keeps
+		 *  Cut/Copy as ordinary text operations. */
+		branchGroupId?: string;
+		/** Fires when Cut is chosen with `branchGroupId` set — see that prop's
+		 *  own doc comment. The caller (`BranchOverlay`) removes the WHOLE
+		 *  decision point from the document and stashes it in its own
+		 *  in-memory branch clipboard, mirroring the card's own header-level
+		 *  "Cut branch group" menu item exactly (same handler, same effect). */
+		onCutBranchGroup?: (groupId: string) => void;
+		/** Fires when Copy is chosen with `branchGroupId` set — same
+		 *  in-memory branch clipboard as `onCutBranchGroup`, but the source
+		 *  stays in the document untouched. A later "Paste branch group" of a
+		 *  copy that's still present renumbers/re-ids the incoming block
+		 *  automatically (`pasteBranchGroup`, fountain.ts) — pasting a cut
+		 *  (whose source is already gone) always travels verbatim instead. */
+		onCopyBranchGroup?: (groupId: string) => void;
 		/** Whether to mount the right-side comment/alt-text gutter at all —
 		 *  default `true` (every existing caller: the main Script view, the
 		 *  Scene/Act pages). `branch-overlay.tsx`'s nested body field sets
@@ -469,7 +510,6 @@ export const FountainField = forwardRef(function FountainField(
 	const onChangeRef = useRef(onChange);
 	const onBlurRef = useRef(onBlur);
 	const charactersRef = useRef(characters);
-	const locationsRef = useRef(locations);
 	const entityOptionsRef = useRef(entityOptions ?? []);
 	const onOpenCharacterRef = useRef(onOpenCharacter);
 	const onOpenLocationRef = useRef(onOpenLocation);
@@ -490,15 +530,20 @@ export const FountainField = forwardRef(function FountainField(
 	const onPasteBranchGroupRef = useRef(onPasteBranchGroup);
 	const branchClipboardAvailableRef = useRef(branchClipboardAvailable ?? false);
 	const branchSpacersRef = useRef(branchSpacers ?? {});
+	const branchGroupIdRef = useRef(branchGroupId);
+	const onCutBranchGroupRef = useRef(onCutBranchGroup);
+	const onCopyBranchGroupRef = useRef(onCopyBranchGroup);
 	onGeometryChangeRef.current = onGeometryChange;
 	onCreateBranchRef.current = onCreateBranch;
 	onPasteBranchGroupRef.current = onPasteBranchGroup;
 	branchClipboardAvailableRef.current = branchClipboardAvailable ?? false;
 	branchSpacersRef.current = branchSpacers ?? {};
+	branchGroupIdRef.current = branchGroupId;
+	onCutBranchGroupRef.current = onCutBranchGroup;
+	onCopyBranchGroupRef.current = onCopyBranchGroup;
 	onChangeRef.current = onChange;
 	onBlurRef.current = onBlur;
 	charactersRef.current = characters;
-	locationsRef.current = locations;
 	entityOptionsRef.current = entityOptions ?? [];
 	onOpenCharacterRef.current = onOpenCharacter;
 	onOpenLocationRef.current = onOpenLocation;
@@ -547,6 +592,19 @@ export const FountainField = forwardRef(function FountainField(
 			const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'alt' && s.id === id);
 			if (!span) return;
 			view.dispatch({ changes: { from: span.contentFrom, to: span.contentTo, insert: text } });
+		},
+		replaceBody: (newValue, cursorLine) => {
+			const view = viewRef.current;
+			if (!view) return;
+			const lines = newValue.split('\n');
+			const target = Math.min(Math.max(cursorLine, 0), lines.length - 1);
+			let offset = 0;
+			for (let i = 0; i < target; i++) offset += lines[i].length + 1;
+			view.dispatch({
+				changes: { from: 0, to: view.state.doc.length, insert: newValue },
+				selection: { anchor: offset },
+			});
+			view.focus();
 		},
 		removeAnnotationMarkers: (id) => {
 			const view = viewRef.current;
@@ -1042,33 +1100,6 @@ export const FountainField = forwardRef(function FountainField(
 			{ decorations: (v) => v.decorations }
 		);
 
-		/** `INT.`/`EXT.`/`INT./EXT.`/`EST.` at the start of a blank-preceded
-		 *  line — offers the full list the moment the cursor LANDS there (an
-		 *  empty `before`), same as Better Fountain, not only once the user
-		 *  has started typing; the explicit `startCompletion` call in the
-		 *  update listener below is what actually pops the tooltip open for
-		 *  that empty case, since CM6 only activates completion on typing
-		 *  by default. */
-		const intExtCompletion = (ctx: CompletionContext): CompletionResult | null => {
-			const line = ctx.state.doc.lineAt(ctx.pos);
-			const before = ctx.state.sliceDoc(line.from, ctx.pos);
-			if (!/^[A-Za-z./]*$/.test(before)) return null;
-			const prevBlank = line.number <= 1 || ctx.state.doc.line(line.number - 1).text.trim() === '';
-			if (!prevBlank) return null;
-			const query = before.toUpperCase();
-			const options = INTEXT_OPTIONS.filter((o) => o.startsWith(query)).map((label) => ({
-				label,
-				apply: (v: EditorView, _c: unknown, from: number, to: number) => {
-					v.dispatch({
-						changes: { from: line.from, to, insert: `${label} ` },
-						selection: { anchor: line.from + label.length + 1 },
-					});
-				},
-			}));
-			if (options.length === 0) return null;
-			return { from: line.from, options, filter: false };
-		};
-
 		/** An existing character's name, offered while starting a line right
 		 *  after a blank one (a real character-cue position) — the full known
 		 *  list shows immediately on landing there (empty `trimmed`), same as
@@ -1112,41 +1143,6 @@ export const FountainField = forwardRef(function FountainField(
 			return { from: line.from, options, filter: false };
 		};
 
-		/** An existing top-level location, offered once a recognized
-		 *  INT./EXT. prefix has been typed — stops offering once past a time
-		 *  separator or the hidden id, i.e. only while still IN the location
-		 *  segment of the heading. */
-		const locationCompletion = (ctx: CompletionContext): CompletionResult | null => {
-			const line = ctx.state.doc.lineAt(ctx.pos);
-			const before = ctx.state.sliceDoc(line.from, ctx.pos);
-			const m = SCENE_PREFIX_RE.exec(before);
-			if (!m) return null;
-			const rest = before.slice(m[0].length);
-			if (rest.includes(' - ') || rest.includes('[[')) return null;
-			const query = rest.toLowerCase();
-			const from = line.from + m[0].length;
-			const options = locationsRef.current
-				.filter((n) => n.toLowerCase().startsWith(query))
-				.slice(0, 8)
-				.map((name) => ({
-					label: name.toUpperCase(),
-					apply: (v: EditorView, _c: unknown, applyFrom: number, applyTo: number) => {
-						const label = name.toUpperCase();
-						// Same default-assoc quirk as the character cue above: an
-						// explicit `selection` is needed or the cursor sticks
-						// before the inserted name instead of landing after it,
-						// ready to keep typing the rest of the heading (a
-						// sublocation, or " - NIGHT").
-						v.dispatch({
-							changes: { from: applyFrom, to: applyTo, insert: label },
-							selection: { anchor: applyFrom + label.length },
-						});
-					},
-				}));
-			if (options.length === 0) return null;
-			return { from, options, filter: false };
-		};
-
 		/** An existing character/faction/location/item, offered while typing
 		 *  inside an `@[` just opened by `entityBracketPairing` below. Never
 		 *  offers to create — an unresolved name is just left as inert text,
@@ -1177,13 +1173,12 @@ export const FountainField = forwardRef(function FountainField(
 			return { from, options, filter: false };
 		};
 
-		/** A landing spot for `intExtCompletion`/`characterCompletion` to
-		 *  offer their FULL list on, before anything's typed: an empty line
-		 *  right after a blank one (or the document's first line). Doc
-		 *  changes only need checking on the cursor's own line, but a
-		 *  same-line selection move (arrow keys, a click) needs it too —
-		 *  CM6's built-in "activate on typing" never fires for either, since
-		 *  neither types a character. */
+		/** A landing spot for `characterCompletion` to offer its FULL list on,
+		 *  before anything's typed: an empty line right after a blank one (or
+		 *  the document's first line). Doc changes only need checking on the
+		 *  cursor's own line, but a same-line selection move (arrow keys, a
+		 *  click) needs it too — CM6's built-in "activate on typing" never
+		 *  fires for either, since neither types a character. */
 		const emptyCueLine = (state: EditorState): boolean => {
 			const pos = state.selection.main.head;
 			const line = state.doc.lineAt(pos);
@@ -1256,89 +1251,241 @@ export const FountainField = forwardRef(function FountainField(
 			else onCreateAltRef.current?.(id, selectedText);
 		};
 
-		/** The first `contextmenu` handler in this editor — every other
-		 *  interaction here is left-click only (`openLinkOnMousedown` above
-		 *  explicitly bails on anything but button 0). Offers "Comment"/
-		 *  "Alternative text…" on a non-empty selection; a selection that
-		 *  partially crosses an existing marked span (nesting fully inside
-		 *  or sitting fully outside one is fine) is rejected with a Notice
-		 *  rather than attempted, keeping every span well-nested. */
-		const openContextMenu = (view: EditorView, event: MouseEvent): boolean => {
-			const sel = view.state.selection.main;
-			if (!sel.empty) {
-				event.preventDefault();
-				const spans = findAnnotationSpans(view.state.doc.toString());
-				const overlaps = spans.some((s) => partiallyOverlaps(sel.from, sel.to, s.from, s.to));
-				if (overlaps) {
-					new Notice(t('view.script.overlapNotice.create'));
-				}
-				const menu = new Menu();
-				menu.addItem((item) =>
-					item
-						.setTitle(t('view.script.contextMenu.comment'))
-						.setIcon('message-square')
-						.setDisabled(overlaps)
-						.onClick(() => insertMarkerPair(view, 'comment', sel.from, sel.to))
-				);
-				menu.addItem((item) =>
-					item
-						.setTitle(t('view.script.contextMenu.altText'))
-						.setIcon('arrow-right-left')
-						.setDisabled(overlaps)
-						.onClick(() => insertMarkerPair(view, 'alt', sel.from, sel.to))
-				);
-				menu.showAtMouseEvent(event);
-				return true;
+		/** Reads the real OS clipboard — the one thing genuinely new here:
+		 *  nothing else in this codebase touches `navigator.clipboard` (the
+		 *  "branch clipboard", branch-clipboard.ts, is a separate in-memory,
+		 *  plugin-only mechanism for moving a whole decision point, kept
+		 *  deliberately off the OS clipboard). Returns `null` on an empty
+		 *  clipboard (silently — an empty native paste is a no-op, not an
+		 *  error) or a genuine read failure (permission denied — surfaced
+		 *  with a Notice, since that's not something the user can fix by
+		 *  just trying again). */
+		const readClipboardText = async (): Promise<string | null> => {
+			try {
+				const text = await navigator.clipboard.readText();
+				return text.length > 0 ? text : null;
+			} catch {
+				new Notice(t('view.script.contextMenu.clipboardReadFailed'));
+				return null;
 			}
+		};
 
-			// No selection — the modular branch editor's own menu items,
-			// resolved from the CLICKED position rather than the caret (a
-			// right-click doesn't move the caret the way a left-click does).
-			// Safe to call `posAtCoords` here: this fires from an ordinary DOM
-			// `contextmenu` event handler, not from inside CM6's own
-			// update/measure lifecycle (the crash this codebase already
-			// guards against elsewhere never applies to a plain event
-			// handler like this one). Only "Create new branch"/"Paste branch
-			// group" are offered here — "Cut branch group" now lives on
-			// `branch-overlay.tsx`'s own per-card right-click instead, since
-			// that overlay's cards are fully opaque and `pointer-events: auto`
-			// (a real, reported course-correction from an earlier transparent/
-			// click-through design): a right-click anywhere inside an EXISTING
-			// branch's span can no longer reach this handler at all in
-			// ordinary use, it's intercepted by the card sitting on top of it.
-			// `branchGroupAtLine` stays as a defensive guard against the brief
-			// window before that overlay's own first `sync()` has run, so
-			// "Create new branch"/"Paste" can't fire on a line that, in
-			// reality, already belongs to a branch group.
-			const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-			if (pos === null) return false;
-			const parsed = parseFountain(view.state.doc.toString());
-			const line0 = view.state.doc.lineAt(pos).number - 1;
-			const isEmptyLine = view.state.doc.line(line0 + 1).text.trim() === '';
-			if (!isEmptyLine || branchGroupAtLine(parsed, line0) !== null) return false;
-			const menu = new Menu();
-			let hasItem = false;
-			if (onCreateBranchRef.current) {
-				hasItem = true;
-				menu.addItem((item) =>
-					item
-						.setTitle(t('view.script.contextMenu.createBranch'))
-						.setIcon('git-branch-plus')
-						.onClick(() => onCreateBranchRef.current?.(pos))
-				);
+		/** Writes to the real OS clipboard, surfacing a Notice on failure
+		 *  (mirrors `readClipboardText` above) rather than a silent no-op —
+		 *  a failed Cut/Copy with no feedback would look like it worked. */
+		const writeClipboardText = async (text: string): Promise<void> => {
+			try {
+				await navigator.clipboard.writeText(text);
+			} catch {
+				new Notice(t('view.script.contextMenu.clipboardWriteFailed'));
 			}
-			if (branchClipboardAvailableRef.current && onPasteBranchGroupRef.current) {
-				hasItem = true;
-				menu.addItem((item) =>
-					item
-						.setTitle(t('view.script.contextMenu.pasteBranchGroup'))
-						.setIcon('clipboard-paste')
-						.onClick(() => onPasteBranchGroupRef.current?.(line0))
-				);
-			}
-			if (!hasItem) return false;
+		};
+
+		/** The ONE contextmenu handler for this editor, replacing Electron's
+		 *  own native menu entirely — Cut/Copy/Paste, Comment/Alternative
+		 *  text, Create branch/Paste branch group, always in that section
+		 *  order. Every item is always PRESENT, enabled or disabled by
+		 *  context (never conditionally shown), so the menu never changes
+		 *  shape depending on where the click landed — a disabled item just
+		 *  explains why in its own title.
+		 *
+		 *  Resolving the clicked position with `precise: false` is what
+		 *  actually fixes a real, previously unexplained bug: right-clicking
+		 *  the first/last VISIBLE line fell through to the native menu.
+		 *  CM6's `posAtCoords` returns `null` when the clicked point maps to
+		 *  a line outside its OWN currently-rendered viewport window (CM6
+		 *  virtualizes — only a margin around the visible area is real DOM
+		 *  at any moment), and the previous version of this handler treated
+		 *  a `null` as "nothing to do here" and returned `false` — which,
+		 *  for a CM6 `domEventHandlers` callback, means CM6 never calls
+		 *  `preventDefault()`, so the native menu shows through underneath.
+		 *  `precise: false` (the same flag CM6's own internal mouse/drag
+		 *  handling always passes for this exact reason) falls back to a
+		 *  best-effort estimate instead of `null`, so this handler always
+		 *  has a position to reason from and always ends up calling
+		 *  `preventDefault()` itself. */
+		/** Shared eligibility check behind "Create branch"/"Paste branch
+		 *  group" — a bare caret on a blank line not already inside a
+		 *  decision point. Used by both `openContextMenu` (below) and the
+		 *  `paste` DOM event interception further down, so a cut-or-copied
+		 *  branch group can be pasted either through the right-click menu OR
+		 *  a plain Ctrl/Cmd+V, with the identical rule for where it's
+		 *  allowed to land. */
+		const branchSlotEligibleAt = (view: EditorView, line0: number): boolean => {
+			const doc = view.state.doc;
+			const isEmptyLine = doc.line(line0 + 1).text.trim() === '';
+			if (!isEmptyLine) return false;
+			const parsed = parseFountain(doc.toString());
+			return branchGroupAtLine(parsed, line0) === null;
+		};
+
+		const openContextMenu = (view: EditorView, event: MouseEvent): boolean => {
 			event.preventDefault();
+			// A branch card (`branch-overlay.tsx`) is a plain DOM ancestor of
+			// this nested field, with its OWN `contextmenu` handler for
+			// right-clicks that land on its header/margins (outside this CM6
+			// field entirely, so they never reach here at all). Without this,
+			// a right-click INSIDE this field's own body would still bubble
+			// past it to that outer handler once this callback returns,
+			// opening a SECOND, competing menu on top of the one built below.
+			event.stopPropagation();
+			const branchGroupId = branchGroupIdRef.current;
+			const sel = view.state.selection.main;
+			const hasSelection = !sel.empty;
+			const doc = view.state.doc;
+			const pos = hasSelection
+				? sel.head
+				: (view.posAtCoords({ x: event.clientX, y: event.clientY }, false) ?? doc.length);
+			const line0 = doc.lineAt(pos).number - 1;
+
+			// A selection that partially crosses an existing marked span
+			// (nesting fully inside or sitting fully outside one is fine)
+			// can't host a NEW comment/alt-text span — surfaced once, right
+			// when the menu opens, same as before this menu was unified.
+			const spans = hasSelection ? findAnnotationSpans(doc.toString()) : [];
+			const overlapsSpan = hasSelection && spans.some((s) => partiallyOverlaps(sel.from, sel.to, s.from, s.to));
+			if (overlapsSpan) new Notice(t('view.script.overlapNotice.create'));
+
+			// Create branch / Paste branch group share the identical
+			// eligibility (a bare caret on a blank line not already inside
+			// a decision point — `branchGroupAtLine` is a defensive guard
+			// here: in ordinary use, a right-click anywhere inside an
+			// EXISTING branch's span never reaches this handler at all,
+			// intercepted by `branch-overlay.tsx`'s own opaque card sitting
+			// on top of it; this only matters in the brief window before
+			// that overlay's first `sync()` has run), so a disabled item
+			// explains why with the one shared reason rather than each
+			// re-deriving its own text.
+			const branchSlotEligible = !hasSelection && branchSlotEligibleAt(view, line0);
+			const branchSlotSuffix = branchSlotEligible ? '' : ` ${t('view.script.contextMenu.branchSlotDisabledReason')}`;
+
+			// Obsidian's own `.menu-item.is-disabled` colors both text and
+			// icon with `--text-faint` (confirmed against the extracted
+			// app.css) — legible on Obsidian's own chrome, but reads as
+			// barely dimmed against some themes' menu background, reported
+			// directly against this menu. `MenuItem.dom` is a stable
+			// (undocumented) internal — every `MenuItem` is built with
+			// `this.dom = createDiv('menu-item tappable')` — used here only
+			// to add one scoped class (styles.css) so a disabled item in
+			// THIS menu specifically reads clearly paler, without touching
+			// Obsidian's own menu styling everywhere else.
+			const addMenuItem = (
+				m: Menu,
+				opts: { title: string; icon: string; disabled: boolean; onClick: () => void | Promise<void> }
+			) => {
+				m.addItem((item) => {
+					item.setTitle(opts.title).setIcon(opts.icon).setDisabled(opts.disabled).onClick(opts.onClick);
+					if (opts.disabled) {
+						(item as unknown as { dom?: HTMLElement }).dom?.addClass('loom-fountain-menu-item-dim');
+					}
+				});
+			};
+
+			const menu = new Menu();
+
+			addMenuItem(menu, {
+				title: branchGroupId ? t('view.script.contextMenu.cutBranchGroup') : t('view.script.contextMenu.cut'),
+				icon: 'scissors',
+				disabled: branchGroupId ? !onCutBranchGroupRef.current : !hasSelection,
+				onClick: branchGroupId
+					? () => onCutBranchGroupRef.current?.(branchGroupId)
+					: async () => {
+							await writeClipboardText(view.state.sliceDoc(sel.from, sel.to));
+							view.dispatch({ changes: { from: sel.from, to: sel.to } });
+							view.focus();
+						},
+			});
+			addMenuItem(menu, {
+				title: branchGroupId ? t('view.script.contextMenu.copyBranchGroup') : t('view.script.contextMenu.copy'),
+				icon: 'copy',
+				disabled: branchGroupId ? !onCopyBranchGroupRef.current : !hasSelection,
+				onClick: branchGroupId
+					? () => onCopyBranchGroupRef.current?.(branchGroupId)
+					: async () => {
+							await writeClipboardText(view.state.sliceDoc(sel.from, sel.to));
+						},
+			});
+			addMenuItem(menu, {
+				title: t('view.script.contextMenu.paste'),
+				icon: 'clipboard-paste',
+				disabled: false,
+				onClick: async () => {
+					const text = await readClipboardText();
+					if (text === null) return;
+					const target = view.state.selection.main;
+					view.dispatch({
+						changes: { from: target.from, to: target.to, insert: text },
+						selection: { anchor: target.from + text.length },
+					});
+					view.focus();
+				},
+			});
+			addMenuItem(menu, {
+				title: t('view.script.contextMenu.pasteBranchGroup') + branchSlotSuffix,
+				icon: 'clipboard-paste',
+				disabled: !branchSlotEligible || !branchClipboardAvailableRef.current || !onPasteBranchGroupRef.current,
+				// Obsidian's `Menu` items are plain non-focusable divs, so
+				// clicking one never blurs whatever had focus before the
+				// right-click — but that's no longer this field's problem to
+				// solve: the caller (`handlePasteBranchGroupInScene`,
+				// entity-view.tsx) resyncs this field directly via
+				// `replaceBody` once its own write lands, bypassing the
+				// normal focus-gated sync entirely. See that method's own
+				// doc comment for the fuller history (a real, reported
+				// geometry-overlap bug that a blur-before-write fix here
+				// used to paper over, and why that approach still wasn't
+				// enough on its own).
+				onClick: () => onPasteBranchGroupRef.current?.(line0),
+			});
+
+			menu.addSeparator();
+
+			addMenuItem(menu, {
+				title: t('view.script.contextMenu.comment'),
+				icon: 'message-square',
+				disabled: !hasSelection || overlapsSpan,
+				onClick: () => insertMarkerPair(view, 'comment', sel.from, sel.to),
+			});
+			addMenuItem(menu, {
+				title: t('view.script.contextMenu.altText'),
+				icon: 'arrow-right-left',
+				disabled: !hasSelection || overlapsSpan,
+				onClick: () => insertMarkerPair(view, 'alt', sel.from, sel.to),
+			});
+
+			menu.addSeparator();
+
+			addMenuItem(menu, {
+				title: t('view.script.contextMenu.createBranch') + branchSlotSuffix,
+				icon: 'git-branch-plus',
+				disabled: !branchSlotEligible || !onCreateBranchRef.current,
+				onClick: () => onCreateBranchRef.current?.(pos),
+			});
+
 			menu.showAtMouseEvent(event);
+			return true;
+		};
+
+		/** A plain Ctrl/Cmd+V (native `paste` event) redirects to "Paste
+		 *  branch group" when there's one to paste AND the caret sits
+		 *  somewhere it could actually land (`branchSlotEligibleAt`, shared
+		 *  with the right-click menu item above) — so a cut-or-copied
+		 *  decision point can be pasted the ordinary keyboard way, not just
+		 *  through the menu. Deliberately takes over the WHOLE paste in that
+		 *  case, never falling through to also insert the OS clipboard's own
+		 *  text: the two clipboards are separate (branch-clipboard.ts's own
+		 *  doc comment), and there's no sane way to do both against the same
+		 *  single caret position. Every other case (no branch clipboard, a
+		 *  real selection, an ineligible line) returns `false` and lets CM6's
+		 *  own default paste handling run exactly as before. */
+		const handleBranchPasteShortcut = (view: EditorView, event: ClipboardEvent): boolean => {
+			if (!onPasteBranchGroupRef.current || !branchClipboardAvailableRef.current) return false;
+			const sel = view.state.selection.main;
+			if (!sel.empty) return false;
+			const line0 = view.state.doc.lineAt(sel.head).number - 1;
+			if (!branchSlotEligibleAt(view, line0)) return false;
+			event.preventDefault();
+			onPasteBranchGroupRef.current(line0);
 			return true;
 		};
 
@@ -1478,12 +1625,18 @@ export const FountainField = forwardRef(function FountainField(
 					entityBracketPairing,
 					draftAnchors,
 					autocompletion({
-						override: [intExtCompletion, characterCompletion, locationCompletion, entityLinkCompletion],
+						override: [characterCompletion, entityLinkCompletion],
 						icons: false,
 					}),
 					keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
 					EditorView.updateListener.of((update) => {
-						if (update.docChanged) onChangeRef.current(update.state.doc.toString());
+						// Excludes the external-value-sync effect's own dispatch
+						// (`userEvent: 'loom.externalSync'`, this file's own
+						// value-sync `useEffect`) — see that dispatch's own doc
+						// comment for the real, severe bug this guard fixes.
+						if (update.docChanged && !update.transactions.some((tr) => tr.isUserEvent('loom.externalSync'))) {
+							onChangeRef.current(update.state.doc.toString());
+						}
 						if (update.focusChanged && !update.view.hasFocus) onBlurRef.current?.();
 						if (update.viewportChanged || update.geometryChanged) onGeometryChangeRef.current?.();
 						// A bare `selectionSet` also fires for plain Up/Down-arrow
@@ -1507,6 +1660,7 @@ export const FountainField = forwardRef(function FountainField(
 					EditorView.domEventHandlers({
 						mousedown: openLinkOnMousedown,
 						contextmenu: (event, cmView) => openContextMenu(cmView, event),
+					paste: (event, cmView) => handleBranchPasteShortcut(cmView, event),
 					}),
 				],
 			}),
@@ -1588,9 +1742,31 @@ export const FountainField = forwardRef(function FountainField(
 			const valueLines = value.split('\n');
 			const clampedIdx = Math.min(Math.max(topLine - 1, 0), valueLines.length - 1);
 			const targetPos = valueLines.slice(0, clampedIdx).join('\n').length + (clampedIdx > 0 ? 1 : 0);
+			// Tagged so the update listener's `onChange` firing below can tell
+			// this dispatch apart from a real keystroke — a REAL, severe bug
+			// found chasing an "intermittent, only-works-after-several-tries"
+			// report: without this, `onChangeRef.current(...)` fired for this
+			// programmatic resync exactly like it does for real typing, which
+			// for the Scene page's own caller means `setSceneBody(newValue)` —
+			// setting its local buffered-draft override to a value that
+			// happens to be correct AT THAT INSTANT, but is now PERMANENTLY
+			// non-null. Since that caller derives what this field actually
+			// shows as `sceneBody ?? sceneBodyOf(sceneExcerpt)`, a non-null
+			// `sceneBody` freezes the displayed text at that one snapshot
+			// forever, no matter how many MORE times `sceneExcerpt` changes
+			// afterward — every later external edit (a branch cut, a paste, a
+			// syncScenes stamp) writes to disk correctly but never shows up in
+			// THIS editor again until an unrelated real edit-and-blur happens
+			// to clear the override back to null (or the whole page remounts,
+			// which is why closing and reopening the Scene always "fixed" it).
+			// This one external-sync path is the only dispatch in this file
+			// that should ever carry this tag — every other `view.dispatch`
+			// here (Cut/Copy/Paste, alt-text swaps, …) represents a real
+			// content change the caller's own buffered draft SHOULD pick up.
 			view.dispatch({
 				changes: { from: 0, to: current.length, insert: value },
 				effects: EditorView.scrollIntoView(targetPos, { y: 'start' }),
+				userEvent: 'loom.externalSync',
 			});
 		}
 	}, [value]);

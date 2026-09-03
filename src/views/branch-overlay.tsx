@@ -118,16 +118,25 @@ import { t } from '../i18n';
  *
  * **A real consequence of going fully opaque/`pointer-events: auto`**: a
  * right-click anywhere inside a branch's own card can no longer pass
- * through to the live CM6 editor beneath it, which is how
- * `fountain-field.tsx`'s own `openContextMenu` used to offer "Cut branch
- * group". That item now lives on the card itself (this file's own
- * `onContextMenu`), and `fountain-field.tsx` only offers "Create new
- * branch"/"Paste branch group" on a genuinely empty line OUTSIDE any
- * existing group's span — which, in ordinary use, this overlay's own opaque
- * cards make unreachable-by-construction anyway (the click never gets past
- * the panel to begin with); `branchGroupAtLine` (fountain.ts) stays there
- * purely as defensive belt-and-suspenders for the brief window before this
- * component's first `sync()` has run.
+ * through to the live CM6 editor beneath it. Two different surfaces answer
+ * it, covering the two different kinds of area a card actually has: the
+ * card's OWN chrome (header, margins — this file's own `onContextMenu`)
+ * offers "Cut branch group"/"Copy branch group" directly; a right-click
+ * landing INSIDE the nested body (`BranchBodyField`'s own real `FountainField`
+ * instance) reaches `fountain-field.tsx`'s own `openContextMenu` instead,
+ * which offers the SAME two actions under its ordinary Cut/Copy items once
+ * it's told which group it belongs to (`branchGroupId`, that file's own doc
+ * comment) — replacing that field's usual per-selection text semantics
+ * entirely, not adding a third option beside them. That field's own handler
+ * also calls `event.stopPropagation()`, so a body-level right-click is
+ * handled ONCE, never bubbling up to also trigger this card's own handler on
+ * top of it. `fountain-field.tsx` only offers "Create new branch"/"Paste
+ * branch group" on a genuinely empty line OUTSIDE any existing group's span
+ * — which, in ordinary use, this overlay's own opaque cards make
+ * unreachable-by-construction anyway (the click never gets past the panel to
+ * begin with); `branchGroupAtLine` (fountain.ts) stays there purely as
+ * defensive belt-and-suspenders for the brief window before this component's
+ * first `sync()` has run.
  */
 
 /** A brand-new decision point not yet written to the document —
@@ -389,21 +398,25 @@ export interface BranchOverlayProps {
 	onTitleFocusConsumed?: () => void;
 	/** A card's own right-click "Cut branch group" — see this file's own top
 	 *  doc comment for why this lives here now instead of
-	 *  `fountain-field.tsx`'s `openContextMenu`. */
+	 *  `fountain-field.tsx`'s `openContextMenu`. Also threaded straight into
+	 *  each card's own nested `BranchBodyField`, so a right-click INSIDE the
+	 *  body reaches the identical handler. */
 	onCutBranchGroup: (groupId: string) => void;
+	/** "Copy branch group" — same clipboard as `onCutBranchGroup`, but the
+	 *  source stays in the document. Threaded the same two ways. */
+	onCopyBranchGroup: (groupId: string) => void;
 	/** The trash icon on a card's own `###` row — deletes just THIS branch
 	 *  (`removeBranchFromGroup`, fountain.ts), not the whole group the way
 	 *  "Cut branch group" does. The caller confirms before calling this (real
 	 *  prose is lost, unlike a cut, which survives in the branch clipboard). */
 	onDeleteBranch: (sectionId: string) => void;
-	/** Existing character/location names, fed straight through to each
-	 *  card's own embedded `FountainField` body — same lists the caller's
-	 *  own main script editor already passes, so the character-cue/scene-
-	 *  heading-location autocomplete behaves identically inside a branch's
-	 *  body. See `BranchBodyField`'s own doc comment for why the body is a
-	 *  real nested `FountainField` at all, not a plain textarea. */
+	/** Existing character names, fed straight through to each card's own
+	 *  embedded `FountainField` body — same list the caller's own main
+	 *  script editor already passes, so the character-cue autocomplete
+	 *  behaves identically inside a branch's body. See `BranchBodyField`'s
+	 *  own doc comment for why the body is a real nested `FountainField` at
+	 *  all, not a plain textarea. */
 	characters: string[];
-	locations: string[];
 	/** `@[` inline entity-link autocomplete/resolution — same shape/source
 	 *  as the caller's own main editor's `entityOptions` prop. */
 	entityOptions?: { name: string; type: EntityType; path: string }[];
@@ -441,9 +454,9 @@ export function BranchOverlay({
 	pendingTitleFocusId,
 	onTitleFocusConsumed,
 	onCutBranchGroup,
+	onCopyBranchGroup,
 	onDeleteBranch,
 	characters,
-	locations,
 	entityOptions,
 	ambientSuggestDismissMs,
 	onSpacerNeedsChange,
@@ -1306,6 +1319,11 @@ export function BranchOverlay({
 						}}
 						data-loom-branch-group={r.groupId}
 						onContextMenu={(e) => {
+							// Only reached for a right-click on the card's own
+							// chrome (header, margins) — a click landing inside
+							// the nested body never bubbles this far, stopped at
+							// `fountain-field.tsx`'s own `openContextMenu` (see
+							// this file's own top doc comment).
 							e.preventDefault();
 							const menu = new Menu();
 							menu.addItem((item) =>
@@ -1313,6 +1331,12 @@ export function BranchOverlay({
 									.setTitle(t('view.script.contextMenu.cutBranchGroup'))
 									.setIcon('scissors')
 									.onClick(() => onCutBranchGroup(r.groupId))
+							);
+							menu.addItem((item) =>
+								item
+									.setTitle(t('view.script.contextMenu.copyBranchGroup'))
+									.setIcon('copy')
+									.onClick(() => onCopyBranchGroup(r.groupId))
 							);
 							menu.showAtMouseEvent(e.nativeEvent);
 						}}
@@ -1372,9 +1396,11 @@ export function BranchOverlay({
 							onCommit={(v) => onSetBranchBody(r.sectionId, v)}
 							contentWidth={r.contentWidth}
 							characters={characters}
-							locations={locations}
 							entityOptions={entityOptions}
 							ambientSuggestDismissMs={ambientSuggestDismissMs}
+							groupId={r.groupId}
+							onCutBranchGroup={onCutBranchGroup}
+							onCopyBranchGroup={onCopyBranchGroup}
 						/>
 						{isLastOfGroup ? (
 							<div
@@ -1576,13 +1602,13 @@ function BranchTitleField({
  *  off `contentWidth` below), no click-to-open character/scene/act/entity
  *  navigation, and — critically — no `onCreateBranch`/`onPasteBranchGroup`
  *  (a branch's body must never itself offer to nest ANOTHER decision point
- *  inside it). `characters`/`locations`/`entityOptions`/
- *  `ambientSuggestDismissMs` are threaded straight through from the caller's
- *  own main editor so the cue/scene-heading-location autocomplete and
- *  ambient link suggester behave identically here. `escapeOverflowForTooltips`
- *  is on — see that prop's own doc comment (fountain-field.tsx) for why the
- *  autocomplete popup needs to escape this field's own clipped context
- *  entirely rather than just repositioning within it.
+ *  inside it). `characters`/`entityOptions`/`ambientSuggestDismissMs` are
+ *  threaded straight through from the caller's own main editor so the cue
+ *  autocomplete and ambient link suggester behave identically here.
+ *  `escapeOverflowForTooltips` is on — see that prop's own doc comment
+ *  (fountain-field.tsx) for why the autocomplete popup needs to escape this
+ *  field's own clipped context entirely rather than just repositioning
+ *  within it.
  *
  *  `contentWidth` is applied as an explicit pixel `width` on the inner
  *  `.loom-branch-body-inner` wrapper — NOT `max-width`, and not left for
@@ -1619,17 +1645,25 @@ const BranchBodyField = forwardRef(function BranchBodyField(
 		onCommit,
 		contentWidth,
 		characters,
-		locations,
 		entityOptions,
 		ambientSuggestDismissMs,
+		groupId,
+		onCutBranchGroup,
+		onCopyBranchGroup,
 	}: {
 		value: string;
 		onCommit: (v: string) => void;
 		contentWidth: number;
 		characters: string[];
-		locations: string[];
 		entityOptions?: { name: string; type: EntityType; path: string }[];
 		ambientSuggestDismissMs?: number;
+		/** This card's own decision-point group id — passed straight through
+		 *  as the nested `FountainField`'s `branchGroupId`, which is what
+		 *  repurposes ITS OWN Cut/Copy menu items into whole-group operations.
+		 *  See that prop's own doc comment (fountain-field.tsx). */
+		groupId: string;
+		onCutBranchGroup: (groupId: string) => void;
+		onCopyBranchGroup: (groupId: string) => void;
 	},
 	ref: ForwardedRef<BranchBodyFieldHandle>
 ): ReactElement {
@@ -1650,11 +1684,13 @@ const BranchBodyField = forwardRef(function BranchBodyField(
 						if (draft !== value) onCommit(draft);
 					}}
 					characters={characters}
-					locations={locations}
 					entityOptions={entityOptions}
 					ambientSuggestDismissMs={ambientSuggestDismissMs}
 					showAnnotationGutter={false}
 					escapeOverflowForTooltips
+					branchGroupId={groupId}
+					onCutBranchGroup={onCutBranchGroup}
+					onCopyBranchGroup={onCopyBranchGroup}
 				/>
 			</div>
 		</div>
