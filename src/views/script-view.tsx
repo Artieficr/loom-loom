@@ -2952,17 +2952,30 @@ export function renderNavTreeNode(
 	);
 }
 
-/** The lines of the script belonging to one scene, by its loom id. */
+/** The lines of the script belonging to one scene, by its loom id.
+ *  Deliberately does NOT strip trailing whitespace off the slice — it used
+ *  to (`.replace(/\s+$/, '')`), a leftover from before the modular-only
+ *  editing change removed the whole-document Script editor: with every
+ *  scene now edited exclusively through its own Scene page, there's no
+ *  longer any reason this function's own slice needs to look "clean" for a
+ *  SEPARATE surface splicing several excerpts together — the Scene page is
+ *  the only consumer that cares about the excerpt's own trailing content at
+ *  all, and it wants exactly what's really there. The strip was a real,
+ *  reported bug: it silently erased any blank line(s) the user deliberately
+ *  left at the end of their own scene (including the one `insertBranch`,
+ *  fountain.ts, always writes after a group's `= gather`) the instant that
+ *  content became the scene's own trailing content, forcing awkward
+ *  arrow-key navigation just to get a line back to type on. `sceneEndLine`
+ *  already finds the correct structural boundary (the next scene/act
+ *  heading's own line, or EOF) regardless of how many blank lines separate
+ *  scenes, so nothing here relied on the strip for correctness — only for a
+ *  "tidiness" that this function's own callers never actually needed. */
 export function sceneScriptText(script: string | null, sceneId: string): string | null {
 	if (script === null || sceneId === '') return null;
 	const parsed = parseFountain(script);
 	const scene = parsed.scenes.find((sc) => sc.loomId === sceneId);
 	if (!scene) return null;
-	return script
-		.split(/\r?\n/)
-		.slice(scene.line, sceneEndLine(parsed, scene))
-		.join('\n')
-		.replace(/\s+$/, '');
+	return script.split(/\r?\n/).slice(scene.line, sceneEndLine(parsed, scene)).join('\n');
 }
 
 /** The lines of the script belonging to one act (its `#` section line
