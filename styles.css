@@ -6143,6 +6143,18 @@ span.loom-row-caret {
 	color: #000;
 }
 
+/* The Fountain editor's own right-click context menu (fountain-field.tsx's
+   `openContextMenu`/`addMenuItem`): a disabled item's text/icon already read
+   `--text-faint` from Obsidian's own `.menu-item.is-disabled` rule, which
+   reads as barely dimmed against some themes' menu background — reported
+   directly against this menu. Opacity (not a color override) is what
+   actually pushes it paler regardless of theme, applied to the whole row so
+   icon and text dim together. No specificity fight needed: Obsidian's own
+   rule never sets `opacity` at all. */
+.menu-item.loom-fountain-menu-item-dim {
+	opacity: 0.45;
+}
+
 /* Column width matches the PDF's own text width exactly (`TEXT_W` in
    pdf.ts: 8.5in page − 1.5in left margin − 1in right margin = 6in), and
    every element's left/right padding below is that same LAYOUT table's

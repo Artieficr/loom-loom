@@ -1278,6 +1278,22 @@ export function sceneBodyLineOffset(excerpt: string): number {
 	const afterHeading = excerpt.split('\n').slice(1);
 	let blanks = 0;
 	while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
+	// An entirely-blank body (a brand-new scene, nothing typed yet) has no
+	// real "first non-blank line" for the loop above to land on — it walks
+	// every line in the excerpt and stops only because it ran out, which
+	// used to return `1 + afterHeading.length`, one line PAST the excerpt's
+	// own last line — pointing at whatever comes next in the WHOLE document
+	// (the next scene's heading, a page break, EOF) instead of anywhere
+	// still inside this scene. A real, reported bug: every caller translating
+	// an excerpt-relative line back to a whole-document one (this Scene
+	// page's own scroll-position math, "Open this scene" navigation,
+	// "Paste branch group") silently targeted the WRONG scene's content, or
+	// rejected a genuinely-blank click as "not an empty line," specifically
+	// for a scene with nothing in it yet. Clamped to the LAST line actually
+	// inside the excerpt instead — every line in an all-blank body is
+	// interchangeable, so landing on the closest-to-boundary one still
+	// inside it is the only sensible choice.
+	if (blanks >= afterHeading.length) return 1 + Math.max(afterHeading.length - 1, 0);
 	return 1 + blanks;
 }
 
@@ -2361,19 +2377,108 @@ export function cutBranchGroup(text: string, groupId: string): { text: string; c
 }
 
 /**
- * Splices a previously-cut decision point block back in right after `line`,
- * verbatim — its own `= gather` (if it had one) travels with it already
- * correctly positioned, nothing to reposition. Returns `null` when `line`
- * no longer points at an empty line by the time this actually runs (a
- * concurrent edit landed between the right-click and the paste) — the
- * caller Notices this rather than silently doing nothing, matching the
- * annotation-overlap rejection pattern elsewhere in this codebase.
+ * Reads a whole decision point's block exactly like `cutBranchGroup` does
+ * (see its own doc comment for exactly what that span includes) WITHOUT
+ * removing it from the document — the read half of "Copy branch group",
+ * feeding the same in-memory branch clipboard `cutBranchGroup` already
+ * writes into. Renumbering/re-idding a colliding paste happens entirely at
+ * PASTE time (`pasteBranchGroup`, below) — this just hands back the source
+ * text unchanged, identical to what a cut of the same group would have
+ * produced.
  */
-export function pasteBranchGroup(text: string, line: number, block: string): string | null {
+export function copyBranchGroup(text: string, groupId: string): string | null {
+	const parsed = parseFountain(text);
+	const bounds = branchGroupBounds(parsed, groupId);
+	if (!bounds) return null;
+	const lines = text.split(/\r?\n/);
+	return trimTrailingBlankLines(lines.slice(bounds.start, bounds.end)).join('\n');
+}
+
+/**
+ * Splices a previously cut-or-copied decision point block back in right
+ * after `line`. Returns `null` when `line` no longer points at an empty
+ * line by the time this actually runs (a concurrent edit landed between the
+ * right-click and the paste) — the caller Notices this rather than silently
+ * doing nothing, matching the annotation-overlap rejection pattern
+ * elsewhere in this codebase.
+ *
+ * **Collision handling — what makes "Copy" safe, not just "Cut"**: a CUT
+ * already removed the source before paste ever runs, so the block's own
+ * `= branch:` value and section ids are guaranteed unique and travel
+ * verbatim, unchanged, exactly as before this function grew this check. A
+ * COPY leaves the source in place, so pasting the identical value/ids
+ * elsewhere would make two physically separate stretches of the script
+ * claim to be the SAME decision point (`branchGroupBounds` groups by exact
+ * `= branch:` value equality — it has no other way to tell them apart) and
+ * hand out duplicate loom ids, which several other things key off (a
+ * Scene's own `sceneBranch`, the branch overlay's own per-card React key).
+ * Detected here by checking whether the block's OWN value still exists
+ * anywhere in the CURRENT document — true only for a copy-still-present
+ * paste, never a genuine cut-then-move. When it collides: a numbered value
+ * (`IDENTIFIER-SUBIDENTIFIER-<N>`) gets bumped to the next free number in
+ * its combo (`nextComboNumber` — the identical mechanism a brand-new
+ * decision point already uses), matching every branch's own duplicate
+ * `= branch:` tag line; a hand-typed text-override value collision is left
+ * untouched (there's no "next" to compute — `renumberBranchGroups` already
+ * tolerates this same gap for the identical reason). Every branch section's
+ * own `[[loom:<id>]]` gets a fresh id regardless of whether the value was
+ * numbered, since the id-uniqueness problem exists either way.
+ *
+ * **Two trailing blank lines, not one, and a reported cursor target**: the
+ * pasted group's own card (`branch-overlay.tsx`) is an opaque, real-pixel
+ * panel whose rendered height depends on a live measurement pass
+ * (header/body/footer) that only converges a render or two AFTER the paste
+ * actually lands — a real, reported bug: right after pasting, the ONE blank
+ * line this used to leave behind could still sit visually UNDER the card
+ * while that measurement was still catching up, leaving nowhere to click to
+ * keep writing without risking a click landing on the covered text instead.
+ * A second blank line is cheap insurance against that same class of timing
+ * gap; `cursorLine` (0-based, whole-document) points at the FARTHER of the
+ * two, for the caller to select the cursor onto directly once the write
+ * lands — sidestepping the "where do I click" question entirely rather than
+ * trying to make the click safe.
+ */
+export function pasteBranchGroup(
+	text: string,
+	line: number,
+	block: string
+): { text: string; cursorLine: number } | null {
 	const lines = text.split(/\r?\n/);
 	if (line < 0 || line >= lines.length || lines[line].trim() !== '') return null;
-	lines.splice(line + 1, 0, ...block.split(/\r?\n/), '');
-	return lines.join('\n');
+
+	const parsed = parseFountain(text);
+	const blockParsed = parseFountain(block);
+	const branches = blockParsed.sections.filter((s) => s.branchGroup !== null);
+	const value = branches[0]?.branchGroup ?? null;
+
+	let finalBlock = block;
+	if (value !== null && parsed.sections.some((s) => s.branchGroup === value)) {
+		const blockLines = block.split(/\r?\n/);
+		const comboKey = branchComboKey(value);
+		const parts = value.split('-');
+		if (parts.length === 3 && /^\d+$/.test(parts[2])) {
+			const newValue = `${comboKey}-${nextComboNumber(parsed, comboKey)}`;
+			for (const sec of branches) {
+				const tagLine = sec.line + 1;
+				if (BRANCH_TAG_RE.test(blockLines[tagLine]?.trim() ?? '')) {
+					blockLines[tagLine] = `= branch: ${newValue}`;
+				}
+			}
+		}
+		const seen = new Set(collectLoomIds(parsed.scenes, parsed.sections, parsed.pageBreaks));
+		for (const sec of branches) {
+			if (sec.loomId === null) continue;
+			const fresh = freshLoomId(seen);
+			seen.add(fresh);
+			blockLines[sec.line] = blockLines[sec.line].replace(`[[loom:${sec.loomId}]]`, `[[loom:${fresh}]]`);
+		}
+		finalBlock = blockLines.join('\n');
+	}
+
+	const blockLinesFinal = finalBlock.split(/\r?\n/);
+	lines.splice(line + 1, 0, ...blockLinesFinal, '', '');
+	const cursorLine = line + 1 + blockLinesFinal.length + 1;
+	return { text: lines.join('\n'), cursorLine };
 }
 
 /** The line right after a branch section's own `= branch:` tag AND printed
