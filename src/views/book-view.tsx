@@ -503,8 +503,11 @@ export function orphanedBookEntities(
 }
 
 /** Live-reads the project's Book file, re-reading on any vault touch to its
- *  path — mirrors `useScriptText`. Shared by the Chapter/Act pages' own
- *  Editor sections and `BookView` itself. */
+ *  path — the Prose equivalent of `script-buffer.ts`'s `useScriptBuffer`,
+ *  just without a shared in-memory buffer of its own yet (see that file's
+ *  own doc comment / ROADMAP for the deferred Book/Chapter follow-up).
+ *  Shared by the Chapter/Act pages' own Editor sections and `BookView`
+ *  itself. */
 export function useBookText(plugin: LoomLoomPlugin, project: ProjectDef | null): string | null {
 	const [text, setText] = useState<string | null>(null);
 	const path = project ? bookFilePath(project) : null;
@@ -518,7 +521,7 @@ export function useBookText(plugin: LoomLoomPlugin, project: ProjectDef | null):
 				return;
 			}
 			// `vault.read`, never `cachedRead` — same fix, same reasoning as
-			// `script-view.tsx`'s own `useScriptText` (a real, confirmed bug:
+			// `script-buffer.ts`'s own initial read (a real, confirmed bug:
 			// a just-landed write's own 'modify' event can fire before
 			// Obsidian's read cache has caught up with it, so a just-written
 			// alt-text swap silently looked reverted here too).

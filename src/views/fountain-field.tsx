@@ -972,6 +972,14 @@ export const FountainField = forwardRef(function FountainField(
 	 *  user's next blur), so there's no React round-trip to plumb a prop
 	 *  through in the first place. */
 	const pendingComboFocusIdRef = useRef<string | null>(null);
+	/** An external `value` change that arrived while this field was FOCUSED —
+	 *  stashed here instead of silently dropped (a real, confirmed gap: the
+	 *  value-sync effect below only ever applies while unfocused, and only
+	 *  re-checks when `value` itself changes again, so a blur alone never
+	 *  revisited a change it had skipped). Applied once focus is actually
+	 *  lost, from the update listener's own blur branch below. `null` = no
+	 *  pending change. */
+	const pendingExternalValueRef = useRef<string | null>(null);
 	onGeometryChangeRef.current = onGeometryChange;
 	onCreateBranchRef.current = onCreateBranch;
 	onPasteBranchGroupRef.current = onPasteBranchGroup;
@@ -2308,7 +2316,34 @@ export const FountainField = forwardRef(function FountainField(
 							const urgent = update.transactions.some((tr) => tr.isUserEvent('undo') || tr.isUserEvent('redo'));
 							onChangeRef.current(update.state.doc.toString(), urgent);
 						}
-						if (update.focusChanged && !update.view.hasFocus) onBlurRef.current?.();
+						if (update.focusChanged && !update.view.hasFocus) {
+							onBlurRef.current?.();
+							// Apply a stashed external change now that it's actually
+							// safe to — a real content change, so it can't be done
+							// synchronously from inside this same update listener
+							// (CM6 throws "Calls to EditorView.update are not allowed
+							// while an update is in progress" for a nested dispatch);
+							// deferred a genuine macrotask out, same reasoning as
+							// `onAnyScroll`'s own `setTimeout` further down this
+							// file. `viewRef.current !== view` guards against the
+							// field having unmounted by the time this fires.
+							if (pendingExternalValueRef.current !== null) {
+								const blurredView = update.view;
+								blurredView.dom.win.setTimeout(() => {
+									if (viewRef.current !== blurredView) return;
+									const pending = pendingExternalValueRef.current;
+									if (pending === null) return;
+									pendingExternalValueRef.current = null;
+									const current = blurredView.state.doc.toString();
+									if (current !== pending) {
+										blurredView.dispatch({
+											changes: { from: 0, to: current.length, insert: pending },
+											userEvent: 'loom.externalSync',
+										});
+									}
+								}, 0);
+							}
+						}
 						if (update.viewportChanged || update.geometryChanged) onGeometryChangeRef.current?.();
 						// A bare `selectionSet` also fires for plain Up/Down-arrow
 						// cursor motion (CM6 annotates keyboard cursor movement as
@@ -2383,12 +2418,26 @@ export const FountainField = forwardRef(function FountainField(
 	}, []);
 
 	// External value changes (loaded from disk, or `ensureSceneIds`/
-	// `syncScenes` rewriting the text after a blur) — pushed in only while
-	// unfocused, same as markdown-field.tsx, so a live edit's cursor is never
-	// disturbed by our own echo of what it just produced.
+	// `syncScenes` rewriting the text after a blur, or now — with the shared
+	// script buffer — a DIFFERENT open pane's own edit to this exact scene)
+	// — applied only while unfocused, same as markdown-field.tsx, so a live
+	// edit's cursor is never disturbed by our own echo of what it just
+	// produced. While focused, a genuinely different `value` is stashed in
+	// `pendingExternalValueRef` instead of silently dropped — a real,
+	// confirmed gap this closes: this effect only re-checks when `value`
+	// itself changes AGAIN, so without the stash, an external change that
+	// arrived mid-edit was gone for good the instant this ran once and saw
+	// `hasFocus`; blur alone never revisited it. The update listener's own
+	// blur branch (above) is what applies a stashed value once it's actually
+	// safe to.
 	useEffect(() => {
 		const view = viewRef.current;
-		if (!view || view.hasFocus) return;
+		if (!view) return;
+		if (view.hasFocus) {
+			if (view.state.doc.toString() !== value) pendingExternalValueRef.current = value;
+			return;
+		}
+		pendingExternalValueRef.current = null;
 		const current = view.state.doc.toString();
 		if (current !== value) {
 			// A wholesale `[0, length)` replace gives CM6 no positional
@@ -2418,22 +2467,16 @@ export const FountainField = forwardRef(function FountainField(
 			// found chasing an "intermittent, only-works-after-several-tries"
 			// report: without this, `onChangeRef.current(...)` fired for this
 			// programmatic resync exactly like it does for real typing, which
-			// for the Scene page's own caller means `setSceneBody(newValue)` —
-			// setting its local buffered-draft override to a value that
-			// happens to be correct AT THAT INSTANT, but is now PERMANENTLY
-			// non-null. Since that caller derives what this field actually
-			// shows as `sceneBody ?? sceneBodyOf(sceneExcerpt)`, a non-null
-			// `sceneBody` freezes the displayed text at that one snapshot
-			// forever, no matter how many MORE times `sceneExcerpt` changes
-			// afterward — every later external edit (a branch cut, a paste, a
-			// syncScenes stamp) writes to disk correctly but never shows up in
-			// THIS editor again until an unrelated real edit-and-blur happens
-			// to clear the override back to null (or the whole page remounts,
-			// which is why closing and reopening the Scene always "fixed" it).
-			// This one external-sync path is the only dispatch in this file
-			// that should ever carry this tag — every other `view.dispatch`
-			// here (Cut/Copy/Paste, alt-text swaps, …) represents a real
-			// content change the caller's own buffered draft SHOULD pick up.
+			// for the Scene page's own caller means writing this exact same
+			// text straight back into the shared script buffer as if the user
+			// had just typed it — a harmless no-op most of the time (the text
+			// already matches what the buffer holds), but not guaranteed to
+			// stay one forever, and not the honest story of what happened
+			// either. This one external-sync path is the only dispatch in
+			// this file that should ever carry this tag — every other
+			// `view.dispatch` here (Cut/Copy/Paste, alt-text swaps, …)
+			// represents a real content change the caller's own `onChange`
+			// SHOULD pick up.
 			view.dispatch({
 				changes: { from: 0, to: current.length, insert: value },
 				effects: EditorView.scrollIntoView(targetPos, { y: 'start' }),

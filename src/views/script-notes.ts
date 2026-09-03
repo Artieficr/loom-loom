@@ -184,7 +184,7 @@ export async function mutateScriptNotes(
 
 // --- React read hook ----------------------------------------------------------
 //
-// Structurally identical to script-view.tsx's `useScriptText`: re-reads on
+// Structurally identical to script-buffer.ts's own read hook: re-reads on
 // every vault touch to this ONE path. This is also how the three
 // simultaneously-mounted views stay in sync with each other's writes — a
 // write from any one of them fires `modify`, and every mounted

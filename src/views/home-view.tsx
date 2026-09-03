@@ -24,7 +24,7 @@ import { LoomFileReactView } from './react-view';
 import { Icon, NavRail } from './common';
 import { useIndexVersion } from './hooks';
 import { countMapPages, mapsFilePath } from './map-view';
-import { createScriptFile, scriptFilePath } from './script-view';
+import { createScriptFile, scriptFilePath } from './script-buffer';
 import { createBookFile, findBookFile } from './book-view';
 import { t } from '../i18n';
 import type LoomLoomPlugin from '../main';
