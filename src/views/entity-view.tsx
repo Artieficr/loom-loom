@@ -162,6 +162,17 @@ import type LoomLoomPlugin from '../main';
 import { LocaleKey, t, tn } from '../i18n';
 import { entityLabel, entityPlural } from '../types';
 
+/**
+ * Embedded branch cards — spike toggle. When `true`, the Scene page's own
+ * `FountainField` renders branch groups as chrome laid directly over their
+ * own real text (see `fountain-field.tsx`'s "Embedded branch cards" doc
+ * comment above `activeBranchByGroup`) instead of mounting `BranchOverlay`'s
+ * `position: fixed` cards. A single flag rather than deleting anything yet —
+ * this is step 1 of the phased plan (ROADMAP), not a finished replacement:
+ * flip back to `false` to compare against the overlay, or once a real gap is
+ * found against it.
+ */
+const EMBEDDED_BRANCH_CARDS_SPIKE = true;
 
 /**
  * Entity page: a structured form over an entity's .md file, opened by every
@@ -8154,7 +8165,20 @@ function EntityPage({ view }: { view: EntityView }) {
 														onCreateBranch={handleCreateBranchDraft}
 														onPasteBranchGroup={handlePasteBranchGroupInScene}
 														branchClipboardAvailable={getBranchClipboard() !== null}
-														branchSpacers={sceneBranchSpacers}
+														// `BranchOverlay`'s own extra-height reservation
+														// (`onSpacerNeedsChange` below) is only meaningful for
+														// ITS OWN opaque cards — the embedded renderer's chrome
+														// is all real document lines with no shortfall to
+														// cover, so this is left unset whenever it's active.
+														branchSpacers={EMBEDDED_BRANCH_CARDS_SPIKE ? undefined : sceneBranchSpacers}
+														embeddedBranchCards={EMBEDDED_BRANCH_CARDS_SPIKE}
+														onRenameBranchTitle={handleRenameBranchTitle}
+														onSetBranchCombo={handleSetBranchCombo}
+														onSetBranchRaw={handleSetBranchRaw}
+														onDeleteBranch={handleDeleteBranchInScene}
+														onAddBranch={(groupId) => void handleAddBranch(groupId)}
+														pendingTitleFocusId={pendingBranchTitleFocusId}
+														onTitleFocusConsumed={() => setPendingBranchTitleFocusId(null)}
 													/>
 													<BranchOverlay
 														fieldRef={sceneScriptEditorRef}
@@ -8164,7 +8188,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														drafts={branchDrafts}
 														onDraftField={handleBranchDraftField}
 														onDismissDraft={handleDismissBranchDraft}
-													onCreateDraft={handleCommitBranchDraft}
+														onCreateDraft={handleCommitBranchDraft}
 														onRenameBranchTitle={handleRenameBranchTitle}
 														onSetBranchCombo={handleSetBranchCombo}
 														onSetBranchRaw={handleSetBranchRaw}
@@ -8174,11 +8198,12 @@ function EntityPage({ view }: { view: EntityView }) {
 														onTitleFocusConsumed={() => setPendingBranchTitleFocusId(null)}
 														onCutBranchGroup={handleCutBranchGroupInScene}
 														onCopyBranchGroup={handleCopyBranchGroupInScene}
-													onDeleteBranch={handleDeleteBranchInScene}
+														onDeleteBranch={handleDeleteBranchInScene}
 														characters={scriptParsed?.characters ?? []}
 														entityOptions={entityOptions}
 														ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
 														onSpacerNeedsChange={setSceneBranchSpacers}
+														renderRealCards={!EMBEDDED_BRANCH_CARDS_SPIKE}
 													/>
 												</div>
 											) : sceneScriptMode === 'pages' ? (

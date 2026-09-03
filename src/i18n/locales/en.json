@@ -788,7 +788,8 @@
 				"deleteBranchAria": "Delete this branch",
 				"deleteBranchConfirmTitle": "Delete this branch?",
 				"deleteBranchConfirmDetail": "Its title, identifier, and body text are permanently removed from the script. This can't be undone.",
-				"deleteBranchConfirmButton": "Delete"
+				"deleteBranchConfirmButton": "Delete",
+				"untitled": "Untitled branch"
 			},
 			"overlapNotice": {
 				"resize": "Can't resize a comment span to partially overlap another one.",

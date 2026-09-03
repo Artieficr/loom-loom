@@ -22,6 +22,7 @@ import {
 	applyBranchLabels,
 	applyDisplayTitles,
 	cleanAnnotationMarkers,
+	collapseBranchBlankLines,
 	elementText,
 	ensureSceneIds,
 	findAnnotationSpans,
@@ -828,7 +829,7 @@ function Script({ view }: { view: ScriptView }) {
 		// title text rather than a note field — there's no Branch note to own
 		// one — so a branch's printed marker stays in sync purely from its
 		// heading, kept separate from the act-title pass above.
-		const titled = applyBranchLabels(applyDisplayTitles(renumbered, titles));
+		const titled = collapseBranchBlankLines(applyBranchLabels(applyDisplayTitles(renumbered, titles)));
 		if (titled !== onDisk.current) {
 			await plugin.app.vault.modify(file, titled);
 			onDisk.current = titled;
@@ -3088,7 +3089,8 @@ export async function editScriptAndSync(
 		const applied = apply(raw);
 		return applied === null
 			? null
-			: cleanAnnotationMarkers(applyBranchLabels(renumberBranchGroups(renumberScenes(applied)))).text;
+			: cleanAnnotationMarkers(collapseBranchBlankLines(applyBranchLabels(renumberBranchGroups(renumberScenes(applied)))))
+					.text;
 	});
 	if (changed) {
 		const scriptFile = findScriptFile(plugin, project);

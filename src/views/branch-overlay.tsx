@@ -19,6 +19,7 @@ import {
 	branchBodyText,
 	branchComboKey,
 	branchGroupBounds,
+	decomposeBranchValue,
 	nextComboNumber,
 	parseFountain,
 } from '../fountain';
@@ -310,19 +311,6 @@ function visibleClipRect(el: HTMLElement): { top: number; bottom: number; left: 
 	return { top, bottom, left, right };
 }
 
-/** `IDENTIFIER-SUBIDENTIFIER-N` decomposed into its three parts, or `null`
- *  for anything else (a legacy hand-typed free-text value) — mirrors
- *  `branchComboKey`'s own 3-non-empty-segment check (fountain.ts), kept as a
- *  separate small helper here since this one needs all three pieces, not
- *  just the combo prefix. */
-function decomposeBranchValue(value: string): { identifier: string; subidentifier: string; number: string } | null {
-	const parts = value.split('-');
-	if (parts.length === 3 && parts.every((p) => p.trim() !== '')) {
-		return { identifier: parts[0], subidentifier: parts[1], number: parts[2] };
-	}
-	return null;
-}
-
 export interface BranchOverlayProps {
 	/** The Scene page's own `FountainFieldHandle` ref — read fresh on every
 	 *  sync via `getView()`, never cached, matching every other consumer of
@@ -435,6 +423,18 @@ export interface BranchOverlayProps {
 	 *  caller storing it in `useState` doesn't need its own extra guard
 	 *  against redundant re-renders. */
 	onSpacerNeedsChange?: (spacers: Record<string, number>) => void;
+	/** Default `true` — set `false` by a caller whose own `FountainField`
+	 *  renders every REAL branch group itself (`embeddedBranchCards`,
+	 *  fountain-field.tsx), so this component's own opaque cards would just
+	 *  double up on top of that. Still-open DRAFTS (`drafts`, above) keep
+	 *  rendering regardless — a draft has no backing document content yet,
+	 *  so there's nothing for the embedded renderer to show in its place.
+	 *  Deliberately only gates the RENDER, not the underlying measurement
+	 *  pass (`sync()`'s own `rects` computation) — that logic is delicate
+	 *  enough (see this file's own top doc comment on scroll timing) that
+	 *  skipping it selectively wasn't worth the risk for what's a small,
+	 *  Scene-page-only perf cost. */
+	renderRealCards?: boolean;
 }
 
 export function BranchOverlay({
@@ -460,6 +460,7 @@ export function BranchOverlay({
 	entityOptions,
 	ambientSuggestDismissMs,
 	onSpacerNeedsChange,
+	renderRealCards = true,
 }: BranchOverlayProps): ReactElement | null {
 	const [rects, setRects] = useState<BranchCardRect[]>([]);
 	const [draftRects, setDraftRects] = useState<DraftCardRect[]>([]);
@@ -1271,7 +1272,7 @@ export function BranchOverlay({
 			    to move in real time to stay in sync with the editor's own
 			    scroll. */}
 			<div className="loom-branch-track" ref={trackRef}>
-			{rects.map((r) => {
+			{renderRealCards && rects.map((r) => {
 				// The group's true top/bottom (first/only and last/only,
 				// respectively) get the plain panel radius + a real border —
 				// but ONLY when that edge isn't itself clamped by the visible

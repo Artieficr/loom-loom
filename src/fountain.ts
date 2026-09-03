@@ -1877,6 +1877,21 @@ export function branchComboKey(value: string): string {
 	return value;
 }
 
+/** `IDENTIFIER-SUBIDENTIFIER-N` decomposed into its three parts, or `null`
+ *  for anything else (a legacy hand-typed free-text value) — mirrors
+ *  `branchComboKey`'s own 3-non-empty-segment check, kept as a separate
+ *  function since this one needs all three pieces, not just the combo
+ *  prefix. Shared by both branch-editing surfaces (`branch-overlay.tsx`'s
+ *  own combo fields and `fountain-field.tsx`'s embedded ones) so the two
+ *  can't silently diverge on what counts as a decomposable value. */
+export function decomposeBranchValue(value: string): { identifier: string; subidentifier: string; number: string } | null {
+	const parts = value.split('-');
+	if (parts.length === 3 && parts.every((p) => p.trim() !== '')) {
+		return { identifier: parts[0], subidentifier: parts[1], number: parts[2] };
+	}
+	return null;
+}
+
 /** Every sibling section in one decision point (exact `= branch:` value
  *  equality), plus where its block starts/ends and where its `= gather` line
  *  (if any) currently sits — found fresh from the parse, never stored. The
@@ -2331,7 +2346,13 @@ export function insertBranch(
 		// exactly where it always has — this only changes what exists
 		// TRANSIENTLY between creation and either a second branch or a
 		// deletion, never the steady state.
-		const block = [`### ${title} [[loom:${id}]]`, `= branch: ${fields.branchValue}`, '', label, '', '= gather', ''];
+		// No blank line between the tag and the label — the two are meant to
+		// sit adjacent (`branchLabelEndLine` already treats any number of
+		// blank lines there as equivalent, so this is a pure formatting
+		// choice, not a parsing requirement); `collapseBranchBlankLines`
+		// normalizes an OLDER script that still has one back to this same
+		// shape on its next commit.
+		const block = [`### ${title} [[loom:${id}]]`, `= branch: ${fields.branchValue}`, label, '', '= gather', ''];
 		lines.splice(anchor.line + 1, 0, ...block);
 		return lines.join('\n');
 	}
@@ -2346,13 +2367,46 @@ export function insertBranch(
 	if (bounds.gatherLine !== null) {
 		const insertAt = bounds.gatherLine;
 		const needsLeadingBlank = lines[insertAt - 1]?.trim() !== '';
-		lines.splice(insertAt, 0, ...(needsLeadingBlank ? [''] : []), heading, tag, '', label, '');
+		lines.splice(insertAt, 0, ...(needsLeadingBlank ? [''] : []), heading, tag, label, '');
 		return lines.join('\n');
 	}
 
 	const insertAt = bounds.end;
 	const needsLeadingBlank = insertAt > 0 && lines[insertAt - 1]?.trim() !== '';
-	lines.splice(insertAt, 0, ...(needsLeadingBlank ? [''] : []), heading, tag, '', label, '', '= gather', '');
+	lines.splice(insertAt, 0, ...(needsLeadingBlank ? [''] : []), heading, tag, label, '', '= gather', '');
+	return lines.join('\n');
+}
+
+/**
+ * Collapses to ZERO the blank-line run (if any) between a branch's own
+ * `= branch: <value>` tag line and its `>**Title**<` preview line
+ * (`applyBranchLabels`'s own output) — the two are meant to sit adjacent
+ * (see `insertBranch`'s own current template); a blank line there was only
+ * ever leftover padding from an earlier version of that template. Idempotent
+ * (a branch that already has no gap there is untouched) and safe to run on
+ * every commit, same as `renumberBranchGroups`/`cleanAnnotationMarkers` —
+ * this is what lets an OLDER script (or one hand-typed before this
+ * convention existed) self-heal on its next edit rather than needing a
+ * one-time migration. The blank line between the PRESERVED preview and
+ * where the body starts is deliberately left alone — that one's real,
+ * intentional breathing room before the prose begins, same as
+ * `branchLabelEndLine`'s own body-start convention.
+ */
+export function collapseBranchBlankLines(text: string): string {
+	const parsed = parseFountain(text);
+	const lines = text.split(/\r?\n/);
+	// Descending line order so an earlier splice never invalidates a LATER
+	// section's own already-computed line index.
+	const branchSections = parsed.sections.filter((s) => s.branchGroup !== null).sort((a, b) => b.line - a.line);
+	for (const sec of branchSections) {
+		const tagLine = sec.line + 1;
+		if (tagLine >= lines.length || !BRANCH_TAG_RE.test(lines[tagLine]?.trim() ?? '')) continue;
+		let scan = tagLine + 1;
+		while (scan < lines.length && lines[scan].trim() === '') scan++;
+		if (scan > tagLine + 1 && scan < lines.length && /^>.*<$/.test(lines[scan].trim())) {
+			lines.splice(tagLine + 1, scan - (tagLine + 1));
+		}
+	}
 	return lines.join('\n');
 }
 
@@ -2499,7 +2553,7 @@ export function pasteBranchGroup(
  *  detect or reuse whatever blank spacing currently exists — the WRITE side
  *  always inserts its own canonical single blank, and the READ side just
  *  skips past however many blanks happen to be there right now. */
-function branchLabelEndLine(lines: string[], sectionLine: number): number {
+export function branchLabelEndLine(lines: string[], sectionLine: number): number {
 	let at = sectionLine + 1;
 	if (at < lines.length && BRANCH_TAG_RE.test(lines[at].trim())) at++;
 	while (at < lines.length && lines[at].trim() === '') at++;
