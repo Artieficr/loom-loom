@@ -1572,10 +1572,19 @@ export function replaceSceneBody(text: string, sceneId: string, body: string): s
 	const scene = parsed.scenes.find((sc) => sc.loomId === sceneId);
 	if (!scene) return null;
 	const lines = text.split(/\r?\n/);
-	const next = body.replace(/\s+$/, '').split('\n');
-	// Keep one blank line between the heading and the body, and one after it,
-	// so the surrounding elements still parse as their own blocks.
-	lines.splice(scene.line + 1, sceneEndLine(parsed, scene) - scene.line - 1, '', ...next, '');
+	const bodyLines = body.split('\n');
+	// Guarantee AT LEAST one trailing blank line — required so whatever
+	// comes next (another scene's heading, an act boundary) still parses as
+	// its own block — without stripping any EXTRA ones the caller's own
+	// body already has: a real, reported bug used to force-collapse the
+	// body to exactly one trailing blank regardless of how many the user
+	// deliberately kept. The leading blank line between the heading and the
+	// body is still unconditional, though — `body` itself never carries it
+	// (the Scene page's own editable buffer is derived via `sceneBodyOf`,
+	// which always skips past however many leading blanks exist before
+	// handing the text over), so there's nothing to preserve on that side.
+	if (bodyLines[bodyLines.length - 1]?.trim() !== '') bodyLines.push('');
+	lines.splice(scene.line + 1, sceneEndLine(parsed, scene) - scene.line - 1, '', ...bodyLines);
 	return lines.join('\n');
 }
 
@@ -2375,6 +2384,80 @@ export function insertBranch(
 	const needsLeadingBlank = insertAt > 0 && lines[insertAt - 1]?.trim() !== '';
 	lines.splice(insertAt, 0, ...(needsLeadingBlank ? [''] : []), heading, tag, label, '', '= gather', '');
 	return lines.join('\n');
+}
+
+/** Placeholder `= branch:` combo segments a typed-into-existence branch
+ *  (`promoteTypedBranch`, below) is born with — genuinely meant to be
+ *  overwritten immediately (the caller auto-focuses+selects the Identifier
+ *  field the instant the group renders), never a "good" value on its own. */
+const TYPED_BRANCH_PLACEHOLDER_IDENTIFIER = 'ID';
+const TYPED_BRANCH_PLACEHOLDER_SUBIDENTIFIER = 'SUB';
+
+/**
+ * Promotes a manually hand-typed, not-yet-tagged section heading directly
+ * followed by a bare `= branch:` line (nothing after the colon yet) into a
+ * real, fully-formed branch group — the write half of "just finished typing
+ * `= branch:` under a heading" (fountain-field.tsx's own auto-detect
+ * trigger, the one piece of evidence needed to know the user wants a
+ * branch there). `headingLine0`/`level` are the heading's own 0-based line
+ * and `#` depth; the very next line is assumed to be the bare tag (the
+ * caller, watching the CM6 transaction that just landed the colon, already
+ * confirmed this exact shape before calling — re-validated here too via the
+ * `headingLine0 + 1 >= lines.length` bound, same defensive posture every
+ * other id-issuing op in this file takes).
+ *
+ * REPLACES both raw lines in place with the same shape `insertBranch`'s own
+ * "new group" template produces (own doc comment above) — id, immediate
+ * `= gather`, everything — so the result is indistinguishable from the
+ * right-click "Create new branch" flow's own output, just sourced from
+ * already-typed text instead of a fresh insertion point. Not a
+ * remove-then-delegate-to-`insertBranch` wrapper: that function's own
+ * `{ line }` anchor only ever inserts AFTER a given line, which can't
+ * express "replace these two lines" — including the `headingLine0 === 0`
+ * case (a branch typed as literally the first line of a scene's body),
+ * which has no "line before" to anchor after at all.
+ *
+ * The combo value is a placeholder (`TYPED_BRANCH_PLACEHOLDER_IDENTIFIER`/
+ * `_SUBIDENTIFIER`), never left blank — `BRANCH_TAG_RE` requires a non-empty
+ * value for the section to parse as tagged at all, and the embedded widget
+ * only renders chrome for an already-tagged group, so SOME value has to
+ * exist immediately. Its own NUMBER segment still goes through
+ * `nextComboNumber` against that same placeholder prefix (not a fixed
+ * `'01'`) specifically so several branches typed into existence in a row
+ * without any of them being edited yet get DIFFERENT combo values —
+ * a fixed placeholder would make them all share one literal `= branch:`
+ * string, which is exactly what group MEMBERSHIP is keyed on (exact value
+ * equality), silently merging unrelated decision points into one.
+ *
+ * Returns the new text AND the freshly assigned section id — the caller
+ * needs the id synchronously (no disk round-trip here at all, unlike every
+ * OTHER branch mutation in this codebase; see fountain-field.tsx's own doc
+ * comment on why this one has to stay a same-tick CM6 transaction) to know
+ * which group's own Identifier field to auto-focus once the embedded
+ * decorations rebuild.
+ */
+export function promoteTypedBranch(
+	text: string,
+	headingLine0: number,
+	level: number,
+	title: string
+): { text: string; id: string } | null {
+	const lines = text.split(/\r?\n/);
+	if (headingLine0 < 0 || headingLine0 + 1 >= lines.length) return null;
+	const parsed = parseFountain(text);
+	const seen = collectLoomIds(parsed.scenes, parsed.sections, parsed.pageBreaks);
+	const id = freshLoomId(seen);
+	const trimmedTitle = title.trim();
+	const label = `>**${trimmedTitle}**<`;
+	const comboKey = branchComboKey(
+		`${TYPED_BRANCH_PLACEHOLDER_IDENTIFIER}-${TYPED_BRANCH_PLACEHOLDER_SUBIDENTIFIER}-1`
+	);
+	const number = String(nextComboNumber(parsed, comboKey)).padStart(2, '0');
+	const branchValue = `${TYPED_BRANCH_PLACEHOLDER_IDENTIFIER}-${TYPED_BRANCH_PLACEHOLDER_SUBIDENTIFIER}-${number}`;
+	const heading = `${'#'.repeat(Math.max(1, level))} ${trimmedTitle} [[loom:${id}]]`;
+	const block = [heading, `= branch: ${branchValue}`, label, '', '= gather', ''];
+	lines.splice(headingLine0, 2, ...block);
+	return { text: lines.join('\n'), id };
 }
 
 /**

@@ -33,6 +33,7 @@ import {
 	findOrphanPairs,
 	newSceneId,
 	parseFountain,
+	promoteTypedBranch,
 	readLoomId,
 } from '../fountain';
 import { AltTextEntry, CommentEntry } from './script-notes';
@@ -428,7 +429,18 @@ class BranchHeaderRowWidget extends WidgetType {
  *  faithful mirror of the document, while edits are only ever accepted
  *  through branch 1's own live copy). Falls back to ONE plain raw field
  *  (editable only on branch 1 too) for a legacy value that doesn't decompose
- *  into 3 dash-separated segments. */
+ *  into 3 dash-separated segments.
+ *
+ *  **`autoFocusSelect`** — the group was just born via the typed
+ *  `### Title` + `= branch:` auto-detect trigger (`promoteTypedBranch`,
+ *  fountain.ts), so its combo carries a placeholder value nobody actually
+ *  chose yet. Unlike `BranchHeaderRowWidget`'s `autoFocusEmpty` (which
+ *  BLANKS the field, since "Untitled" would otherwise read as real typed
+ *  content), the Identifier field here shows its real placeholder text
+ *  `.select()`ed instead — a plain, standard "type to replace" affordance:
+ *  there's no ambiguity to mask, since a freshly-generated combo like
+ *  `ID-SUB-01` already reads unmistakably as a placeholder, not something
+ *  the user could mistake for their own input. */
 class BranchComboRowWidget extends WidgetType {
 	constructor(
 		readonly groupId: string,
@@ -436,12 +448,16 @@ class BranchComboRowWidget extends WidgetType {
 		readonly onCommitCombo:
 			| ((groupId: string, identifier: string, subidentifier: string, numberOrOverride: string) => void)
 			| undefined,
-		readonly onCommitRaw: ((groupId: string, value: string) => void) | undefined
+		readonly onCommitRaw: ((groupId: string, value: string) => void) | undefined,
+		readonly autoFocusSelect: boolean = false,
+		readonly onFocusConsumed: (() => void) | undefined = undefined
 	) {
 		super();
 	}
 	eq(other: BranchComboRowWidget): boolean {
-		return other.groupId === this.groupId && other.isFirst === this.isFirst;
+		return (
+			other.groupId === this.groupId && other.isFirst === this.isFirst && other.autoFocusSelect === this.autoFocusSelect
+		);
 	}
 	toDOM(view: EditorView): HTMLElement {
 		const row = view.dom.doc.body.createDiv({ cls: 'loom-fountain-branch-header-row loom-branch-label-row' });
@@ -483,6 +499,16 @@ class BranchComboRowWidget extends WidgetType {
 		const subInput = mkField(decomposed.subidentifier, t('view.script.branch.subidentifierPlaceholder'));
 		comboRow.createSpan({ cls: 'loom-branch-combo-sep', text: '-' });
 		const numInput = mkField(decomposed.number, t('view.script.branch.numberPlaceholder'), 'loom-branch-number-input');
+		if (this.isFirst && this.autoFocusSelect) {
+			// Deferred a tick — same reasoning as `BranchHeaderRowWidget`'s own
+			// `autoFocusEmpty`: avoids focusing synchronously from inside CM6's
+			// own decoration-building pass.
+			window.setTimeout(() => {
+				idInput.focus();
+				idInput.select();
+				this.onFocusConsumed?.();
+			}, 0);
+		}
 		if (this.isFirst) {
 			const commit = () => {
 				const i = idInput.value.trim() || decomposed.identifier;
@@ -697,7 +723,19 @@ export const FountainField = forwardRef(function FountainField(
 		escapeOverflowForTooltips = false,
 	}: {
 		value: string;
-		onChange: (value: string) => void;
+		/** `urgent` is `true` only for a transaction CM6's own `history()`
+		 *  tags `userEvent: 'undo'`/`'redo'` (confirmed against the real
+		 *  `@codemirror/commands` source, not guessed) — a real, reported
+		 *  bug: a caller that only debounces its own disk write (the Scene
+		 *  page's own idle-autosave, entity-view.tsx) could lose an undo/redo
+		 *  entirely if the user acted again (e.g. pasted a SECOND time)
+		 *  before that debounce fired — the second paste reads fresh from
+		 *  DISK, which still held the pre-undo state, silently reviving what
+		 *  had just been undone in the visible editor. `urgent` tells the
+		 *  caller to flush THIS change to disk immediately instead of
+		 *  waiting out its own debounce, closing that race. Every other
+		 *  change (plain typing) still gets `urgent: false`. */
+		onChange: (value: string, urgent: boolean) => void;
 		/** Fires once, on losing focus — mirrors the old textarea's onBlur,
 		 *  which is where `ensureSceneIds`/`syncScenes` actually run. */
 		onBlur?: () => void;
@@ -867,15 +905,21 @@ export const FountainField = forwardRef(function FountainField(
 		 *  with no gutter at all. */
 		showAnnotationGutter?: boolean;
 		/** Mounts CM6's own `tooltips({ parent: document.body })` extension —
-		 *  default `false` (CM6's own default tooltip container is fine for a
-		 *  field that isn't itself nested inside a clipped ancestor). Meant
-		 *  for a caller whose own DOM sits inside something with
-		 *  `overflow: hidden` (or, further up, Obsidian's own workspace-leaf
-		 *  DOM, which applies CSS `contain` — the same thing that re-bases a
-		 *  bare `position: fixed` to the leaf instead of the true viewport):
-		 *  without this, the character-cue/INT.-EXT. autocomplete popup
-		 *  renders fixed to that same re-based, clipped context — squeezed
-		 *  and cut off — instead of floating freely over the real viewport. */
+		 *  default `false`. Originally assumed CM6's own default tooltip
+		 *  container was fine for any field not nested inside a clipped
+		 *  ancestor (Obsidian's own workspace-leaf DOM applies CSS `contain`,
+		 *  the same thing that re-bases a bare `position: fixed` to the leaf
+		 *  instead of the true viewport) — WRONG, a real, reported bug: even
+		 *  the Scene page's own main (non-nested) field showed the
+		 *  character-cue autocomplete popup extending the SCROLLABLE
+		 *  CONTAINER's own layout downward near the bottom of a long scene,
+		 *  rather than floating over existing content as a true overlay,
+		 *  since CM6's default tooltip host isn't positioned independently of
+		 *  that container's own normal document flow. `document.body` fixes
+		 *  both this and the originally-documented clipped-ancestor case: CM6
+		 *  measures real viewport space once tooltips live there, which is
+		 *  also what lets it auto-flip a popup upward on its own when there's
+		 *  no room below, no separate flip logic needed here. */
 		escapeOverflowForTooltips?: boolean;
 	},
 	ref: ForwardedRef<FountainFieldHandle>
@@ -916,6 +960,18 @@ export const FountainField = forwardRef(function FountainField(
 	const onAddBranchRef = useRef(onAddBranch);
 	const pendingTitleFocusIdRef = useRef(pendingTitleFocusId ?? null);
 	const onTitleFocusConsumedRef = useRef(onTitleFocusConsumed);
+	/** A branch group's own section id, set the instant `promoteTypedBranch`
+	 *  (fountain.ts) fires from the typed `### Title` + `= branch:` trigger
+	 *  below — purely internal, never backed by a React prop like
+	 *  `pendingTitleFocusIdRef` above: the whole flow (detect the typed
+	 *  colon, transform the text, focus the new combo) has to complete
+	 *  within ONE synchronous CM6 transaction (the field stays FOCUSED
+	 *  throughout, so the external-value-sync effect below — which only
+	 *  ever applies while unfocused — would silently sit on any change
+	 *  routed through React state/`editScriptAndSync` instead until the
+	 *  user's next blur), so there's no React round-trip to plumb a prop
+	 *  through in the first place. */
+	const pendingComboFocusIdRef = useRef<string | null>(null);
 	onGeometryChangeRef.current = onGeometryChange;
 	onCreateBranchRef.current = onCreateBranch;
 	onPasteBranchGroupRef.current = onPasteBranchGroup;
@@ -1344,7 +1400,16 @@ export const FountainField = forwardRef(function FountainField(
 					);
 					replaceLine(
 						tagLine,
-						new BranchComboRowWidget(groupId, isFirst, onSetBranchComboRef.current, onSetBranchRawRef.current)
+						new BranchComboRowWidget(
+							groupId,
+							isFirst,
+							onSetBranchComboRef.current,
+							onSetBranchRawRef.current,
+							isFirst && branchSection.loomId === pendingComboFocusIdRef.current,
+							() => {
+								pendingComboFocusIdRef.current = null;
+							}
+						)
 					);
 
 					// `branchLabelEndLine` (fountain.ts) is the SAME scan
@@ -2125,6 +2190,55 @@ export const FountainField = forwardRef(function FountainField(
 			return false;
 		});
 
+		/** Typing `:` completing a bare `= branch:` line directly beneath an
+		 *  untagged section heading — the "last evidence" that the user just
+		 *  hand-typed a branch into existence, an alternative to the
+		 *  right-click "Create new branch" menu item that needs no menu at
+		 *  all. `promoteTypedBranch` (fountain.ts) does the actual text
+		 *  transform, in memory, no disk write — this has to land as ONE
+		 *  synchronous CM6 transaction, not a round-trip through React state/
+		 *  `editScriptAndSync` the way every OTHER branch mutation in this
+		 *  codebase works: this fires while the field is still focused (the
+		 *  user is mid-keystroke), and the external-value-sync effect further
+		 *  down only ever applies a changed `value` prop while UNFOCUSED — a
+		 *  change routed through React would sit invisible in the live buffer
+		 *  until the next blur, defeating "the instant `:` is typed."
+		 *  Everything here reads/simulates against `v.state`, the state
+		 *  BEFORE this pending keystroke lands (same convention
+		 *  `entityBracketPairing` above already uses), never the actual
+		 *  post-insertion document — there isn't one yet at this point. */
+		const branchAutoCreate = EditorView.inputHandler.of((v, from, to, text) => {
+			if (text !== ':' || from !== to) return false;
+			const line = v.state.doc.lineAt(from);
+			const resultingLine = `${v.state.sliceDoc(line.from, from)}:${v.state.sliceDoc(from, line.to)}`;
+			// Same shape/tolerance as `BRANCH_TAG_RE` above (whitespace around
+			// `=`, case-insensitive "branch"), just requiring an EMPTY tail
+			// instead of `BRANCH_TAG_RE`'s own required non-empty one — this
+			// bare shape is exactly what a real, already-tagged `= branch:`
+			// line looks like BEFORE it has a value yet.
+			if (!/^=\s*branch:\s*$/i.test(resultingLine.trim()) || line.number <= 1) return false;
+			const headingLine0 = line.number - 2; // 0-based — the line directly above this one
+			const headingLine = v.state.doc.line(headingLine0 + 1);
+			const headingMatch = /^(#{1,6})\s+(.+?)\s*$/.exec(headingLine.text);
+			if (!headingMatch) return false;
+			// Confirm the heading is a genuine, untagged Fountain section —
+			// `parseFountain` is what actually knows the grammar (a raw regex
+			// match alone can't tell a real section from incidental text that
+			// happens to start with `#`s), and confirms it isn't ALREADY part
+			// of some other group (defensive; shouldn't be reachable in
+			// ordinary typing, since a tagged section's `= branch:` line
+			// already holds a real value, not this bare trigger shape).
+			const parsed = parseFountain(v.state.doc.toString());
+			const sec = parsed.sections.find((s) => s.line === headingLine0);
+			if (!sec || sec.loomId !== null || sec.branchGroup !== null) return false;
+			const fullTextAfter = `${v.state.sliceDoc(0, from)}:${v.state.sliceDoc(to)}`;
+			const result = promoteTypedBranch(fullTextAfter, headingLine0, headingMatch[1].length, headingMatch[2]);
+			if (!result) return false;
+			pendingComboFocusIdRef.current = result.id;
+			v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: result.text } });
+			return true;
+		});
+
 		// Ambient link suggester (link-suggest-cm6.ts) — no caching here (unlike
 		// markdown-field.tsx): `entityOptions` isn't memoized by its one real
 		// caller (script-view.tsx builds it fresh every render), so a cache
@@ -2166,10 +2280,23 @@ export const FountainField = forwardRef(function FountainField(
 					annotationHandlesOverlay,
 					linkSuggestExt,
 					entityBracketPairing,
+					...(embeddedBranchCards ? [branchAutoCreate] : []),
 					draftAnchors,
 					autocompletion({
 						override: [characterCompletion, entityLinkCompletion],
 						icons: false,
+						// A real, reported bug: the FIRST option was pre-selected the
+						// instant the popup opened (CM6's own default), so pressing
+						// Enter on an empty cue-eligible line — meant to just start a
+						// new blank line — silently pasted that option instead
+						// (`acceptCompletion`, bound to Enter by `completionKeymap`
+						// below, confirms whatever's currently selected). With nothing
+						// selected on open, `acceptCompletion` has nothing to confirm
+						// and returns `false`, falling through to `defaultKeymap`'s own
+						// Enter handling — a plain newline — exactly as if no popup
+						// were open at all; Enter only pastes an option once the user
+						// has explicitly moved to one (click, or Down/Up-arrow).
+						selectOnOpen: false,
 					}),
 					keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
 					EditorView.updateListener.of((update) => {
@@ -2178,7 +2305,8 @@ export const FountainField = forwardRef(function FountainField(
 						// value-sync `useEffect`) — see that dispatch's own doc
 						// comment for the real, severe bug this guard fixes.
 						if (update.docChanged && !update.transactions.some((tr) => tr.isUserEvent('loom.externalSync'))) {
-							onChangeRef.current(update.state.doc.toString());
+							const urgent = update.transactions.some((tr) => tr.isUserEvent('undo') || tr.isUserEvent('redo'));
+							onChangeRef.current(update.state.doc.toString(), urgent);
 						}
 						if (update.focusChanged && !update.view.hasFocus) onBlurRef.current?.();
 						if (update.viewportChanged || update.geometryChanged) onGeometryChangeRef.current?.();

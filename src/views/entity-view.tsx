@@ -76,7 +76,7 @@ import { LinkOption } from './link-textarea';
 import { MarkdownField, type MarkdownFieldHandle } from './markdown-field';
 import { FountainField, FountainFieldHandle } from './fountain-field';
 import { BranchDraft, BranchOverlay } from './branch-overlay';
-import { extractLinkpath, linkTargetOf, memberEntryLinkpath } from '../indexer';
+import { extractLinkpath, linkTargetOf, memberEntryLinkpath, type ProjectDef } from '../indexer';
 import { evaluateEvent, recomputeEventLocks, waitForMetadataSync } from '../gm-lock';
 import { cascadeDecisionPointSession, reconcileSessionBeforeLink } from '../gm-decision-point';
 import { clearFmKeys, fmLoomValue, setLoomKey } from '../fm';
@@ -144,6 +144,7 @@ import {
 	sceneEndLine,
 	type ParsedScript,
 	branchComboKey,
+	branchGroupBounds,
 	collectLoomIds,
 	copyBranchGroup,
 	cutBranchGroup,
@@ -905,6 +906,50 @@ function EntityPage({ view }: { view: EntityView }) {
 		: [];
 	/** Draft of the scene's script body (everything under its heading). */
 	const [sceneBody, setSceneBody] = useState<string | null>(null);
+	/** A real, reported data-loss risk fixed here: the field's own commit
+	 *  used to happen ONLY on blur, which — same class of problem
+	 *  `saveDescription`/`saveBody` (above/below) were already fixed for,
+	 *  see THEIR OWN "no blur-style moment that reliably fires before
+	 *  navigation" comment — depends on a specific lifecycle event actually
+	 *  firing; a user who kept typing without ever clicking away (or whose
+	 *  navigation click happened to land on something that doesn't steal
+	 *  DOM focus, the exact "Menu items are non-focusable divs" gotcha
+	 *  `handleCutBranchGroupInScene` above already had to work around) could
+	 *  lose an entire unsaved session. This is a plain idle-debounced
+	 *  BACKUP write, not a replacement for the onBlur commit below — it
+	 *  never touches `sceneBody`/`setSceneBody` itself, so there's no race
+	 *  with newer keystrokes arriving while an older debounced write is
+	 *  still in flight (`editScriptAndSync`'s own per-file write queue,
+	 *  write-queue.ts, serializes the two writes safely if they do overlap).
+	 *  `sceneId`/`proj` are passed fresh on each CALL (from the current
+	 *  render's own `onChange`) rather than captured at closure-creation
+	 *  time, so the memoized closure only needs to stay stable for `plugin`
+	 *  (a true singleton) — no risk of it going stale against a `record`/
+	 *  `project` that changes identity across renders the way most objects
+	 *  in this component do. */
+	const saveSceneScript = useMemo(() => {
+		let timer = 0;
+		return (sceneId: string, proj: ProjectDef, value: string) => {
+			window.clearTimeout(timer);
+			timer = window.setTimeout(() => {
+				void editScriptAndSync(plugin, proj, (raw) => replaceSceneBody(raw, sceneId, value));
+			}, 600);
+		};
+	}, [plugin]);
+	/** The "real," full commit — writes immediately (no debounce) and clears
+	 *  the local buffer once it lands, same as every other branch mutation
+	 *  in this component. Shared by the field's own `onBlur` and by
+	 *  `onChange`'s own `urgent` case: a real, reported bug — pasting a
+	 *  branch, undoing it (Ctrl+Z), then pasting AGAIN before
+	 *  `saveSceneScript`'s own 600ms debounce fired read stale (pre-undo)
+	 *  disk content, since the undo only ever reverted the LOCAL CM6
+	 *  buffer — silently reviving the "undone" branch and leaving TWO
+	 *  instead of one. An undo/redo transaction can't wait out a debounce;
+	 *  it has to land on disk before anything else (paste included) might
+	 *  read fresh from there. */
+	const commitSceneScript = (sceneId: string, proj: ProjectDef, value: string) => {
+		void editScriptAndSync(plugin, proj, (raw) => replaceSceneBody(raw, sceneId, value)).then(() => setSceneBody(null));
+	};
 	/** Scene page's Script section: same Script/Pages preview + search pattern
 	 *  as the main Script view, scoped to just this scene's own excerpt.
 	 *  Remembered per-note in `localStorage` — same "which pane was open last
@@ -1081,13 +1126,55 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project) return;
 		void editScriptAndSync(plugin, project, (raw) => setBranchTagValue(raw, groupId, newValue));
 	};
+	/** Cuts a whole decision point, then hands the field's own new body
+	 *  straight to `replaceBody` (fountain-field.tsx) once the write lands —
+	 *  the SAME direct imperative sync `handlePasteBranchGroupInScene` below
+	 *  already uses, not the normal reactive `scriptText`/passive-`value`-prop
+	 *  round trip. Needed for the identical reason that field's own doc
+	 *  comment on `pasteBranchGroup`'s treatment explains, PLUS one more:
+	 *  this write is triggered from the right-click menu's own "Cut branch
+	 *  group" item, and Obsidian's `Menu` items are plain non-focusable divs
+	 *  — clicking one never blurs the field, so the passive external-sync
+	 *  effect (which only ever applies a changed `value` prop while
+	 *  UNFOCUSED) never gets a chance to run at all, leaving the cut branch
+	 *  still visibly sitting there until some LATER, unrelated blur. A real,
+	 *  reported bug ("I click and nothing happens") — `fountain-field.tsx`'s
+	 *  own `openContextMenu` already documents this exact class of problem
+	 *  and its fix for "Paste branch group"; this mirrors it. The cursor
+	 *  lands roughly where the removed group used to start (`bounds.start`,
+	 *  read from the PRE-cut parse, mapped into the scene's own body-relative
+	 *  line space) — `replaceBody` clamps it into range regardless, so this
+	 *  doesn't need to be exact. */
 	const handleCutBranchGroupInScene = (groupId: string) => {
 		if (!project) return;
+		let newBody: string | null = null;
+		let cursorLine: number | null = null;
 		void editScriptAndSync(plugin, project, (raw) => {
+			const parsed = parseFountain(raw);
+			const bounds = branchGroupBounds(parsed, groupId);
+			const oldScene = parsed.scenes.find((s) => s.loomId === record?.sceneId);
 			const result = cutBranchGroup(raw, groupId);
 			if (!result) return null;
 			setBranchClipboard(result.cut);
+			if (bounds && oldScene) {
+				const oldExcerptUntrimmed = raw.split('\n').slice(oldScene.line, sceneEndLine(parsed, oldScene)).join('\n');
+				const bodyOffset = oldScene.line + computeSceneBodyLineOffset(oldExcerptUntrimmed);
+				cursorLine = Math.max(0, bounds.start - bodyOffset);
+			}
+			const newParsed = parseFountain(result.text);
+			const newScene = newParsed.scenes.find((s) => s.loomId === record?.sceneId);
+			if (newScene) {
+				const newExcerptUntrimmed = result.text
+					.split('\n')
+					.slice(newScene.line, sceneEndLine(newParsed, newScene))
+					.join('\n');
+				newBody = sceneBodyOf(newExcerptUntrimmed);
+			}
 			return result.text;
+		}).then((ok) => {
+			if (ok && newBody !== null && cursorLine !== null) {
+				sceneScriptEditorRef.current?.replaceBody(newBody, cursorLine);
+			}
 		});
 	};
 	/** The read-only sibling of the above — leaves the group in the document,
@@ -1139,16 +1226,17 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** Pastes a cut-or-copied decision point, then hands the field's own new
 	 *  body straight to `replaceBody` (fountain-field.tsx) once the write
 	 *  lands — a direct imperative sync, not the normal reactive
-	 *  `scriptText` round trip. That distinction matters here specifically:
-	 *  `sceneScriptText` unconditionally strips trailing whitespace from a
-	 *  scene's excerpt, which would erase the two blank lines
-	 *  `pasteBranchGroup` reserves as a landing spot the INSTANT they become
-	 *  the scene's own trailing content (a real, reported bug — the safe
-	 *  cursor line computed against the round-tripped, re-stripped excerpt
-	 *  pointed at a line that no longer existed there, landing the cursor
-	 *  back under the branch card). Computing the new body directly from
-	 *  `result.text` inside `apply` — before any such round trip — and
-	 *  pushing it into the field ourselves sidesteps the erasure entirely. */
+	 *  `scriptText`/passive-`value`-prop round trip. Needed because this is
+	 *  triggered from the right-click menu's own "Paste branch group" item,
+	 *  and Obsidian's `Menu` items are plain non-focusable divs — clicking
+	 *  one never blurs the field, so the passive external-sync effect
+	 *  (which only ever applies a changed `value` prop while UNFOCUSED)
+	 *  never gets a chance to run at all; without this, the pasted group
+	 *  would sit invisible until some LATER, unrelated blur (the exact bug
+	 *  `handleCutBranchGroupInScene`, above, was separately found and fixed
+	 *  for). Computing the new body directly from `result.text` inside
+	 *  `apply` and pushing it into the field ourselves sidesteps the
+	 *  focus-gated sync entirely. */
 	const handlePasteBranchGroupInScene = (line: number) => {
 		if (!project) return;
 		const block = getBranchClipboard();
@@ -1734,11 +1822,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	// Leading blanks skipped via `computeSceneBodyLineOffset` (shared with the
 	// excerpt-to-whole-document line math everywhere else in this component)
 	// rather than a bare `.trim()` — trimming the WHOLE joined string would
-	// also eat TRAILING blanks, which `sceneScriptText` already strips before
-	// this ever runs in the normal (read-from-disk) path, so this changes
-	// nothing there; it matters for `handlePasteBranchGroupInScene`'s own
-	// direct, untrimmed injection (`replaceBody`), which deliberately keeps
-	// trailing blank lines a `.trim()` here would otherwise erase again.
+	// also eat TRAILING blanks, which `sceneScriptText` deliberately leaves
+	// alone (its own doc comment) precisely so they survive here too — real
+	// content the user typed at the end of their own scene, branch groups'
+	// own trailing `= gather` blank line included.
 	const sceneBodyOf = (excerpt: string) => excerpt.split('\n').slice(computeSceneBodyLineOffset(excerpt)).join('\n');
 	const sceneDraft = sceneBody ?? (sceneExcerpt === null ? '' : sceneBodyOf(sceneExcerpt));
 	/** Same Script/Pages scroll sync as the main Script view, scoped to this
@@ -8093,7 +8180,12 @@ function EntityPage({ view }: { view: EntityView }) {
 													<FountainField
 														ref={sceneScriptEditorRef}
 														value={sceneDraft}
-														onChange={setSceneBody}
+														onChange={(value, urgent) => {
+															setSceneBody(value);
+															if (!project || !record) return;
+															if (urgent) commitSceneScript(record.sceneId, project, value);
+															else saveSceneScript(record.sceneId, project, value);
+														}}
 														onBlur={() => {
 															// Scroll-position memory — see the identical comment
 															// on the Act page's own Script section above.
@@ -8102,9 +8194,7 @@ function EntityPage({ view }: { view: EntityView }) {
 																window.localStorage.setItem(`loom-scene-script-line:${record.path}`, String(top));
 															}
 															if (!project || sceneDraft === sceneBodyOf(sceneExcerpt)) return;
-															void editScriptAndSync(plugin, project, (raw) =>
-																replaceSceneBody(raw, record.sceneId, sceneDraft)
-															).then(() => setSceneBody(null));
+															commitSceneScript(record.sceneId, project, sceneDraft);
 														}}
 														characters={scriptParsed?.characters ?? []}
 														entityOptions={entityOptions}
@@ -8140,6 +8230,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														onCutBranchGroup={handleCutBranchGroupInScene}
 														onCopyBranchGroup={handleCopyBranchGroupInScene}
 														embeddedBranchCards
+														escapeOverflowForTooltips
 														onRenameBranchTitle={handleRenameBranchTitle}
 														onSetBranchCombo={handleSetBranchCombo}
 														onSetBranchRaw={handleSetBranchRaw}
