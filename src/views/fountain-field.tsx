@@ -1,5 +1,15 @@
 import { EditorSelection, EditorState, StateEffect, StateField } from '@codemirror/state';
-import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, gutter, keymap, tooltips } from '@codemirror/view';
+import {
+	Decoration,
+	DecorationSet,
+	EditorView,
+	ViewPlugin,
+	ViewUpdate,
+	WidgetType,
+	gutter,
+	keymap,
+	tooltips,
+} from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import {
 	CompletionContext,
@@ -8,12 +18,16 @@ import {
 	completionKeymap,
 	startCompletion,
 } from '@codemirror/autocomplete';
-import { Menu, Notice } from 'obsidian';
+import { Menu, Notice, setIcon } from 'obsidian';
 import { ForwardedRef, forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { t } from '../i18n';
 import {
 	ElementType,
+	ParsedScript,
 	branchGroupAtLine,
+	branchGroupBounds,
+	branchLabelEndLine,
+	decomposeBranchValue,
 	findAnnotationSpans,
 	findEntityLinks,
 	findOrphanPairs,
@@ -313,6 +327,337 @@ const draftAnchors = StateField.define<Map<string, number>>({
 	},
 });
 
+/**
+ * Embedded branch cards: every branch group in the document renders its own
+ * chrome DIRECTLY over its own real text — no second copy, no
+ * `position: fixed` overlay (replacing `branch-overlay.tsx`). Every sibling
+ * in a group renders SIMULTANEOUSLY, stacked in document order — no
+ * tab-switching, no folding, nothing hidden that isn't ALWAYS meant to stay
+ * hidden (the raw `###`/`= branch:`/`>**Title**<`/`= gather` syntax, which
+ * becomes display-only chrome per the design; a branch's own PROSE BODY is
+ * left completely untouched, real, always-editable document text, so native
+ * cut/copy/paste on it just works with no special handling). Only single-
+ * line, non-block decorations are used here (`Decoration.replace`/`.widget`
+ * with NO `block: true`, same trick `markdown-field.tsx`'s `HrWidget`/
+ * `BulletWidget` already use to render a full-width custom element in place
+ * of one line's raw text) — a real CM6 constraint hit building the earlier
+ * tab-based version of this feature: block decorations may only be supplied
+ * through a `StateField`, never a `ViewPlugin`, and since nothing folds away
+ * any more there's no reason to need one.
+ *
+ * Every widget class below is constructed fresh inside `pushBranchGroupDecorations`
+ * (defined inside the component body, closing over the SAME refs every other
+ * decoration pass here reads), so a widget's own constructor already carries
+ * whichever callback it needs — no per-instance ref lookups inside the widget
+ * itself. `eq()` on each one compares only the COMMITTED values (never
+ * anything from an in-progress, uncommitted keystroke), which is what lets a
+ * decoration rebuild triggered by something unrelated (typing elsewhere in
+ * the document, an annotation search match) reuse the SAME `<input>` DOM
+ * node rather than tearing it down mid-edit — the input's own uncommitted
+ * text simply survives, no extra buffering needed on this side.
+ */
+class BranchHeaderRowWidget extends WidgetType {
+	constructor(
+		readonly sectionId: string,
+		readonly title: string,
+		readonly autoFocusEmpty: boolean,
+		readonly onCommitTitle: ((sectionId: string, title: string) => void) | undefined,
+		readonly onDelete: ((sectionId: string) => void) | undefined,
+		readonly onFocusConsumed: (() => void) | undefined
+	) {
+		super();
+	}
+	eq(other: BranchHeaderRowWidget): boolean {
+		return other.sectionId === this.sectionId && other.title === this.title && other.autoFocusEmpty === this.autoFocusEmpty;
+	}
+	toDOM(view: EditorView): HTMLElement {
+		const row = view.dom.doc.body.createDiv({ cls: 'loom-fountain-branch-header-row loom-branch-label-row' });
+		row.detach();
+		fixWidgetRowDisplay(row, 'inline-flex');
+		row.contentEditable = 'false';
+		row.createSpan({ cls: 'loom-branch-label loom-branch-label-section', text: '###' });
+		const input = row.createEl('input', { cls: 'loom-branch-input loom-branch-title-input' });
+		input.type = 'text';
+		input.placeholder = t('view.script.branch.titlePlaceholder');
+		input.value = this.autoFocusEmpty ? '' : this.title;
+		input.addEventListener('input', () => {
+			// Live-updates the sibling `>**Title**<` preview widget, if it's
+			// currently mounted — a nice-to-have carried over from the overlay's
+			// own `liveTitleOverrides`, not load-bearing (the preview still
+			// catches up to the real title on the NEXT commit either way).
+			for (const el of Array.from(view.dom.querySelectorAll<HTMLElement>('[data-loom-branch-preview-for]'))) {
+				if (el.dataset.loomBranchPreviewFor !== this.sectionId) continue;
+				const bold = el.querySelector<HTMLElement>('.loom-branch-title-preview-bold');
+				if (bold) bold.textContent = `**${input.value}**`;
+			}
+		});
+		input.addEventListener('blur', () => {
+			const trimmed = input.value.trim();
+			if (trimmed !== '' && trimmed !== this.title) this.onCommitTitle?.(this.sectionId, trimmed);
+			else input.value = this.title;
+		});
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') input.blur();
+		});
+		if (this.autoFocusEmpty) {
+			// Deferred a tick — avoids focusing/dispatching React state
+			// (`onFocusConsumed`) synchronously from inside CM6's own
+			// decoration-building pass.
+			window.setTimeout(() => {
+				input.focus();
+				this.onFocusConsumed?.();
+			}, 0);
+		}
+		const del = row.createEl('button', { cls: 'clickable-icon loom-branch-delete-btn' });
+		del.type = 'button';
+		del.setAttr('aria-label', t('view.script.branch.deleteBranchAria'));
+		setIcon(del, 'trash-2');
+		del.addEventListener('click', () => this.onDelete?.(this.sectionId));
+		return row;
+	}
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
+
+/** Branch 1's own decomposed Identifier/Subidentifier/Number(-or-override)
+ *  fields, editable — every OTHER sibling in the group renders the identical
+ *  row DISABLED, mirroring branch 1's current value (a real `= branch: <id>`
+ *  line sits under every branch in the group, all carrying the identical
+ *  text, which is what groups them; showing it there too keeps the chrome a
+ *  faithful mirror of the document, while edits are only ever accepted
+ *  through branch 1's own live copy). Falls back to ONE plain raw field
+ *  (editable only on branch 1 too) for a legacy value that doesn't decompose
+ *  into 3 dash-separated segments. */
+class BranchComboRowWidget extends WidgetType {
+	constructor(
+		readonly groupId: string,
+		readonly isFirst: boolean,
+		readonly onCommitCombo:
+			| ((groupId: string, identifier: string, subidentifier: string, numberOrOverride: string) => void)
+			| undefined,
+		readonly onCommitRaw: ((groupId: string, value: string) => void) | undefined
+	) {
+		super();
+	}
+	eq(other: BranchComboRowWidget): boolean {
+		return other.groupId === this.groupId && other.isFirst === this.isFirst;
+	}
+	toDOM(view: EditorView): HTMLElement {
+		const row = view.dom.doc.body.createDiv({ cls: 'loom-fountain-branch-header-row loom-branch-label-row' });
+		row.detach();
+		fixWidgetRowDisplay(row, 'inline-flex');
+		row.contentEditable = 'false';
+		row.createSpan({ cls: 'loom-branch-label loom-branch-label-synopsis', text: '= branch:' });
+		const decomposed = decomposeBranchValue(this.groupId);
+		if (!decomposed) {
+			const input = row.createEl('input', { cls: 'loom-branch-input loom-branch-raw-input' });
+			input.type = 'text';
+			input.value = this.groupId;
+			input.disabled = !this.isFirst;
+			if (this.isFirst) {
+				input.addEventListener('blur', () => {
+					const trimmed = input.value.trim();
+					if (trimmed !== '' && trimmed !== this.groupId) this.onCommitRaw?.(this.groupId, trimmed);
+					else input.value = this.groupId;
+				});
+				input.addEventListener('keydown', (e) => {
+					if (e.key === 'Enter') input.blur();
+				});
+			}
+			return row;
+		}
+		const comboRow = row.createDiv({ cls: 'loom-branch-combo-row' });
+		const mkField = (value: string, placeholder: string, extraClass?: string) => {
+			const inp = comboRow.createEl('input', {
+				cls: extraClass ? `loom-branch-input ${extraClass}` : 'loom-branch-input',
+			});
+			inp.type = 'text';
+			inp.placeholder = placeholder;
+			inp.value = value;
+			inp.disabled = !this.isFirst;
+			return inp;
+		};
+		const idInput = mkField(decomposed.identifier, t('view.script.branch.identifierPlaceholder'));
+		comboRow.createSpan({ cls: 'loom-branch-combo-sep', text: '-' });
+		const subInput = mkField(decomposed.subidentifier, t('view.script.branch.subidentifierPlaceholder'));
+		comboRow.createSpan({ cls: 'loom-branch-combo-sep', text: '-' });
+		const numInput = mkField(decomposed.number, t('view.script.branch.numberPlaceholder'), 'loom-branch-number-input');
+		if (this.isFirst) {
+			const commit = () => {
+				const i = idInput.value.trim() || decomposed.identifier;
+				const s = subInput.value.trim() || decomposed.subidentifier;
+				const n = numInput.value.trim() || decomposed.number;
+				if (i !== decomposed.identifier || s !== decomposed.subidentifier || n !== decomposed.number) {
+					this.onCommitCombo?.(this.groupId, i, s, n);
+				}
+			};
+			for (const inp of [idInput, subInput, numInput]) {
+				inp.addEventListener('blur', commit);
+				inp.addEventListener('keydown', (e) => {
+					if (e.key === 'Enter') inp.blur();
+				});
+			}
+		}
+		return row;
+	}
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
+
+/** The printed `>**Title**<` marker `applyBranchLabels` (fountain.ts) writes
+ *  into the document right under a branch's own `= branch:` line — display
+ *  only, never itself edited (renaming the Title field above updates it,
+ *  live via `BranchHeaderRowWidget`'s own `input` listener, and for real on
+ *  the next commit). `data-loom-branch-preview-for` is what that listener
+ *  targets. */
+class BranchTitlePreviewWidget extends WidgetType {
+	constructor(
+		readonly sectionId: string,
+		readonly title: string
+	) {
+		super();
+	}
+	eq(other: BranchTitlePreviewWidget): boolean {
+		return other.sectionId === this.sectionId && other.title === this.title;
+	}
+	toDOM(view: EditorView): HTMLElement {
+		const row = view.dom.doc.body.createDiv({ cls: 'loom-branch-title-preview' });
+		row.detach();
+		fixWidgetRowDisplay(row, 'inline-block');
+		row.contentEditable = 'false';
+		row.setAttr('data-loom-branch-preview-for', this.sectionId);
+		row.createSpan({ text: '>' });
+		row.createSpan({ cls: 'loom-branch-title-preview-bold', text: `**${this.title}**` });
+		row.createSpan({ text: '<' });
+		return row;
+	}
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
+
+/** `= gather` — display only, always present once a group has one (every
+ *  group created through the app gets one from the moment it's born,
+ *  `insertBranch`'s own doc comment) — carries the group's own "+" (add
+ *  another branch) button, sitting right after it, still inside the outer
+ *  box. */
+class BranchGatherRowWidget extends WidgetType {
+	constructor(
+		readonly groupId: string,
+		readonly onAdd: ((groupId: string) => void) | undefined
+	) {
+		super();
+	}
+	eq(other: BranchGatherRowWidget): boolean {
+		return other.groupId === this.groupId;
+	}
+	toDOM(view: EditorView): HTMLElement {
+		const row = view.dom.doc.body.createDiv({ cls: 'loom-fountain-branch-gather-row' });
+		row.detach();
+		fixWidgetRowDisplay(row, 'inline-block');
+		row.contentEditable = 'false';
+		row.createSpan({ cls: 'loom-branch-gather-label', text: '= gather' });
+		const btn = row.createEl('button', { cls: 'loom-fountain-branch-add-btn', text: '+' });
+		btn.type = 'button';
+		btn.setAttr('aria-label', t('view.script.branch.addBranchAria'));
+		btn.addEventListener('click', () => this.onAdd?.(this.groupId));
+		return row;
+	}
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
+
+/** The group's own "+" for the rare case it has NO `= gather` line to attach
+ *  to (a hand-typed/imported script — every group created through the app
+ *  always has one) — a plain, non-replacing widget appended right after the
+ *  last branch's own last line, `display: block` so it still lands on its
+ *  own visual row within that line (same technique `HrWidget`/`BulletWidget`
+ *  use in markdown-field.tsx). */
+class BranchAddRowWidget extends WidgetType {
+	constructor(
+		readonly groupId: string,
+		readonly onAdd: ((groupId: string) => void) | undefined
+	) {
+		super();
+	}
+	eq(other: BranchAddRowWidget): boolean {
+		return other.groupId === this.groupId;
+	}
+	toDOM(view: EditorView): HTMLElement {
+		const row = view.dom.doc.body.createDiv({ cls: 'loom-fountain-branch-add-row' });
+		row.detach();
+		fixWidgetRowDisplay(row, 'inline-block');
+		row.contentEditable = 'false';
+		const btn = row.createEl('button', { cls: 'loom-fountain-branch-add-btn', text: '+' });
+		btn.type = 'button';
+		btn.setAttr('aria-label', t('view.script.branch.addBranchAria'));
+		btn.addEventListener('click', () => this.onAdd?.(this.groupId));
+		return row;
+	}
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
+
+/** Applies `baseClass` (plus `-first`/`-last` boundary modifiers) as a line
+ *  decoration across `[fromLine, toLine)` (0-based, exclusive) — the shared
+ *  box-chrome primitive behind both the outer (whole group) and inner (one
+ *  branch's own body) boxes. A no-op if the range is empty (a branch with no
+ *  body typed yet). */
+function pushBoxLines(
+	state: EditorState,
+	entries: { from: number; to: number; deco: Decoration }[],
+	fromLine: number,
+	toLine: number,
+	baseClass: string
+): void {
+	const docLines = state.doc.lines;
+	for (let ln = fromLine; ln < toLine && ln < docLines; ln++) {
+		const docLine = state.doc.line(ln + 1);
+		let cls = baseClass;
+		if (ln === fromLine) cls += ` ${baseClass}-first`;
+		if (ln === toLine - 1 || ln === docLines - 1) cls += ` ${baseClass}-last`;
+		entries.push({ from: docLine.from, to: docLine.from, deco: Decoration.line({ class: cls }) });
+	}
+}
+
+/**
+ * Every branch-card widget's own ROOT element needs this — a real,
+ * confirmed bug (not a guess: reproduced live in a headless browser
+ * mounting the actual component, per this feature's own investigation)
+ * found in every one of the widget classes above: CM6 inserts an invisible
+ * `cm-widgetBuffer` placeholder element on each side of a non-block
+ * `Decoration.replace` widget (for cursor-positioning purposes), which puts
+ * the widget's own root element inside what the BROWSER treats as an
+ * inline formatting context. A `display: block`/`flex` root there (the
+ * default for a plain `<div>`, and what `.loom-branch-label-row`'s own
+ * `display: flex` gives these rows) is a BLOCK-level box sitting inside
+ * that inline context — the browser's own anonymous-block-box generation
+ * rules then split the line's content around it, and the resulting phantom
+ * spacing was measured, live, at MORE than double the widget's own real
+ * rendered height (a 29px-tall row inside a 67px-tall `.cm-line`) — this
+ * was the actual cause of the reported "big gap between rows," not
+ * anything in the surrounding document TEXT. `inline-flex`/`inline-block`
+ * (inline-outside, same internal layout otherwise) fixes it outright, no
+ * phantom spacing at all; `width: 100%` is required alongside it since an
+ * inline-level box shrink-wraps its own content by default, unlike the
+ * block-level default this replaces. Applied as a CSS class carrying
+ * `!important` on each property (styles.css `.loom-fountain-branch-row-
+ * inline-flex`/`-inline-block`) rather than an inline style — these values
+ * are static, never computed at runtime, and this codebase's own ESLint
+ * rule (`obsidianmd/no-static-styles-assignment`) reserves `setCssProps`
+ * for genuinely dynamic ones; `!important` is what guarantees this wins
+ * regardless of which REUSED class (`.loom-branch-label-row`, `.loom-
+ * branch-title-preview`, …) a given row also carries, or which order they
+ * happen to appear in the stylesheet.
+ */
+function fixWidgetRowDisplay(row: HTMLElement, display: 'inline-flex' | 'inline-block'): void {
+	row.addClass(display === 'inline-flex' ? 'loom-fountain-branch-row-inline-flex' : 'loom-fountain-branch-row-inline-block');
+}
+
 export const FountainField = forwardRef(function FountainField(
 	{
 		value,
@@ -342,6 +687,14 @@ export const FountainField = forwardRef(function FountainField(
 		branchGroupId,
 		onCutBranchGroup,
 		onCopyBranchGroup,
+		embeddedBranchCards = false,
+		onRenameBranchTitle,
+		onSetBranchCombo,
+		onSetBranchRaw,
+		onDeleteBranch,
+		onAddBranch,
+		pendingTitleFocusId,
+		onTitleFocusConsumed,
 		showAnnotationGutter = true,
 		escapeOverflowForTooltips = false,
 	}: {
@@ -473,6 +826,61 @@ export const FountainField = forwardRef(function FountainField(
 		 *  automatically (`pasteBranchGroup`, fountain.ts) — pasting a cut
 		 *  (whose source is already gone) always travels verbatim instead. */
 		onCopyBranchGroup?: (groupId: string) => void;
+		/** **Embedded branch cards.** When `true`, every branch group in the
+		 *  document renders its own chrome (`###`/`= branch:`/`>**Title**<`/
+		 *  `= gather` — all display-only, per the design: the real syntax is
+		 *  replaced by input widgets/labels, never left as raw text to edit
+		 *  directly) laid DIRECTLY over its own real document range — no
+		 *  second copy of the text, unlike `branch-overlay.tsx`'s
+		 *  `position: fixed` cards. Every sibling branch in a group renders
+		 *  simultaneously, stacked in document order (no tab-switching, no
+		 *  folding) — a branch's own PROSE BODY is left completely untouched,
+		 *  real, always-visible document text, which is what makes native
+		 *  cut/copy/paste on it just work. Only the metadata lines around each
+		 *  body (heading/tag/preview/gather) become widgets; see
+		 *  `buildDecorations`'s own "Embedded branch cards" section for the
+		 *  full mechanism, and each widget class's own doc comment for its
+		 *  write path. Default `false`: every OTHER call site (`branch-
+		 *  overlay.tsx`'s own nested body field, which must never itself
+		 *  offer to nest a decision point) leaves this off. */
+		embeddedBranchCards?: boolean;
+		/** A branch's own Title field committed a new value (blur, non-empty,
+		 *  changed) — `renameSectionTitle` (fountain.ts) through
+		 *  `editScriptAndSync`, mirroring `BranchOverlay`'s identical prop of
+		 *  the same name. */
+		onRenameBranchTitle?: (sectionId: string, newTitle: string) => void;
+		/** The group's FIRST branch's decomposed Identifier/Subidentifier/
+		 *  Number fields committed — every sibling sharing the group's value
+		 *  moves together (`setBranchTagValue`, fountain.ts). Every OTHER
+		 *  sibling's own copy of this row renders disabled, mirroring the
+		 *  first branch's current value — real text really does repeat
+		 *  identically on every branch's own `= branch:` line (that's what
+		 *  groups them), so showing it there too keeps the chrome a faithful
+		 *  mirror of the document, while edits are only ever accepted through
+		 *  this one (first branch's) path. */
+		onSetBranchCombo?: (groupId: string, identifier: string, subidentifier: string, numberOrOverride: string) => void;
+		/** The group's first branch's single plain field committed — a legacy
+		 *  value that doesn't decompose into 3 dash-separated segments,
+		 *  rewritten verbatim. */
+		onSetBranchRaw?: (groupId: string, newValue: string) => void;
+		/** A branch's own delete (trash) button — `removeBranchFromGroup`
+		 *  (fountain.ts) through the caller's own confirm dialog; mirrors
+		 *  `BranchOverlay`'s identical prop. */
+		onDeleteBranch?: (sectionId: string) => void;
+		/** The group's own "+" (rendered after its `= gather` label, or after
+		 *  the last branch's own body when the group has none) — writes a
+		 *  real new branch to the document immediately; mirrors
+		 *  `BranchOverlay`'s identical prop. */
+		onAddBranch?: (groupId: string) => void;
+		/** The section id of a branch just created via `onAddBranch`, still
+		 *  waiting for its own Title field to claim the one-shot "show blank,
+		 *  not the underlying `'Untitled'` placeholder, and steal focus"
+		 *  treatment — mirrors `BranchOverlay`'s identical prop pair (see its
+		 *  own doc comment for the full reasoning). */
+		pendingTitleFocusId?: string | null;
+		/** Fired once, the instant the pending id above has actually been
+		 *  claimed by its own Title widget's first mount. */
+		onTitleFocusConsumed?: () => void;
 		/** Whether to mount the right-side comment/alt-text gutter at all —
 		 *  default `true` (every existing caller: the main Script view, the
 		 *  Scene/Act pages). `branch-overlay.tsx`'s nested body field sets
@@ -533,6 +941,13 @@ export const FountainField = forwardRef(function FountainField(
 	const branchGroupIdRef = useRef(branchGroupId);
 	const onCutBranchGroupRef = useRef(onCutBranchGroup);
 	const onCopyBranchGroupRef = useRef(onCopyBranchGroup);
+	const onRenameBranchTitleRef = useRef(onRenameBranchTitle);
+	const onSetBranchComboRef = useRef(onSetBranchCombo);
+	const onSetBranchRawRef = useRef(onSetBranchRaw);
+	const onDeleteBranchRef = useRef(onDeleteBranch);
+	const onAddBranchRef = useRef(onAddBranch);
+	const pendingTitleFocusIdRef = useRef(pendingTitleFocusId ?? null);
+	const onTitleFocusConsumedRef = useRef(onTitleFocusConsumed);
 	onGeometryChangeRef.current = onGeometryChange;
 	onCreateBranchRef.current = onCreateBranch;
 	onPasteBranchGroupRef.current = onPasteBranchGroup;
@@ -541,6 +956,13 @@ export const FountainField = forwardRef(function FountainField(
 	branchGroupIdRef.current = branchGroupId;
 	onCutBranchGroupRef.current = onCutBranchGroup;
 	onCopyBranchGroupRef.current = onCopyBranchGroup;
+	onRenameBranchTitleRef.current = onRenameBranchTitle;
+	onSetBranchComboRef.current = onSetBranchCombo;
+	onSetBranchRawRef.current = onSetBranchRaw;
+	onDeleteBranchRef.current = onDeleteBranch;
+	onAddBranchRef.current = onAddBranch;
+	pendingTitleFocusIdRef.current = pendingTitleFocusId ?? null;
+	onTitleFocusConsumedRef.current = onTitleFocusConsumed;
 	onChangeRef.current = onChange;
 	onBlurRef.current = onBlur;
 	charactersRef.current = characters;
@@ -892,6 +1314,147 @@ export const FountainField = forwardRef(function FountainField(
 		}
 		const annotationHandlesOverlay = ViewPlugin.fromClass(AnnotationHandlesOverlay);
 
+		/** Builds every branch group's chrome for the CURRENT parse — see this
+		 *  file's own "Embedded branch cards" doc comment (above
+		 *  `BranchHeaderRowWidget`) for the design. Returns the widget/box-line
+		 *  decorations to add AND the raw `[from, to)` ranges they fully
+		 *  replace (the `###`/`= branch:`/`>**Title**<` lines) — the caller
+		 *  filters every OTHER pass's own decorations against `replaced`
+		 *  before merging these in, since a non-block `Decoration.replace`
+		 *  isn't allowed to CONTAIN another one (this line's `[[loom:<id>]]`
+		 *  hider, and — for the title-preview line specifically — `**bold**`
+		 *  emphasis marks, would otherwise land nested inside these). */
+		function buildBranchGroupDecorations(
+			view: EditorView,
+			parsed: ParsedScript
+		): { decos: { from: number; to: number; deco: Decoration }[]; replaced: { from: number; to: number }[] } {
+			const docLines = view.state.doc.lines;
+			const lines = view.state.doc.toString().split(/\r?\n/);
+			const decos: { from: number; to: number; deco: Decoration }[] = [];
+			const replaced: { from: number; to: number }[] = [];
+			const replaceLine = (line0: number, widget: WidgetType) => {
+				if (line0 >= docLines) return;
+				const docLine = view.state.doc.line(line0 + 1);
+				decos.push({ from: docLine.from, to: docLine.to, deco: Decoration.replace({ widget }) });
+				if (docLine.to > docLine.from) replaced.push({ from: docLine.from, to: docLine.to });
+			};
+
+			const seenGroups = new Set<string>();
+			for (const sec of parsed.sections) {
+				if (sec.branchGroup === null || seenGroups.has(sec.branchGroup)) continue;
+				seenGroups.add(sec.branchGroup);
+				const bounds = branchGroupBounds(parsed, sec.branchGroup);
+				if (!bounds || bounds.branches.length === 0) continue;
+				const groupId = sec.branchGroup;
+
+				// Each sibling's own [startLine, endLine) — 0-based, exclusive —
+				// up to its next sibling, or the group's own gather line/overall
+				// end for the last one.
+				const spans = bounds.branches.map((branchSection, i) => ({
+					section: branchSection,
+					startLine: branchSection.line,
+					endLine:
+						i + 1 < bounds.branches.length ? bounds.branches[i + 1].line : (bounds.gatherLine ?? bounds.end),
+				}));
+
+				// Outer box across the WHOLE group — every branch, the gather
+				// line, all of it.
+				pushBoxLines(view.state, decos, bounds.start, bounds.end, 'loom-fountain-branch-group-line');
+
+				for (const { section: branchSection, startLine, endLine } of spans) {
+					const isFirst = branchSection.loomId === bounds.branches[0].loomId;
+					const tagLine = startLine + 1;
+
+					replaceLine(
+						startLine,
+						new BranchHeaderRowWidget(
+							branchSection.loomId,
+							branchSection.text,
+							branchSection.loomId === pendingTitleFocusIdRef.current,
+							onRenameBranchTitleRef.current,
+							onDeleteBranchRef.current,
+							onTitleFocusConsumedRef.current
+						)
+					);
+					replaceLine(
+						tagLine,
+						new BranchComboRowWidget(groupId, isFirst, onSetBranchComboRef.current, onSetBranchRawRef.current)
+					);
+
+					// `branchLabelEndLine` (fountain.ts) is the SAME scan
+					// `branchBodyText`/`replaceBranchBody` already use to find
+					// where a branch's body starts — reused rather than a
+					// second ad-hoc search, and correctly tolerant of however
+					// many (zero or more) blank lines currently sit between the
+					// tag and the label. Its return value IS the body-start
+					// line; the label itself, if found, is the line right
+					// before it. Absent right after a hand-typed branch that
+					// hasn't gone through a commit yet — the raw line just
+					// stays visible in that brief window rather than forcing a
+					// guess at where it WOULD go.
+					const bodyStart = Math.min(branchLabelEndLine(lines, startLine), endLine);
+					const labelLine = bodyStart - 1;
+					const labelFound = labelLine > tagLine && /^>.*<$/.test(lines[labelLine]?.trim() ?? '');
+					if (labelFound) {
+						replaceLine(labelLine, new BranchTitlePreviewWidget(branchSection.loomId, branchSection.text));
+					}
+					// Any blank line(s) still sitting between the tag and the
+					// label render as a full line-height gap regardless of
+					// their CONTENT being hidden — a blank `.cm-line` still
+					// occupies its own line-height, the same reason hiding it
+					// via a decoration alone (rather than editing it out of the
+					// document) can't close the gap. `collapseBranchBlankLines`
+					// (fountain.ts, runs on every commit) is the real, permanent
+					// fix for the TEXT — this is the immediate, render-only
+					// compensation for whatever's on disk RIGHT NOW, so a
+					// pre-existing branch that hasn't been through a fresh
+					// commit yet (or one hand-typed with extra blank padding)
+					// doesn't show a stale gap in the meantime. Compacted via
+					// `font-size`/`line-height` only, never a block-level
+					// decoration spanning the newline (the earlier, crash-prone
+					// attempt at truly REMOVING a blank line's own height from
+					// rendering) — the line stays a completely ordinary,
+					// real, clickable/editable blank line, just visually thin.
+					if (labelFound) {
+						for (let ln = tagLine + 1; ln < labelLine; ln++) {
+							if (ln >= docLines) break;
+							const spacerLine = view.state.doc.line(ln + 1);
+							decos.push({
+								from: spacerLine.from,
+								to: spacerLine.from,
+								deco: Decoration.line({ class: 'loom-fountain-branch-spacer-line' }),
+							});
+						}
+					}
+
+					// The branch's own real prose body — box chrome only, the
+					// text itself untouched, so native cut/copy/paste on it is
+					// just ordinary CM6 editing.
+					pushBoxLines(view.state, decos, bodyStart, endLine, 'loom-fountain-branch-body-line');
+				}
+
+				if (bounds.gatherLine !== null) {
+					replaceLine(bounds.gatherLine, new BranchGatherRowWidget(groupId, onAddBranchRef.current));
+				} else {
+					// No gather to attach to (a hand-typed/imported script only —
+					// every group created through the app has one from birth) —
+					// append the "+" as its own row right after the last
+					// branch's own last line instead.
+					const lastSpan = spans[spans.length - 1];
+					const lastLine = Math.max(lastSpan.endLine - 1, lastSpan.startLine);
+					if (lastLine < docLines) {
+						const lastDocLine = view.state.doc.line(lastLine + 1);
+						decos.push({
+							from: lastDocLine.to,
+							to: lastDocLine.to,
+							deco: Decoration.widget({ widget: new BranchAddRowWidget(groupId, onAddBranchRef.current), side: 1 }),
+						});
+					}
+				}
+			}
+			return { decos, replaced };
+		}
+
 		/** A scene/section's own raw line, decorated once per physical line a
 		 *  merged multi-line element (dialogue can span several) actually
 		 *  occupies — `element.line` is only the block's FIRST line. */
@@ -1064,9 +1627,49 @@ export const FountainField = forwardRef(function FountainField(
 				entries.push({ from, to, deco: Decoration.mark({ class: 'loom-fountain-nowrap' }) });
 			}
 
-			entries.sort((a, b) => a.from - b.from || a.to - b.to);
+			// Embedded branch cards — see `buildBranchGroupDecorations`'s own
+			// doc comment. Every OTHER pass's own content-spanning decoration
+			// (a mark/replace/widget with `to > from` — zero-width `Decoration
+			// .line` entries are a different, always-compatible category, never
+			// filtered) is dropped if it overlaps a line this pass fully
+			// replaces with its own widget — a non-block `Decoration.replace`
+			// can't legally CONTAIN another one (this line's own `[[loom:<id>]]`
+			// hider, and — on the title-preview line specifically — its
+			// `**bold**` emphasis mark, would otherwise land nested inside it).
+			let finalEntries = entries;
+			if (embeddedBranchCards) {
+				const { decos: branchDecos, replaced } = buildBranchGroupDecorations(view, parsed);
+				// A REAL bug this used to have: a zero-width `Decoration.line`
+				// entry (the ordinary per-element `ELEMENT_CLASS` line-class
+				// pass, above — e.g. `loom-fountain-synopsis` on a `=`-prefixed
+				// line) sits at `from === to === docLine.from`, exactly the
+				// STARTING edge of a replaced range `[r.from, r.to)` — the old
+				// overlap test (`e.from < r.to && e.to > r.from`) fails for
+				// that exact case (`e.to > r.from` is false when `e.to ===
+				// r.from`), so this used to wave every line-class entry through
+				// UNCONDITIONALLY, on the theory that a line CLASS can't
+				// "contain" a content replace the way a mark/replace decoration
+				// can (true — nothing crashes) but wrong about styling: that
+				// original element class kept fighting my own widget's classes
+				// for CSS specificity on the exact same `.cm-line`, and
+				// sometimes won (`.loom-fountain-field .cm-line.loom-fountain-
+				// synopsis`'s 3-class selector beating my own 2-class scoped
+				// override — confirmed live via DevTools). Fixed with a proper
+				// half-open-interval containment check that treats a
+				// zero-width point as "inside" `[r.from, r.to)` when
+				// `r.from <= e.from < r.to`, and drops EVERY entry (line-class
+				// included) on a line this pass fully replaces — nothing from
+				// the original per-element pass belongs there any more, the
+				// widget is now that line's entire visual representation.
+				const overlapsReplaced = (e: { from: number; to: number }) =>
+					replaced.some((r) => (e.to === e.from ? e.from >= r.from && e.from < r.to : e.from < r.to && e.to > r.from));
+				finalEntries = entries.filter((e) => !overlapsReplaced(e));
+				finalEntries.push(...branchDecos);
+			}
+
+			finalEntries.sort((a, b) => a.from - b.from || a.to - b.to);
 			return Decoration.set(
-				entries.map((e) => e.deco.range(e.from, e.to)),
+				finalEntries.map((e) => e.deco.range(e.from, e.to)),
 				true
 			);
 		}
@@ -1329,7 +1932,6 @@ export const FountainField = forwardRef(function FountainField(
 			// past it to that outer handler once this callback returns,
 			// opening a SECOND, competing menu on top of the one built below.
 			event.stopPropagation();
-			const branchGroupId = branchGroupIdRef.current;
 			const sel = view.state.selection.main;
 			const hasSelection = !sel.empty;
 			const doc = view.state.doc;
@@ -1337,6 +1939,14 @@ export const FountainField = forwardRef(function FountainField(
 				? sel.head
 				: (view.posAtCoords({ x: event.clientX, y: event.clientY }, false) ?? doc.length);
 			const line0 = doc.lineAt(pos).number - 1;
+			// `branchGroupIdRef` is only ever set on `branch-overlay.tsx`'s own
+			// nested body field; the embedded-cards field has no such prop (a
+			// branch's body is real text directly inside THIS field), so its
+			// own "Cut/Copy branch group" reach is derived the same defensive
+			// way `branchSlotEligibleAt` already does — whichever group (if
+			// any) the click/selection's own line currently sits inside.
+			const branchGroupId =
+				branchGroupIdRef.current ?? (embeddedBranchCards ? branchGroupAtLine(parseFountain(doc.toString()), line0) : null);
 
 			// A selection that partially crosses an existing marked span
 			// (nesting fully inside or sitting fully outside one is fine)

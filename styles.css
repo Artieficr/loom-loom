@@ -7672,12 +7672,19 @@ button.loom-alt-modal-delete:hover:not(:disabled) {
    visible, not hidden, unlike `markdown-field.tsx`'s raw-at-cursor model) —
    a plain `<span>`, not `<strong>`, specifically so a theme's own generic
    `strong` styling can't reach it; color follows "Follow theme text
-   coloring" exactly like `.loom-fountain-bold` does (plain `--text-normal`
-   by default, the rule right below switches it to the measured/accent bold
-   color only when that setting is on). */
+   coloring" exactly like `.loom-fountain-bold` does — a real, reported bug
+   fixed here: this rule used to set `color: var(--text-normal)` as its own
+   "default," but `--text-normal` is Obsidian's LIVE theme variable, not the
+   fixed print-page black `.loom-fountain-field .cm-editor` hardcodes
+   (`color: #000`, styles.css above) — so with the toggle OFF, this text
+   still silently changed color across a light/dark theme switch, confirmed
+   live. `.loom-fountain-bold` never had this bug: it sets no `color` at
+   all by default, just `font-weight`, and INHERITS the fixed `#000` from
+   `.cm-editor` — the rule right below switches to the measured/accent bold
+   color only when the setting is on. Matched here the same way: no default
+   `color` declared, inherit instead. */
 .loom-branch-title-preview-bold {
 	font-weight: var(--font-bold);
-	color: var(--text-normal);
 }
 
 body.loom-follow-theme-color .loom-branch-title-preview-bold {
@@ -7986,4 +7993,278 @@ body.loom-follow-theme-color .loom-branch-title-preview-bold {
 .loom-branch-create-btn:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
+}
+
+/* Embedded branch cards (`fountain-field.tsx`'s `embeddedBranchCards` prop —
+   see that file's own "Embedded branch cards" doc comment above
+   `BranchHeaderRowWidget`). Chrome laid directly over a branch group's own
+   real document range — a genuinely different mechanism from
+   `.loom-branch-*`/`branch-overlay.tsx` above (real CM6 line/widget
+   decorations, not a floating `position: fixed` card), gated per
+   `FountainField` instance by that prop.
+
+   Applied by `fixWidgetRowDisplay` (fountain-field.tsx) to every branch
+   widget's own root element — see that function's own doc comment for the
+   confirmed root cause this fixes (a block-level widget root inside CM6's
+   inline replace mechanism triggers the browser's anonymous-block-box
+   splitting, adding large amounts of phantom line height around it — this
+   was the real cause of a "big gap between rows" reported bug, not
+   anything about the document text). `!important` on every property is
+   deliberate, not decorative — it's what makes this win regardless of
+   which reused class (`.loom-branch-label-row`'s own `display: flex`,
+   `.loom-branch-title-preview`'s block default, …) a given row also
+   carries, or which order the two rules happen to appear in this file. */
+.loom-fountain-branch-row-inline-flex {
+	display: inline-flex !important;
+	width: 100% !important;
+	box-sizing: border-box !important;
+}
+
+.loom-fountain-branch-row-inline-block {
+	display: inline-block !important;
+	width: 100% !important;
+	box-sizing: border-box !important;
+}
+
+   Fixed hex colors throughout, not theme tokens — matching
+   `.loom-fountain-field .cm-editor`'s own "fixed white/black pair, meant to
+   read as a sheet of paper regardless of the vault's color scheme" (this
+   file's own comment on that rule, above). A theme-following
+   `--background-secondary`/`--text-accent` pair was tried first and reads
+   fine in a LIGHT theme, but has no relationship to the editor's own forced
+   white/black page in a DARK one — inconsistent for the same reason that
+   rule exists in the first place.
+
+   HORIZONTAL space is a `margin`/`padding` "bleed" pair on this one class —
+   `margin: 0 -X` extends the box's own background/border X past its normal
+   line width on each side, `padding: 0 X` then pushes CONTENT back in by
+   the same X, netting ZERO shift to where text/widgets actually start (so
+   this can't fight `.loom-fountain-dialogue`'s own 1in indent or any other
+   per-element padding). Declared ONLY here, on the class every line in the
+   group gets (`pushBoxLines(bounds.start, bounds.end, …)`,
+   fountain-field.tsx) — `.loom-fountain-branch-body-line`/the row classes
+   below deliberately never repeat it, so there's exactly one source of
+   horizontal position for every line in the group, header rows and body
+   text alike, which is what keeps `###`/`= branch:`/`= gather` aligned to
+   the same left edge as the prose. */
+/* Colors sampled directly off the user's own mockup (pixel-exact, not
+   eyeballed): the outer box's background is `--background-primary`
+   ITSELF — i.e. it deliberately FOLLOWS the vault's theme, unlike the
+   editor's own inner screenplay page (`.loom-fountain-field .cm-editor`,
+   fixed white always) — this box reads as UI CHROME laid over the page,
+   not part of the page itself, the same distinction Obsidian's own modals/
+   popovers draw against a note's fixed-rendering content. The side borders
+   (`box-shadow` below) stay a neutral grey (~#91a0a2 sampled); the top/
+   bottom borders (`-first`/`-last`, below) were later changed to
+   `--text-accent` on request — a top/bottom-only accent treatment, not a
+   full accent-bordered box. */
+.loom-fountain-branch-group-line {
+	background: var(--background-primary);
+	margin: 0 -2em;
+	/* `!important`: `.loom-fountain-field .cm-line { padding: 0; }` (above)
+	   is TWO class selectors (descendant combinator, specificity 0,2,0) —
+	   it silently outranked this rule's own single class (0,1,0) and won
+	   outright regardless of source order, leaving the `margin` bleed
+	   visible (nothing else sets that) but the compensating `padding`
+	   zeroed — a real, reported bug: the box background/border bled
+	   outward as intended, but its CONTENT (widget rows, the label text
+	   inside them) never got pushed back in to compensate, landing 2em
+	   left of where it should be, misaligned against the plain body text
+	   around it. Same specificity fight `.loom-branch-input`'s own
+	   `!important`s already document against a different base rule.
+	   2em (not 1em) is deliberate — widened on request so there's visible
+	   air between the box's own edge and where the text/widget content
+	   actually sits, on both sides; the margin/padding pair still cancels
+	   exactly, so the WIDTH changed, never the text's own position. */
+	padding: 0 2em !important;
+	box-shadow: inset 1px 0 0 #91a0a2, inset -1px 0 0 #91a0a2;
+}
+
+/* Extra air above the group's own first line (requested — the bottom
+   equivalent was tried too and reverted, see `-last` below): `.loom-
+   fountain-field .cm-line { padding: 0; }` (0,2,0 specificity) would
+   otherwise win outright over a lone `padding-top` declaration on the
+   `-first` class (a plain single-class selector, 0,1,0) even with
+   `!important` — ties between two `!important` rules are STILL broken by
+   specificity first. Compounding both classes onto one selector (`.loom-
+   fountain-branch-group-line.loom-fountain-branch-group-line-first`)
+   matches that 0,2,0 specificity, so the normal last-in-source-order
+   tiebreak applies, and this rule (defined after that base one) wins. */
+.loom-fountain-branch-group-line.loom-fountain-branch-group-line-first {
+	border-top: 1px solid var(--text-accent);
+	border-top-left-radius: 10px;
+	border-top-right-radius: 10px;
+	padding-top: 10px !important;
+}
+
+/* No `padding-bottom` here — tried once, reverted on request (the "+"
+   button's own `bottom` offset, below, is tuned to match: it straddles the
+   border where it sits WITHOUT this padding). */
+.loom-fountain-branch-group-line.loom-fountain-branch-group-line-last {
+	border-bottom: 1px solid var(--text-accent);
+	border-bottom-left-radius: 10px;
+	border-bottom-right-radius: 10px;
+}
+
+/* One branch's own real prose body, nested inside the outer group box —
+   plain white, same as every other line of the script (this is real script
+   text, not a form control), with a light neutral border (sampled off the
+   mockup as ~#b0b9b5, then made translucent on request — `rgba(...,0.4)` of
+   that same grey, not a flatter/lighter opaque grey, so it still reads as
+   the same color family as the outer box's own border, just quieter) so it
+   still reads as its own distinct "page" without competing with the outer
+   box's own edge. No `margin`/`padding` of its own at all — the outer class
+   above (also applied to every body line) already supplies the shared
+   horizontal position; repeating either property here would just win
+   outright over the outer's own declaration (same specificity, whichever
+   rule is LAST in source order takes the whole property) rather than adding
+   to it. */
+.loom-fountain-branch-body-line {
+	background: #fff;
+	box-shadow: inset 1px 0 0 rgba(176, 185, 181, 0.4), inset -1px 0 0 rgba(176, 185, 181, 0.4);
+}
+
+.loom-fountain-branch-body-line-first {
+	border-top: 1px solid rgba(176, 185, 181, 0.4);
+	border-top-left-radius: 6px;
+	border-top-right-radius: 6px;
+}
+
+.loom-fountain-branch-body-line-last {
+	border-bottom: 1px solid rgba(176, 185, 181, 0.4);
+	border-bottom-left-radius: 6px;
+	border-bottom-right-radius: 6px;
+}
+
+/* A real, ordinary, still-editable blank line sitting between a branch's
+   `= branch:` tag and its `>**Title**<` preview — visually compacted to a
+   sliver rather than a full line-height gap, since hiding its CONTENT alone
+   (a `Decoration.replace`) doesn't shrink a blank `.cm-line`'s own height at
+   all. Whether this ever renders at all depends purely on whatever's
+   currently on disk (`collapseBranchBlankLines`, fountain.ts, is the real
+   fix that removes the line outright on the next commit) — this is the
+   immediate compensation for right now. Font-size/line-height only, never a
+   block decoration spanning the line's own newline (the earlier, crash-
+   prone attempt at genuinely removing a blank line's rendered height) — the
+   line stays completely ordinary underneath, just visually thin. */
+.loom-fountain-branch-spacer-line {
+	font-size: 1px;
+	line-height: 4px;
+}
+
+.loom-fountain-branch-header-row {
+	padding: var(--size-2-2) 0;
+}
+
+/* Scoped overrides for the reused `.loom-branch-label-*`/`.loom-branch-
+   gather-label` classes (branch-overlay.tsx) — those read `var(--text-
+   normal)`/`var(--text-faint)`, fine there since the overlay's own card
+   background ALSO follows the theme (the two always move together); here
+   the surrounding box is a fixed light color regardless of theme, so a dark
+   theme's own `--text-normal`/`--text-faint` (light colors, meant for a
+   dark background) would go illegible — same reasoning
+   `.loom-branch-input`'s own hardcoded `#000`/`#fff` already established in
+   the reused rules themselves. Two classes beats those rules' one, so this
+   wins with no `!important` needed. */
+.loom-fountain-branch-header-row .loom-branch-label-section {
+	color: #000;
+}
+
+.loom-fountain-branch-header-row .loom-branch-label-synopsis,
+.loom-fountain-branch-gather-row .loom-branch-gather-label {
+	color: #666;
+}
+
+/* `position: relative` is what makes the "+" button's own `position:
+   absolute` (below) straddle THIS row's bottom edge specifically, rather
+   than the nearest ANY positioned ancestor. `display`/`width` are set from
+   JS (`fixWidgetRowDisplay`, fountain-field.tsx) — see that function's own
+   doc comment for the confirmed root cause of the "gap between rows" bug
+   this and its sibling rows all had (a block-level widget root inside CM6's
+   inline replace mechanism, NOT a document-text or calc()/var() issue, both
+   suspected and ruled out first).
+
+   `padding-bottom` is NOT zero, deliberately, despite the button being
+   `position: absolute` (out of flow, so it can't itself force this padding
+   to exist): the LABEL text sits in normal flow above the button, and
+   without real reserved space below it, the button's own straddle offset
+   (`.loom-fountain-branch-add-btn`'s `bottom: -14px`, tuned against THIS
+   row's real height once the phantom-height bug above was fixed) overlaps
+   the label instead of clearing it — confirmed live, then fixed by
+   reserving enough bottom padding for the button's own upper half plus a
+   couple of pixels of breathing room. */
+.loom-fountain-branch-gather-row {
+	position: relative;
+	padding: var(--size-2-2) 0 18px 0;
+}
+
+/* Straddles the row's own bottom edge — half showing inside it, half past.
+   Fixed pixel values throughout, verified against real rendered dimensions
+   (a headless-browser measurement of the actual component, not a guess) —
+   see `.loom-fountain-branch-gather-row`'s own doc comment for the
+   `padding-bottom` pairing this depends on. Deliberately its own class, not
+   a reuse of `.loom-branch-add-btn` above — that one straddles its OWN
+   floating card via a different technique (negative margin, appropriate
+   there since a real React-owned `.loom-branch-card` isn't inside CM6's own
+   widget-replace mechanism).
+
+   This button is ALSO a bare `<button>` element (`row.createEl('button', ...)`,
+   fountain-field.tsx), so it hits the EXACT SAME specificity gotcha
+   `.loom-branch-add-btn` already documents above — a stale version of this
+   comment once claimed that fight was "irrelevant here," which was wrong and
+   is why the fill silently rendered Obsidian's own grey `--interactive-normal`
+   instead of the accent fill despite the CSS looking correct: Obsidian's base
+   `button:not(.clickable-icon) { background-color: var(--interactive-normal);
+   box-shadow: var(--input-shadow); }` (one pseudo-class + one element,
+   specificity 0,1,1) outranks this rule's plain single class (0,1,0)
+   regardless of source order. Fixed the same way — `!important` on
+   `background`/`box-shadow`. */
+/* Fill/border colors sampled off the mockup (pixel-exact) — a light
+   neutral tan-grey, not the saturated gold tried first, `border-radius:
+   50%` for the same fully-round look (not the plain 4px square rounding
+   tried first). */
+/* Smaller + accent-colored, on request — a light/neutral fill (matching
+   this whole design's minimal, mostly-white-and-grey palette) with the
+   BORDER and icon in the app's own `--text-accent`, rather than a solid
+   accent-filled circle, so it still reads as a small, quiet affordance
+   rather than a bold CTA competing with the script text around it. */
+.loom-fountain-branch-add-btn {
+	position: absolute;
+	left: 1.5rem;
+	/* Half the button's own 20px height — `.loom-fountain-branch-group-
+	   line-last` carries no `padding-bottom` of its own (see that rule's
+	   own comment), so the real border sits right at this row's own
+	   bottom edge, unlike the reverted version this once had to
+	   compensate for. Re-verified by direct measurement after reverting,
+	   not assumed. */
+	bottom: -10px;
+	box-sizing: border-box;
+	width: 20px;
+	height: 20px;
+	line-height: 18px;
+	text-align: center;
+	padding: 0;
+	border-radius: 50%;
+	border: 1px solid var(--text-accent);
+	background: var(--background-primary) !important;
+	box-shadow: none !important;
+	color: var(--text-accent);
+	font-weight: var(--font-bold);
+	cursor: var(--cursor-link);
+}
+
+.loom-fountain-branch-add-btn:hover {
+	background: var(--background-primary) !important;
+	color: var(--interactive-accent-hover, var(--text-accent));
+	border-color: var(--interactive-accent-hover, var(--text-accent));
+}
+
+/* The no-gather fallback row (`BranchAddRowWidget`) — `display`/`width` set
+   from JS (`fixWidgetRowDisplay`), same reasoning as the gather row above;
+   `position: relative` + matching `padding-bottom` for the identical reason
+   too — this is the button's own straddle anchor when there's no gather row
+   to hold it instead. */
+.loom-fountain-branch-add-row {
+	position: relative;
+	padding: var(--size-2-2) 0 18px 0;
 }
