@@ -683,8 +683,6 @@ export const FountainField = forwardRef(function FountainField(
 		onCreateBranch,
 		onPasteBranchGroup,
 		branchClipboardAvailable,
-		branchSpacers,
-		branchGroupId,
 		onCutBranchGroup,
 		onCopyBranchGroup,
 		embeddedBranchCards = false,
@@ -789,60 +787,36 @@ export const FountainField = forwardRef(function FountainField(
 		 *  never needs to read what's IN it, only whether the menu item
 		 *  should appear. */
 		branchClipboardAvailable?: boolean;
-		/** Extra vertical space (pixels), keyed by a branch section's own
-		 *  `[[loom:<id>]]`, to reserve as `padding-bottom` on that branch's own
-		 *  `= branch: <id>` synopsis line — how `branch-overlay.tsx`'s opaque
-		 *  panels grow a branch's real document span to match what their own
-		 *  header UI + nested body actually need, without touching the
-		 *  document's real text. `BranchOverlay`'s own `onSpacerNeedsChange` is
-		 *  the one source for this map; see that file's own top doc comment
-		 *  ("A branch's card can be genuinely TALLER...") for the full
-		 *  mechanism this prop is the write-side of. */
-		branchSpacers?: Record<string, number>;
-		/** Set ONLY by `branch-overlay.tsx`'s `BranchBodyField` — the section
-		 *  id of the decision-point branch this nested field's own body BELONGS
-		 *  to. Its one effect: `openContextMenu`'s Cut/Copy items stop meaning
-		 *  "the current text selection" and mean "this whole decision point"
-		 *  instead, always enabled regardless of selection — right-clicking
-		 *  ANYWHERE inside a branch's body (not just its card's own header/
-		 *  margins, which never reach this field at all) reaches for the same
-		 *  whole-group operation a user would expect from a card that reads as
-		 *  one object, not a loose bag of paragraphs. Plain per-selection
-		 *  text cut/copy is still reachable via the keyboard (Ctrl/Cmd+X/C) —
-		 *  only the right-click MENU'S meaning changes here. Undefined (the
-		 *  main Script view, the Scene/Act pages' own top-level editor) keeps
-		 *  Cut/Copy as ordinary text operations. */
-		branchGroupId?: string;
-		/** Fires when Cut is chosen with `branchGroupId` set — see that prop's
-		 *  own doc comment. The caller (`BranchOverlay`) removes the WHOLE
-		 *  decision point from the document and stashes it in its own
-		 *  in-memory branch clipboard, mirroring the card's own header-level
-		 *  "Cut branch group" menu item exactly (same handler, same effect). */
+		/** Fires when "Cut branch group" is chosen from the right-click menu on
+		 *  a line inside an existing decision point (`embeddedBranchCards` on —
+		 *  the group is resolved via `branchGroupAtLine`, below) — removes the
+		 *  WHOLE decision point from the document and stashes it in the
+		 *  caller's own in-memory branch clipboard. */
 		onCutBranchGroup?: (groupId: string) => void;
-		/** Fires when Copy is chosen with `branchGroupId` set — same
-		 *  in-memory branch clipboard as `onCutBranchGroup`, but the source
-		 *  stays in the document untouched. A later "Paste branch group" of a
-		 *  copy that's still present renumbers/re-ids the incoming block
-		 *  automatically (`pasteBranchGroup`, fountain.ts) — pasting a cut
-		 *  (whose source is already gone) always travels verbatim instead. */
+		/** Fires when "Copy branch group" is chosen — same in-memory branch
+		 *  clipboard as `onCutBranchGroup`, but the source stays in the
+		 *  document untouched. A later "Paste branch group" of a copy that's
+		 *  still present renumbers/re-ids the incoming block automatically
+		 *  (`pasteBranchGroup`, fountain.ts) — pasting a cut (whose source is
+		 *  already gone) always travels verbatim instead. */
 		onCopyBranchGroup?: (groupId: string) => void;
 		/** **Embedded branch cards.** When `true`, every branch group in the
 		 *  document renders its own chrome (`###`/`= branch:`/`>**Title**<`/
 		 *  `= gather` — all display-only, per the design: the real syntax is
 		 *  replaced by input widgets/labels, never left as raw text to edit
 		 *  directly) laid DIRECTLY over its own real document range — no
-		 *  second copy of the text, unlike `branch-overlay.tsx`'s
-		 *  `position: fixed` cards. Every sibling branch in a group renders
-		 *  simultaneously, stacked in document order (no tab-switching, no
-		 *  folding) — a branch's own PROSE BODY is left completely untouched,
-		 *  real, always-visible document text, which is what makes native
-		 *  cut/copy/paste on it just work. Only the metadata lines around each
-		 *  body (heading/tag/preview/gather) become widgets; see
-		 *  `buildDecorations`'s own "Embedded branch cards" section for the
-		 *  full mechanism, and each widget class's own doc comment for its
-		 *  write path. Default `false`: every OTHER call site (`branch-
-		 *  overlay.tsx`'s own nested body field, which must never itself
-		 *  offer to nest a decision point) leaves this off. */
+		 *  second copy of the text, unlike `branch-overlay.tsx`'s old
+		 *  `position: fixed` real cards (replaced entirely by this). Every
+		 *  sibling branch in a group renders simultaneously, stacked in
+		 *  document order (no tab-switching, no folding) — a branch's own
+		 *  PROSE BODY is left completely untouched, real, always-visible
+		 *  document text, which is what makes native cut/copy/paste on it
+		 *  just work. Only the metadata lines around each body (heading/tag/
+		 *  preview/gather) become widgets; see `buildDecorations`'s own
+		 *  "Embedded branch cards" section for the full mechanism, and each
+		 *  widget class's own doc comment for its write path. Default
+		 *  `false` — the Scene page's own Script section is the only caller
+		 *  that turns this on today. */
 		embeddedBranchCards?: boolean;
 		/** A branch's own Title field committed a new value (blur, non-empty,
 		 *  changed) — `renameSectionTitle` (fountain.ts) through
@@ -883,29 +857,25 @@ export const FountainField = forwardRef(function FountainField(
 		onTitleFocusConsumed?: () => void;
 		/** Whether to mount the right-side comment/alt-text gutter at all —
 		 *  default `true` (every existing caller: the main Script view, the
-		 *  Scene/Act pages). `branch-overlay.tsx`'s nested body field sets
-		 *  this `false`: it never wires up `comments`/`altText`, so the
-		 *  gutter would render as a permanently empty column — and, being
-		 *  CM6's own `gutter()` extension, it still reserves real horizontal
-		 *  space for that column regardless of whether any line ever has a
-		 *  marker, narrowing `.cm-content`'s own available width on the side
-		 *  it sits on (`side: 'after'`, i.e. the right) relative to a field
+		 *  Scene/Act pages). Meant for a caller that never wires up
+		 *  `comments`/`altText`: the gutter would otherwise render as a
+		 *  permanently empty column, and being CM6's own `gutter()`
+		 *  extension, it still reserves real horizontal space for that
+		 *  column regardless of whether any line ever has a marker,
+		 *  narrowing `.cm-content`'s own available width on the side it
+		 *  sits on (`side: 'after'`, i.e. the right) relative to a field
 		 *  with no gutter at all. */
 		showAnnotationGutter?: boolean;
 		/** Mounts CM6's own `tooltips({ parent: document.body })` extension —
-		 *  default `false` for every existing caller (CM6's own default
-		 *  tooltip container is fine for a field that isn't itself nested
-		 *  inside a clipped ancestor). `branch-overlay.tsx`'s nested body
-		 *  field sets this `true`: CM6's default tooltip host lives INSIDE
-		 *  this field's own DOM, which sits inside `.loom-branch-body-field`'s
-		 *  `overflow: hidden` (and, further up, Obsidian's own workspace-leaf
+		 *  default `false` (CM6's own default tooltip container is fine for a
+		 *  field that isn't itself nested inside a clipped ancestor). Meant
+		 *  for a caller whose own DOM sits inside something with
+		 *  `overflow: hidden` (or, further up, Obsidian's own workspace-leaf
 		 *  DOM, which applies CSS `contain` — the same thing that re-bases a
-		 *  bare `position: fixed` to the leaf instead of the true viewport,
-		 *  documented on `BranchOverlay`'s own top doc comment for why THAT
-		 *  overlay is portalled to `document.body` too). Without this, the
-		 *  character-cue/INT.-EXT. autocomplete popup renders fixed to that
-		 *  same re-based, clipped context — squeezed into the narrow card and
-		 *  cut off — instead of floating freely over the real viewport. */
+		 *  bare `position: fixed` to the leaf instead of the true viewport):
+		 *  without this, the character-cue/INT.-EXT. autocomplete popup
+		 *  renders fixed to that same re-based, clipped context — squeezed
+		 *  and cut off — instead of floating freely over the real viewport. */
 		escapeOverflowForTooltips?: boolean;
 	},
 	ref: ForwardedRef<FountainFieldHandle>
@@ -937,8 +907,6 @@ export const FountainField = forwardRef(function FountainField(
 	const onCreateBranchRef = useRef(onCreateBranch);
 	const onPasteBranchGroupRef = useRef(onPasteBranchGroup);
 	const branchClipboardAvailableRef = useRef(branchClipboardAvailable ?? false);
-	const branchSpacersRef = useRef(branchSpacers ?? {});
-	const branchGroupIdRef = useRef(branchGroupId);
 	const onCutBranchGroupRef = useRef(onCutBranchGroup);
 	const onCopyBranchGroupRef = useRef(onCopyBranchGroup);
 	const onRenameBranchTitleRef = useRef(onRenameBranchTitle);
@@ -952,8 +920,6 @@ export const FountainField = forwardRef(function FountainField(
 	onCreateBranchRef.current = onCreateBranch;
 	onPasteBranchGroupRef.current = onPasteBranchGroup;
 	branchClipboardAvailableRef.current = branchClipboardAvailable ?? false;
-	branchSpacersRef.current = branchSpacers ?? {};
-	branchGroupIdRef.current = branchGroupId;
 	onCutBranchGroupRef.current = onCutBranchGroup;
 	onCopyBranchGroupRef.current = onCopyBranchGroup;
 	onRenameBranchTitleRef.current = onRenameBranchTitle;
@@ -1545,32 +1511,6 @@ export const FountainField = forwardRef(function FountainField(
 				}
 			}
 
-			// The modular branch editor's own vertical spacers (`branchSpacers`
-			// prop, above) — reserves real screen space as pure `padding-bottom`
-			// on a branch's own `= branch: <id>` synopsis line (the line
-			// directly beneath its own heading, present on EVERY branch in a
-			// group, first or last), with no effect on the document's actual
-			// text. Targeting this branch's own synopsis line rather than
-			// whatever follows its span means every branch always has a line
-			// to pad — a group's LAST branch has nothing structurally
-			// guaranteed to sit right after its own span (`branchGroupBounds`'s
-			// `end` can land past the document's last line), which the branch
-			// synopsis line, always present, sidesteps entirely. `BranchOverlay`
-			// (branch-overlay.tsx) is the one source for this map.
-			for (const [loomId, px] of Object.entries(branchSpacersRef.current)) {
-				if (!(px > 0)) continue;
-				const sec = parsed.sections.find((s) => s.loomId === loomId);
-				if (!sec || sec.branchGroup === null) continue;
-				const cmLine = sec.line + 2; // 0-based synopsis line (sec.line + 1) as a CM6 1-based line number
-				if (cmLine < 1 || cmLine > docLines) continue;
-				const docLine = view.state.doc.line(cmLine);
-				entries.push({
-					from: docLine.from,
-					to: docLine.from,
-					deco: Decoration.line({ attributes: { style: `padding-bottom: ${px}px` } }),
-				});
-			}
-
 			for (const span of scanEmphasis(text)) entries.push(span);
 			for (const span of scanEntityLinks(text, view.state.selection, view.hasFocus, entityOptionsRef.current)) {
 				entries.push(span);
@@ -1924,13 +1864,6 @@ export const FountainField = forwardRef(function FountainField(
 
 		const openContextMenu = (view: EditorView, event: MouseEvent): boolean => {
 			event.preventDefault();
-			// A branch card (`branch-overlay.tsx`) is a plain DOM ancestor of
-			// this nested field, with its OWN `contextmenu` handler for
-			// right-clicks that land on its header/margins (outside this CM6
-			// field entirely, so they never reach here at all). Without this,
-			// a right-click INSIDE this field's own body would still bubble
-			// past it to that outer handler once this callback returns,
-			// opening a SECOND, competing menu on top of the one built below.
 			event.stopPropagation();
 			const sel = view.state.selection.main;
 			const hasSelection = !sel.empty;
@@ -1939,14 +1872,13 @@ export const FountainField = forwardRef(function FountainField(
 				? sel.head
 				: (view.posAtCoords({ x: event.clientX, y: event.clientY }, false) ?? doc.length);
 			const line0 = doc.lineAt(pos).number - 1;
-			// `branchGroupIdRef` is only ever set on `branch-overlay.tsx`'s own
-			// nested body field; the embedded-cards field has no such prop (a
-			// branch's body is real text directly inside THIS field), so its
-			// own "Cut/Copy branch group" reach is derived the same defensive
-			// way `branchSlotEligibleAt` already does — whichever group (if
-			// any) the click/selection's own line currently sits inside.
-			const branchGroupId =
-				branchGroupIdRef.current ?? (embeddedBranchCards ? branchGroupAtLine(parseFountain(doc.toString()), line0) : null);
+			// A branch's own PROSE BODY is real, unreplaced document text
+			// (`embeddedBranchCards`'s own doc comment) — a right-click landing
+			// there reaches this handler exactly like any other line, so
+			// "Cut/Copy branch group" has to be derived from WHERE the click
+			// landed rather than an explicit prop: whichever group (if any)
+			// the click/selection's own line currently sits inside.
+			const branchGroupId = embeddedBranchCards ? branchGroupAtLine(parseFountain(doc.toString()), line0) : null;
 
 			// A selection that partially crosses an existing marked span
 			// (nesting fully inside or sitting fully outside one is fine)
@@ -1958,12 +1890,13 @@ export const FountainField = forwardRef(function FountainField(
 
 			// Create branch / Paste branch group share the identical
 			// eligibility (a bare caret on a blank line not already inside
-			// a decision point — `branchGroupAtLine` is a defensive guard
-			// here: in ordinary use, a right-click anywhere inside an
-			// EXISTING branch's span never reaches this handler at all,
-			// intercepted by `branch-overlay.tsx`'s own opaque card sitting
-			// on top of it; this only matters in the brief window before
-			// that overlay's first `sync()` has run), so a disabled item
+			// a decision point). A right-click on a branch's own metadata
+			// lines (heading/tag/preview/gather) never reaches this handler
+			// at all — those are widget-replaced content, intercepted by the
+			// widget's own DOM — but a right-click inside its real, unreplaced
+			// PROSE BODY does, which is exactly what `branchGroupAtLine`
+			// guards against here (that's a Cut/Copy-branch-group click, per
+			// `branchGroupId` above, not a Create/Paste one). A disabled item
 			// explains why with the one shared reason rather than each
 			// re-deriving its own text.
 			const branchSlotEligible = !hasSelection && branchSlotEligibleAt(view, line0);
@@ -2382,17 +2315,16 @@ export const FountainField = forwardRef(function FountainField(
 	}, [value]);
 
 	// A comment's resolved state (or an alt-text's option list, or which id a
-	// search match currently highlights, or a branch's own spacer amount) can
-	// change from the caller's own popover/search/measurement pass without
-	// any document edit — the gutter's icon (or the branch spacer's own
-	// `padding-top`) still needs to redraw, so a no-op transaction carrying
+	// search match currently highlights) can change from the caller's own
+	// popover/search pass without any document edit — the gutter's icon
+	// still needs to redraw, so a no-op transaction carrying
 	// `refreshAnnotations` nudges it (see the gutter's own `lineMarkerChange`,
 	// inside the mount effect).
 	useEffect(() => {
 		const view = viewRef.current;
 		if (!view) return;
 		view.dispatch({ effects: refreshAnnotations.of(null) });
-	}, [comments, altText, highlightedAnnotationId, branchSpacers]);
+	}, [comments, altText, highlightedAnnotationId]);
 
 	return <div className="loom-fountain-field" ref={hostRef} />;
 });

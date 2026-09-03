@@ -152,7 +152,6 @@ import {
 	nextComboNumber,
 	pasteBranchGroup,
 	removeBranchFromGroup,
-	replaceBranchBody,
 	setBranchTagValue,
 } from '../fountain';
 import { getBranchClipboard, setBranchClipboard } from './branch-clipboard';
@@ -161,18 +160,6 @@ import { features, projectRoleType, projectTypes, roleOf } from '../project-kind
 import type LoomLoomPlugin from '../main';
 import { LocaleKey, t, tn } from '../i18n';
 import { entityLabel, entityPlural } from '../types';
-
-/**
- * Embedded branch cards — spike toggle. When `true`, the Scene page's own
- * `FountainField` renders branch groups as chrome laid directly over their
- * own real text (see `fountain-field.tsx`'s "Embedded branch cards" doc
- * comment above `activeBranchByGroup`) instead of mounting `BranchOverlay`'s
- * `position: fixed` cards. A single flag rather than deleting anything yet —
- * this is step 1 of the phased plan (ROADMAP), not a finished replacement:
- * flip back to `false` to compare against the overlay, or once a real gap is
- * found against it.
- */
-const EMBEDDED_BRANCH_CARDS_SPIKE = true;
 
 /**
  * Entity page: a structured form over an entity's .md file, opened by every
@@ -964,17 +951,6 @@ function EntityPage({ view }: { view: EntityView }) {
 	useEffect(() => {
 		setPendingBranchTitleFocusId(null);
 	}, [record?.path]);
-	/** Extra `padding-top` (pixels, keyed by branch section id) the Scene's
-	 *  own `FountainField` reserves right after each branch's span, so its
-	 *  `BranchOverlay` panel can be genuinely taller than the raw span
-	 *  without overlapping whatever follows — see branch-overlay.tsx's own
-	 *  top doc comment ("A branch's card can be genuinely TALLER..."). Reset
-	 *  alongside `branchDrafts` for the same reason (meaningless once the
-	 *  page moves to a different Scene). */
-	const [sceneBranchSpacers, setSceneBranchSpacers] = useState<Record<string, number>>({});
-	useEffect(() => {
-		setSceneBranchSpacers({});
-	}, [record?.path]);
 	/** Applies a patch to one draft and, once its required fields are all
 	 *  filled, transitions it to a real branch (`insertBranch`, fountain.ts)
 	 *  through `editScriptAndSync` — the same "operate on fresh disk text,
@@ -1043,9 +1019,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** The group's own "+" — writes a real new branch to the document
 	 *  IMMEDIATELY (no draft/staging step at all), titled with a literal
 	 *  `'Untitled'` placeholder, then focuses its Title field
-	 *  (`pendingBranchTitleFocusId`, claimed by `BranchTitleField`'s own
-	 *  `autoFocusEmpty`, which shows that field blank rather than literally
-	 *  "Untitled" until something is actually typed).
+	 *  (`pendingBranchTitleFocusId`, claimed by `BranchHeaderRowWidget`'s own
+	 *  `autoFocusEmpty`, fountain-field.tsx, which shows that field blank
+	 *  rather than literally "Untitled" until something is actually typed).
 	 *
 	 *  This USED TO stage a `kind: 'new-branch'` draft instead, committed
 	 *  only once its Title field's `ready` check passed — which, for a
@@ -1073,9 +1049,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  pruning) before its promise ever resolves, and the Scene page's own
 	 *  reactive `text` (from `useScriptText`'s vault-modify listener) can
 	 *  pick up the raw file write and mount the new card LONG before that —
-	 *  seeding `BranchTitleField`'s masked-blank display from a still-`null`
-	 *  pending id, so it showed the literal `'Untitled'` text instead of
-	 *  masking it. Rolling the id up front and calling
+	 *  seeding `BranchHeaderRowWidget`'s masked-blank display from a
+	 *  still-`null` pending id, so it showed the literal `'Untitled'` text
+	 *  instead of masking it. Rolling the id up front and calling
 	 *  `setPendingBranchTitleFocusId` BEFORE the `await` guarantees it's
 	 *  already in React state by the time any reactive re-render — however
 	 *  fast — could possibly mount that card. `insertBranch` (fountain.ts)
@@ -1104,10 +1080,6 @@ function EntityPage({ view }: { view: EntityView }) {
 	const handleSetBranchRaw = (groupId: string, newValue: string) => {
 		if (!project) return;
 		void editScriptAndSync(plugin, project, (raw) => setBranchTagValue(raw, groupId, newValue));
-	};
-	const handleSetBranchBody = (sectionId: string, newBody: string) => {
-		if (!project) return;
-		void editScriptAndSync(plugin, project, (raw) => replaceBranchBody(raw, sectionId, newBody));
 	};
 	const handleCutBranchGroupInScene = (groupId: string) => {
 		if (!project) return;
@@ -8165,13 +8137,9 @@ function EntityPage({ view }: { view: EntityView }) {
 														onCreateBranch={handleCreateBranchDraft}
 														onPasteBranchGroup={handlePasteBranchGroupInScene}
 														branchClipboardAvailable={getBranchClipboard() !== null}
-														// `BranchOverlay`'s own extra-height reservation
-														// (`onSpacerNeedsChange` below) is only meaningful for
-														// ITS OWN opaque cards — the embedded renderer's chrome
-														// is all real document lines with no shortfall to
-														// cover, so this is left unset whenever it's active.
-														branchSpacers={EMBEDDED_BRANCH_CARDS_SPIKE ? undefined : sceneBranchSpacers}
-														embeddedBranchCards={EMBEDDED_BRANCH_CARDS_SPIKE}
+														onCutBranchGroup={handleCutBranchGroupInScene}
+														onCopyBranchGroup={handleCopyBranchGroupInScene}
+														embeddedBranchCards
 														onRenameBranchTitle={handleRenameBranchTitle}
 														onSetBranchCombo={handleSetBranchCombo}
 														onSetBranchRaw={handleSetBranchRaw}
@@ -8189,21 +8157,6 @@ function EntityPage({ view }: { view: EntityView }) {
 														onDraftField={handleBranchDraftField}
 														onDismissDraft={handleDismissBranchDraft}
 														onCreateDraft={handleCommitBranchDraft}
-														onRenameBranchTitle={handleRenameBranchTitle}
-														onSetBranchCombo={handleSetBranchCombo}
-														onSetBranchRaw={handleSetBranchRaw}
-														onSetBranchBody={handleSetBranchBody}
-														onAddBranch={(groupId) => void handleAddBranch(groupId)}
-														pendingTitleFocusId={pendingBranchTitleFocusId}
-														onTitleFocusConsumed={() => setPendingBranchTitleFocusId(null)}
-														onCutBranchGroup={handleCutBranchGroupInScene}
-														onCopyBranchGroup={handleCopyBranchGroupInScene}
-														onDeleteBranch={handleDeleteBranchInScene}
-														characters={scriptParsed?.characters ?? []}
-														entityOptions={entityOptions}
-														ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs}
-														onSpacerNeedsChange={setSceneBranchSpacers}
-														renderRealCards={!EMBEDDED_BRANCH_CARDS_SPIKE}
 													/>
 												</div>
 											) : sceneScriptMode === 'pages' ? (
