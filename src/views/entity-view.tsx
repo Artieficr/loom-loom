@@ -88,7 +88,6 @@ import {
 	buildNavTree,
 	actScriptText,
 	deleteScriptEntity,
-	editScriptAndSync,
 	pushActTitles,
 	renderNavTreeItem,
 	replaceAltContentInScript,
@@ -98,7 +97,13 @@ import {
 	type NavNode,
 	type ScriptSearchMatch,
 } from './script-view';
-import { mutateScriptBuffer, registerActiveRegion, scheduleFlush, useScriptBuffer } from './script-buffer';
+import {
+	mutateScriptBuffer,
+	mutateScriptBufferAndFlush,
+	registerActiveRegion,
+	scheduleFlush,
+	useScriptBuffer,
+} from './script-buffer';
 import {
 	ActChapterBlocks,
 	deleteBookEntity,
@@ -616,7 +621,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project || !record || record.type !== 'scene') return;
 		const fresh = fieldRef.current?.getValue();
 		if (fresh === undefined) return;
-		void editScriptAndSync(plugin, project, (raw) => replaceSceneBody(raw, record.sceneId, fresh));
+		mutateScriptBuffer(plugin, project, (raw) => replaceSceneBody(raw, record.sceneId, fresh));
+		scheduleFlush(plugin, project);
 	};
 	/** The single write path every alt-text mutation handler below goes
 	 *  through: Scene's own field mutates then commits through it whenever
@@ -987,13 +993,12 @@ function EntityPage({ view }: { view: EntityView }) {
 	}, [record?.path]);
 	/** Applies a patch to one draft and, once its required fields are all
 	 *  filled, transitions it to a real branch (`insertBranch`, fountain.ts)
-	 *  through `editScriptAndSync` — the same "operate on fresh disk text,
-	 *  never on `sceneDraft`" pattern every other structural Scene-page edit
-	 *  already uses (`setSceneHeadingParts`'s own call sites), so this needs
-	 *  no special handling for `sceneDraft` possibly holding uncommitted
-	 *  prose edits: the live `FountainField`'s own "sync external value only
-	 *  while unfocused" convention (fountain-field.tsx) is what reconciles
-	 *  the two once the field next loses focus, same as it always has. */
+	 *  through `mutateScriptBufferAndFlush` — operating on the live shared
+	 *  buffer, which already reflects every keystroke `sceneDraft`'s own
+	 *  field has made (typing writes into the buffer synchronously, see
+	 *  `writeSceneScript` above), so there's nothing to reconcile here: no
+	 *  stale-disk-read window the way a fresh `vault.read` could once have
+	 *  left open. */
 	/** A draft field changed — updates state only, never commits. Committing
 	 *  used to happen automatically the instant `title`/`identifier`/
 	 *  `subidentifier` all became non-empty, which meant typing the FIRST
@@ -1021,10 +1026,10 @@ function EntityPage({ view }: { view: EntityView }) {
 		const anchorLine = sceneScriptEditorRef.current?.getDraftAnchorLine(id);
 		sceneScriptEditorRef.current?.clearDraftAnchor(id);
 		if (anchorLine === null || anchorLine === undefined) return;
-		void editScriptAndSync(plugin, project, (raw) => {
+		void mutateScriptBufferAndFlush(plugin, project, (raw) => {
 			const parsed = parseFountain(raw);
 			// The draft's anchor line is relative to `sceneDraft` (the SCENE'S
-			// OWN excerpt, heading stripped) — `editScriptAndSync` hands
+			// OWN excerpt, heading stripped) — `mutateScriptBufferAndFlush` hands
 			// `apply` the FULL script text, so the anchor has to be
 			// re-expressed as a whole-document line before `insertBranch` can
 			// use it. `sceneBodyLineOffset` (this component's own shared
@@ -1078,17 +1083,19 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *
 	 *  **The new section's id is rolled HERE, synchronously, not learned by
 	 *  re-parsing the file after the write lands** — a real, reported bug
-	 *  from the first version of this: `editScriptAndSync` does real
-	 *  disk-round-tripping work (write, re-read, `syncScenes`, sidecar
-	 *  pruning) before its promise ever resolves, and the Scene page's own
-	 *  reactive `text` (from `useScriptBuffer`'s shared buffer) can
-	 *  pick up the raw file write and mount the new card LONG before that —
-	 *  seeding `BranchHeaderRowWidget`'s masked-blank display from a
-	 *  still-`null` pending id, so it showed the literal `'Untitled'` text
-	 *  instead of masking it. Rolling the id up front and calling
-	 *  `setPendingBranchTitleFocusId` BEFORE the `await` guarantees it's
-	 *  already in React state by the time any reactive re-render — however
-	 *  fast — could possibly mount that card. `insertBranch` (fountain.ts)
+	 *  from the first version of this, and if anything MORE load-bearing
+	 *  now than when it was fixed: `mutateScriptBufferAndFlush`'s own
+	 *  `mutateScriptBuffer` half notifies every subscriber of the shared
+	 *  buffer SYNCHRONOUSLY, before any disk I/O even starts — so the Scene
+	 *  page's own reactive `scriptText` (`useScriptBuffer`) can re-render
+	 *  and mount the new card before this function's `await` on the
+	 *  eventual disk flush has even had a chance to return. Rolling the id
+	 *  up front and calling `setPendingBranchTitleFocusId` BEFORE that first
+	 *  synchronous mutation guarantees it's already in React state by the
+	 *  time any reactive re-render — however fast — could possibly mount
+	 *  that card; without it, `BranchHeaderRowWidget`'s masked-blank display
+	 *  would seed from a still-`null` pending id and show the literal
+	 *  `'Untitled'` text instead of masking it. `insertBranch` (fountain.ts)
 	 *  re-validates the id against the actual `parsed` set at write time
 	 *  regardless (its own `id?` doc comment), so a caller-supplied id is
 	 *  never trusted blindly. */
@@ -1096,24 +1103,24 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project || !scriptParsed) return;
 		const newId = freshLoomId(collectLoomIds(scriptParsed.scenes, scriptParsed.sections, scriptParsed.pageBreaks));
 		setPendingBranchTitleFocusId(newId);
-		const ok = await editScriptAndSync(plugin, project, (raw) =>
+		const ok = await mutateScriptBufferAndFlush(plugin, project, (raw) =>
 			insertBranch(raw, { afterGroupId: groupId }, { title: 'Untitled', branchValue: groupId, id: newId })
 		);
 		if (!ok) setPendingBranchTitleFocusId(null);
 	};
 	const handleRenameBranchTitle = (sectionId: string, newTitle: string) => {
 		if (!project) return;
-		void editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, sectionId, newTitle));
+		void mutateScriptBufferAndFlush(plugin, project, (raw) => renameSectionTitle(raw, sectionId, newTitle));
 	};
 	const handleSetBranchCombo = (groupId: string, identifier: string, subidentifier: string, numberOrOverride: string) => {
 		if (!project) return;
-		void editScriptAndSync(plugin, project, (raw) =>
+		void mutateScriptBufferAndFlush(plugin, project, (raw) =>
 			setBranchTagValue(raw, groupId, `${identifier}-${subidentifier}-${numberOrOverride}`)
 		);
 	};
 	const handleSetBranchRaw = (groupId: string, newValue: string) => {
 		if (!project) return;
-		void editScriptAndSync(plugin, project, (raw) => setBranchTagValue(raw, groupId, newValue));
+		void mutateScriptBufferAndFlush(plugin, project, (raw) => setBranchTagValue(raw, groupId, newValue));
 	};
 	/** Cuts a whole decision point, then hands the field's own new body
 	 *  straight to `replaceBody` (fountain-field.tsx) once the write lands —
@@ -1138,7 +1145,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project) return;
 		let newBody: string | null = null;
 		let cursorLine: number | null = null;
-		void editScriptAndSync(plugin, project, (raw) => {
+		void mutateScriptBufferAndFlush(plugin, project, (raw) => {
 			const parsed = parseFountain(raw);
 			const bounds = branchGroupBounds(parsed, groupId);
 			const oldScene = parsed.scenes.find((s) => s.loomId === record?.sceneId);
@@ -1166,19 +1173,17 @@ function EntityPage({ view }: { view: EntityView }) {
 			}
 		});
 	};
-	/** The read-only sibling of the above — leaves the group in the document,
-	 *  reading through `editScriptAndSync`'s own fresh-from-disk `raw` purely
-	 *  for a consistent read (returning `null` always, so nothing is ever
-	 *  written back). A later paste of what this stashes renumbers/re-ids
-	 *  itself automatically if the source is still around by then
+	/** The read-only sibling of the above — leaves the group in the document.
+	 *  Never wrote anything, so it never needed `editScriptAndSync`'s own
+	 *  disk round trip to begin with — reads straight off the live buffer
+	 *  (`scriptText`, already kept current via `useScriptBuffer` above) now
+	 *  that one's available. A later paste of what this stashes renumbers/
+	 *  re-ids itself automatically if the source is still around by then
 	 *  (`pasteBranchGroup`, fountain.ts) — nothing extra to do here. */
 	const handleCopyBranchGroupInScene = (groupId: string) => {
-		if (!project) return;
-		void editScriptAndSync(plugin, project, (raw) => {
-			const block = copyBranchGroup(raw, groupId);
-			if (block) setBranchClipboard(block);
-			return null;
-		});
+		if (!project || scriptText === null) return;
+		const block = copyBranchGroup(scriptText, groupId);
+		if (block) setBranchClipboard(block);
 	};
 	/** The trash icon on a branch card's own `###` row — deletes just THIS
 	 *  branch, unlike "Cut branch group" (which keeps the whole group
@@ -1195,7 +1200,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			t('view.script.branch.deleteBranchConfirmButton')
 		).then((confirmed) => {
 			if (!confirmed) return;
-			void editScriptAndSync(plugin, project, (raw) => removeBranchFromGroup(raw, sectionId)).then((ok) => {
+			void mutateScriptBufferAndFlush(plugin, project, (raw) => removeBranchFromGroup(raw, sectionId)).then((ok) => {
 				if (!ok) new Notice(t('view.script.editWriteFailed'));
 			});
 		});
@@ -1220,7 +1225,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!block) return;
 		let pastedBody: string | null = null;
 		let pastedCursorLine: number | null = null;
-		void editScriptAndSync(plugin, project, (raw) => {
+		void mutateScriptBufferAndFlush(plugin, project, (raw) => {
 			const parsed = parseFountain(raw);
 			const scene = parsed.scenes.find((s) => s.loomId === record?.sceneId);
 			if (!scene) return null;
@@ -2090,7 +2095,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				await editBookAndSync(plugin, project, (raw) => renameBookActTitle(raw, record.actId, entered));
 				return;
 			}
-			await editScriptAndSync(plugin, project, (raw) => renameSectionTitle(raw, record.actId, entered));
+			await mutateScriptBufferAndFlush(plugin, project, (raw) => renameSectionTitle(raw, record.actId, entered));
 		} finally {
 			commitNameInFlightRef.current = false;
 		}
@@ -2161,13 +2166,13 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project || record.type !== 'scene') return;
 		const value = raw.trim();
 		if (value === record.sceneIntExt) return;
-		void editScriptAndSync(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { intExt: value }));
+		void mutateScriptBufferAndFlush(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { intExt: value }));
 	};
 	const commitSceneTime = (raw: string = sceneTime) => {
 		if (!project || record.type !== 'scene') return;
 		const value = raw.trim();
 		if (value === record.sceneTime) return;
-		void editScriptAndSync(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { timeOfDay: value }));
+		void mutateScriptBufferAndFlush(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { timeOfDay: value }));
 	};
 
 	/** A confirm dialog that resolves to whether the user actually confirmed —
@@ -2363,7 +2368,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 
 		writeFm((fm) => setLoomKey(fm, FM.sceneLocation, `[[${linkTargetOf(target)}]]`));
-		void editScriptAndSync(plugin, project, (raw) =>
+		void mutateScriptBufferAndFlush(plugin, project, (raw) =>
 			setSceneHeadingParts(raw, record.sceneId, { location: joinLocationSub(mainRecord.name, subName) })
 		);
 	};
@@ -3903,7 +3908,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										const next = [...ids];
 										const [moved] = next.splice(from, 1);
 										next.splice(over, 0, moved);
-										void editScriptAndSync(plugin, project, (raw) => reorderBranchGroup(raw, item.id, next));
+										void mutateScriptBufferAndFlush(plugin, project, (raw) => reorderBranchGroup(raw, item.id, next));
 									})}
 									<span className="loom-row-caret" aria-hidden="true" />
 									<span className="loom-writer-row-num">{i + 1}</span>
@@ -6695,7 +6700,7 @@ function EntityPage({ view }: { view: EntityView }) {
 															>
 																{seqGrip('act-scenes', i, actScenes, (reordered) => {
 																	if (!project) return;
-																	void editScriptAndSync(plugin, project, (raw) =>
+																	void mutateScriptBufferAndFlush(plugin, project, (raw) =>
 																		reorderScenesInSection(
 																			raw,
 																			record.actId,
@@ -7581,7 +7586,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									// that fired instantly gave no chance to readjust.
 									const finishMove = () => {
 										const nextSibling = siblings[placeAt];
-										void editScriptAndSync(plugin, project, (raw) =>
+										void mutateScriptBufferAndFlush(plugin, project, (raw) =>
 											nextSibling
 												? moveSceneBefore(raw, record.sceneId, nextSibling.sceneId)
 												: moveSceneToSection(raw, record.sceneId, moveTargetAct.actId)

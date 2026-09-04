@@ -66,6 +66,7 @@ import {
 	findScriptFile,
 	flushScriptBufferNow,
 	mutateScriptBuffer,
+	mutateScriptBufferAndFlush,
 	prepareScriptText,
 	registerPostFlushHook,
 	scheduleFlush,
@@ -2890,26 +2891,27 @@ export async function editScriptAndSync(
  *  lives — used by every alt-text mutation handler above (cycling/drafting/
  *  accepting/editing an option), none of which have a live `FountainField`
  *  to dispatch a CM6 transaction through now that Script mode no longer
- *  exists: finding the span across the whole raw text and writing it back
- *  via `editScriptAndSync` works regardless of where the field would have
- *  been, mirroring `book-view.tsx`'s own `replaceAltContentInBook`. */
+ *  exists: finding the span across the whole buffer text and writing it back
+ *  via `mutateScriptBufferAndFlush` works regardless of where the field
+ *  would have been, mirroring `book-view.tsx`'s own
+ *  `replaceAltContentInBook`. */
 export async function replaceAltContentInScript(
 	plugin: LoomLoomPlugin,
 	project: ProjectDef,
 	id: string,
 	text: string
 ): Promise<void> {
-	const changed = await editScriptAndSync(plugin, project, (raw) => {
+	const changed = await mutateScriptBufferAndFlush(plugin, project, (raw) => {
 		const span = findAnnotationSpans(raw).find((s) => s.kind === 'alt' && s.id === id);
 		if (!span) return null;
 		return raw.slice(0, span.contentFrom) + text + raw.slice(span.contentTo);
 	});
 	// Diagnostic: this should always find a live span for an id the sidecar
-	// just cycled — if it doesn't, `editScript` silently no-ops (by design,
-	// for genuinely-absent targets elsewhere) and the swap never reaches
-	// disk, with nothing else to signal why. Surfacing it here rather than
-	// leaving it silent while tracking down a reported "cycling does
-	// nothing" bug.
+	// just cycled — if it doesn't, `mutateScriptBuffer` silently no-ops (by
+	// design, for genuinely-absent targets elsewhere) and the swap never
+	// reaches disk, with nothing else to signal why. Surfacing it here
+	// rather than leaving it silent while tracking down a reported "cycling
+	// does nothing" bug.
 	if (!changed) console.error('Loom Loom: replaceAltContentInScript found no live span for', id);
 }
 
@@ -2918,14 +2920,14 @@ export async function replaceAltContentInScript(
  *  `removeAnnotationMarkers` (a CM6 transaction dispatched through a live
  *  view), for the same reason `replaceAltContentInScript` above needs one:
  *  no live field to dispatch through, so this finds the span across the
- *  whole raw text via `editScriptAndSync` instead. Mirrors `book-view.tsx`'s
- *  `stripAnnotationMarkerInBook`. */
+ *  whole buffer text via `mutateScriptBufferAndFlush` instead. Mirrors
+ *  `book-view.tsx`'s `stripAnnotationMarkerInBook`. */
 export async function stripAnnotationMarkerInScript(
 	plugin: LoomLoomPlugin,
 	project: ProjectDef,
 	id: string
 ): Promise<void> {
-	await editScriptAndSync(plugin, project, (raw) => {
+	await mutateScriptBufferAndFlush(plugin, project, (raw) => {
 		const span = findAnnotationSpans(raw).find((s) => s.id === id);
 		if (!span) return null;
 		return raw.slice(0, span.from) + raw.slice(span.contentFrom, span.contentTo) + raw.slice(span.to);
@@ -2948,6 +2950,15 @@ export async function deleteScriptEntity(
 ): Promise<void> {
 	if (record.type === 'scene' && record.sceneId !== '') {
 		const sceneId = record.sceneId;
+		// Deliberately `editScript`, not the shared-buffer path — there's
+		// nothing useful to sync after a pure removal (no new heading to
+		// create/update a note from, and the note being removed is trashed
+		// a few lines down regardless), matching `removeBookAct`/
+		// `removeBookChapter`'s identical choice of plain `editBook` over
+		// `editBookAndSync` in book-view.tsx. `mutateScriptBufferAndFlush`
+		// has no way to opt out of its own always-runs `pruneOrphanedAnnotations`
+		// post-flush pass, so keeping this on the low-level primitive is what
+		// preserves that choice rather than silently reversing it.
 		await editScript(plugin, project, (raw) => removeScene(raw, sceneId));
 	} else if (record.type === 'act' && record.actId !== '') {
 		const actId = record.actId;

@@ -201,8 +201,9 @@ export function cleanAnnotationMarkers(text: string): { text: string; changed: b
 
 /** Marker ids currently backed by a COMPLETE pair — the annotation
  *  equivalent of `liveSceneIds`/`liveActIds` further down, feeding the
- *  sidecar-pruning GC pass in script-view.tsx's `runCommit`/
- *  `editScriptAndSync`. */
+ *  sidecar-pruning GC pass in script-view.tsx's `pruneOrphanedAnnotations`
+ *  (run after every successful `script-buffer.ts` flush, and directly by
+ *  `editScriptAndSync`). */
 export function liveAnnotationIds(text: string): Set<string> {
 	return new Set(findAnnotationSpans(text).map((s) => s.id));
 }
