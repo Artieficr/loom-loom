@@ -858,8 +858,8 @@ export const FountainField = forwardRef(function FountainField(
 		embeddedBranchCards?: boolean;
 		/** A branch's own Title field committed a new value (blur, non-empty,
 		 *  changed) — `renameSectionTitle` (fountain.ts) through
-		 *  `editScriptAndSync`, mirroring `BranchOverlay`'s identical prop of
-		 *  the same name. */
+		 *  `mutateScriptBufferAndFlush`, mirroring `BranchOverlay`'s identical
+		 *  prop of the same name. */
 		onRenameBranchTitle?: (sectionId: string, newTitle: string) => void;
 		/** The group's FIRST branch's decomposed Identifier/Subidentifier/
 		 *  Number fields committed — every sibling sharing the group's value
@@ -966,11 +966,13 @@ export const FountainField = forwardRef(function FountainField(
 	 *  `pendingTitleFocusIdRef` above: the whole flow (detect the typed
 	 *  colon, transform the text, focus the new combo) has to complete
 	 *  within ONE synchronous CM6 transaction (the field stays FOCUSED
-	 *  throughout, so the external-value-sync effect below — which only
-	 *  ever applies while unfocused — would silently sit on any change
-	 *  routed through React state/`editScriptAndSync` instead until the
-	 *  user's next blur), so there's no React round-trip to plumb a prop
-	 *  through in the first place. */
+	 *  throughout, so a change routed through React state/
+	 *  `mutateScriptBufferAndFlush` instead would only reach this field via
+	 *  the external-value-sync effect below — which even with its own
+	 *  `pendingExternalValueRef` stash, below, wouldn't apply until the
+	 *  user's NEXT blur, far too late to focus a combo that needs to exist
+	 *  right now), so there's no React round-trip to plumb a prop through in
+	 *  the first place. */
 	const pendingComboFocusIdRef = useRef<string | null>(null);
 	/** An external `value` change that arrived while this field was FOCUSED —
 	 *  stashed here instead of silently dropped (a real, confirmed gap: the
@@ -2205,12 +2207,14 @@ export const FountainField = forwardRef(function FountainField(
 		 *  all. `promoteTypedBranch` (fountain.ts) does the actual text
 		 *  transform, in memory, no disk write — this has to land as ONE
 		 *  synchronous CM6 transaction, not a round-trip through React state/
-		 *  `editScriptAndSync` the way every OTHER branch mutation in this
-		 *  codebase works: this fires while the field is still focused (the
-		 *  user is mid-keystroke), and the external-value-sync effect further
-		 *  down only ever applies a changed `value` prop while UNFOCUSED — a
-		 *  change routed through React would sit invisible in the live buffer
-		 *  until the next blur, defeating "the instant `:` is typed."
+		 *  `mutateScriptBufferAndFlush` the way every OTHER branch mutation in
+		 *  this codebase works: this fires while the field is still focused
+		 *  (the user is mid-keystroke), and the external-value-sync effect
+		 *  further down only ever applies a changed `value` prop while
+		 *  UNFOCUSED (its own `pendingExternalValueRef` stash notwithstanding
+		 *  — that only closes the gap until the NEXT blur, not "instantly") —
+		 *  a change routed through React would sit invisible in the live
+		 *  buffer until then, defeating "the instant `:` is typed."
 		 *  Everything here reads/simulates against `v.state`, the state
 		 *  BEFORE this pending keystroke lands (same convention
 		 *  `entityBracketPairing` above already uses), never the actual

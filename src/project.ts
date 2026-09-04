@@ -93,6 +93,7 @@ import {
 	reorderBookActs,
 	reorderBookChaptersInAct,
 } from './prose';
+import { ensureScriptBufferLoaded, flushScriptBufferNow, mutateScriptBuffer } from './views/script-buffer';
 import type LoomLoomPlugin from './main';
 
 /** Folders scaffolded for a new project: only the entity types its kind (and,
@@ -1220,45 +1221,16 @@ export async function createEntity(
 }
 
 /**
- * Reads/rewrites the project's script file — the same small job `editScript`
- * (script-view.tsx) does, duplicated here rather than imported: script-view.tsx
- * already imports FROM this module, so importing it back would be a cycle.
- * fountain.ts itself has no such problem (it depends on nothing), so every
- * actual script-editing function the modal below uses comes from there.
- *
- * Serialized against `editScript`'s OWN queue (`queueWrite`'s `'script'`
- * registry, keyed by this same `fullPath`) — a real, confirmed gap this
- * closes: without it, a creation-modal write here and an alt-text-cycling
- * write through `editScript` could still race each other on the same file
- * even after `editScript` itself gained internal serialization, since this
- * function went through a completely separate, uncoordinated
- * read-modify-write. `write-queue.ts` exists specifically so this module —
- * which can't import script-view.tsx/book-view.tsx directly — can still
- * share the SAME queue those two use.
- */
-async function editScriptFile(
-	plugin: LoomLoomPlugin,
-	project: ProjectDef,
-	apply: (text: string) => string
-): Promise<string | null> {
-	const path = normalizePath(`${project.name}.${SCRIPT_EXTENSION}`);
-	const fullPath = project.root === '' ? path : normalizePath(`${project.root}/${path}`);
-	return queueWrite('script', fullPath, async () => {
-		const file = plugin.app.vault.getFileByPath(fullPath);
-		if (!file) return null;
-		const raw = await plugin.app.vault.read(file);
-		const next = apply(raw);
-		if (next !== raw) await plugin.app.vault.modify(file, next);
-		return next;
-	});
-}
-
-/**
  * Reads/rewrites the project's Book file — the same small job `editBook`
- * (book-view.tsx) does, duplicated here for the same import-cycle reason as
- * `editScriptFile` above (book-view.tsx already imports `createEntity`/
- * `entityFileName` FROM this module). Unlike Script, a Prose project has no
- * Book file scaffolded at project setup, so this creates one on first write
+ * (book-view.tsx) does, duplicated here because book-view.tsx already
+ * imports `createEntity`/`entityFileName` FROM this module, so importing it
+ * back would cycle. Unlike Script's own scene/act creation (`submitScene`/
+ * `submitAct` below, which write through `script-buffer.ts`'s shared
+ * in-memory buffer — a module with no dependency on this one, so no cycle
+ * to dodge there), Prose hasn't been migrated onto an equivalent shared
+ * buffer yet, so this private duplicate is still how a Chapter/Act creation
+ * modal writes the Book file. Unlike Script, a Prose project has no Book
+ * file scaffolded at project setup, so this creates one on first write
  * rather than returning null when it's missing — mirrors `createBookFile`.
  * Also runs `ensureBookIds` on the result, mirroring `editBookAndSync`'s own
  * chain — this is the ONE write path a Chapter/Act creation modal uses, so
@@ -1268,8 +1240,15 @@ async function editScriptFile(
  * freshly appended/moved chapter or act picks up its own unwanted blank
  * line in the first place.
  *
- * Serialized against `editBook`'s OWN queue the same way `editScriptFile`
- * above is against `editScript`'s — see that function's own doc comment.
+ * Serialized against `editBook`'s OWN queue (`queueWrite`'s `'book'`
+ * registry, keyed by this same `fullPath`) — a real, confirmed gap this
+ * closes: without it, a creation-modal write here and any other write
+ * through `editBook` could still race each other on the same file even
+ * after `editBook` itself gained internal serialization, since this
+ * function went through a completely separate, uncoordinated
+ * read-modify-write. `write-queue.ts` exists specifically so this module —
+ * which can't import book-view.tsx directly — can still share the SAME
+ * queue that one uses.
  */
 async function editBookFile(
 	plugin: LoomLoomPlugin,
@@ -1297,9 +1276,9 @@ function newActStub(projectRoot: string): EntityRecord {
 }
 
 /** Matches the file's own frontmatter block — same regex as `FRONTMATTER_RE`
- *  in views/common.tsx, duplicated for the same reason `editScriptFile` is:
- *  common.tsx is a view, and views already import FROM this module. Used to
- *  write a newly-created Scene/Act's Notes as the note's raw body. */
+ *  in views/common.tsx, duplicated for the same reason `editBookFile` above
+ *  is: common.tsx is a view, and views already import FROM this module.
+ *  Used to write a newly-created Scene/Act's Notes as the note's raw body. */
 const FM_BLOCK_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
 async function writeNotesBody(plugin: LoomLoomPlugin, file: TFile, notes: string): Promise<void> {
 	const trimmed = notes.trim();
@@ -2838,7 +2817,9 @@ export class CreateEntityModal extends Modal {
 				: [];
 
 		let newId: string | null = null;
-		const nextText = await editScriptFile(this.plugin, this.project, (raw) => {
+		let nextText: string | null = null;
+		await ensureScriptBufferLoaded(this.plugin, this.project);
+		const applied = mutateScriptBuffer(this.plugin, this.project, (raw) => {
 			let t = appendScene(raw, mainLoc);
 			const parsed = parseFountain(t);
 			const created = parsed.scenes[parsed.scenes.length - 1];
@@ -2859,9 +2840,10 @@ export class CreateEntityModal extends Modal {
 					location: joinLocationSub(mainLoc, fields.subLoc),
 					timeOfDay: fields.timeOfDay.trim(),
 				}) ?? t;
+			nextText = t;
 			return t;
 		});
-		if (nextText === null || !newId) {
+		if (!applied || nextText === null || !newId) {
 			new Notice(t('project.createEntity.sceneWriteFailed'));
 			return;
 		}
@@ -2891,6 +2873,13 @@ export class CreateEntityModal extends Modal {
 				setLoomKey(fm, FM.seq, scene.index);
 			});
 			await writeNotesBody(this.plugin, created, fields.notes);
+			// The note already carries `newId` at this point, so `syncScenes`
+			// (run inside this flush's own post-flush hook) matches it by id
+			// and updates it in place rather than creating a duplicate — this
+			// is what derives the note's cast/factions/mentioned-locations
+			// immediately, instead of leaving them stale until some later,
+			// unrelated script edit happens to trigger a sync.
+			await flushScriptBufferNow(this.plugin, this.project);
 			this.close();
 			if (this.options.onCreated) {
 				this.options.onCreated(created);
@@ -2907,7 +2896,7 @@ export class CreateEntityModal extends Modal {
 	/** Resolves a scene heading's main/sublocation text to Location entities,
 	 *  creating whichever doesn't exist yet — mirrors `resolveSceneLocation` in
 	 *  script-view.tsx's `syncScenes` (duplicated for the same import-cycle
-	 *  reason as `editScriptFile` above), so a name typed fresh here connects
+	 *  reason as `editBookFile` above), so a name typed fresh here connects
 	 *  exactly the way the same name typed into the script would. */
 	private async resolveModalLocation(mainName: string, subName: string): Promise<EntityRecord | null> {
 		const mainKey = mainName.trim().toLowerCase();
@@ -3141,7 +3130,9 @@ export class CreateEntityModal extends Modal {
 		const displayTitle = fields.displayTitle.trim();
 
 		let newId: string | null = null;
-		const nextText = await editScriptFile(this.plugin, this.project, (raw) => {
+		let nextText: string | null = null;
+		await ensureScriptBufferLoaded(this.plugin, this.project);
+		const applied = mutateScriptBuffer(this.plugin, this.project, (raw) => {
 			let t = appendAct(raw, title);
 			const parsed = parseFountain(t);
 			const last = [...parsed.sections].reverse().find((sec) => sec.level === 1 && sec.loomId !== null);
@@ -3154,9 +3145,10 @@ export class CreateEntityModal extends Modal {
 				t = reorderTopSections(t, order) ?? t;
 			}
 			if (displayTitle !== '') t = applyDisplayTitles(t, new Map([[newId, displayTitle]]));
+			nextText = t;
 			return t;
 		});
-		if (nextText === null || !newId) {
+		if (!applied || nextText === null || !newId) {
 			new Notice(t('project.createEntity.actWriteFailed'));
 			return;
 		}
@@ -3187,6 +3179,10 @@ export class CreateEntityModal extends Modal {
 				seq,
 				displayTitle,
 			};
+			// Same reasoning as `submitScene`'s own flush — the note already
+			// carries `newId`, so `syncScenes` (this flush's post-flush hook)
+			// matches and updates it rather than creating a duplicate.
+			await flushScriptBufferNow(this.plugin, this.project);
 			this.close();
 			if (this.options.onActCreated) {
 				this.options.onActCreated(record);

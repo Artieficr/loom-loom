@@ -68,6 +68,10 @@ interface ScriptBufferState {
 	flushing: Promise<void> | null;
 	flushAgainAfter: boolean;
 	listenerInstalled: boolean;
+	/** Resolves once the buffer's first disk read has landed (or resolves
+	 *  immediately if the project has no script file yet) — see
+	 *  `ensureScriptBufferLoaded`'s own doc comment for why this exists. */
+	loadPromise: Promise<void>;
 }
 
 const buffers = new Map<string, ScriptBufferState>();
@@ -179,6 +183,7 @@ function newState(): ScriptBufferState {
 		flushing: null,
 		flushAgainAfter: false,
 		listenerInstalled: false,
+		loadPromise: Promise.resolve(),
 	};
 }
 
@@ -197,10 +202,27 @@ function adopt(state: ScriptBufferState, text: string): void {
 	notify(state);
 }
 
-/** Reconciles a fresh disk read against the buffer's current in-memory
- *  state via `reconcileScriptText` (fountain.ts) and applies the result —
- *  the one place `vault.on('modify')` events actually land. */
-function reconcile(state: ScriptBufferState, diskText: string): void {
+/**
+ * Reconciles a fresh disk read against the buffer's current in-memory
+ * state via `reconcileScriptText` (fountain.ts) and applies the result —
+ * the one place `vault.on('modify')` events actually land.
+ *
+ * Takes `plugin`/`project` (not just `state`) for one reason: a `merged` or
+ * `local-wins` result differs from what's now ON DISK, by construction —
+ * disk still holds the pre-merge external text until something pushes the
+ * reconciled result back out. A real, caught-before-shipping bug: the first
+ * version of this function updated `state.text`/`notify`ed and stopped
+ * there, with no `scheduleFlush` call — the merge lived in memory only,
+ * and unless some LATER, unrelated edit happened to trigger another flush,
+ * the just-reconciled change (someone's actual typing, successfully merged
+ * against a conflicting external write) could sit un-persisted forever,
+ * discarded outright on a reload. `scheduleFlush(plugin, project)` (an
+ * IMMEDIATE one — no `debounceMs` — since this is push-the-merge-back-out,
+ * not a typing surface) is what the plan's own pseudocode already called
+ * for; this was a real gap between that pseudocode and what actually got
+ * implemented, not a deliberate omission.
+ */
+function reconcile(plugin: LoomLoomPlugin, project: ProjectDef, state: ScriptBufferState, diskText: string): void {
 	if (!state.loaded) {
 		adopt(state, diskText);
 		return;
@@ -223,6 +245,7 @@ function reconcile(state: ScriptBufferState, diskText: string): void {
 			state.text = result.text;
 			state.lastFlushedText = diskText;
 			notify(state);
+			scheduleFlush(plugin, project);
 			return;
 	}
 }
@@ -238,17 +261,33 @@ function ensureBuffer(plugin: LoomLoomPlugin, project: ProjectDef): ScriptBuffer
 		state.listenerInstalled = true;
 		const read = () => {
 			const file = findScriptFile(plugin, project);
-			if (!file) return;
-			void plugin.app.vault.read(file).then((raw) => reconcile(state, raw));
+			if (!file) return Promise.resolve();
+			return plugin.app.vault.read(file).then((raw) => reconcile(plugin, project, state, raw));
 		};
-		read();
+		state.loadPromise = read();
 		const touched = (f: { path: string }) => {
-			if (f.path === path) read();
+			if (f.path === path) void read();
 		};
 		plugin.registerEvent(plugin.app.vault.on('modify', touched));
 		plugin.registerEvent(plugin.app.vault.on('create', touched));
 	}
 	return state;
+}
+
+/**
+ * Awaits the buffer's first disk read — for a caller with no React
+ * component of its own to `useScriptBuffer` from (a creation modal in
+ * project.ts, which can't use hooks): await this before the first
+ * `mutateScriptBuffer` call, so a scene/act created against a COLD buffer
+ * (no Script/Scene page opened for this project yet this session) doesn't
+ * silently no-op — `mutateScriptBuffer` warns and does nothing when
+ * `!state.loaded`, exactly the state a just-created buffer starts in before
+ * its async initial read resolves. A no-op await once the buffer is
+ * already loaded (every OTHER caller's own first hook-driven read already
+ * happened), so this is safe to call unconditionally right before a write.
+ */
+export async function ensureScriptBufferLoaded(plugin: LoomLoomPlugin, project: ProjectDef): Promise<void> {
+	await ensureBuffer(plugin, project).loadPromise;
 }
 
 /** Subscribes a component to one project's script buffer; returns its
@@ -304,6 +343,25 @@ export function mutateScriptBuffer(
 	state.text = next;
 	notify(state);
 	return true;
+}
+
+/**
+ * `mutateScriptBuffer` + an immediate `flushScriptBufferNow`, combined into
+ * one call with the same async boolean-return shape `editScriptAndSync`
+ * (script-view.tsx) has — a near drop-in replacement for a caller that
+ * doesn't need fine control over WHEN the flush happens. A genuinely
+ * debounced typing surface (the Scene page's own field, mid-keystroke)
+ * should keep calling `mutateScriptBuffer` + `scheduleFlush` separately
+ * instead — this one flushes right away every time.
+ */
+export async function mutateScriptBufferAndFlush(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	apply: (text: string) => string | null
+): Promise<boolean> {
+	const applied = mutateScriptBuffer(plugin, project, apply);
+	if (applied) await flushScriptBufferNow(plugin, project);
+	return applied;
 }
 
 /** Marks which scene (if any) is the currently-open Scene page's own body —
