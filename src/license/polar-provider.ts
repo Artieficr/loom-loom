@@ -13,6 +13,17 @@ import { ActivateResult, DeactivateResult, LicenseProvider, ValidateResult } fro
  * Uses Obsidian's `requestUrl`, never `fetch` — required for mobile (no CORS
  * layer) and it's what Obsidian's own plugin review checks for.
  *
+ * **API versioning**: every request pins `Polar-Version: 2026-04` (date-based,
+ * `YYYY-MM`, per Polar's own announcement of this scheme). Polar keeps three
+ * versions live at a time — Current, Deprecated, Next — and rotates them
+ * quarterly (Jan/Apr/Jul/Oct); omitting the header falls back to whatever is
+ * Current *at request time*, which is exactly the silently-shifting contract
+ * pinning exists to avoid. 2026-10 becomes Current on 2026-10-01, at which
+ * point 2026-04 (this pin) becomes Deprecated but stays on the SAME stable
+ * contract until it's removed at the 2027-01 release — so this pin keeps
+ * working unattended through then, but `POLAR_API_VERSION` must move to a
+ * newer version (after testing against it) before the 2027-01 cutover.
+ *
  * **Wire format**: the raw REST body is snake_case (`organization_id`,
  * `activation_id`) even though Polar's own JS SDK exposes camelCase — the SDK
  * translates at its own boundary, we're calling the HTTP API directly. `POST
@@ -28,6 +39,10 @@ import { ActivateResult, DeactivateResult, LicenseProvider, ValidateResult } fro
  */
 
 const BASE_URL = 'https://api.polar.sh/v1/customer-portal/license-keys';
+
+/** Pinned API version (see the file-level doc comment above for the rotation
+ *  schedule) — bump only after testing against the newer version's contract. */
+const POLAR_API_VERSION = '2026-04';
 
 /** Loom Loom's Polar.sh organization — every License Keys API call needs it. */
 export const POLAR_ORGANIZATION_ID = 'd732a90d-0029-4e4b-910f-56fbf6b1a469';
@@ -82,6 +97,7 @@ export class PolarLicenseProvider implements LicenseProvider {
 				url: `${BASE_URL}/${endpoint}`,
 				method: 'POST',
 				contentType: 'application/json',
+				headers: { 'Polar-Version': POLAR_API_VERSION },
 				body: JSON.stringify(body),
 				throw: false,
 			});
