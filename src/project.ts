@@ -57,6 +57,7 @@ import {
 	ProjectKind,
 	WriterMode,
 	featuresOf,
+	projectFolderPath,
 	projectKindDescription,
 	projectKindLabel,
 	projectRoleType,
@@ -106,7 +107,7 @@ function projectSubfolders(kind: ProjectKind, writerMode: WriterMode = DEFAULT_W
 	return ['Entities', ...typesFor(kind, writerMode).map((t) => ENTITY_META[t].folder), TIMELINES_FOLDER];
 }
 
-async function ensureFolder(app: App, path: string): Promise<void> {
+export async function ensureFolder(app: App, path: string): Promise<void> {
 	let current = '';
 	for (const segment of path.split('/')) {
 		current = current === '' ? segment : current + '/' + segment;
@@ -3573,7 +3574,7 @@ export class CreateEntityModal extends Modal {
  * vault folders, but any path (including one that doesn't exist yet) stays
  * typeable — unlike a pick-only fuzzy modal.
  */
-class FolderSuggest extends AbstractInputSuggest<TFolder> {
+export class FolderSuggest extends AbstractInputSuggest<TFolder> {
 	/** Whether the popup is showing — lets the host input tell "Enter picks a
 	 *  suggestion" apart from "Enter means submit". */
 	suggestionsShown = false;
@@ -3613,10 +3614,6 @@ class FolderSuggest extends AbstractInputSuggest<TFolder> {
 }
 
 export class SetupProjectModal extends Modal {
-	/** 'create' scaffolds a new folder named after the project inside `dir`;
-	 *  'use' turns `dir` itself into the project folder. */
-	private mode: 'create' | 'use' = 'create';
-	private dir = '';
 	private name = '';
 	private kind: ProjectKind = DEFAULT_PROJECT_KIND;
 	/** Writer only: Fountain script vs. prose — mutually exclusive per project
@@ -3631,8 +3628,8 @@ export class SetupProjectModal extends Modal {
 	onOpen(): void {
 		this.setTitle(t('project.setup.title'));
 		// Obsidian vertically centers a modal by default — this one's height
-		// changes a lot switching Create/Use (a different field set each way),
-		// so centering kept shifting the box's own TOP edge up and down on
+		// changes with the picked kind (Writer adds its Script/Prose pills and
+		// a longer "Holds" line), so centering kept shifting the box's own TOP edge up and down on
 		// every switch (centering holds the MIDDLE fixed, not the top).
 		// Anchoring to the top instead keeps the top edge planted in one spot
 		// regardless of height.
@@ -3643,50 +3640,16 @@ export class SetupProjectModal extends Modal {
 	private render(): void {
 		this.contentEl.empty();
 
-		const pills = this.contentEl.createDiv({ cls: 'loom-seg loom-setup-mode-pills' });
-		const pill = (mode: 'create' | 'use', label: string) => {
-			const btn = pills.createEl('button', {
-				cls: 'loom-seg-btn' + (this.mode === mode ? ' loom-seg-on' : ''),
-				text: label,
-			});
-			btn.addEventListener('click', () => {
-				this.mode = mode;
-				this.render();
-			});
-		};
-		pill('create', t('project.setup.pillCreate'));
-		pill('use', t('project.setup.pillUse'));
-
-		if (this.mode === 'create') {
-			new Setting(this.contentEl)
-				.setName(t('project.setup.projectName'))
-				.setDesc(t('project.setup.projectNameDesc'))
-				.addText((text) => {
-					text.setPlaceholder(t('project.setup.projectNamePlaceholder'))
-						.setValue(this.name)
-						.onChange((v) => (this.name = v.trim()));
-					text.inputEl.addEventListener('keydown', (e) => {
-						if (e.key === 'Enter') void this.submit();
-					});
-					window.setTimeout(() => text.inputEl.focus());
-				});
-		}
-
 		new Setting(this.contentEl)
-			.setName(this.mode === 'create' ? t('project.setup.locationLabel') : t('project.setup.projectFolderLabel'))
-			.setDesc(
-				this.mode === 'create' ? t('project.setup.locationDesc') : t('project.setup.projectFolderDesc')
-			)
+			.setName(t('project.setup.projectName'))
 			.addText((text) => {
-				text.setPlaceholder(t('project.setup.pickFolderPlaceholder'))
-					.setValue(this.dir)
-					.onChange((v) => (this.dir = v.trim()));
-				const suggest = new FolderSuggest(this.app, text.inputEl);
+				text.setPlaceholder(t('project.setup.projectNamePlaceholder'))
+					.setValue(this.name)
+					.onChange((v) => (this.name = v.trim()));
 				text.inputEl.addEventListener('keydown', (e) => {
-					// With the popup open, Enter picks the highlighted folder
-					// (handled by the suggest's scope); only a second Enter submits.
-					if (e.key === 'Enter' && !suggest.suggestionsShown) void this.submit();
+					if (e.key === 'Enter') void this.submit();
 				});
+				window.setTimeout(() => text.inputEl.focus());
 			});
 
 		// The kind decides which entity types the project holds, so it is
@@ -3786,20 +3749,15 @@ export class SetupProjectModal extends Modal {
 	}
 
 	private async submit(): Promise<void> {
-		let root: string;
-		if (this.mode === 'create') {
-			const name = sanitizeFileName(this.name);
-			if (name === '') {
-				new Notice(t('project.setup.projectNameRequired'));
-				return;
-			}
-			root = this.dir === '' ? name : `${this.dir}/${name}`;
-		} else {
-			if (this.dir === '') {
-				new Notice(t('project.setup.folderPathRequired'));
-				return;
-			}
-			root = this.dir;
+		const name = sanitizeFileName(this.name);
+		if (name === '') {
+			new Notice(t('project.setup.projectNameRequired'));
+			return;
+		}
+		const root = projectFolderPath(this.plugin.settings.loomRoot, this.kind, name);
+		if (this.app.vault.getAbstractFileByPath(root)) {
+			new Notice(t('project.setup.projectExists'));
+			return;
 		}
 		// Authoritative re-check, not just the render()-time disabled state: the
 		// index or license tier could have changed between opening this modal and
@@ -3884,7 +3842,10 @@ export class ConfirmModal extends Modal {
 		private heading: string,
 		private detail: string,
 		private onConfirm: () => void | Promise<void>,
-		private confirmText = t('project.confirm.continueDefault')
+		private confirmText = t('project.confirm.continueDefault'),
+		/** An optional switch shown above the buttons; `value` is updated in
+		 *  place, so `onConfirm` reads the user's choice from the same object. */
+		private option?: { label: string; value: boolean }
 	) {
 		super(app);
 	}
@@ -3894,6 +3855,12 @@ export class ConfirmModal extends Modal {
 		// pre-line so a multi-paragraph detail (e.g. the script-import warning,
 		// which has to spell out what is and isn't destroyed) keeps its breaks.
 		this.contentEl.createEl('p', { cls: 'loom-confirm-detail', text: this.detail });
+		const option = this.option;
+		if (option) {
+			new Setting(this.contentEl)
+				.setName(option.label)
+				.addToggle((tg) => tg.setValue(option.value).onChange((v) => (option.value = v)));
+		}
 		new Setting(this.contentEl)
 			.addButton((btn) => btn.setButtonText(t('project.common.cancel')).onClick(() => this.close()))
 			.addButton((btn) => {

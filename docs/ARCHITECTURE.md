@@ -16,6 +16,38 @@ state, and commands resolve a project via single-project fallback or a fuzzy pic
 Pre-.loom installs are migrated on load: the legacy `projectRoot` setting gets a .loom
 file scaffolded into it once, then the setting is cleared.
 
+New projects are always created under one **Loom root** folder (`settings.loomRoot`,
+default `loom-loom`), in a subfolder per kind (`<root>/Writer/<name>` — the English kind
+label, so folder names don't change with the interface language) — the setup modal only
+asks for a name. Discovery deliberately stays
+vault-wide (any `.loom` file is a project), so the root is a placement convention, not a
+filter. Changing the root moves every project folder with `fileManager.renameFile` (links
+stay intact). Per-project UI state in settings is keyed by project root, so it's re-keyed
+from the vault `rename` event's folder branch rather than inside the move itself — that
+way renaming or moving a project folder by hand in the file explorer keeps its graph
+cameras, pins, filters and saved views too, not just the settings-driven move. The
+plugin's own **project manager** view (grouped by kind, user-ordered) is the navigation
+surface for projects; the file explorer still shows the folders.
+
+**Snapshots** (`src/snapshots.ts`) are whole-project, point-in-time copies of every text
+file, because Obsidian's own File recovery only covers `.md`/`.canvas`/`.base` (checked in
+app.js) and keeps them per file in per-device IndexedDB — so the `.fountain`, `.loomprose`,
+`.loom` and JSON sidecars had no history at all, and nothing could put a project back to one
+consistent moment. They live in a hidden `<project>/.snapshots/` folder: hidden so Obsidian
+never indexes the copies (the indexer would otherwise find each copy's `.loom` and list it
+as another project), inside the project so they travel with a moved folder (a folder rename
+is one `fs.rename` of the directory) and go to the trash with it, with no re-keying code.
+One gzipped JSON per snapshot (`CompressionStream`), with time, kind and content hash in
+the file name, so retention and the "nothing changed" check never open a file. Retention
+is a rule, not a conversion: keep the newest N interval snapshots plus the newest snapshot
+of each of the last N days that have one (a day without changes produces no snapshot, so a
+long break never ages the history out); manual and before-restore snapshots are never
+deleted automatically. On a vault synced to two machines both schedule snapshots, but each
+compares against the newest snapshot on disk, synced ones included, so the second usually
+skips; an occasional duplicate is harmless. Restore flushes the in-memory script buffer
+first — otherwise the buffer would read the restored file as an external change racing its
+own unsaved text and write that text back.
+
 ## Data flow
 
 ```

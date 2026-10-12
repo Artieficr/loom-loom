@@ -835,6 +835,7 @@ export const VIEW_GROUP = 'loom-loom-group';
 export const VIEW_MAP = 'loom-loom-map';
 export const VIEW_SCRIPT = 'loom-loom-script';
 export const VIEW_PROSE = 'loom-loom-prose';
+export const VIEW_PROJECTS = 'loom-loom-projects';
 
 /** Maps: a spatial drawing canvas where zones (polygons) are associated with
  *  locations. Lucide icon + the folders maps/images live under. Maps sit under
