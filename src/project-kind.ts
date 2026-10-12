@@ -65,6 +65,13 @@ export const PROJECT_KIND_META: Record<ProjectKind, ProjectKindMeta> = {
 	},
 };
 
+/** A project's folder: `<loomRoot>/<kind folder>/<name>`. The kind folder is
+ *  the English label on purpose — a folder name must not change with the
+ *  interface language. */
+export function projectFolderPath(loomRoot: string, kind: ProjectKind, name: string): string {
+	return `${loomRoot}/${PROJECT_KIND_META[kind].label}/${name}`;
+}
+
 /** `PROJECT_KIND_META[kind].label`/`.description` are the English source
  *  strings — every DISPLAY read should go through these instead, mirroring
  *  `entityLabel`/`entityPlural` in `types.ts`. */

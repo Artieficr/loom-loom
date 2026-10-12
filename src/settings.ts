@@ -7,17 +7,41 @@ import {
 	SettingDefinition,
 	SettingDefinitionItem,
 	TFile,
+	normalizePath,
 	setIcon,
 } from 'obsidian';
 import { ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera, bookLabel, entityLabel, entityPlural, scriptLabel } from './types';
-import { DEFAULT_PROJECT_KIND, PROJECT_KIND_META, PROJECT_KINDS, projectKindLabel, typesFor } from './project-kind';
-import { ConfirmModal } from './project';
+import {
+	DEFAULT_PROJECT_KIND,
+	PROJECT_KIND_META,
+	PROJECT_KINDS,
+	ProjectKind,
+	isProjectKind,
+	projectKindLabel,
+	typesFor,
+} from './project-kind';
+import { ConfirmModal, FolderSuggest } from './project';
 import { TimelineSettingsEditor } from './timeline-settings';
+import {
+	SNAPSHOT_INTERVALS,
+	SNAPSHOT_KEEP_DAILY_MAX,
+	SNAPSHOT_KEEP_RECENT_MAX,
+	SNAPSHOT_KEEP_RECENT_MIN,
+	listSnapshots,
+} from './snapshots';
 import { POLAR_CHECKOUT_URL } from './license/polar-provider';
-import { t, LocaleCode, SUPPORTED_LOCALES } from './i18n';
+import { t, tn, LocaleCode, SUPPORTED_LOCALES } from './i18n';
 import type LoomLoomPlugin from './main';
 
 export type LoomTextSize = 'compact' | 'normal' | 'large';
+
+/** A typed Loom root as a vault folder path: no leading/trailing slashes,
+ *  '' when nothing usable was typed (the vault root itself isn't allowed —
+ *  moving projects "into" it would mean moving them nowhere). */
+export function normalizeLoomRoot(raw: string): string {
+	const path = normalizePath(raw.trim());
+	return path === '/' ? '' : path.replace(/^\/+|\/+$/g, '');
+}
 
 /** A darker shade of a hex color. */
 export function darkenHex(hex: string, factor = 0.62): string {
@@ -169,6 +193,26 @@ export interface LoomLoomSettings {
 	 *  is always an explicit button click, never automatic on sync, so opening
 	 *  the vault on a new machine doesn't silently burn an activation slot. */
 	licenseKey: string;
+	/** Vault folder every project lives in (`<loomRoot>/<Project>/`). Changing
+	 *  it from settings moves every project there (`LoomLoomPlugin.changeLoomRoot`). */
+	loomRoot: string;
+	/** Whether the project manager sits as a tab in the left sidebar (beside
+	 *  Files/Search/Bookmarks). The ribbon icon opens it as a main-area tab
+	 *  regardless. */
+	projectsSidebarTab: boolean;
+	/** Manual order of projects in the project manager, as project roots —
+	 *  one flat list, each kind group shows its own members in this order;
+	 *  projects missing from it sort after, by name. */
+	projectOrder: string[];
+	/** Project-manager kind groups the user has collapsed. */
+	collapsedProjectKinds: ProjectKind[];
+	/** Project snapshots (`src/snapshots.ts`): on/off, minutes between interval
+	 *  snapshots (one of `SNAPSHOT_INTERVALS`), how many interval snapshots to
+	 *  keep, and how many days' last snapshot to keep on top of those. */
+	snapshotsEnabled: boolean;
+	snapshotIntervalMin: number;
+	snapshotKeepRecent: number;
+	snapshotKeepDaily: number;
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
@@ -249,6 +293,14 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	timelineManualOrder: {},
 	timelineDrawerHeight: 240,
 	licenseKey: '',
+	loomRoot: 'loom-loom',
+	projectsSidebarTab: true,
+	projectOrder: [],
+	collapsedProjectKinds: [],
+	snapshotsEnabled: true,
+	snapshotIntervalMin: 60,
+	snapshotKeepRecent: 12,
+	snapshotKeepDaily: 30,
 };
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -320,6 +372,8 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 		graphViews: {},
 		timelineManualOrder: {},
 		timelineDrawerHeight: 240,
+		projectOrder: [],
+		collapsedProjectKinds: [],
 	};
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
@@ -356,6 +410,28 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	}
 	if (typeof data.licenseKey === 'string') {
 		base.licenseKey = data.licenseKey;
+	}
+	if (typeof data.loomRoot === 'string' && normalizeLoomRoot(data.loomRoot) !== '') {
+		base.loomRoot = normalizeLoomRoot(data.loomRoot);
+	}
+	if (typeof data.projectsSidebarTab === 'boolean') {
+		base.projectsSidebarTab = data.projectsSidebarTab;
+	}
+	if (Array.isArray(data.projectOrder)) {
+		base.projectOrder = data.projectOrder.filter((r): r is string => typeof r === 'string');
+	}
+	if (Array.isArray(data.collapsedProjectKinds)) {
+		base.collapsedProjectKinds = (data.collapsedProjectKinds as unknown[]).filter(isProjectKind);
+	}
+	if (typeof data.snapshotsEnabled === 'boolean') base.snapshotsEnabled = data.snapshotsEnabled;
+	if ((SNAPSHOT_INTERVALS as readonly unknown[]).includes(data.snapshotIntervalMin)) {
+		base.snapshotIntervalMin = data.snapshotIntervalMin as number;
+	}
+	if (typeof data.snapshotKeepRecent === 'number' && Number.isFinite(data.snapshotKeepRecent)) {
+		base.snapshotKeepRecent = Math.max(SNAPSHOT_KEEP_RECENT_MIN, Math.min(SNAPSHOT_KEEP_RECENT_MAX, Math.round(data.snapshotKeepRecent)));
+	}
+	if (typeof data.snapshotKeepDaily === 'number' && Number.isFinite(data.snapshotKeepDaily)) {
+		base.snapshotKeepDaily = Math.max(0, Math.min(SNAPSHOT_KEEP_DAILY_MAX, Math.round(data.snapshotKeepDaily)));
 	}
 	if (typeof data.timelineDrawerHeight === 'number' && data.timelineDrawerHeight > 0) {
 		base.timelineDrawerHeight = data.timelineDrawerHeight;
@@ -499,6 +575,24 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	return base;
 }
 
+function snapshotIntervalLabel(min: number): string {
+	return min < 60 ? tn('settings.projects.snapshots.minutesShort', min) : tn('settings.projects.snapshots.hours', min / 60);
+}
+
+/** "1 day 12 hours", "45 minutes" — whole days/hours/minutes, zero parts dropped. */
+function formatDuration(totalMin: number): string {
+	const days = Math.floor(totalMin / 1440);
+	const hours = Math.floor((totalMin % 1440) / 60);
+	const mins = totalMin % 60;
+	return [
+		days > 0 ? tn('settings.projects.snapshots.days', days) : '',
+		hours > 0 ? tn('settings.projects.snapshots.hours', hours) : '',
+		mins > 0 ? tn('settings.projects.snapshots.minutes', mins) : '',
+	]
+		.filter(Boolean)
+		.join(' ');
+}
+
 /**
  * Settings keys owned by each page. Its "Restore defaults" row resets exactly
  * these from DEFAULT_SETTINGS — when adding a new setting, add its key to its
@@ -509,6 +603,7 @@ const PAGE_SETTINGS_KEYS = {
 		'textSize',
 		'locale',
 		'followThemeTextColoring',
+		'projectsSidebarTab',
 		'ambientLinkSuggestDismissMs',
 	] as (keyof LoomLoomSettings)[],
 	entities: [
@@ -522,6 +617,13 @@ const PAGE_SETTINGS_KEYS = {
 		'loomButtonStyle',
 		'loomButtonBg',
 		'loomButtonIcon',
+	] as (keyof LoomLoomSettings)[],
+	// Not `loomRoot` — restoring it would mean moving every project.
+	projects: [
+		'snapshotsEnabled',
+		'snapshotIntervalMin',
+		'snapshotKeepRecent',
+		'snapshotKeepDaily',
 	] as (keyof LoomLoomSettings)[],
 	graph: [
 		'graphCollapseThreshold',
@@ -775,6 +877,11 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 								]),
 							},
 							{
+								name: t('settings.general.projectsSidebarTab.name'),
+								desc: t('settings.general.projectsSidebarTab.desc'),
+								control: { type: 'toggle', key: 'projectsSidebarTab' },
+							},
+							{
 								name: t('settings.general.followThemeTextColoring.name'),
 								// The example row is real HTML gated by the SAME
 								// `.loom-follow-theme-color` body class the actual
@@ -874,9 +981,51 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 					{
 						type: 'group',
 						items: [
+							{
+								name: t('settings.projects.root.name'),
+								desc: t('settings.projects.root.desc'),
+								render: (setting) => this.renderLoomRoot(setting),
+							},
+						],
+					},
+					{
+						type: 'group',
+						heading: t('settings.projects.snapshots.heading'),
+						items: [
+							{
+								name: t('settings.projects.snapshots.enabled.name'),
+								desc: t('settings.projects.snapshots.enabled.desc'),
+								render: (setting) => this.renderSnapshotsToggle(setting),
+							},
+							{
+								name: t('settings.projects.snapshots.interval.name'),
+								desc: t('settings.projects.snapshots.interval.desc'),
+								visible: () => this.plugin.settings.snapshotsEnabled,
+								render: (setting) => this.renderSnapshotInterval(setting),
+							},
+							{
+								name: t('settings.projects.snapshots.keepRecent.name'),
+								visible: () => this.plugin.settings.snapshotsEnabled,
+								render: (setting) => this.renderSnapshotCount(setting, 'snapshotKeepRecent'),
+							},
+							{
+								name: t('settings.projects.snapshots.keepDaily.name'),
+								visible: () => this.plugin.settings.snapshotsEnabled,
+								render: (setting) => this.renderSnapshotCount(setting, 'snapshotKeepDaily'),
+							},
+						],
+					},
+					{
+						type: 'group',
+						items: [
 							{ name: t('settings.projects.heading'), render: (setting) => this.renderProjectsTable(setting) },
 						],
 					},
+					this.restoreDefaultsRow(
+						'projects',
+						t('settings.projects.restore.name'),
+						t('settings.projects.restore.desc')
+					),
 				],
 			},
 			{
@@ -1037,6 +1186,117 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	}
 
 	// --- Projects -------------------------------------------------------
+
+	/** Typed draft + a Move button rather than writing on every keystroke —
+	 *  applying a root physically moves every project folder, so it happens
+	 *  once, behind a confirmation naming how many projects move. */
+	private renderLoomRoot(setting: Setting): void {
+		let draft = this.plugin.settings.loomRoot;
+		setting.addText((text) => {
+			text.setPlaceholder(DEFAULT_SETTINGS.loomRoot)
+				.setValue(draft)
+				.onChange((v) => (draft = v));
+			new FolderSuggest(this.app, text.inputEl);
+		});
+		setting.addButton((btn) =>
+			btn.setButtonText(t('settings.projects.root.apply')).onClick(() => {
+				const next = normalizeLoomRoot(draft);
+				if (next === '') {
+					new Notice(t('settings.projects.root.invalid'));
+					return;
+				}
+				if (next === this.plugin.settings.loomRoot) return;
+				const count = this.plugin.indexer.getProjects().length;
+				new ConfirmModal(
+					this.app,
+					t('settings.projects.root.confirmTitle'),
+					tn('settings.projects.root.confirmBody', count, { root: next }),
+					async () => {
+						await this.plugin.changeLoomRoot(next);
+						this.update();
+					},
+					t('settings.projects.root.apply')
+				).open();
+			})
+		);
+	}
+
+	/** The on/off switch, plus a red note while it's off but projects still
+	 *  hold snapshots — turning snapshots off never deletes them. */
+	private renderSnapshotsToggle(setting: Setting): void {
+		const warning = setting.descEl.createDiv({ cls: 'loom-snapshot-warning' });
+		const refreshWarning = async () => {
+			const counts = await Promise.all(
+				this.plugin.indexer.getProjects().map((p) => listSnapshots(this.app, p).then((l) => l.length))
+			);
+			const holding = counts.filter((n) => n > 0).length;
+			warning.setText(
+				!this.plugin.settings.snapshotsEnabled && holding > 0
+					? tn('settings.projects.snapshots.disabledWarning', holding)
+					: ''
+			);
+		};
+		setting.addToggle((toggle) =>
+			toggle.setValue(this.plugin.settings.snapshotsEnabled).onChange(async (value) => {
+				this.plugin.settings.snapshotsEnabled = value;
+				await this.plugin.saveSettings();
+				this.refreshDomState();
+				void refreshWarning();
+			})
+		);
+		void refreshWarning();
+	}
+
+	/** Shown under "Recent snapshots to keep": what the count and interval
+	 *  add up to, updated live from either row. */
+	private snapshotCoverageEl: HTMLElement | null = null;
+
+	private updateSnapshotCoverage(): void {
+		const s = this.plugin.settings;
+		this.snapshotCoverageEl?.setText(
+			t('settings.projects.snapshots.keepRecent.coverage', {
+				count: s.snapshotKeepRecent,
+				interval: snapshotIntervalLabel(s.snapshotIntervalMin),
+				total: formatDuration(s.snapshotKeepRecent * s.snapshotIntervalMin),
+			})
+		);
+	}
+
+	private renderSnapshotInterval(setting: Setting): void {
+		const options = SNAPSHOT_INTERVALS.map((min): [string, string] => [String(min), snapshotIntervalLabel(min)]);
+		setting.addDropdown((dd) => {
+			for (const [value, label] of options) dd.addOption(value, label);
+			dd.setValue(String(this.plugin.settings.snapshotIntervalMin)).onChange(async (value) => {
+				this.plugin.settings.snapshotIntervalMin = Number(value);
+				await this.plugin.saveSettings();
+				this.updateSnapshotCoverage();
+			});
+			const longest = Math.max(...options.map(([, label]) => label.length));
+			dd.selectEl.setCssProps({ width: `${longest + 6}ch` });
+		});
+	}
+
+	/** A slider whose description states its current value in words. */
+	private renderSnapshotCount(setting: Setting, key: 'snapshotKeepRecent' | 'snapshotKeepDaily'): void {
+		const recent = key === 'snapshotKeepRecent';
+		const live = setting.descEl.createDiv();
+		const describe = () => {
+			if (recent) this.updateSnapshotCoverage();
+			else live.setText(tn('settings.projects.snapshots.keepDaily.desc', this.plugin.settings.snapshotKeepDaily));
+		};
+		if (recent) this.snapshotCoverageEl = live;
+		setting.addSlider((slider) =>
+			slider
+				.setLimits(recent ? SNAPSHOT_KEEP_RECENT_MIN : 0, recent ? SNAPSHOT_KEEP_RECENT_MAX : SNAPSHOT_KEEP_DAILY_MAX, 1)
+				.setValue(this.plugin.settings[key])
+				.onChange(async (value) => {
+					this.plugin.settings[key] = value;
+					await this.plugin.saveSettings();
+					describe();
+				})
+		);
+		describe();
+	}
 
 	/** Read-only Title | Type table — one row per project. Clicking a title
 	 *  opens that project's `.loom` file (same as `main.ts`'s `openHome()`).

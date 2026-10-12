@@ -1,12 +1,14 @@
 {
 	"command": {
-		"ribbonTooltip": "Open Loom Loom home",
+		"ribbonTooltip": "Open Loom Loom projects",
 		"openHome": "Open home",
 		"openLoom": "Open Loom",
 		"setupProject": "Set up project",
 		"applyManagedFileNames": "Apply managed file names",
 		"createEntity": "Create entity in current project",
-		"toggleQuickNotes": "Toggle Quick Notes panel"
+		"toggleQuickNotes": "Toggle Quick Notes panel",
+		"openProjects": "Open project manager",
+		"manageSnapshots": "Manage project snapshots"
 	},
 	"notice": {
 		"applyingManagedFileNames": "Loom Loom: applying managed file names…",
@@ -134,18 +136,10 @@
 		"notes": "Notes",
 		"setup": {
 			"title": "Set up project",
-			"pillCreate": "Create a project folder",
-			"pillUse": "Use existing folder",
 			"pillScript": "Fountain script",
 			"pillProse": "Prose",
 			"projectName": "Project name",
-			"projectNameDesc": "A folder with this name is created in the chosen location.",
 			"projectNamePlaceholder": "My Loom project",
-			"locationLabel": "Location",
-			"projectFolderLabel": "Project folder",
-			"locationDesc": "Where the project folder is created. Leave empty for the vault root.",
-			"projectFolderDesc": "This folder becomes the project folder; entity subfolders and the home file are scaffolded inside it.",
-			"pickFolderPlaceholder": "Pick a folder",
 			"projectType": "Project type",
 			"holds": "Holds: {list}.",
 			"alreadyFreeTier": "This vault already has a free-tier project of this type: {kind}.",
@@ -153,7 +147,7 @@
 			"seeSettings": "See Settings → General → License",
 			"createProjectButton": "Create project",
 			"projectNameRequired": "Project name is required.",
-			"folderPathRequired": "Folder path is required.",
+			"projectExists": "A project with that name already exists.",
 			"alreadyFreeTierNotice": "This vault already has a free-tier project of that type. See settings → license.",
 			"projectReady": "Project ready.",
 			"setupFailed": "Could not set up the project. See console for details."
@@ -804,6 +798,14 @@
 				"leaveCommentPlaceholder": "Leave a comment…",
 				"addReply": "+ Add"
 			}
+		},
+		"projects": {
+			"title": "Loom Loom",
+			"newProject": "New project",
+			"empty": "No projects",
+			"collapse": "Collapse",
+			"expand": "Expand",
+			"snapshots": "Snapshots…"
 		}
 	},
 	"timeline": {
@@ -940,6 +942,10 @@
 				"normal": "Normal",
 				"large": "Large"
 			},
+			"projectsSidebarTab": {
+				"name": "Loom Loom sidebar tab",
+				"desc": "Show the project manager as a tab in the left sidebar, next to Files, Search and Bookmarks."
+			},
 			"followThemeTextColoring": {
 				"name": "Follow theme text coloring",
 				"desc": "Let text formatting and section headings in the Script and Prose editors pick up your Obsidian theme's colors.",
@@ -995,7 +1001,52 @@
 		"projects": {
 			"heading": "Projects",
 			"colTitle": "Title",
-			"colType": "Type"
+			"colType": "Type",
+			"root": {
+				"name": "Loom Loom folder",
+				"desc": "The vault folder every project lives in, sorted into one subfolder per project type. Changing it moves all projects there.",
+				"apply": "Move projects",
+				"invalid": "Pick a folder inside the vault.",
+				"confirmTitle": "Move projects?",
+				"confirmBody_one": "Move {count} project into {root}? Links between notes stay intact.",
+				"confirmBody_other": "Move {count} projects into {root}? Links between notes stay intact.",
+				"moved": "Projects moved to {root}.",
+				"skipped": "Not moved (a folder with that name already exists there, or the project sits at the vault root): {list}"
+			},
+			"snapshots": {
+				"heading": "Snapshots",
+				"enabled": {
+					"name": "Save project snapshots",
+					"desc": "Regularly saves a copy of each project's text files in a hidden .snapshots folder inside the project. A snapshot is only saved when something changed. To restore or delete snapshots, right-click a project in the project manager."
+				},
+				"disabledWarning_one": "Snapshots are off, but 1 project still holds saved snapshots. They stay until you delete them from the project manager.",
+				"disabledWarning_other": "Snapshots are off, but {count} projects still hold saved snapshots. They stay until you delete them from the project manager.",
+				"interval": {
+					"name": "Snapshot interval",
+					"desc": "How often a project is checked for changes."
+				},
+				"keepRecent": {
+					"name": "Recent snapshots to keep",
+					"coverage": "{count} × {interval}: covers at least the last {total}. Hours without changes don't use up a snapshot, so it often reaches further back."
+				},
+				"keepDaily": {
+					"name": "Daily snapshots to keep",
+					"desc_one": "The last snapshot of each day is kept for the last {count} day with changes. Days without changes don't count.",
+					"desc_other": "The last snapshot of each day is kept for the last {count} days with changes. Days without changes don't count."
+				},
+				"minutesShort_one": "{count} min",
+				"minutesShort_other": "{count} min",
+				"minutes_one": "{count} minute",
+				"minutes_other": "{count} minutes",
+				"hours_one": "{count} hour",
+				"hours_other": "{count} hours",
+				"days_one": "{count} day",
+				"days_other": "{count} days"
+			},
+			"restore": {
+				"name": "Restore projects defaults",
+				"desc": "Resets the snapshot settings. The Loom Loom folder is not changed."
+			}
 		},
 		"entities": {
 			"groupLabel": "Group",
@@ -1086,6 +1137,38 @@
 				"name": "Restore defaults",
 				"desc": "Reset all settings on this tab to their defaults. Timeline settings belong to their project and are not affected."
 			}
+		}
+	},
+	"snapshots": {
+		"title": "Snapshots: {name}",
+		"takeNow": {
+			"name": "Take a snapshot now",
+			"desc": "Saved by hand, so it's never deleted automatically.",
+			"button": "Take snapshot"
+		},
+		"taken": "Snapshot saved.",
+		"empty": "No snapshots yet.",
+		"role": {
+			"recent": "Interval",
+			"daily": "Daily",
+			"manual": "Manual",
+			"restore": "Before restore"
+		},
+		"restore": {
+			"button": "Restore",
+			"title": "Restore snapshot?",
+			"body": "Replace the files of {name} with the snapshot from {when}? Files created since then go to the trash.\n\nIf this vault is open on another device, close Loom Loom there first, or it may write its own copy back.",
+			"saveCurrent": "Save the current state as a snapshot first",
+			"done": "Snapshot restored.",
+			"failed_one": "Snapshot restored, but 1 file could not be written. See the developer console.",
+			"failed_other": "Snapshot restored, but {count} files could not be written. See the developer console."
+		},
+		"delete": "Delete snapshot",
+		"deleteAll": {
+			"button": "Delete all snapshots",
+			"title": "Delete all snapshots?",
+			"body_one": "Permanently delete {count} snapshot of {name}?",
+			"body_other": "Permanently delete all {count} snapshots of {name}?"
 		}
 	}
 }

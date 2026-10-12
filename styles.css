@@ -8088,3 +8088,99 @@ body.loom-follow-theme-color .loom-branch-title-preview-bold {
 	position: relative;
 	padding: var(--size-2-2) 0 18px 0;
 }
+
+/* ── Project manager (projects-view.tsx) — styled after Obsidian's own file
+   explorer. In a sidebar it uses the explorer's own compact size; as a
+   main-area tab it keeps `.loom-view`'s page text size (the Text size
+   setting) and a capped width, like any other plugin page. ── */
+.loom-pm {
+	--loom-pm-icon: var(--icon-m);
+	flex: 1;
+	overflow-y: auto;
+	width: 100%;
+	max-width: 40em;
+	margin: 0 auto;
+	padding: var(--size-4-4) var(--size-4-6);
+}
+.mod-sidedock .loom-pm {
+	--loom-pm-icon: var(--icon-s);
+	padding: var(--size-4-2) var(--size-4-3);
+	font-size: var(--nav-item-size);
+}
+.loom-pm-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: var(--size-4-1) var(--size-4-2) var(--size-4-2);
+}
+.loom-pm-title {
+	font-weight: var(--font-semibold);
+	font-size: 1.4em;
+}
+.mod-sidedock .loom-pm-title {
+	font-size: 1em;
+}
+.loom-pm-empty {
+	padding: var(--size-4-2);
+	color: var(--text-muted);
+}
+.loom-pm-kind,
+.loom-pm-project {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	padding: var(--size-4-1) var(--size-4-2);
+	border-radius: var(--radius-s);
+	color: var(--nav-item-color);
+	cursor: var(--cursor);
+}
+.loom-pm-kind:hover,
+.loom-pm-project:hover {
+	background: var(--nav-item-background-hover);
+	color: var(--nav-item-color-hover);
+}
+.loom-pm-kind {
+	font-weight: var(--font-semibold);
+	margin-top: var(--size-4-1);
+}
+.loom-pm-kind .loom-icon {
+	display: inline-flex;
+	color: var(--icon-color);
+	--icon-size: var(--loom-pm-icon);
+}
+.loom-pm-kind-label {
+	flex: 1;
+}
+.loom-pm-count {
+	color: var(--text-faint);
+	font-size: 0.8em;
+}
+/* The guide line sits under the chevron: row padding + half the icon. */
+.loom-pm-list {
+	margin-left: calc(var(--size-4-2) + var(--loom-pm-icon) / 2);
+	padding-left: var(--size-4-2);
+	border-left: var(--nav-indentation-guide-width, 1px) solid var(--nav-indentation-guide-color);
+}
+.loom-pm-dragging {
+	opacity: 0.4;
+}
+.loom-pm-drop-before {
+	box-shadow: inset 0 2px 0 var(--interactive-accent);
+}
+.loom-pm-drop-after {
+	box-shadow: inset 0 -2px 0 var(--interactive-accent);
+}
+
+/* --- Project snapshots (settings note + SnapshotsModal) --- */
+.loom-snapshot-warning {
+	color: var(--text-error);
+}
+
+.loom-snapshot-warning:empty {
+	display: none;
+}
+
+.loom-snapshot-list {
+	max-height: 50vh;
+	overflow-y: auto;
+}

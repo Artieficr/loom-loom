@@ -1,4 +1,4 @@
-import { ItemView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
+import { ItemView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, normalizePath } from 'obsidian';
 import {
 	BOOK_EXTENSION,
 	EntityOrigin,
@@ -11,6 +11,7 @@ import {
 	VIEW_HOME,
 	VIEW_LIST,
 	VIEW_MAP,
+	VIEW_PROJECTS,
 	VIEW_PROSE,
 	VIEW_SCRIPT,
 } from './types';
@@ -21,8 +22,10 @@ import {
 	EntityTypeSuggestModal,
 	ProjectSuggestModal,
 	SetupProjectModal,
+	ensureFolder,
 	scaffoldProject,
 } from './project';
+import { projectFolderPath } from './project-kind';
 import { HomeView } from './views/home-view';
 import { LoomFileReactView, LoomReactView } from './views/react-view';
 import { EntityListView } from './views/list-view';
@@ -32,6 +35,8 @@ import { GroupView } from './views/group-view';
 import { MapView } from './views/map-view';
 import { ScriptView } from './views/script-view';
 import { BookView } from './views/book-view';
+import { ProjectsView } from './views/projects-view';
+import { SnapshotsModal, startSnapshots } from './snapshots';
 import { LicenseManager } from './license/manager';
 import { POLAR_ORGANIZATION_ID, PolarLicenseProvider } from './license/polar-provider';
 import { resolveActiveLocale, setLocale, t } from './i18n';
@@ -73,6 +78,7 @@ export default class LoomLoomPlugin extends Plugin {
 		this.registerView(VIEW_MAP, (leaf) => new MapView(leaf, this));
 		this.registerView(VIEW_SCRIPT, (leaf) => new ScriptView(leaf, this));
 		this.registerView(VIEW_PROSE, (leaf) => new BookView(leaf, this));
+		this.registerView(VIEW_PROJECTS, (leaf) => new ProjectsView(leaf, this));
 		// Project home files show up in the file explorer like .canvas/.base
 		// files and open straight into the plugin.
 		this.registerExtensions([LOOM_EXTENSION], VIEW_HOME);
@@ -86,7 +92,7 @@ export default class LoomLoomPlugin extends Plugin {
 		// Obsidian's wikilink index if it were plain markdown.
 		this.registerExtensions([BOOK_EXTENSION], VIEW_PROSE);
 
-		this.addRibbonIcon('dices', t('command.ribbonTooltip'), () => this.openHome());
+		this.addRibbonIcon('spool', t('command.ribbonTooltip'), () => this.openProjectsTab());
 
 		this.addCommand({
 			id: 'open-home',
@@ -94,9 +100,19 @@ export default class LoomLoomPlugin extends Plugin {
 			callback: () => this.openHome(),
 		});
 		this.addCommand({
+			id: 'open-projects',
+			name: t('command.openProjects'),
+			callback: () => this.openProjectsTab(),
+		});
+		this.addCommand({
 			id: 'open-graph',
 			name: t('command.openLoom'),
 			callback: () => this.withProject((p) => void this.activateView(VIEW_GRAPH, { project: p.root })),
+		});
+		this.addCommand({
+			id: 'manage-snapshots',
+			name: t('command.manageSnapshots'),
+			callback: () => this.withProject((p) => new SnapshotsModal(this, p).open()),
 		});
 		this.addCommand({
 			id: 'setup-project',
@@ -144,6 +160,10 @@ export default class LoomLoomPlugin extends Plugin {
 		// the same set of path-keyed maps, so it's pulled out once.
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
+				if (file instanceof TFolder) {
+					if (this.rekeyProjectRoots(oldPath, file.path)) void this.saveSettings();
+					return;
+				}
 				if (!(file instanceof TFile)) return;
 				let changed = false;
 				for (const entries of this.perFileStateMaps()) {
@@ -177,6 +197,7 @@ export default class LoomLoomPlugin extends Plugin {
 			// CSS is fully applied, which left the measured colors wrong
 			// until the user happened to toggle the setting off and on again.
 			this.applyThemeTextColoring();
+			this.applyProjectsSidebarTab();
 			this.registerTimestampPropertyTypes();
 			void this.migrateLegacyProject().then(async () => {
 				await this.indexer.rebuildNow();
@@ -186,6 +207,7 @@ export default class LoomLoomPlugin extends Plugin {
 				await this.waitForVaultSettled();
 				await this.indexer.rebuildNow();
 				await this.indexer.migrateFiles();
+				startSnapshots(this);
 			});
 			// Internally throttled and a no-op with no local activation, so this
 			// costs nothing for a free-tier user and doesn't fight the migration
@@ -223,6 +245,125 @@ export default class LoomLoomPlugin extends Plugin {
 			...Object.values(this.settings.graphPins),
 			...Object.values(this.settings.timelineManualOrder),
 		];
+	}
+
+	/** Per-project-root settings follow a moved project folder (or a moved
+	 *  folder above it): the root-keyed dicts, `projectOrder`, and any open view
+	 *  whose state still names the old root. A folder rename also fires `rename`
+	 *  for every file inside it, so the per-note maps (`perFileStateMaps`) follow
+	 *  through the file branch of the same handler. */
+	private rekeyProjectRoots(oldPath: string, newPath: string): boolean {
+		// `::` — map cameras key as `<root>::<map page id>`.
+		const moved = (key: string): string | null =>
+			key === oldPath || key.startsWith(oldPath + '/') || key.startsWith(oldPath + '::')
+				? newPath + key.slice(oldPath.length)
+				: null;
+		const s = this.settings;
+		let changed = false;
+		const maps: Record<string, unknown>[] = [
+			s.graphCameras,
+			s.mapCameras,
+			s.graphManualX,
+			s.graphManualY,
+			s.graphPins,
+			s.graphFilters,
+			s.graphViews,
+			s.timelineManualOrder,
+		];
+		for (const map of maps) {
+			for (const key of Object.keys(map)) {
+				const next = moved(key);
+				if (next === null) continue;
+				map[next] = map[key];
+				delete map[key];
+				changed = true;
+			}
+		}
+		s.projectOrder = s.projectOrder.map((root) => {
+			const next = moved(root);
+			if (next !== null) changed = true;
+			return next ?? root;
+		});
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			const viewState = leaf.getViewState();
+			const project = (viewState.state as { project?: unknown } | undefined)?.project;
+			const next = typeof project === 'string' ? moved(project) : null;
+			if (next !== null) void leaf.setViewState({ ...viewState, state: { ...viewState.state, project: next } });
+		});
+		return changed;
+	}
+
+	/** Moves every project folder into its kind subfolder under `next`
+	 *  (`projectFolderPath`) and makes `next` the Loom root.
+	 *  Skips (and reports) a project that can't move: one at the vault root,
+	 *  one containing the new root, or one whose name is already taken there.
+	 *  `fileManager.renameFile` keeps links intact; settings follow through the
+	 *  folder branch of the `rename` handler. */
+	async changeLoomRoot(next: string): Promise<void> {
+		const previous = this.settings.loomRoot;
+		const skipped: string[] = [];
+		for (const project of this.indexer.getProjects()) {
+			const folder = project.root === '' ? null : this.app.vault.getFolderByPath(project.root);
+			const target = projectFolderPath(next, project.config.kind, project.root.split('/').pop() ?? '');
+			if (target === project.root) continue;
+			if (
+				!folder ||
+				next === project.root ||
+				next.startsWith(project.root + '/') ||
+				this.app.vault.getAbstractFileByPath(target)
+			) {
+				skipped.push(project.name);
+				continue;
+			}
+			try {
+				await ensureFolder(this.app, target.slice(0, target.lastIndexOf('/')));
+				await this.app.fileManager.renameFile(folder, target);
+			} catch (e) {
+				console.error(`Loom Loom: failed to move project ${project.name}`, e);
+				skipped.push(project.name);
+			}
+		}
+		this.settings.loomRoot = next;
+		await this.saveSettings();
+		// The old root, left holding only empty kind folders, goes too.
+		const old = this.app.vault.getFolderByPath(previous);
+		const holdsFiles = (f: TFolder): boolean => f.children.some((c) => !(c instanceof TFolder) || holdsFiles(c));
+		if (old && !holdsFiles(old)) await this.app.fileManager.trashFile(old);
+		this.indexer.rebuild();
+		new Notice(
+			skipped.length > 0
+				? t('settings.projects.root.skipped', { list: skipped.join(', ') })
+				: t('settings.projects.root.moved', { root: next })
+		);
+	}
+
+	/** Opens the project manager as a new main-area tab (the ribbon icon). */
+	openProjectsTab(): void {
+		void this.app.workspace.getLeaf('tab').setViewState({ type: VIEW_PROJECTS, active: true });
+	}
+
+	/** Last applied `projectsSidebarTab`, so the settings save this runs from
+	 *  only touches the workspace when the toggle actually changed — and a
+	 *  second save landing before the first leaf's view state settles can't
+	 *  add a duplicate tab. */
+	private appliedProjectsSidebarTab: boolean | null = null;
+
+	/** Adds the project manager as a left-sidebar tab (beside Files/Search/
+	 *  Bookmarks) or removes it, per `projectsSidebarTab`. Obsidian persists the
+	 *  leaf in the workspace layout, so "on" only adds one when none exists. */
+	applyProjectsSidebarTab(): void {
+		const want = this.settings.projectsSidebarTab;
+		if (!this.app.workspace.layoutReady || this.appliedProjectsSidebarTab === want) return;
+		this.appliedProjectsSidebarTab = want;
+		const { workspace } = this.app;
+		const inSidebar = workspace
+			.getLeavesOfType(VIEW_PROJECTS)
+			.filter((leaf) => leaf.getRoot() === workspace.leftSplit);
+		if (!want) {
+			inSidebar.forEach((leaf) => leaf.detach());
+		} else if (inSidebar.length === 0) {
+			void workspace.getLeftLeaf(false)?.setViewState({ type: VIEW_PROJECTS, active: false });
+		}
 	}
 
 	/**
@@ -398,6 +539,7 @@ export default class LoomLoomPlugin extends Plugin {
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
 		this.applyTextSize();
+		this.applyProjectsSidebarTab();
 		this.applyLocale();
 		this.applyThemeTextColoring();
 	}
