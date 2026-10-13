@@ -1,4 +1,4 @@
-import { Menu, ViewStateResult } from 'obsidian';
+import { ViewStateResult } from 'obsidian';
 import { MouseEvent as ReactMouseEvent, ReactElement, useState } from 'react';
 import {
 	ENTITY_META,
@@ -12,10 +12,12 @@ import {
 	VIEW_GROUP,
 	entityPlural,
 	pcGroupStub,
+	bySeq,
 } from '../types';
 import { formatLoomDateShort, groupNameOf, serializeProjectConfig } from '../calendar';
-import { projectRoleType, projectTypes, roleOf } from '../project-kind';
-import { t } from '../i18n';
+import { projectRoleType, projectTypes, roleOf, isInvolvableType } from '../project-kind';
+import { showTypeFilterMenu } from '../project';
+import { shortMonthNames, t } from '../i18n';
 import { LoomReactView } from './react-view';
 import {
 	EntityChip,
@@ -24,35 +26,13 @@ import {
 	SearchableSelect,
 	buildEntityLinkNames,
 	buildLinkTargetLabels,
-	locationLabel,
 	noProjectMessage,
 	openEntityLink,
 } from './common';
+import { locationLabel } from '../display';
 import { MarkdownField } from './markdown-field';
-import type { LinkOption } from './link-textarea';
+import type { LinkOption } from './markdown-field';
 import { resolveProject, useIndexVersion } from './hooks';
-
-/** Short Gregorian month labels for the session-month filter grid — sessions
- *  are always Gregorian, unlike a project's optional custom calendar, so
- *  these are a fixed 12-entry set rather than anything calendar-config-driven.
- *  Read inside the component (not module scope) so a live language switch
- *  updates them immediately. */
-function monthLabels(): string[] {
-	return [
-		t('view.group.months.jan'),
-		t('view.group.months.feb'),
-		t('view.group.months.mar'),
-		t('view.group.months.apr'),
-		t('view.group.months.may'),
-		t('view.group.months.jun'),
-		t('view.group.months.jul'),
-		t('view.group.months.aug'),
-		t('view.group.months.sep'),
-		t('view.group.months.oct'),
-		t('view.group.months.nov'),
-		t('view.group.months.dec'),
-	];
-}
 
 /**
  * The virtual Group's page: the player hub, one click away from every page
@@ -218,7 +198,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 			map.get(key)?.entries.push(e);
 		}
 		for (const g of map.values())
-			g.entries.sort((a, b) => (a.owner.seq ?? a.owner.created) - (b.owner.seq ?? b.owner.created));
+			g.entries.sort((a, b) => bySeq(a.owner, b.owner));
 		return [...map.values()].sort((a, b) => {
 			const ka = a.session?.date?.sortKey;
 			const kb = b.session?.date?.sortKey;
@@ -265,26 +245,8 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 		.filter((p) => !pcPaths.has(p))
 		.map((p) => plugin.indexer.get(p))
 		.filter((r): r is EntityRecord => r !== undefined);
-	const openFilterTypeMenu = (e: ReactMouseEvent<HTMLButtonElement>) => {
-		const menu = new Menu();
-		menu.addItem((item) =>
-			item
-				.setTitle(t('project.createEntity.allEntities'))
-				.setIcon('filter')
-				.setChecked(filterType === null)
-				.onClick(() => setFilterType(null))
-		);
-		for (const et of projectTypes(project.config).filter((et) => roleOf(et) === null && et !== 'decisionPoint')) {
-			menu.addItem((item) =>
-				item
-					.setTitle(entityPlural(et))
-					.setIcon(ENTITY_META[et].icon)
-					.setChecked(filterType === et)
-					.onClick(() => setFilterType(et))
-			);
-		}
-		menu.showAtMouseEvent(e.nativeEvent);
-	};
+	const openFilterTypeMenu = (e: ReactMouseEvent<HTMLButtonElement>) =>
+		showTypeFilterMenu(e.nativeEvent, projectTypes(project.config).filter(isInvolvableType), filterType, setFilterType);
 
 	// Note texts render with the shared live-preview field (read-only): links,
 	// bold/italic, bullets — the same formatting the editors show.
@@ -527,7 +489,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 									placeholder={t('view.group.filterByEntityPlaceholder')}
 									options={plugin.indexer
 										.getAll(undefined, project.root)
-										.filter((r) => roleOf(r.type) === null && r.type !== 'decisionPoint')
+										.filter((r) => isInvolvableType(r.type))
 										.filter((r) => filterType === null || r.type === filterType)
 										.filter((r) => !entityFilter.includes(r.path))
 										.sort((a, b) => a.name.localeCompare(b.name))
@@ -579,7 +541,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 									</button>
 								</div>
 								<div className="loom-month-grid">
-									{monthLabels().map((label, m) => {
+									{shortMonthNames().map((label, m) => {
 										const key = `${shownYear}-${m + 1}`;
 										const on = monthFilter.includes(key);
 										return (

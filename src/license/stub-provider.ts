@@ -5,9 +5,8 @@ import { ActivateResult, DeactivateResult, LicenseProvider, ValidateResult } fro
  * Exercises the whole stack (gating -> settings UI -> manager -> cache-store ->
  * grace.ts) end to end: the free-tier limit, activation, the 3-device cap, a
  * definite rejection, and — via `setStubNetworkDown` — the "offline, cached
- * verdict keeps ruling until the grace period lapses" path, all without
- * needing `PolarLicenseProvider` to be live. This is the active provider until
- * a real Polar account exists to swap in (see `main.ts`).
+ * verdict keeps ruling until the grace period lapses" path. Swap it in for
+ * `PolarLicenseProvider` in `main.ts` for offline testing.
  */
 export const STUB_VALID_KEY = 'LOOM-STUB-DEV-KEY';
 export const STUB_ACTIVATION_LIMIT = 3;

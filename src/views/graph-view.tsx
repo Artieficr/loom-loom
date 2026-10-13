@@ -11,6 +11,20 @@ import {
 	useRef,
 	useState,
 } from 'react';
+import {
+	CLICK_SLOP,
+	Displacement,
+	GraphFilter,
+	HOLD_MS,
+	PanState,
+	RADII,
+	fitCamera,
+	focusCamera,
+	panMove,
+	runSpring,
+	useCameraAnimation,
+	zoomAt,
+} from './mini-graph';
 import { createPortal } from 'react-dom';
 import {
 	ENTITY_META,
@@ -25,12 +39,12 @@ import {
 	TimelineDef,
 	VIEW_GRAPH,
 	newEntityTitle,
-	entityPlural,
 } from '../types';
 import type { LoomTextSize, SavedGraphView } from '../settings';
-import { ConfirmModal, CreateEntityModal, RelationshipPromptModal, TextInputModal } from '../project';
+import { ConfirmModal, CreateEntityModal, TextInputModal, deleteEntityNote } from '../project';
+import { deleteEntity, deleteEntityMessage } from './script-view';
 import { extractLinkpath, linkTargetOf } from '../indexer';
-import { fmLoomValue, setLoomKey } from '../fm';
+import { appendLoomList, fmValue, involveInFirstNote, newNoteEntry, setLoomKey, withoutRelationships, writeFmAt } from '../fm';
 import { GraphLayout, LayoutNode, computeGraphLayout } from '../graph/layout';
 import { EdgeRoute, Pt, edgeEndDirs, edgePath, edgeXRange } from '../graph/routing';
 import { GraphSidePanel, PANEL_MAX, PANEL_MIN } from '../graph/side-panel';
@@ -44,8 +58,9 @@ import {
 	buildLinkTargetLabels,
 	noProjectMessage,
 	openEntityLink,
-	recordLabel,
+	useCloseOnOutsideClick,
 } from './common';
+import { recordLabel } from '../display';
 import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
 import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
@@ -103,11 +118,6 @@ export class GraphView extends LoomReactView {
 	}
 }
 
-/** Fallback node radius per layout row (anchor / beat / global layers),
- *  used when the type has no configured size. */
-const RADII = { anchor: 26, beat: 20, global: 17 } as const;
-/** Pointer movement below this is a click (select/clear), above it a drag/pan. */
-const CLICK_SLOP = 4;
 /** World-space margin outside the viewport before nodes are culled. */
 const CULL_MARGIN = 250;
 // Very low floor so large graphs can be zoomed out to fit — effectively
@@ -129,14 +139,6 @@ const DROP_SNAP = 12;
 const TRASH_R = 110;
 const TRASH_REVEAL = 260;
 
-interface Displacement {
-	dx: number;
-	dy: number;
-	vx: number;
-	vy: number;
-	dragging: boolean;
-}
-
 interface DragState {
 	id: string;
 	node: LayoutNode;
@@ -154,8 +156,6 @@ interface DragState {
 	holdTimer: number;
 	held: boolean;
 }
-/** How long a still press-and-hold on a node waits before zoom-focusing it. */
-const HOLD_MS = 450;
 
 /** Creation-order graph animation. Duration scales with node count between a
  *  floor and ceiling (small graphs are quick, large ones never drag on), and
@@ -306,15 +306,6 @@ interface AnimState {
 	homes: Map<string, { x: number; y: number }>;
 	/** Per-node live spring state. */
 	an: Map<string, AnimNode>;
-}
-
-interface PanState {
-	pointerId: number;
-	startX: number;
-	startY: number;
-	tx0: number;
-	ty0: number;
-	moved: boolean;
 }
 
 const DRAWER_MIN = 120;
@@ -560,10 +551,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const layerKey = plugin.settings.globalLayerOrder.join(',');
 	/** Bumped when a drag-reorder writes a new manual x, to re-run the layout. */
 	const [manualVersion, setManualVersion] = useState(0);
-	// Retained but inert: live reflow was removed (dragging no longer re-lays out
-	// the graph each frame), so this stays null — kept only so runLayout and the
-	// drop handlers read a stable "no live override".
-	const liveManual = useRef<{ id: string; x: number; y: number } | null>(null);
 	// Entity pick filter: hand-picked entities (+ their connections) are the only
 	// ones shown. Empty = inactive. `pickTransitive` extends to connections of
 	// connections; `pickSeparate` re-lays out just the subgraph instead of hiding
@@ -577,17 +564,10 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			project?.root ?? ' none',
 			plugin.settings.globalLayerOrder,
 			plugin.settings.graphLineGap,
-			new Map<string, number>([
-				...Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {}),
-				...(liveManual.current ? [[liveManual.current.id, liveManual.current.x] as const] : []),
-			]),
+			new Map(Object.entries(project ? plugin.settings.graphManualX[project.root] ?? {} : {})),
 			plugin.settings.graphTrunkGap,
 			LABEL_FONT_PX[plugin.settings.textSize],
-			liveManual.current?.id,
-			new Map<string, number>([
-				...Object.entries(project ? plugin.settings.graphManualY[project.root] ?? {} : {}),
-				...(liveManual.current ? [[liveManual.current.id, liveManual.current.y] as const] : []),
-			]),
+			new Map(Object.entries(project ? plugin.settings.graphManualY[project.root] ?? {} : {})),
 			restrictTo,
 			features(project?.config).eventPlanning
 		);
@@ -678,24 +658,15 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			if (selected) setSelected(null);
 			else unpinAllRef.current();
 		};
-		document.addEventListener('keydown', onKey);
-		return () => document.removeEventListener('keydown', onKey);
+		const ownerDoc = wrapRef.current?.doc ?? activeDocument;
+		ownerDoc.addEventListener('keydown', onKey);
+		return () => ownerDoc.removeEventListener('keydown', onKey);
 	}, [selected]);
 	/** Graph search: matching nodes highlight, everything else dims. */
 	const [search, setSearch] = useState('');
 	/** Graph filter: unticked types are dimmed or hidden per the eye mode. */
-	const [filterOpen, setFilterOpen] = useState(false);
-	const filterRef = useRef<HTMLDivElement>(null);
 	// Close the filter popover on any press outside it (the button lives inside
 	// the ref, so its own toggle still works).
-	useEffect(() => {
-		if (!filterOpen) return;
-		const onDown = (e: PointerEvent) => {
-			if (!filterRef.current?.contains(e.target as Node)) setFilterOpen(false);
-		};
-		document.addEventListener('pointerdown', onDown, true);
-		return () => document.removeEventListener('pointerdown', onDown, true);
-	}, [filterOpen]);
 	const [filterTypes, setFilterTypes] = useState<ReadonlySet<EntityType>>(() => {
 		const stored = project ? plugin.settings.graphFilters[project.root] : undefined;
 		return new Set(stored ? stored.types : ENTITY_TYPES);
@@ -717,14 +688,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	);
 	const [viewsOpen, setViewsOpen] = useState(false);
 	const viewsRef = useRef<HTMLDivElement>(null);
-	useEffect(() => {
-		if (!viewsOpen) return;
-		const onDown = (e: PointerEvent) => {
-			if (!viewsRef.current?.contains(e.target as Node)) setViewsOpen(false);
-		};
-		document.addEventListener('pointerdown', onDown, true);
-		return () => document.removeEventListener('pointerdown', onDown, true);
-	}, [viewsOpen]);
+	useCloseOnOutsideClick(viewsRef, viewsOpen, () => setViewsOpen(false));
 	const persistViews = (next: SavedGraphView[]) => {
 		setViews(next);
 		if (!project) return;
@@ -893,7 +857,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const pendingReorder = useRef<{ id: string; x: number; y: number } | null>(null);
 	const panRef = useRef<PanState | null>(null);
 	const springRaf = useRef(0);
-	const cameraRaf = useRef(0);
+	const cameraAnim = useCameraAnimation(cameraRef, setCamera);
 
 	// Track the viewport size (also fires when the side panel mounts/unmounts).
 	useEffect(() => {
@@ -916,12 +880,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			const rect = el.getBoundingClientRect();
 			const px = e.clientX - rect.left;
 			const py = e.clientY - rect.top;
-			setCamera((c) => {
-				const k = clamp(c.k * Math.exp(-e.deltaY * 0.0015), MIN_ZOOM, MAX_ZOOM);
-				const wx = (px - c.tx) / c.k;
-				const wy = (py - c.ty) / c.k;
-				return { k, tx: px - wx * k, ty: py - wy * k };
-			});
+			setCamera((c) => zoomAt(c, px, py, e.deltaY, MIN_ZOOM, MAX_ZOOM));
 		};
 		el.addEventListener('wheel', onWheel, { passive: false });
 		return () => el.removeEventListener('wheel', onWheel);
@@ -930,61 +889,24 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	useEffect(
 		() => () => {
 			window.cancelAnimationFrame(springRaf.current);
-			window.cancelAnimationFrame(cameraRaf.current);
 			window.cancelAnimationFrame(animRaf.current);
 		},
 		[]
 	);
 
-	const animateCamera = (target: Camera) => {
-		window.cancelAnimationFrame(cameraRaf.current);
-		const from = cameraRef.current;
-		const start = performance.now();
-		const duration = 250;
-		const step = (now: number) => {
-			const t = Math.min(1, (now - start) / duration);
-			const e = 1 - (1 - t) * (1 - t);
-			setCamera({
-				tx: from.tx + (target.tx - from.tx) * e,
-				ty: from.ty + (target.ty - from.ty) * e,
-				k: from.k + (target.k - from.k) * e,
-			});
-			if (t < 1) cameraRaf.current = window.requestAnimationFrame(step);
-		};
-		cameraRaf.current = window.requestAnimationFrame(step);
-	};
+	const animateCamera = cameraAnim.animate;
 
 	const focusNode = (node: LayoutNode) => {
 		const el = wrapRef.current;
 		const w = el?.clientWidth ?? size.w;
 		const h = el?.clientHeight ?? size.h;
-		const k = plugin.settings.graphFocusZoom;
-		animateCamera({ k, tx: w / 2 - node.x * k, ty: h / 2 - node.y * k });
+		animateCamera(focusCamera(node, w, h, plugin.settings.graphFocusZoom));
 	};
 
 	const fitPoints = (pts: { x: number; y: number }[]) => {
 		const el = wrapRef.current;
-		if (!el || pts.length === 0) return;
-		const pad = 60;
-		let minX = Infinity;
-		let maxX = -Infinity;
-		let minY = Infinity;
-		let maxY = -Infinity;
-		for (const p of pts) {
-			minX = Math.min(minX, p.x);
-			maxX = Math.max(maxX, p.x);
-			minY = Math.min(minY, p.y);
-			maxY = Math.max(maxY, p.y);
-		}
-		minX -= pad;
-		maxX += pad;
-		minY -= pad;
-		// Extra room below for the bottom row's labels.
-		maxY += pad + 24;
-		const w = el.clientWidth;
-		const h = el.clientHeight;
-		const k = clamp(Math.min(w / (maxX - minX), h / (maxY - minY)), MIN_ZOOM, 1.25);
-		animateCamera({ k, tx: (w - (minX + maxX) * k) / 2, ty: (h - (minY + maxY) * k) / 2 });
+		const cam = el ? fitCamera(pts, el.clientWidth, el.clientHeight, MIN_ZOOM) : null;
+		if (cam) animateCamera(cam);
 	};
 	const fitNodes = (nodes: LayoutNode[]) => fitPoints(nodes.map((n) => ({ x: n.x, y: n.y })));
 	const fitAll = () => fitNodes(layout.nodes);
@@ -1110,27 +1032,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	}, [pickSeparate, pickedPaths]);
 
 	// Spring loop: released nodes ease back to their home position.
-	const startSpring = () => {
-		window.cancelAnimationFrame(springRaf.current);
-		const step = () => {
-			let active = false;
-			for (const [id, d] of dispRef.current) {
-				if (d.dragging) continue;
-				d.vx = (d.vx - d.dx * 0.14) * 0.8;
-				d.vy = (d.vy - d.dy * 0.14) * 0.8;
-				d.dx += d.vx;
-				d.dy += d.vy;
-				if (Math.abs(d.dx) < 0.5 && Math.abs(d.dy) < 0.5 && Math.abs(d.vx) < 0.5 && Math.abs(d.vy) < 0.5) {
-					dispRef.current.delete(id);
-				} else {
-					active = true;
-				}
-			}
-			setTick((t) => t + 1);
-			if (active) springRaf.current = window.requestAnimationFrame(step);
-		};
-		springRaf.current = window.requestAnimationFrame(step);
-	};
+	const startSpring = () => runSpring(dispRef, springRaf, () => setTick((t) => t + 1));
 
 	// --- Node interaction ----------------------------------------------------
 
@@ -1276,11 +1178,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		dragRef.current = null;
 		dropRef.current = null;
 		setDragActive(false);
-		const hadLive = liveManual.current !== null;
-		liveManual.current = null;
 		const d = dispRef.current.get(drag.id);
 		if (d) d.dragging = false;
-		if (hadLive) setManualVersion((v) => v + 1);
 		startSpring();
 	};
 
@@ -1349,8 +1248,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		setDragActive(false);
 		const dropId = dropRef.current;
 		dropRef.current = null;
-		const hadLive = liveManual.current !== null;
-		liveManual.current = null;
 		const d = dispRef.current.get(drag.id);
 		if (d) d.dragging = false;
 		if (drag.held) {
@@ -1360,31 +1257,30 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			return;
 		}
 		if (drag.moved) {
-			// Trash sector drop: confirm, then move the note to the trash.
+			// Trash sector drop: confirm, then delete the entity the same way the
+			// entity page does — references purged, a Scene/Act/Chapter's script
+			// or book text removed with it.
 			const cam = cameraRef.current;
 			const trashDist = Math.hypot(
 				size.w - (drag.worldX * cam.k + cam.tx),
 				size.h - (drag.worldY * cam.k + cam.ty)
 			);
 			if (trashDist < TRASH_R) {
-				if (hadLive) setManualVersion((v) => v + 1);
 				startSpring();
 				new ConfirmModal(
 					plugin.app,
 					t('view.list.deleteConfirmTitle', { name: recordLabel(drag.node.record, project ?? null) }),
-					t('view.list.deleteMessageGeneral'),
-					() => {
-						const file = plugin.app.vault.getFileByPath(drag.id);
-						if (file) void plugin.app.fileManager.trashFile(file);
-					},
+					project ? deleteEntityMessage(project, drag.node.record) : t('view.list.deleteMessageGeneral'),
+					() =>
+						void (project
+							? deleteEntity(plugin, project, drag.node.record)
+							: deleteEntityNote(plugin, drag.node.record)),
 					t('project.common.delete')
 				).open();
 				return;
 			}
 			const target = dropId !== null ? layout.nodes.find((n) => n.id === dropId) : undefined;
 			if (target) {
-				// Undo the live preview — a connect drop doesn't keep the spot.
-				if (hadLive) setManualVersion((v) => v + 1);
 				startSpring();
 				onNodeDrop(drag.node, target, { x: e.clientX, y: e.clientY });
 			} else if (pinnedRef.current.has(drag.id)) {
@@ -1406,7 +1302,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				pendingReorder.current = { id: drag.id, x: drag.worldX, y: drag.worldY };
 				setManualVersion((v) => v + 1);
 			} else {
-				if (hadLive) setManualVersion((v) => v + 1);
 				startSpring();
 			}
 		} else {
@@ -1444,7 +1339,6 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (d) d.dragging = false;
 		dragRef.current = null;
 		dropRef.current = null;
-		liveManual.current = null;
 		setDragActive(false);
 	};
 	useEffect(() => {
@@ -1453,15 +1347,16 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		const up = (e: PointerEvent) => dragHandlers.current.up(e);
 		const cancel = () => dragHandlers.current.abort();
 		const ctx = (e: MouseEvent) => dragContextMenuRef.current(e);
-		window.addEventListener('pointermove', move);
-		window.addEventListener('pointerup', up);
-		window.addEventListener('pointercancel', cancel);
-		window.addEventListener('contextmenu', ctx, true);
+		const ownerWin = wrapRef.current?.win ?? activeWindow;
+		ownerWin.addEventListener('pointermove', move);
+		ownerWin.addEventListener('pointerup', up);
+		ownerWin.addEventListener('pointercancel', cancel);
+		ownerWin.addEventListener('contextmenu', ctx, true);
 		return () => {
-			window.removeEventListener('pointermove', move);
-			window.removeEventListener('pointerup', up);
-			window.removeEventListener('pointercancel', cancel);
-			window.removeEventListener('contextmenu', ctx, true);
+			ownerWin.removeEventListener('pointermove', move);
+			ownerWin.removeEventListener('pointerup', up);
+			ownerWin.removeEventListener('pointercancel', cancel);
+			ownerWin.removeEventListener('contextmenu', ctx, true);
 		};
 	}, [dragActive]);
 
@@ -1495,42 +1390,25 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 
 	/** Writes to a node's frontmatter with error reporting. */
 	const writeNodeFm = (node: LayoutNode, apply: (fm: Record<string, unknown>) => void) => {
-		const file = plugin.app.vault.getFileByPath(node.id);
-		if (!file) return;
-		plugin.app.fileManager.processFrontMatter(file, apply).catch((err) => {
+		writeFmAt(plugin.app, node.id, apply).catch((err) => {
 			console.error('Loom Loom: failed to update frontmatter', err);
 			new Notice(t('view.entity.common.saveFailed'));
 		});
 	};
 
-	/** Frontmatter value as a link list (accepts a single string too). */
-	const linkList = (raw: unknown): unknown[] =>
-		Array.isArray(raw) ? raw : typeof raw === 'string' && raw !== '' ? [raw] : [];
-
-	/** Adds a `[[link]]` to the event's first session note's `involved`/`places`
-	 *  list, creating a session-less note if the event has none yet (mirrors the
-	 *  entity page's "Add an event" behaviour). */
-	const addToEventNote = (event: LayoutNode, other: LayoutNode, key: 'involved' | 'places') => {
-		const link = `[[${linkTargetOf(other.record)}]]`;
-		writeNodeFm(event, (fm) => {
-			const cur = fmLoomValue(fm, FM.sessionNotes);
-			const arr: unknown[] = Array.isArray(cur) ? [...(cur as unknown[])] : [];
-			if (arr.length === 0) {
-				arr.push({ session: '', text: '', seq: Date.now(), [key]: [link] });
-			} else {
-				const first = arr[0];
-				const note: Record<string, unknown> =
-					typeof first === 'object' && first !== null
-						? { ...(first as Record<string, unknown>) }
-						: { session: '', text: typeof first === 'string' ? first : '' };
-				const list = Array.isArray(note[key]) ? [...(note[key] as unknown[])] : [];
-				list.push(link);
-				note[key] = list;
-				arr[0] = note;
-			}
-			setLoomKey(fm, FM.sessionNotes, arr);
+	/** Appends a `[[link]]` to `target` onto a link-list key of `node` (a single
+	 *  stored string counts as a one-entry list). */
+	const appendLinkTo = (node: LayoutNode, key: string, target: EntityRecord) =>
+		writeNodeFm(node, (fm) => {
+			const raw = fmValue(fm, key);
+			const list: unknown[] = Array.isArray(raw) ? raw : typeof raw === 'string' && raw !== '' ? [raw] : [];
+			setLoomKey(fm, key, [...list, `[[${linkTargetOf(target)}]]`]);
 		});
-	};
+
+	/** Involves `other` in the event's first session note (mirrors the entity
+	 *  page's "Add an event" behaviour). */
+	const addToEventNote = (event: LayoutNode, other: LayoutNode, key: 'involved' | 'places') =>
+		writeNodeFm(event, (fm) => involveInFirstNote(fm, key, `[[${linkTargetOf(other.record)}]]`));
 
 	/** Node-on-node drop. Pairs with a dedicated field offer to fill it — those
 	 *  writes go to the note that OWNS the field (a character dropped on a quest
@@ -1559,12 +1437,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				options.push({
 					title: t('view.graph.addAsQuestGiver'),
 					action: () =>
-						writeNodeFm(quest, (fm) => {
-							setLoomKey(fm, FM.questGiver, [
-								...linkList(fmLoomValue(fm, FM.questGiver)),
-								`[[${linkTargetOf(char.record)}]]`,
-							]);
-						}),
+						appendLinkTo(quest, FM.questGiver, char.record),
 				});
 			}
 		}
@@ -1579,12 +1452,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				options.push({
 					title: t('view.graph.addAsMember'),
 					action: () =>
-						writeNodeFm(faction, (fm) => {
-							setLoomKey(fm, FM.members, [
-								...linkList(fmLoomValue(fm, FM.members)),
-								`[[${linkTargetOf(char.record)}]]`,
-							]);
-						}),
+						appendLinkTo(faction, FM.members, char.record),
 				});
 			}
 		}
@@ -1599,12 +1467,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			options.push({
 				title: t('view.graph.addItem'),
 				action: () =>
-					writeNodeFm(holder, (fm) => {
-						setLoomKey(fm, FM.items, [
-							...linkList(fmLoomValue(fm, FM.items)),
-							`[[${linkTargetOf(item.record)}]]`,
-						]);
-					}),
+					appendLinkTo(holder, FM.items, item.record),
 			});
 		}
 
@@ -1655,7 +1518,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					title: t('view.graph.addAsReward'),
 					action: () =>
 						writeNodeFm(quest, (fm) => {
-							const cur = fmLoomValue(fm, FM.reward);
+							const cur = fmValue(fm, FM.reward);
 							const text = typeof cur === 'string' ? cur : '';
 							setLoomKey(fm, FM.reward, text.trim() === '' ? link : `${text}\n${link}`);
 						}),
@@ -1716,12 +1579,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				options.push({
 					title: t('view.graph.markAsAttending'),
 					action: () =>
-						writeNodeFm(session, (fm) => {
-							setLoomKey(fm, FM.attendance, [
-								...linkList(fmLoomValue(fm, FM.attendance)),
-								`[[${linkTargetOf(other.record)}]]`,
-							]);
-						}),
+						appendLinkTo(session, FM.attendance, other.record),
 				});
 			}
 			const has = other.record.sessionNotes.some(
@@ -1731,12 +1589,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				options.push({
 					title: t('view.graph.addSessionNote'),
 					action: () =>
-						writeNodeFm(other, (fm) => {
-							const cur = fmLoomValue(fm, FM.sessionNotes);
-							const notes = Array.isArray(cur) ? cur : [];
-							notes.push({ session: `[[${linkTargetOf(session.record)}]]`, text: '', seq: Date.now() });
-							setLoomKey(fm, FM.sessionNotes, notes);
-						}),
+						writeNodeFm(other, (fm) =>
+							appendLoomList(fm, FM.sessionNotes, newNoteEntry(`[[${linkTargetOf(session.record)}]]`))
+						),
 				});
 			}
 		}
@@ -1750,16 +1605,8 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				r.parentLocation !== null
 					? plugin.indexer.resolve(r.parentLocation, r.path)?.path
 					: undefined;
-			const descendsFrom = (r: EntityRecord, ancestor: string): boolean => {
-				let cur: EntityRecord | undefined = r;
-				for (let guard = 0; guard < 20 && cur; guard++) {
-					const parentPath = parentPathOf(cur);
-					if (parentPath === undefined) return false;
-					if (parentPath === ancestor) return true;
-					cur = plugin.indexer.get(parentPath);
-				}
-				return false;
-			};
+			const descendsFrom = (r: EntityRecord, ancestor: string): boolean =>
+				plugin.indexer.locationAncestors(r).some((p) => p.path === ancestor);
 			const alreadyChild = parentPathOf(from.record) === to.id;
 			const wouldCycle = descendsFrom(to.record, from.id);
 			if (!alreadyChild && !wouldCycle) {
@@ -1796,13 +1643,17 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			options.push({
 				title: t('view.graph.addRelationshipEllipsis'),
 				action: () =>
-					new RelationshipPromptModal(plugin.app, declarerLabel, otherLabel, (relType) => {
-						writeNodeFm(declarer, (fm) => {
-							const cur = fmLoomValue(fm, FM.relationships);
-							const rels = Array.isArray(cur) ? cur : [];
-							rels.push({ type: relType, target: `[[${linkTargetOf(other.record)}]]` });
-							setLoomKey(fm, FM.relationships, rels);
-						});
+					// Pre-filled "related", selected — Enter keeps it, typing replaces it.
+					new TextInputModal(plugin.app, {
+						title: t('project.relationshipPrompt.title'),
+						desc: t('project.relationshipPrompt.desc', { from: declarerLabel, to: otherLabel }),
+						initial: 'related',
+						placeholder: t('project.createEntity.identifierPlaceholder'),
+						cta: t('project.relationshipPrompt.connectButton'),
+						onSubmit: (relType) =>
+							writeNodeFm(declarer, (fm) =>
+								appendLoomList(fm, FM.relationships, { type: relType, target: `[[${linkTargetOf(other.record)}]]` })
+							),
 					}).open(),
 			});
 		}
@@ -1824,24 +1675,18 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const removeConnection = async (node: LayoutNode, other: LayoutNode) => {
 		const resolvesToOther = (linkpath: string) =>
 			plugin.indexer.resolve(linkpath, node.id)?.path === other.id;
-		const file = plugin.app.vault.getFileByPath(node.id);
-		if (!file) return;
 		try {
-			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				const cur = fmLoomValue(fm, FM.relationships);
-				if (Array.isArray(cur)) {
-					setLoomKey(
-						fm,
-						FM.relationships,
-						cur.filter((rel: unknown) => {
-							if (typeof rel !== 'object' || rel === null) return true;
-							const target = (rel as { target?: unknown }).target;
-							if (typeof target !== 'string') return true;
-							const linkpath = extractLinkpath(target);
-							return linkpath === null || !resolvesToOther(linkpath);
-						})
-					);
-				}
+			await writeFmAt(plugin.app, node.id, (fm) => {
+				const cur = fmValue(fm, FM.relationships);
+				if (!Array.isArray(cur)) return;
+				setLoomKey(
+					fm,
+					FM.relationships,
+					withoutRelationships(cur, (target) => {
+						const linkpath = extractLinkpath(target);
+						return linkpath !== null && resolvesToOther(linkpath);
+					})
+				);
 			});
 		} catch (err) {
 			console.error('Loom Loom: failed to remove connection', err);
@@ -1852,7 +1697,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	// --- Background pan (any mouse button) ------------------------------------
 
 	const onSvgPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
-		window.cancelAnimationFrame(cameraRaf.current);
+		cameraAnim.cancel();
 		// Right click opens the create menu (see onSvgContextMenu), not a pan.
 		if (e.button === 2) return;
 		// Middle click would otherwise start autoscroll.
@@ -1868,15 +1713,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		};
 	};
 
-	const onSvgPointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
-		const pan = panRef.current;
-		if (!pan || pan.pointerId !== e.pointerId) return;
-		const dx = e.clientX - pan.startX;
-		const dy = e.clientY - pan.startY;
-		if (!pan.moved && Math.hypot(dx, dy) < CLICK_SLOP) return;
-		pan.moved = true;
-		setCamera((c) => ({ ...c, tx: pan.tx0 + dx, ty: pan.ty0 + dy }));
-	};
+	const onSvgPointerMove = (e: ReactPointerEvent<SVGSVGElement>) => panMove(panRef, e, setCamera);
 
 	const onSvgPointerUp = (e: ReactPointerEvent<SVGSVGElement>) => {
 		const pan = panRef.current;
@@ -2225,7 +2062,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								aria-label={t('view.graph.savedViews')}
 								onClick={() => setViewsOpen(!viewsOpen)}
 							>
-								<Icon name="bookmark" fallback="star" />
+								<Icon name="bookmark" />
 							</button>
 							{viewsOpen ? (
 								<div className="loom-filter-pop loom-views-pop">
@@ -2246,7 +2083,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 														title={t('view.graph.updateToCurrent')}
 														onClick={() => updateView(v)}
 													>
-														<Icon name="save" fallback="check" />
+														<Icon name="save" />
 													</button>
 													<button
 														className="loom-rel-filter loom-views-act"
@@ -2254,7 +2091,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 														title={t('view.list.rename')}
 														onClick={() => renameView(v)}
 													>
-														<Icon name="pencil" fallback="edit" />
+														<Icon name="pencil" />
 													</button>
 													<button
 														className="loom-rel-filter loom-views-act"
@@ -2262,7 +2099,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 														title={t('project.common.delete')}
 														onClick={() => deleteView(v)}
 													>
-														<Icon name="trash-2" fallback="x" />
+														<Icon name="trash-2" />
 													</button>
 												</div>
 											))}
@@ -2277,51 +2114,14 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								</div>
 							) : null}
 						</div>
-					<div className="loom-graph-filter" ref={filterRef}>
-							<button
-								className={
-									filterActive || pickedPaths.size > 0
-										? 'loom-rel-filter loom-filter-active'
-										: 'loom-rel-filter'
-								}
-								aria-label={t('view.graph.filterGraph')}
-								onClick={() => setFilterOpen(!filterOpen)}
-							>
-								<Icon name="filter" />
-							</button>
-							{filterOpen ? (
-								<div className="loom-filter-pop">
-									{/* The whole row toggles (not just the small switch), so clicking
-									    the label/icon works too. */}
-									<div
-										className="loom-filter-mode loom-filter-mode-btn"
-										role="switch"
-										aria-checked={filterMode === 'hide'}
-										onClick={() => setFilterMode(filterMode === 'dim' ? 'hide' : 'dim')}
-									>
-										<Icon name={filterMode === 'dim' ? 'eye-off' : 'eye-closed'} />
-										<span>{filterMode === 'dim' ? t('view.graph.dimmed') : t('view.graph.hidden')}</span>
-										<div
-											className={
-												filterMode === 'hide' ? 'checkbox-container is-enabled' : 'checkbox-container'
-											}
-										/>
-									</div>
-									{projectTypes(project?.config).map((et) => (
-										<label key={et} className="loom-check">
-											<input
-												type="checkbox"
-												checked={filterTypes.has(et)}
-												onChange={() => {
-													const next = new Set(filterTypes);
-													if (next.has(et)) next.delete(et);
-													else next.add(et);
-													setFilterTypes(next);
-												}}
-											/>
-											{entityPlural(et)}
-										</label>
-									))}
+					<GraphFilter
+						types={projectTypes(project?.config)}
+						filterTypes={filterTypes}
+						setFilterTypes={setFilterTypes}
+						filterMode={filterMode}
+						setFilterMode={setFilterMode}
+						active={filterActive || pickedPaths.size > 0}
+					>
 									{project ? (
 										<div className="loom-filter-pick">
 											<div className="loom-filter-pick-head">{t('view.graph.focusOnEntities')}</div>
@@ -2393,16 +2193,14 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 											) : null}
 										</div>
 									) : null}
-								</div>
-							) : null}
-						</div>
+					</GraphFilter>
 					{pinned.size > 0 ? (
 						<button
 							className="loom-rel-filter loom-filter-active"
 							aria-label={tn('view.graph.clearPinnedNodes', pinned.size)}
 							onClick={unpinAll}
 						>
-							<Icon name="pin-off" fallback="x" />
+							<Icon name="pin-off" />
 						</button>
 					) : null}
 					<button
@@ -2410,7 +2208,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						aria-label={animActive ? t('view.graph.stopAnimation') : t('view.graph.startAnimation')}
 						onClick={() => (animActive ? finishAnimation() : startAnimation())}
 					>
-						<Icon name={animActive ? 'square' : 'play'} fallback={animActive ? 'x' : 'chevron-right'} />
+						<Icon name={animActive ? 'square' : 'play'} />
 					</button>
 					<button className="loom-rel-filter" aria-label={t('view.graph.fitView')} onClick={fitAll}>
 						<Icon name="scan" />
@@ -2833,7 +2631,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								onClick={(e) => e.stopPropagation()}
 							>
 								<span className="loom-timeline-zoom-icon">
-									<Icon name="binoculars" fallback="search" />
+									<Icon name="binoculars" />
 								</span>
 								<input
 									type="range"

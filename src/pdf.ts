@@ -6,6 +6,7 @@ import {
 	hasTitlePage,
 	stripAnnotationMarkers,
 	stripEntityLinksForDisplay,
+	withEscapes,
 } from './fountain';
 
 /**
@@ -37,7 +38,6 @@ const MARGIN_TOP = 1 * 72;
 const MARGIN_BOTTOM = 1 * 72;
 
 const TEXT_W = PAGE_W - MARGIN_LEFT - MARGIN_RIGHT;
-const LINES_PER_PAGE = Math.floor((PAGE_H - MARGIN_TOP - MARGIN_BOTTOM) / LINE_H);
 
 /** Indent from the left margin, and text width, per element — in points. */
 const LAYOUT: Record<string, { indent: number; width: number; align?: 'right' | 'center' }> = {
@@ -71,17 +71,13 @@ function plainText(rawText: string): string {
 	// the active option, per fountain-field.tsx's cycle-as-document-edit
 	// design), and a comment's own markers carry no printable content at all.
 	const text = stripAnnotationMarkers(stripEntityLinksForDisplay(rawText));
-	const escapedChars: string[] = [];
-	const withPlaceholders = text.replace(/\\([*_\\])/g, (_, ch: string) => {
-		escapedChars.push(ch);
-		return `\uE000${escapedChars.length - 1}\uE000`;
-	});
-	const stripped = withPlaceholders
-		.replace(/\*\*\*(.+?)\*\*\*/g, '$1')
-		.replace(/\*\*(.+?)\*\*/g, '$1')
-		.replace(/\*(.+?)\*/g, '$1')
-		.replace(/_(.+?)_/g, '$1');
-	return stripped.replace(/\uE000(\d+)\uE000/g, (_, i: string) => escapedChars[Number(i)]);
+	return withEscapes(text, (t) =>
+		t
+			.replace(/\*\*\*(.+?)\*\*\*/g, '$1')
+			.replace(/\*\*(.+?)\*\*/g, '$1')
+			.replace(/\*(.+?)\*/g, '$1')
+			.replace(/_(.+?)_/g, '$1')
+	);
 }
 
 /** Escapes a string for a PDF literal and drops anything outside Latin-1. */
@@ -204,7 +200,7 @@ function layoutPages(parsed: ParsedScript): PdfPage[] {
 			if (current.lines.length > 0) newPage();
 			continue;
 		}
-		const { lines, height } = layoutElement(element, y);
+		let { lines, height } = layoutElement(element, y);
 		// Keep a character cue with what follows it.
 		let need = height;
 		if (isTight(element.type) && i + 1 < flat.length && flat[i + 1].type !== 'page-break') {
@@ -212,11 +208,7 @@ function layoutPages(parsed: ParsedScript): PdfPage[] {
 		}
 		if (y - need < bottom && current.lines.length > 0) {
 			newPage();
-			const re = layoutElement(element, y);
-			current.lines.push(...re.lines);
-			current.elements.push(element);
-			y -= re.height + (isTight(element.type) ? 0 : LINE_H);
-			continue;
+			({ lines, height } = layoutElement(element, y));
 		}
 		current.lines.push(...lines);
 		current.elements.push(element);
@@ -345,9 +337,36 @@ export function pdfPages(parsed: ParsedScript): FountainElement[][] {
 	return layoutPages(parsed).map((p) => p.elements);
 }
 
-/** Page count of the typeset PDF — the real one, from the same layout pass. */
-export function pdfPageCount(parsed: ParsedScript): number {
-	return layoutPages(parsed).length;
+/** How many source lines a laid-out element covers — only `dialogue` merges
+ *  consecutive lines into one element. */
+export function elementSpan(el: FountainElement): number {
+	return el.type === 'dialogue' ? el.text.split('\n').length : 1;
 }
 
-export { LINES_PER_PAGE };
+/** `"3"` / `"3–5"`: the pages holding any element whose line falls in
+ *  `[from, to)`, numbered from 1 + `shift`; `—` when none does. */
+export function pageRange(pages: FountainElement[][], from: number, to: number, shift = 0): string {
+	const hits: number[] = [];
+	pages.forEach((els, i) => {
+		if (els.some((el) => el.line >= from && el.line < to)) hits.push(i + 1 + shift);
+	});
+	if (hits.length === 0) return '—';
+	const first = hits[0];
+	const last = hits[hits.length - 1];
+	return first === last ? String(first) : `${first}–${last}`;
+}
+
+/** The page (numbered from 1 + `shift`) a source line renders on, matching an
+ *  element's whole span. A line nothing renders on (a section heading) lands
+ *  on the page holding whatever comes after it. */
+export function pageOfLine(pages: FountainElement[][], line: number, shift = 0): number {
+	const first = 1 + shift;
+	for (let i = 0; i < pages.length; i++) {
+		if (pages[i].some((el) => line >= el.line && line < el.line + elementSpan(el))) return i + first;
+	}
+	for (let i = 0; i < pages.length; i++) {
+		if (pages[i].some((el) => el.line > line)) return i + first;
+	}
+	return Math.max(first, pages.length - 1 + first);
+}
+

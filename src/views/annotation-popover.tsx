@@ -1,5 +1,5 @@
 import { Menu } from 'obsidian';
-import { MouseEvent as ReactMouseEvent, ReactElement, useEffect, useRef, useState } from 'react';
+import { MouseEvent as ReactMouseEvent, ReactElement, ReactNode, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { t } from '../i18n';
 import { CommentEntry, UnresolvedCommentRow, UndecidedAltRow } from './script-notes';
@@ -8,33 +8,16 @@ import { Icon } from './common';
 
 const POPOVER_W = 320;
 
-/** `Intl.DateTimeFormat` is overkill for a tooltip; this reads close enough
- *  to native "Resolved on …" phrasing without pulling in a date library. */
-function formatResolvedAt(ms: number): string {
-	return new Date(ms).toLocaleString(undefined, {
-		dateStyle: 'medium',
-		timeStyle: 'short',
-	});
-}
-
 /**
  * A comment THREAD's card, anchored with its TOP-RIGHT corner on the icon
- * that opened it. Portalled to `document.body` — same reasoning as
- * `timeline-strip.tsx`'s own tooltip: Obsidian's workspace-leaf DOM applies
- * CSS `contain`, which re-bases `position: fixed` to the leaf instead of the
- * true viewport, so an in-place popover would mis-position the moment the
- * leaf itself scrolls.
+ * that opened it. Portalled to `document.body`: Obsidian's workspace-leaf DOM
+ * applies CSS `contain`, which re-bases `position: fixed` to the leaf.
  *
- * `entries` is the marker id's full `CommentEntry[]` — a marked range is a
- * thread, not a single note (script-notes.ts's own doc comment on why the
- * array shape exists). Each entry renders as a compact row (text, a
- * resolve-toggle check icon, an ellipsis menu for edit/delete); a reply box
- * at the bottom is always available to append another entry. `entries` is
- * `[]` only transiently, right after a brand-new marker pair is inserted and
- * before the caller's own `mutateScriptNotes` write has landed and
- * re-rendered this with the fresh entry — the reply box alone (no rows yet)
- * covers that case fine, since "opening the popover IS the request to start
- * typing" already holds.
+ * `entries` is the marker id's full `CommentEntry[]` (a marked range is a
+ * thread). Each entry is a compact row (text, a resolve check, an ellipsis
+ * menu for edit/delete); the reply box at the bottom always appends another.
+ * `entries` is `[]` for a brand-new marker, where the reply box alone is the
+ * compose surface.
  */
 export function CommentPopover({
 	anchorRect,
@@ -76,11 +59,12 @@ export function CommentPopover({
 		// Capture phase — a click on the gutter/margin icon that opened this
 		// (or a DIFFERENT one) would otherwise reach this listener AFTER
 		// React's own onClick has already fired a state update, racing it.
-		document.addEventListener('mousedown', onDocMouseDown, true);
-		return () => document.removeEventListener('mousedown', onDocMouseDown, true);
+		const ownerDoc = rootRef.current?.doc ?? activeDocument;
+		ownerDoc.addEventListener('mousedown', onDocMouseDown, true);
+		return () => ownerDoc.removeEventListener('mousedown', onDocMouseDown, true);
 	}, [onClose]);
 
-	const left = Math.max(8, Math.min(anchorRect.right - POPOVER_W, window.innerWidth - POPOVER_W - 8));
+	const left = Math.max(8, Math.min(anchorRect.right - POPOVER_W, activeWindow.innerWidth - POPOVER_W - 8));
 	const top = Math.max(8, anchorRect.bottom + 4);
 
 	const openRowMenu = (event: ReactMouseEvent, index: number) => {
@@ -149,7 +133,7 @@ export function CommentPopover({
 									aria-label={
 										entry.resolved
 											? entry.resolvedAt
-												? t('view.script.comment.resolvedOnAria', { date: formatResolvedAt(entry.resolvedAt) })
+												? t('view.script.comment.resolvedOnAria', { date: new Date(entry.resolvedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) })
 												: t('view.script.comment.resolvedAria')
 											: t('view.script.comment.resolveThisAria')
 									}
@@ -191,7 +175,8 @@ export function CommentPopover({
 				</button>
 			</div>
 		</div>,
-		document.body
+		// Opened by a click, so the active window is the one it belongs in.
+		activeDocument.body
 	);
 }
 
@@ -204,6 +189,34 @@ export function CommentPopover({
  * rendered `[data-loom-annotation-content]` element), which the caller
  * supplies rather than this component knowing about either.
  */
+/** The aside shell both browse-all panels share: title + close, then either
+ *  the empty message or the rows. */
+function BrowserPanel({
+	title,
+	closeLabel,
+	empty,
+	onClose,
+	children,
+}: {
+	title: string;
+	closeLabel: string;
+	empty: string | null;
+	onClose: () => void;
+	children: ReactNode;
+}): ReactElement {
+	return (
+		<aside className="loom-script-nav">
+			<div className="loom-script-nav-head">
+				{title}
+				<button className="loom-rel-filter" aria-label={closeLabel} onClick={onClose}>
+					<Icon name="chevron-left" />
+				</button>
+			</div>
+			{empty !== null ? <div className="loom-script-nav-empty">{empty}</div> : children}
+		</aside>
+	);
+}
+
 export function CommentsBrowserPanel({
 	rows,
 	onJump,
@@ -214,36 +227,31 @@ export function CommentsBrowserPanel({
 	onClose: () => void;
 }): ReactElement {
 	return (
-		<aside className="loom-script-nav">
-			<div className="loom-script-nav-head">
-				{t('view.entity.script.unresolvedComments')}
-				<button className="loom-rel-filter" aria-label={t('view.entity.script.hideComments')} onClick={onClose}>
-					<Icon name="chevron-left" />
-				</button>
-			</div>
-			{rows.length === 0 ? (
-				<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
-			) : (
-				rows.map(({ span, excerpt, unresolvedEntries }) => (
-					<div key={span.id} className="loom-script-comments-panel-group">
-						<button className="loom-script-nav-act loom-script-comments-panel-excerpt" onClick={() => onJump(span)}>
-							{excerpt}
-						</button>
-						<div className="loom-script-comments-panel-nested">
-							{unresolvedEntries.map((entry) => (
-								<button
-									key={entry.id + entry.createdAt}
-									className="loom-script-comments-panel-reply"
-									onClick={() => onJump(span)}
-								>
-									{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
-								</button>
-							))}
-						</div>
+		<BrowserPanel
+			title={t('view.entity.script.unresolvedComments')}
+			closeLabel={t('view.entity.script.hideComments')}
+			empty={rows.length === 0 ? t('view.entity.script.noUnresolvedComments') : null}
+			onClose={onClose}
+		>
+			{rows.map(({ span, excerpt, unresolvedEntries }) => (
+				<div key={span.id} className="loom-script-comments-panel-group">
+					<button className="loom-script-nav-act loom-script-comments-panel-excerpt" onClick={() => onJump(span)}>
+						{excerpt}
+					</button>
+					<div className="loom-script-comments-panel-nested">
+						{unresolvedEntries.map((entry) => (
+							<button
+								key={entry.id + entry.createdAt}
+								className="loom-script-comments-panel-reply"
+								onClick={() => onJump(span)}
+							>
+								{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
+							</button>
+						))}
 					</div>
-				))
-			)}
-		</aside>
+				</div>
+			))}
+		</BrowserPanel>
 	);
 }
 
@@ -262,26 +270,21 @@ export function AlternativesBrowserPanel({
 	onClose: () => void;
 }): ReactElement {
 	return (
-		<aside className="loom-script-nav">
-			<div className="loom-script-nav-head">
-				{t('view.entity.script.unfinalizedAlternatives')}
-				<button className="loom-rel-filter" aria-label={t('view.entity.script.hideAlternatives')} onClick={onClose}>
-					<Icon name="chevron-left" />
+		<BrowserPanel
+			title={t('view.entity.script.unfinalizedAlternatives')}
+			closeLabel={t('view.entity.script.hideAlternatives')}
+			empty={rows.length === 0 ? t('view.entity.script.everyAlternativeAccepted') : null}
+			onClose={onClose}
+		>
+			{rows.map(({ span, excerpt }) => (
+				<button
+					key={span.id}
+					className="loom-script-nav-act loom-script-comments-panel-excerpt"
+					onClick={() => onJump(span)}
+				>
+					{excerpt}
 				</button>
-			</div>
-			{rows.length === 0 ? (
-				<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
-			) : (
-				rows.map(({ span, excerpt }) => (
-					<button
-						key={span.id}
-						className="loom-script-nav-act loom-script-comments-panel-excerpt"
-						onClick={() => onJump(span)}
-					>
-						{excerpt}
-					</button>
-				))
-			)}
-		</aside>
+			))}
+		</BrowserPanel>
 	);
 }

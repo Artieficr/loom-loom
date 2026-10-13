@@ -168,3 +168,27 @@ export function edgeXRange(route: EdgeRoute, a: Pt, b: Pt): [number, number] {
 	}
 	return [min, max];
 }
+
+/**
+ * Packs horizontal spans into lanes, first-fit in the order given: each item
+ * takes the lowest lane ≥ `floor(item, placed)` that no overlapping span
+ * already holds, so spans that don't overlap share a lane. Returns item →
+ * lane. Callers order the items (and use `floor`) to keep any lane order a
+ * crossing-free drawing depends on.
+ */
+export function packLanes<T>(
+	items: T[],
+	span: (t: T) => [number, number],
+	floor: (t: T, placed: Map<T, number>) => number = () => 0
+): Map<T, number> {
+	const out = new Map<T, number>();
+	const taken: { lane: number; lo: number; hi: number }[] = [];
+	for (const it of items) {
+		const [lo, hi] = span(it);
+		let lane = floor(it, out);
+		while (taken.some((p) => p.lane === lane && p.lo < hi && p.hi > lo)) lane++;
+		out.set(it, lane);
+		taken.push({ lane, lo, hi });
+	}
+	return out;
+}

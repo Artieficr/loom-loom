@@ -36,31 +36,6 @@ export const DATE_FORMATS = [
 
 export type DateFormat = (typeof DATE_FORMATS)[number];
 
-export const PAGE_SIZES = ['letter', 'a4', 'custom'] as const;
-export type PageSize = (typeof PAGE_SIZES)[number];
-
-export function isPageSize(value: unknown): value is PageSize {
-	return typeof value === 'string' && (PAGE_SIZES as readonly string[]).includes(value);
-}
-
-/** Writer/Prose only: page size + margins for the Prose editor's visual page
- *  column (§5d) and the Pages-preview pagination estimate (§5e) — a
- *  document-level setting, not inline markup, hence living here alongside
- *  the project's other layout-ish config (`dateFormat`, `customCalendar`)
- *  rather than on each Chapter note's own frontmatter. */
-export interface ProseLayoutConfig {
-	pageSize: PageSize;
-	/** Used only when `pageSize === 'custom'`; ignored (but still stored, so a
-	 *  round-trip through 'letter'/'a4' and back to 'custom' doesn't lose it)
-	 *  otherwise. */
-	widthIn: number;
-	marginIn: { top: number; bottom: number; left: number; right: number };
-}
-
-export function defaultProseLayout(): ProseLayoutConfig {
-	return { pageSize: 'letter', widthIn: 8.5, marginIn: { top: 1, bottom: 1, left: 1, right: 1 } };
-}
-
 export interface ProjectConfig {
 	/** The project's workflow — which entity types it holds, which features are
 	 *  on. See project-kind.ts; everything reads it through the helpers there. */
@@ -72,8 +47,6 @@ export interface ProjectConfig {
 	customCalendar: CustomCalendarConfig;
 	/** Display name of the virtual Group (the party); '' = the default "Group". */
 	groupName: string;
-	/** Writer/Prose only — see `ProseLayoutConfig`. Ignored otherwise. */
-	proseLayout: ProseLayoutConfig;
 }
 
 export function defaultProjectConfig(kind: ProjectKind = DEFAULT_PROJECT_KIND): ProjectConfig {
@@ -83,7 +56,6 @@ export function defaultProjectConfig(kind: ProjectKind = DEFAULT_PROJECT_KIND): 
 		dateFormat: 'MMM Do, YYYY',
 		customCalendar: { enabled: false, monthCount: 12, months: [], useShortNames: false },
 		groupName: '',
-		proseLayout: defaultProseLayout(),
 	};
 }
 
@@ -126,20 +98,6 @@ export function parseProjectConfig(text: string): ProjectConfig {
 				name: typeof m?.name === 'string' ? m.name : '',
 				short: typeof m?.short === 'string' ? m.short : '',
 			}));
-		}
-	}
-	const pl = d.proseLayout;
-	if (typeof pl === 'object' && pl !== null) {
-		if (isPageSize(pl.pageSize)) config.proseLayout.pageSize = pl.pageSize;
-		if (typeof pl.widthIn === 'number' && pl.widthIn > 0 && pl.widthIn <= 100) {
-			config.proseLayout.widthIn = pl.widthIn;
-		}
-		const m = pl.marginIn;
-		if (typeof m === 'object' && m !== null) {
-			for (const side of ['top', 'bottom', 'left', 'right'] as const) {
-				const v = m[side];
-				if (typeof v === 'number' && v >= 0 && v <= 10) config.proseLayout.marginIn[side] = v;
-			}
 		}
 	}
 	return config;

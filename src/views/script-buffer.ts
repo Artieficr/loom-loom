@@ -1,10 +1,10 @@
 import { useCallback, useSyncExternalStore } from 'react';
-import { Notice, TFile, normalizePath } from 'obsidian';
+import { Notice, TFile } from 'obsidian';
 import type LoomLoomPlugin from '../main';
 import type { ProjectDef } from '../indexer';
 import { SCRIPT_EXTENSION } from '../types';
 import { t } from '../i18n';
-import { queueWrite } from '../write-queue';
+import { editVaultFile } from '../write-queue';
 import {
 	applyBranchLabels,
 	cleanAnnotationMarkers,
@@ -13,44 +13,27 @@ import {
 	renumberBranchGroups,
 	renumberScenes,
 } from '../fountain';
+import { projectPath } from '../naming';
 
 /**
  * One project's whole `.fountain` script, held live in memory and edited
- * into DIRECTLY by every UI operation — disk is a background persistence
- * target, not the thing an operation has to read fresh to be correct. This
- * replaces the previous architecture (every operation reading the file
- * fresh from disk, transforming, writing back) that caused a real class of
- * stale-read races: an empty-scene paste rejected because a scene-body
- * offset was computed against on-disk content while the live editor buffer
- * had already grown by a line; an undo-then-paste-again sequence reviving a
- * branch that had just been undone, because the second paste read
- * pre-undo disk content.
+ * DIRECTLY by every UI operation — disk is a background persistence target,
+ * not something an operation reads fresh to be correct. (Reading disk per
+ * operation raced the live editor: offsets computed against stale content,
+ * an undo revived by a paste that read pre-undo text.)
  *
- * **This module has NO dependency on `script-view.tsx`, deliberately** —
- * script-view.tsx imports FROM here (for both the low-level file utilities
- * below and the buffer API), matching this codebase's own established
- * one-directional-dependency convention (`project.ts`'s own doc comment on
- * `editScriptFile` notes the identical reasoning: it can't import from
- * script-view.tsx because script-view.tsx already imports FROM project.ts).
- * The one place this module needs script-view.tsx-resident logic —
- * `syncScenes`, run after every successful flush — is wired via
- * `registerPostFlushHook` (below) instead of a static import: script-view.tsx
- * registers it once, at its own module load, rather than this module
- * importing it back and creating a cycle.
+ * **No dependency on `script-view.tsx`** — script-view.tsx imports from
+ * here. The one piece of script-view.tsx logic this module needs (the
+ * post-flush `syncScenes` + sidecar prune) is registered via
+ * `registerPostFlushHook` at script-view.tsx's module load.
  *
- * Keyed by `scriptFilePath(project)` — the SAME key `write-queue.ts`'s own
- * `'script'` registry already uses, so `flushScriptBufferNow` (below) can
- * reuse `editScript`'s serialization unchanged rather than inventing a
- * second lock.
+ * Keyed by `scriptFilePath(project)` — the same key `queueWrite` uses, so
+ * `flushScriptBufferNow` reuses `editScript`'s serialization.
  *
- * A buffer, once created, lives for the rest of the plugin session — its
- * `vault.on('modify'|'create')` listener is registered via
- * `plugin.registerEvent` (Obsidian's own Component-lifecycle cleanup, tied
- * to plugin unload) rather than torn down when the last subscribing
- * component unmounts, so an external change landing while no Scene/Script
- * view happens to be open for that project is still correctly reconciled
- * the moment one opens again — no separate "did I miss anything while
- * closed" reload check needed.
+ * A buffer lives for the rest of the plugin session: its `vault.on('modify'|
+ * 'create')` listener is registered with `plugin.registerEvent` (cleaned up
+ * on unload), so an external change while no view is open is still
+ * reconciled when one opens.
  */
 interface ScriptBufferState {
 	loaded: boolean;
@@ -67,7 +50,6 @@ interface ScriptBufferState {
 	debounceTimer: number | null;
 	flushing: Promise<void> | null;
 	flushAgainAfter: boolean;
-	listenerInstalled: boolean;
 	/** Resolves once the buffer's first disk read has landed (or resolves
 	 *  immediately if the project has no script file yet) — see
 	 *  `ensureScriptBufferLoaded`'s own doc comment for why this exists. */
@@ -77,13 +59,9 @@ interface ScriptBufferState {
 const buffers = new Map<string, ScriptBufferState>();
 
 /** What runs after a successful flush, alongside re-reading the confirmed
- *  disk text — `syncScenes` + the comment/alt-text sidecar prune
- *  (`pruneOrphanedAnnotations`, script-view.tsx), registered once at that
- *  module's own load rather than imported here (see this file's own top
- *  doc comment for why). `undefined` only in the brief window before
- *  script-view.tsx has loaded — not a real concern in practice, since
- *  nothing calls `flushScriptBufferNow` before the app itself has finished
- *  loading every view module. */
+ *  disk text — `syncScenes` + the sidecar prune (`pruneOrphanedAnnotations`,
+ *  script-view.tsx), registered at that module's load. `undefined` only
+ *  before script-view.tsx loads, before anything can flush. */
 type PostFlushHook = (plugin: LoomLoomPlugin, project: ProjectDef, text: string) => Promise<void>;
 let postFlushHook: PostFlushHook | undefined;
 
@@ -103,8 +81,7 @@ export function registerPostFlushHook(hook: PostFlushHook): void {
  * direction one-way.
  */
 export function scriptFilePath(project: ProjectDef): string {
-	const base = `${project.name}.${SCRIPT_EXTENSION}`;
-	return normalizePath(project.root === '' ? base : `${project.root}/${base}`);
+	return projectPath(project, `${project.name}.${SCRIPT_EXTENSION}`);
 }
 
 /** The project's script file, or null when it hasn't been created yet. */
@@ -133,21 +110,9 @@ export async function editScript(
 	project: ProjectDef,
 	apply: (text: string) => string | null
 ): Promise<boolean> {
-	return queueWrite('script', scriptFilePath(project), async () => {
-		const scriptFile = findScriptFile(plugin, project);
-		if (!scriptFile) return false;
-		try {
-			const raw = await plugin.app.vault.read(scriptFile);
-			const next = apply(raw);
-			if (next === null || next === raw) return false;
-			await plugin.app.vault.modify(scriptFile, next);
-			return true;
-		} catch (e) {
-			console.error('Loom Loom: could not edit the script', e);
-			new Notice(t('view.script.editWriteFailed'));
-			return false;
-		}
-	});
+	return editVaultFile(plugin.app, scriptFilePath(project), apply, 'script', () =>
+		new Notice(t('view.script.editWriteFailed'))
+	);
 }
 
 /**
@@ -182,7 +147,6 @@ function newState(): ScriptBufferState {
 		debounceTimer: null,
 		flushing: null,
 		flushAgainAfter: false,
-		listenerInstalled: false,
 		loadPromise: Promise.resolve(),
 	};
 }
@@ -203,24 +167,11 @@ function adopt(state: ScriptBufferState, text: string): void {
 }
 
 /**
- * Reconciles a fresh disk read against the buffer's current in-memory
- * state via `reconcileScriptText` (fountain.ts) and applies the result —
- * the one place `vault.on('modify')` events actually land.
- *
- * Takes `plugin`/`project` (not just `state`) for one reason: a `merged` or
- * `local-wins` result differs from what's now ON DISK, by construction —
- * disk still holds the pre-merge external text until something pushes the
- * reconciled result back out. A real, caught-before-shipping bug: the first
- * version of this function updated `state.text`/`notify`ed and stopped
- * there, with no `scheduleFlush` call — the merge lived in memory only,
- * and unless some LATER, unrelated edit happened to trigger another flush,
- * the just-reconciled change (someone's actual typing, successfully merged
- * against a conflicting external write) could sit un-persisted forever,
- * discarded outright on a reload. `scheduleFlush(plugin, project)` (an
- * IMMEDIATE one — no `debounceMs` — since this is push-the-merge-back-out,
- * not a typing surface) is what the plan's own pseudocode already called
- * for; this was a real gap between that pseudocode and what actually got
- * implemented, not a deliberate omission.
+ * Reconciles a fresh disk read against the buffer's in-memory state via
+ * `reconcileScriptText` (fountain.ts) and applies the result — where
+ * `vault.on('modify')` events land. A `merged`/`local-wins` result differs
+ * from what's on disk by construction, so it schedules an immediate flush to
+ * push the reconciled text back out (else it would only live in memory).
  */
 function reconcile(plugin: LoomLoomPlugin, project: ProjectDef, state: ScriptBufferState, diskText: string): void {
 	if (!state.loaded) {
@@ -257,20 +208,17 @@ function ensureBuffer(plugin: LoomLoomPlugin, project: ProjectDef): ScriptBuffer
 	state = newState();
 	buffers.set(path, state);
 
-	if (!state.listenerInstalled) {
-		state.listenerInstalled = true;
-		const read = () => {
-			const file = findScriptFile(plugin, project);
-			if (!file) return Promise.resolve();
-			return plugin.app.vault.read(file).then((raw) => reconcile(plugin, project, state, raw));
-		};
-		state.loadPromise = read();
-		const touched = (f: { path: string }) => {
-			if (f.path === path) void read();
-		};
-		plugin.registerEvent(plugin.app.vault.on('modify', touched));
-		plugin.registerEvent(plugin.app.vault.on('create', touched));
-	}
+	const read = () => {
+		const file = findScriptFile(plugin, project);
+		if (!file) return Promise.resolve();
+		return plugin.app.vault.read(file).then((raw) => reconcile(plugin, project, state, raw));
+	};
+	state.loadPromise = read();
+	const touched = (f: { path: string }) => {
+		if (f.path === path) void read();
+	};
+	plugin.registerEvent(plugin.app.vault.on('modify', touched));
+	plugin.registerEvent(plugin.app.vault.on('create', touched));
 	return state;
 }
 
@@ -318,6 +266,12 @@ export function useScriptBuffer(plugin: LoomLoomPlugin, project: ProjectDef | nu
 		return state?.loaded ? state.text : null;
 	}, [plugin, path]);
 	return useSyncExternalStore(subscribe, getSnapshot);
+}
+
+/** The buffer's current text, or null before its first disk read lands. */
+export function readScriptBuffer(project: ProjectDef): string | null {
+	const state = buffers.get(scriptFilePath(project));
+	return state?.loaded ? state.text : null;
 }
 
 /** Fully synchronous, in-memory-only mutation — no disk I/O at all. Every

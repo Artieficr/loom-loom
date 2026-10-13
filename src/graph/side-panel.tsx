@@ -1,9 +1,9 @@
 import { App } from 'obsidian';
 import { PointerEvent as ReactPointerEvent, memo, useRef, useState } from 'react';
 import { Connection, ENTITY_TYPES, EntityRecord, EntityType, entityPlural } from '../types';
-import { Icon, Truncated } from '../views/common';
+import { Icon, SectionHeader, Truncated } from '../views/common';
 import { MarkdownField } from '../views/markdown-field';
-import type { LinkOption } from '../views/link-textarea';
+import type { LinkOption } from '../views/markdown-field';
 import { t } from '../i18n';
 
 /** The panel's original fixed width — resizing can only widen it. */
@@ -29,11 +29,7 @@ function Section({
 	return (
 		<div className="loom-section">
 			<div className="loom-section-head">
-				<button className="loom-section-header" onClick={() => setOpen(!open)}>
-					<span className={open ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
-					{label}
-					<span className="loom-section-count">{entries.length}</span>
-				</button>
+				<SectionHeader open={open} onToggle={() => setOpen(!open)} label={label} count={entries.length} />
 				<button
 					className="loom-section-add"
 					aria-label={t('view.graph.newConnectedType', { label: label.toLowerCase() })}

@@ -24,9 +24,20 @@
  * plain, undecorated body text.
  */
 
-import { readLoomId, collectLoomIds, freshLoomId, trimTrailingBlankLines, PAGE_BREAK_RE } from './fountain';
+import {
+	LOOM_ID_RE_G,
+	PAGE_BREAK_RE,
+	TopLevelEntry,
+	actOrderKeepingBreaks,
+	appendWithFreshId,
+	collectLoomIds,
+	freshLoomId,
+	mergeTopLevel,
+	readLoomId,
+	relocateBlock,
+	spliceInOrder,
+} from './fountain';
 
-const LOOM_ID_RE_G = /\s*\[\[loom:[A-Za-z0-9]+\]\]/g;
 
 export interface ParsedAct {
 	title: string;
@@ -100,43 +111,19 @@ function allBookLoomIds(parsed: ParsedBook): Set<string> {
 	return collectLoomIds(parsed.acts, parsed.chapters, parsed.pageBreaks);
 }
 
-/** Normalizes blank lines sitting immediately around an Act/Chapter heading
- *  — the SOURCE of two related, separately reported gaps: a brand-new
- *  chapter/act, or one just moved/reordered, kept showing a REAL blank line
- *  between its own title and whatever comes right after (its own first
- *  line of prose, or — for an act with no chapters yet — its first
- *  chapter's own heading), never just none at all. Several structural ops
- *  (`replaceBookChapterBody`/`replaceBookActBody`'s own leading `''` before
- *  the body; `moveBookChapterToAct`/`reorderBookChaptersInAct`/
- *  `reorderBookActs`/`reorderBookTopLevelEntries`, all via
- *  `trimTrailingBlankLines` + their own leading/trailing `''` splice) each
- *  wrap the block they're placing in a blank line independently, and doing
- *  that consistently right in each one of those (some conditionally, since a
- *  gap BETWEEN two distinct chapters is still wanted) turned out to be far
- *  more failure-prone than fixing it in exactly one place, after the fact:
+/** Normalizes blank lines immediately around an Act/Chapter heading, once,
+ *  after the fact — several structural ops each pad the block they place
+ *  with blank lines independently:
  *
- * - Directly AFTER a heading: the blank run collapses to NOTHING, not just
- *   down to one — a heading's own CSS `padding-bottom` (styles.css) already
- *   supplies the visual gap, so an actual blank LINE there is never wanted,
- *   whether it's one or several.
- * - Directly BEFORE a heading: a run of 2+ collapses to exactly one — a
- *   SINGLE blank line here is the normal, still-wanted separator between
- *   two distinct sections (the end of one chapter's prose and the start of
- *   the next); only the STACKED case (two independent ops' own padding
- *   landing back to back — e.g. a chapter freshly appended then immediately
- *   moved under its act at creation time) needs correcting.
+ * - Directly AFTER a heading: the blank run collapses to nothing (the
+ *   heading's CSS `padding-bottom` supplies the gap).
+ * - Directly BEFORE a heading: a run of 2+ collapses to one (a single blank
+ *   line is the normal separator between sections).
  *
- * Regex-based specifically so it never has to reason about a mutating
- * `lines` array's shifting indices while it edits — a heading boundary is
- * unambiguous (`^#{1,2} `) and N raw newlines in a row IS N-1 blank lines by
- * construction (each blank line contributes exactly one extra `\n`).
- * Deliberately scoped to heading-ADJACENT runs only — a deliberate multi-
- * blank-line break the user typed in the middle of their own prose is left
- * completely alone. Run from BOTH of Prose's write paths — `ensureBookIds`
- * below (covers `editBookAndSync`, book-view.tsx) and `editBookFile`
- * (project.ts's own private duplicate, used by the Chapter/Act creation
- * modals) — since a chapter/act can pick up this exact blank-line padding
- * at CREATION time, before any `editBookAndSync` commit ever runs. */
+ * Regex-based, so no shifting indices; heading-adjacent runs only, so blank
+ * lines inside the user's prose are untouched. Run from both Prose write
+ * paths — `ensureBookIds` (`editBookAndSync`) and project.ts's
+ * `editBookFile` (the creation modals). */
 function collapseHeadingBlankRuns(text: string): { text: string; changed: boolean } {
 	const next = text.replace(/^(#{1,2} .*)\n+/gm, '$1\n').replace(/\n{3,}(#{1,2} .*)/gm, '\n\n$1');
 	return { text: next, changed: next !== text };
@@ -167,50 +154,31 @@ export function ensureBookIds(text: string): { text: string; changed: boolean } 
 	return { text: lines.join('\n'), changed: true };
 }
 
-/** The next Act heading OR a qualifying page break after `afterLine`,
- *  whichever comes first, or null at EOF — bounds an act's own span so a
+/** The first line after `afterLine` holding any of `groups`' items, else
+ *  `totalLines` (EOF). */
+function nextLineOf(afterLine: number, totalLines: number, ...groups: { line: number }[][]): number {
+	return Math.min(totalLines, ...groups.flat().map((i) => i.line).filter((l) => l > afterLine));
+}
+
+/** An act ends at the next Act heading or qualifying page break — so a
  *  TRAILING page break (meant to start the NEXT act on a fresh page) isn't
- *  swept into the act BEFORE it. Mirrors `nextTopSectionLine`. */
-function nextActLine(parsed: ParsedBook, afterLine: number): number | null {
-	const candidates = [
-		...parsed.acts.filter((a) => a.line > afterLine).map((a) => a.line),
-		...parsed.pageBreaks.filter((pb) => pb.line > afterLine).map((pb) => pb.line),
-	];
-	return candidates.length > 0 ? Math.min(...candidates) : null;
-}
-
-/** The next `#`/`##`/page-break line after `afterLine`, or null at EOF —
- *  bounds a chapter's own span (a chapter ends at the next chapter, the next
- *  act, or a trailing page break before either, whichever comes first). */
-function nextChapterOrActLine(parsed: ParsedBook, afterLine: number): number | null {
-	const candidates = [
-		...parsed.acts.filter((a) => a.line > afterLine).map((a) => a.line),
-		...parsed.chapters.filter((c) => c.line > afterLine).map((c) => c.line),
-		...parsed.pageBreaks.filter((pb) => pb.line > afterLine).map((pb) => pb.line),
-	];
-	return candidates.length > 0 ? Math.min(...candidates) : null;
-}
-
+ *  swept into the act before it. Mirrors `nextTopSectionLine`. */
 function actEndLine(parsed: ParsedBook, act: ParsedAct, totalLines: number): number {
-	return nextActLine(parsed, act.line) ?? totalLines;
+	return nextLineOf(act.line, totalLines, parsed.acts, parsed.pageBreaks);
 }
 
+/** A chapter ends at the next chapter, act, or page break, whichever comes first. */
 function chapterEndLine(parsed: ParsedBook, chapter: ParsedChapter, totalLines: number): number {
-	return nextChapterOrActLine(parsed, chapter.line) ?? totalLines;
+	return nextLineOf(chapter.line, totalLines, parsed.acts, parsed.chapters, parsed.pageBreaks);
 }
 
 const WIKILINK_MENTION_RE = /\[\[([^[\]\n|]+)(?:\|[^[\]\n]*)?\]\]/g;
 
 /** Every plain `[[Name]]`/`[[Name|Display]]` wikilink target named anywhere
- *  in `text` — the Prose analogue of `fountain.ts`'s `findEntityLinks`, just
- *  reading the SAME plain-wikilink syntax the Book editor already renders
- *  everywhere else instead of a second `@[...]` convention: Fountain needed
- *  `@[...]` because `[[...]]` was already its own non-exporting Note syntax
- *  reserved for scene/section ids, but nothing in Prose reserves `[[...]]`
- *  beyond the specific marker targets excluded below, so an ordinary
- *  wikilink IS the mention. Excludes Prose's own hidden `[[loom:<id>]]`
- *  identity marker and `[[loom-comment:<id>]]`/`[[loom-alt:<id>]]`
- *  annotation markers — never a real entity reference. */
+ *  in `text` — the Prose analogue of fountain.ts's `findEntityLinks`. Fountain
+ *  needs `@[...]` because `[[...]]` is its own note syntax; in Prose an
+ *  ordinary wikilink IS the mention. Excludes the hidden `[[loom:<id>]]`
+ *  and `[[loom-comment:<id>]]`/`[[loom-alt:<id>]]` markers. */
 export function findChapterMentions(text: string): string[] {
 	const out: string[] = [];
 	WIKILINK_MENTION_RE.lastIndex = 0;
@@ -233,21 +201,6 @@ export function chapterBookText(text: string, chapterId: string): string | null 
 	const end = chapterEndLine(parsed, chapter, lines.length);
 	return lines
 		.slice(chapter.line + 1, end)
-		.join('\n')
-		.trim();
-}
-
-/** An act's own body text — every chapter beneath it, `##` headings
- *  included so the editor still shows chapter breaks, up to the next act
- *  heading (or EOF). Mirrors `actScriptText`. */
-export function actBookText(text: string, actId: string): string | null {
-	const parsed = parseBook(text);
-	const act = parsed.acts.find((a) => a.loomId === actId);
-	if (!act) return null;
-	const lines = text.split(/\r?\n/);
-	const end = actEndLine(parsed, act, lines.length);
-	return lines
-		.slice(act.line + 1, end)
 		.join('\n')
 		.trim();
 }
@@ -331,10 +284,7 @@ export function renameBookChapterTitle(text: string, chapterId: string, newTitle
  *  so `syncActsChapters` creates the note FROM it on the next commit rather
  *  than the note starting orphaned. */
 export function appendBookAct(text: string, title: string): string {
-	const parsed = parseBook(text);
-	const id = freshLoomId(allBookLoomIds(parsed));
-	const trimmed = text.replace(/\s+$/, '');
-	return `${trimmed}\n\n# ${title.trim()} [[loom:${id}]]\n`;
+	return appendWithFreshId(text, allBookLoomIds(parseBook(text)), (id) => `# ${title.trim()} [[loom:${id}]]`);
 }
 
 /** Appends a new, empty Chapter to the very end of the book, id already
@@ -342,11 +292,8 @@ export function appendBookAct(text: string, title: string): string {
  *  act's content is simply "everything up to the next `#` line or EOF"),
  *  actless if there's no act yet, same as typing one in by hand. */
 export function appendBookChapter(text: string, title: string): string {
-	const parsed = parseBook(text);
-	const id = freshLoomId(allBookLoomIds(parsed));
-	const trimmed = text.replace(/\s+$/, '');
 	const heading = title.trim() === '' ? 'Untitled chapter' : title.trim();
-	return `${trimmed}\n\n## ${heading} [[loom:${id}]]\n`;
+	return appendWithFreshId(text, allBookLoomIds(parseBook(text)), (id) => `## ${heading} [[loom:${id}]]`);
 }
 
 /** Appends a new act-boundary page break to the very end of the book, id
@@ -356,10 +303,7 @@ export function appendBookChapter(text: string, title: string): string {
  *  satisfied by EOF); a page break typed by hand elsewhere already works the
  *  same way once the next commit re-parses. */
 export function appendBookPageBreak(text: string): string {
-	const parsed = parseBook(text);
-	const id = freshLoomId(allBookLoomIds(parsed));
-	const trimmed = text.replace(/\s+$/, '');
-	return `${trimmed}\n\n=== [[loom:${id}]]\n`;
+	return appendWithFreshId(text, allBookLoomIds(parseBook(text)), (id) => `=== [[loom:${id}]]`);
 }
 
 /** Removes an act-boundary page break — its one line, plus a following
@@ -382,16 +326,12 @@ export function moveBookChapterToAct(text: string, chapterId: string, actId: str
 	const target = parsed.acts.find((a) => a.loomId === actId);
 	if (!chapter || !target) return null;
 	const lines = text.split(/\r?\n/);
-	const end = chapterEndLine(parsed, chapter, lines.length);
-	const block = lines.slice(chapter.line, end);
-	let insertAt = actEndLine(parsed, target, lines.length);
-	lines.splice(chapter.line, end - chapter.line);
-	// Removing the block shifts everything after it up.
-	if (insertAt > chapter.line) insertAt -= end - chapter.line;
-	while (insertAt > 0 && lines[insertAt - 1]?.trim() === '') insertAt--;
-	const clean = trimTrailingBlankLines(block);
-	lines.splice(insertAt, 0, '', ...clean, '');
-	return lines.join('\n');
+	return relocateBlock(
+		lines,
+		chapter.line,
+		chapterEndLine(parsed, chapter, lines.length),
+		actEndLine(parsed, target, lines.length)
+	);
 }
 
 /** Reorders every chapter within ONE act to match `orderedChapterIds`
@@ -416,45 +356,30 @@ export function reorderBookChaptersInAct(
 	if (inAct.length === 0) return null;
 	const trueEnd = (c: ParsedChapter) => Math.min(chapterEndLine(parsed, c, lines.length), actEnd);
 
-	const insertAt = inAct[0].line;
-	const removeEnd = trueEnd(inAct[inAct.length - 1]);
 	const blocks = new Map<string, string[]>(
 		inAct.map((c) => [c.loomId as string, lines.slice(c.line, trueEnd(c))])
 	);
-
-	const order = [
-		...orderedChapterIds.filter((id) => blocks.has(id)),
-		...inAct.map((c) => c.loomId as string).filter((id) => !orderedChapterIds.includes(id)),
-	];
-	const rebuilt: string[] = [];
-	for (const id of order) {
-		const block = blocks.get(id);
-		if (!block) continue;
-		rebuilt.push('', ...trimTrailingBlankLines(block), '');
-	}
-	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
-	return lines.join('\n');
+	return spliceInOrder(
+		lines,
+		inAct[0].line,
+		trueEnd(inAct[inAct.length - 1]),
+		blocks,
+		inAct.map((c) => c.loomId as string),
+		orderedChapterIds,
+		(clean) => ['', ...clean, '']
+	);
 }
 
 /** One entry in the book's top-level sequence — an Act (its whole block,
  *  chapters included) or a page break sitting between them, in document
  *  order. What `reorderBookTopLevelEntries`/`reorderBookActs` reorder.
  *  Mirrors `TopLevelEntry` (fountain.ts). */
-export interface BookTopLevelEntry {
-	kind: 'act' | 'page-break';
-	id: string;
-}
+export type BookTopLevelEntry = TopLevelEntry;
 
 /** The current top-level sequence — acts and act-boundary page breaks — in
  *  document order. Mirrors `topLevelEntries` (fountain.ts). */
 export function bookTopLevelEntries(parsed: ParsedBook): BookTopLevelEntry[] {
-	const acts = parsed.acts
-		.filter((a): a is ParsedAct & { loomId: string } => a.loomId !== null)
-		.map((a) => ({ kind: 'act' as const, id: a.loomId, line: a.line }));
-	const breaks = parsed.pageBreaks
-		.filter((pb): pb is ParsedPageBreak & { loomId: string } => pb.loomId !== null)
-		.map((pb) => ({ kind: 'page-break' as const, id: pb.loomId, line: pb.line }));
-	return [...acts, ...breaks].sort((a, b) => a.line - b.line).map(({ kind, id }) => ({ kind, id }));
+	return mergeTopLevel(parsed.acts, parsed.pageBreaks);
 }
 
 /** Shared splice-rebuild behind `reorderBookActs`/`reorderBookTopLevelEntries`
@@ -482,24 +407,18 @@ function rebuildBookTopLevel(text: string, parsed: ParsedBook, order: string[]):
 	};
 
 	const sorted = entries.slice().sort((a, b) => (lineOf.get(a.id) as number) - (lineOf.get(b.id) as number));
-	const insertAt = lineOf.get(sorted[0].id) as number;
-	const removeEnd = blockEnd(sorted[sorted.length - 1].id);
 	const blocks = new Map<string, string[]>(
 		sorted.map((e) => [e.id, lines.slice(lineOf.get(e.id) as number, blockEnd(e.id))])
 	);
-
-	const finalOrder = [
-		...order.filter((id) => blocks.has(id)),
-		...sorted.map((e) => e.id).filter((id) => !order.includes(id)),
-	];
-	const rebuilt: string[] = [];
-	for (const id of finalOrder) {
-		const block = blocks.get(id);
-		if (!block) continue;
-		rebuilt.push(...trimTrailingBlankLines(block), '');
-	}
-	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
-	return lines.join('\n');
+	return spliceInOrder(
+		lines,
+		lineOf.get(sorted[0].id) as number,
+		blockEnd(sorted[sorted.length - 1].id),
+		blocks,
+		sorted.map((e) => e.id),
+		order,
+		(clean) => [...clean, '']
+	);
 }
 
 /**
@@ -532,42 +451,16 @@ export function reorderBookTopLevelEntries(text: string, order: string[]): strin
  */
 export function reorderBookActs(text: string, orderedActIds: string[]): string | null {
 	const parsed = parseBook(text);
-	const entries = bookTopLevelEntries(parsed);
-	const actIds = entries.filter((e) => e.kind === 'act').map((e) => e.id);
-	if (actIds.length === 0) return null;
-
-	// Which page breaks immediately precede which act, in the CURRENT
-	// (pre-reorder) document — one with nothing after it attaches to `null`,
-	// the very end.
-	const attachedBefore = new Map<string, string[]>();
-	let pending: string[] = [];
-	for (const e of entries) {
-		if (e.kind === 'page-break') {
-			pending.push(e.id);
-			continue;
-		}
-		if (pending.length > 0) {
-			attachedBefore.set(e.id, [...(attachedBefore.get(e.id) ?? []), ...pending]);
-			pending = [];
-		}
-	}
-	const trailing = pending;
-
-	const actOrder = [
-		...orderedActIds.filter((id) => actIds.includes(id)),
-		...actIds.filter((id) => !orderedActIds.includes(id)),
-	];
-	const fullOrder = [...actOrder.flatMap((id) => [...(attachedBefore.get(id) ?? []), id]), ...trailing];
-
-	return rebuildBookTopLevel(text, parsed, fullOrder);
+	const fullOrder = actOrderKeepingBreaks(bookTopLevelEntries(parsed), orderedActIds);
+	return fullOrder ? rebuildBookTopLevel(text, parsed, fullOrder) : null;
 }
 
 /** Act loom ids currently backed by a `#` line — mirrors `liveActIds`. */
 export function liveBookActIds(parsed: ParsedBook): Set<string> {
-	return new Set(parsed.acts.map((a) => a.loomId).filter((id): id is string => id !== null));
+	return collectLoomIds(parsed.acts);
 }
 
 /** Chapter loom ids currently backed by a `##` line — mirrors `liveSceneIds`. */
 export function liveBookChapterIds(parsed: ParsedBook): Set<string> {
-	return new Set(parsed.chapters.map((c) => c.loomId).filter((id): id is string => id !== null));
+	return collectLoomIds(parsed.chapters);
 }

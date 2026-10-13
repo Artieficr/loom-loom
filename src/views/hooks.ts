@@ -1,4 +1,5 @@
-import { useCallback, useSyncExternalStore } from 'react';
+import { Dispatch, SetStateAction, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import type { App } from 'obsidian';
 import { LoomIndexer, ProjectDef } from '../indexer';
 
 /**
@@ -27,4 +28,57 @@ export function resolveProject(indexer: LoomIndexer, root: string | null): Proje
 	}
 	const all = indexer.getProjects();
 	return all.length === 1 ? all[0] : null;
+}
+
+/** A string-union UI preference remembered per `key` in localStorage (not
+ *  vault data); a stored value outside `allowed` reads as `fallback`. A null
+ *  key is neither read nor written. */
+export function usePersistedChoice<T extends string>(
+	key: string | null,
+	allowed: readonly T[],
+	fallback: T
+): [T, Dispatch<SetStateAction<T>>] {
+	const [value, setValue] = useState<T>(() => {
+		const saved = key ? window.localStorage.getItem(key) : null;
+		return saved !== null && (allowed as readonly string[]).includes(saved) ? (saved as T) : fallback;
+	});
+	useEffect(() => {
+		if (key) window.localStorage.setItem(key, value);
+	}, [key, value]);
+	return [value, setValue];
+}
+
+/** The text of the vault file at `path`, re-read whenever that file is
+ *  modified, created or deleted; null while it doesn't exist (or `path` is
+ *  null). Reads with `vault.read`, never `cachedRead` — a 'modify' event for
+ *  a write this session just made can fire before the read cache catches up. */
+export function useVaultFileText(app: App, path: string | null): string | null {
+	const [text, setText] = useState<string | null>(null);
+	useEffect(() => {
+		if (path === null) {
+			setText(null);
+			return;
+		}
+		let cancelled = false;
+		const read = () => {
+			const file = app.vault.getFileByPath(path);
+			if (!file) {
+				setText(null);
+				return;
+			}
+			void app.vault.read(file).then((raw) => {
+				if (!cancelled) setText(raw);
+			});
+		};
+		read();
+		const touched = (f: { path: string }) => {
+			if (f.path === path) read();
+		};
+		const refs = [app.vault.on('modify', touched), app.vault.on('create', touched), app.vault.on('delete', touched)];
+		return () => {
+			cancelled = true;
+			for (const ref of refs) app.vault.offref(ref);
+		};
+	}, [app, path]);
+	return text;
 }

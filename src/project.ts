@@ -2,6 +2,7 @@ import {
 	AbstractInputSuggest,
 	App,
 	ButtonComponent,
+	EventRef,
 	FuzzySuggestModal,
 	Menu,
 	Modal,
@@ -14,6 +15,7 @@ import {
 	moment as momentImport,
 	normalizePath,
 	setIcon,
+	stringifyYaml,
 } from 'obsidian';
 
 /** `obsidian`'s own re-exported `moment` loses its call signature under this
@@ -47,8 +49,9 @@ import {
 	entityPlural,
 	formatTimestamp,
 	pcGroupStub,
+	bySeq,
 } from './types';
-import { defaultProjectConfig, formatLoomDate, groupNameOf, serializeProjectConfig, todayRaw } from './calendar';
+import { defaultProjectConfig, groupNameOf, serializeProjectConfig, todayRaw } from './calendar';
 import {
 	DEFAULT_PROJECT_KIND,
 	DEFAULT_WRITER_MODE,
@@ -65,15 +68,17 @@ import {
 	roleOf,
 	roleType,
 	typesFor,
+	isInvolvableType,
 } from './project-kind';
-import { managedEntityFileName, managedSessionFileName, sanitizeFileName } from './naming';
+import { managedEntityFileName, managedSessionFileName, projectPath, sanitizeFileName } from './naming';
+import { locationLabel, mainLocationFirst, recordLabel } from './display';
 import { ProjectDef, extractLinkpath, linkTargetOf } from './indexer';
-import { fmLoomValue, setLoomKey } from './fm';
+import { appendLoomList, newNoteEntry, setLoomKey, writeFmAt, writeNoteBody } from './fm';
 import { queueWrite } from './write-queue';
 import { recomputeEventLocks, waitForMetadataSync } from './gm-lock';
 import { SessionConflict, cascadeDecisionPointSession, setEventSession } from './gm-decision-point';
 import { canCreateProjectOfKind } from './license/gating';
-import { LocaleKey, t } from './i18n';
+import { LocaleKey, article, t } from './i18n';
 import {
 	appendAct,
 	appendScene,
@@ -119,10 +124,6 @@ export async function ensureFolder(app: App, path: string): Promise<void> {
 			}
 		}
 	}
-}
-
-function projectPath(project: ProjectDef, sub: string): string {
-	return normalizePath(project.root === '' ? sub : project.root + '/' + sub);
 }
 
 /**
@@ -181,12 +182,6 @@ export async function scaffoldProject(
 	const config = defaultProjectConfig(kind);
 	config.writerMode = writerMode;
 	return app.vault.create(loomPath, serializeProjectConfig(config));
-}
-
-export { sanitizeFileName } from './naming';
-
-function yamlQuote(value: string): string {
-	return JSON.stringify(value);
 }
 
 export interface NewEntityFields {
@@ -293,109 +288,77 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	// `loomDescription` rather than silently dropping what was typed. Every
 	// other entity type is unaffected — this only branches for the beat role.
 	const descriptionToSessionNote = roleOf(type) === 'beat' && hasSessionNote;
-	const lines = [
-		'---',
-		`${FM.type}: ${type}`,
-		// Sessions have no user-entered name — their display is the date and
-		// their file name is managed from it. Everyone else stores the entered
-		// name (`loomName`, the display source of truth) plus a native alias so
-		// Obsidian's own [[link]] autocomplete finds the note by that name.
-		...(type !== 'session'
-			? [`${FM.name}: ${yamlQuote(fields.name)}`, `aliases: [${yamlQuote(fields.name)}]`]
-			: []),
-		`${FM.tags}: [${fields.tag === '' ? '' : yamlQuote(fields.tag)}]`,
-		`${FM.description}: ${yamlQuote(descriptionToSessionNote ? '' : (fields.description ?? ''))}`,
-		...(rels.length > 0
-			? [
-					`${FM.relationships}:`,
-					...rels.flatMap((r) => [
-						`  - type: ${yamlQuote(r.type)}`,
-						`    target: ${yamlQuote(`[[${r.target}]]`)}`,
-					]),
-				]
-			: [`${FM.relationships}: []`]),
-	];
+	const link = (target: string) => `[[${target}]]`;
+	const fm: Record<string, unknown> = { [FM.type]: type };
+	// Sessions have no user-entered name — their display is the date and their
+	// file name is managed from it. Everyone else stores the entered name
+	// (`loomName`, the display source of truth) plus a native alias so
+	// Obsidian's own [[link]] autocomplete finds the note by that name.
+	if (type !== 'session') {
+		fm[FM.name] = fields.name;
+		fm.aliases = [fields.name];
+	}
+	fm[FM.tags] = fields.tag === '' ? [] : [fields.tag];
+	fm[FM.description] = descriptionToSessionNote ? '' : (fields.description ?? '');
+	fm[FM.relationships] = rels.map((r) => ({ type: r.type, target: link(r.target) }));
 	if (hasSessionNote) {
-		lines.push(
-			`${FM.sessionNotes}:`,
-			`  - session: ${
-				fields.noteSession && fields.noteSession !== '' ? yamlQuote(`[[${fields.noteSession}]]`) : '""'
-			}`,
-			`    text: ${yamlQuote(descriptionToSessionNote ? (fields.description ?? '') : '')}`,
-			`    seq: ${Date.now()}`
-		);
-		if (involved.length > 0) {
-			lines.push('    involved:');
-			for (const n of involved) lines.push(`      - ${yamlQuote(`[[${n}]]`)}`);
-		}
-		if (group.length > 0) {
-			lines.push('    group:');
-			for (const n of group) lines.push(`      - ${yamlQuote(`[[${n}]]`)}`);
-		}
-		if (places.length > 0) {
-			lines.push('    places:');
-			for (const p of places) lines.push(`      - ${yamlQuote(`[[${p}]]`)}`);
-		}
+		const note: Record<string, unknown> = {
+			session: fields.noteSession && fields.noteSession !== '' ? link(fields.noteSession) : '',
+			text: descriptionToSessionNote ? (fields.description ?? '') : '',
+			seq: Date.now(),
+		};
+		if (involved.length > 0) note.involved = involved.map(link);
+		if (group.length > 0) note.group = group.map(link);
+		if (places.length > 0) note.places = places.map(link);
+		fm[FM.sessionNotes] = [note];
 	}
 	if (type === 'location' && fields.parentLocation && fields.parentLocation !== '') {
-		lines.push(`${FM.parentLocation}: ${yamlQuote(`[[${fields.parentLocation}]]`)}`);
+		fm[FM.parentLocation] = link(fields.parentLocation);
 	}
-	if (type === 'location' && fields.region && fields.region !== '') {
-		lines.push(`${FM.region}: ${yamlQuote(`[[${fields.region}]]`)}`);
-	}
+	if (type === 'location' && fields.region && fields.region !== '') fm[FM.region] = link(fields.region);
 	if (type === 'event' && fields.decisionPoint && fields.decisionPoint !== '') {
-		lines.push(`${FM.decisionPoint}: ${yamlQuote(`[[${fields.decisionPoint}]]`)}`);
+		fm[FM.decisionPoint] = link(fields.decisionPoint);
 	}
-	if (type === 'event' && fields.eventKind) {
-		lines.push(`${FM.eventKind}: ${fields.eventKind}`);
-	}
+	if (type === 'event' && fields.eventKind) fm[FM.eventKind] = fields.eventKind;
 	if (type === 'faction') {
-		const members = (fields.members ?? []).filter((m) => m.character !== '');
-		if (members.length > 0) {
-			lines.push(`${FM.members}:`);
-			for (const m of members) {
+		// A member with the default role and no location is a plain link.
+		fm[FM.members] = (fields.members ?? [])
+			.filter((m) => m.character !== '')
+			.map((m) => {
 				const roleIsDefault = m.role === '' || m.role.toLowerCase() === defaultMemberRole().toLowerCase();
-				if (roleIsDefault && m.location === '') {
-					lines.push(`  - ${yamlQuote(`[[${m.character}]]`)}`);
-				} else {
-					lines.push(`  - character: ${yamlQuote(`[[${m.character}]]`)}`);
-					if (!roleIsDefault) lines.push(`    role: ${yamlQuote(m.role)}`);
-					if (m.location !== '') lines.push(`    location: ${yamlQuote(`[[${m.location}]]`)}`);
-				}
-			}
-		} else {
-			lines.push(`${FM.members}: []`);
-		}
+				if (roleIsDefault && m.location === '') return link(m.character);
+				return {
+					character: link(m.character),
+					...(roleIsDefault ? {} : { role: m.role }),
+					...(m.location !== '' ? { location: link(m.location) } : {}),
+				};
+			});
 	}
-	if (type === 'character') lines.push(`${FM.alive}: true`);
-	if (type === 'event' || type === 'session') lines.push(`${FM.date}: ${yamlQuote(fields.date)}`);
+	if (type === 'character') fm[FM.alive] = true;
+	if (type === 'event' || type === 'session') fm[FM.date] = fields.date;
 	if (type === 'session') {
-		lines.push(`${FM.attendance}: []`);
-		if (fields.dailyNote) lines.push(`${FM.dailyNote}: ${yamlQuote(fields.dailyNote)}`);
+		fm[FM.attendance] = [];
+		if (fields.dailyNote) fm[FM.dailyNote] = fields.dailyNote;
 	}
 	// Acts aren't dated — they carry a manual order (stamped on the first
 	// reorder) and the title that goes into the exported script.
-	if (type === 'act') lines.push(`${FM.displayTitle}: ""`);
+	if (type === 'act') fm[FM.displayTitle] = '';
 	if (type === 'quest') {
-		const link = (name?: string) => (name && name !== '' ? yamlQuote(`[[${name}]]`) : '""');
-		const givers = (fields.questGivers ?? []).filter((n) => n !== '');
-		lines.push(
-			givers.length > 0
-				? `${FM.questGiver}: [${givers.map((n) => yamlQuote(`[[${n}]]`)).join(', ')}]`
-				: `${FM.questGiver}: []`,
-			`${FM.questReceived}: ${link(fields.questReceived)}`,
-			`${FM.questOutcome}: ""`,
-			`${FM.questOutcomeSession}: ""`,
-			`${FM.reward}: ${yamlQuote(fields.reward ?? '')}`
-		);
+		fm[FM.questGiver] = (fields.questGivers ?? []).filter((n) => n !== '').map(link);
+		fm[FM.questReceived] = fields.questReceived && fields.questReceived !== '' ? link(fields.questReceived) : '';
+		fm[FM.questOutcome] = '';
+		fm[FM.questOutcomeSession] = '';
+		fm[FM.reward] = fields.reward ?? '';
 	}
 	// Loom-managed timestamps: captured at creation so the real creation date
 	// survives cloud-sync overwriting the filesystem ctime. Datetime-property
 	// format so Obsidian renders them in the date & time picker.
 	const now = formatTimestamp(Date.now());
-	lines.push(`${FM.created}: ${now}`, `${FM.modified}: ${now}`);
-	lines.push('---', '', '');
-	return lines.join('\n');
+	fm[FM.created] = now;
+	fm[FM.modified] = now;
+	// Obsidian's own YAML writer — the same one `processFrontMatter` uses for
+	// every later edit, so a new note starts in its final format.
+	return `---\n${stringifyYaml(fm)}---\n\n`;
 }
 
 /**
@@ -489,6 +452,17 @@ export async function purgeEntityReferences(
 	}
 }
 
+/** Removes every structured reference to a note, then moves it to the trash. */
+export async function deleteEntityNote(
+	plugin: LoomLoomPlugin,
+	record: { path: string; project: string }
+): Promise<void> {
+	const file = plugin.app.vault.getFileByPath(record.path);
+	if (!file) return;
+	await purgeEntityReferences(plugin, record.path, record.project);
+	await plugin.app.fileManager.trashFile(file);
+}
+
 /** One-line text prompt (rename, alias, date…) by default — Enter or the CTA
  *  submits. `multiline` swaps the `<input>` for an auto-growing `<textarea>`
  *  (same technique as `AltTextModal`'s own "New alternative wording" field
@@ -496,6 +470,12 @@ export async function purgeEntityReferences(
  *  caller whose answer can legitimately span more than one line — there,
  *  Enter has to make a newline like any text field, not submit, so only the
  *  CTA button does. */
+/** Fits a modal textarea's height to its content (CSS caps it). */
+function growToContent(el: HTMLTextAreaElement | HTMLInputElement): void {
+	el.setCssProps({ height: 'auto' });
+	el.style.height = `${el.scrollHeight}px`;
+}
+
 export class TextInputModal extends Modal {
 	private submitted = false;
 
@@ -503,6 +483,8 @@ export class TextInputModal extends Modal {
 		app: App,
 		private opts: {
 			title: string;
+			/** A line of explanation above the input. */
+			desc?: string;
 			initial?: string;
 			placeholder?: string;
 			cta?: string;
@@ -521,6 +503,7 @@ export class TextInputModal extends Modal {
 
 	onOpen(): void {
 		this.titleEl.setText(this.opts.title);
+		if (this.opts.desc) this.contentEl.createEl('p', { cls: 'setting-item-description', text: this.opts.desc });
 		const input: HTMLInputElement | HTMLTextAreaElement = this.opts.multiline
 			? this.contentEl.createEl('textarea', {
 					cls: 'loom-modal-input loom-modal-textarea',
@@ -537,10 +520,7 @@ export class TextInputModal extends Modal {
 			this.opts.onSubmit(value);
 		};
 		if (this.opts.multiline) {
-			const autoGrow = () => {
-				input.setCssProps({ height: 'auto' });
-				input.style.height = `${input.scrollHeight}px`;
-			};
+			const autoGrow = () => growToContent(input);
 			// Deferred a frame — the textarea isn't laid out yet (0 scrollHeight)
 			// synchronously right after `createEl` inserts it.
 			window.setTimeout(autoGrow, 0);
@@ -658,19 +638,10 @@ export class AltTextModal extends Modal {
 		// to the input, and that stray top border showed as a half-cut
 		// separator line above the row.
 		const addBtn = addRow.createEl('button', { cls: 'mod-cta loom-alt-modal-add-btn', text: t('project.common.add') });
-		const autoGrowAddTextarea = () => {
-			input.setCssProps({ height: 'auto' });
-			input.style.height = `${input.scrollHeight}px`;
-		};
-		// Measured, not guessed via matching CSS padding — a `<textarea>` and a
-		// `<button>` don't share the same default border/padding, so no amount
-		// of CSS tweaking landed them on the exact same pixel height. Reading
-		// the textarea's own natural (single empty line) `scrollHeight` once at
-		// mount and copying THAT value onto the button's fixed `height`
-		// guarantees an exact match regardless of what either element's
-		// individual box-model happens to be. Deferred a frame — neither
-		// element is laid out yet (0 `scrollHeight`) synchronously right after
-		// `createEl` inserts them.
+		const autoGrowAddTextarea = () => growToContent(input);
+		// The button's height is copied from the textarea's natural one-line
+		// `scrollHeight` (the two elements' default box models differ, so CSS
+		// alone can't match them), deferred a frame until both are laid out.
 		window.setTimeout(() => {
 			autoGrowAddTextarea();
 			addBtn.style.height = `${input.scrollHeight}px`;
@@ -698,10 +669,7 @@ export class AltTextModal extends Modal {
 			});
 			const textarea = row.createEl('textarea', { cls: 'loom-alt-modal-textarea', attr: { rows: 1 } });
 			textarea.value = opt;
-			const autoGrow = () => {
-				textarea.setCssProps({ height: 'auto' });
-				textarea.style.height = `${textarea.scrollHeight}px`;
-			};
+			const autoGrow = () => growToContent(textarea);
 			// Deferred a frame — the textarea isn't laid out yet (0 scrollHeight)
 			// synchronously right after `createEl` inserts it.
 			window.setTimeout(autoGrow, 0);
@@ -772,15 +740,11 @@ export class AltTextModal extends Modal {
 	}
 }
 
-/** Search/display label of a record in pickers: session dates, sublocations
- *  as "Tavern, City A", everything else its name. */
+/** Search/display label of a record in pickers — the same labels the pages
+ *  use: an anchor's date, a sublocation's ancestry ("Tavern, City A", per the
+ *  full-ancestry setting), everything else its name. */
 export function recordPickLabel(plugin: LoomLoomPlugin, project: ProjectDef, r: EntityRecord): string {
-	if (roleOf(r.type) === 'anchor' && r.date) return formatLoomDate(r.date, project.config);
-	if (r.type === 'location' && r.parentLocation !== null) {
-		const parent = plugin.indexer.resolve(r.parentLocation, r.path);
-		if (parent?.type === 'location') return `${r.name}, ${parent.name}`;
-	}
-	return r.name;
+	return r.type === 'location' ? locationLabel(r, plugin) : recordLabel(r, project);
 }
 
 /**
@@ -835,7 +799,7 @@ export async function copyEntityRecord(
 	const pathFor = (base: string, i: number) =>
 		normalizePath(`${folder === '' ? '' : folder + '/'}${base}${i > 1 ? ` ${i}` : ''}.md`);
 	if (record.type === 'session') {
-		const base = sessionFileName(project, record.date?.raw ?? '');
+		const base = managedSessionFileName(project.name, record.date?.raw ?? '');
 		let i = 2; // "… 2" — the original occupies the plain name.
 		while (plugin.app.vault.getAbstractFileByPath(pathFor(base, i)) !== null) i++;
 		return plugin.app.vault.create(pathFor(base, i), content);
@@ -934,16 +898,11 @@ export class AddRelationshipModal extends Modal {
 			new Notice(t('project.addRelationship.pickTarget'));
 			return;
 		}
-		const file = this.plugin.app.vault.getFileByPath(this.record.path);
-		if (!file) return;
-		const link = `[[${linkTargetOf(this.target)}]]`;
+		const target = `[[${linkTargetOf(this.target)}]]`;
 		const relType = this.relType.trim() === '' ? 'related' : this.relType.trim();
-		await this.plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-			const cur = fmLoomValue(fm, FM.relationships);
-			const list = Array.isArray(cur) ? [...(cur as unknown[])] : [];
-			list.push({ type: relType, target: link });
-			setLoomKey(fm, FM.relationships, list);
-		});
+		if (!(await writeFmAt(this.app, this.record.path, (fm) => appendLoomList(fm, FM.relationships, { type: relType, target })))) {
+			return;
+		}
 		this.close();
 	}
 
@@ -1033,14 +992,7 @@ export class AddToHoldersModal extends Modal {
 		}
 		const link = `[[${linkTargetOf(this.item)}]]`;
 		for (const holder of this.picked) {
-			const file = this.plugin.app.vault.getFileByPath(holder.path);
-			if (!file) continue;
-			await this.plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				const cur = fmLoomValue(fm, FM.items);
-				const list = Array.isArray(cur) ? [...(cur as unknown[])] : [];
-				list.push(link);
-				setLoomKey(fm, FM.items, list);
-			});
+			await writeFmAt(this.app, holder.path, (fm) => appendLoomList(fm, FM.items, link));
 		}
 		this.close();
 	}
@@ -1076,6 +1028,34 @@ export function renderChipEl(
 	}
 }
 
+/** The type-filter menu behind every filter icon beside an entity search:
+ *  "All entities", then one checked row per type. */
+export function showTypeFilterMenu(
+	evt: MouseEvent,
+	types: readonly EntityType[],
+	current: EntityType | null,
+	onPick: (type: EntityType | null) => void
+): void {
+	const menu = new Menu();
+	menu.addItem((item) =>
+		item
+			.setTitle(t('project.createEntity.allEntities'))
+			.setIcon('filter')
+			.setChecked(current === null)
+			.onClick(() => onPick(null))
+	);
+	for (const et of types) {
+		menu.addItem((item) =>
+			item
+				.setTitle(entityPlural(et))
+				.setIcon(ENTITY_META[et].icon)
+				.setChecked(current === et)
+				.onClick(() => onPick(et))
+		);
+	}
+	menu.showAtMouseEvent(evt);
+}
+
 /**
  * Fuzzy-searchable picker over entity records — for choices that can grow
  * huge with a project (e.g. "Turn to a sublocation" over every location).
@@ -1107,16 +1087,16 @@ export class RecordSuggestModal extends FuzzySuggestModal<EntityRecord> {
 	}
 }
 
-/**
- * Inline record search attached to a plain text input (modal counterpart of
- * the views' SearchableSelect): typing filters, picking hands the record over
- * and clears the input for the next pick.
- */
 /** Sentinel path for the synthetic "+ Create new …" row `RecordInputSuggest`
  *  can prepend to its own suggestion list — never a real file, so nothing
  *  else needs to recognize it except `selectSuggestion` itself below. */
 const CREATE_NEW_SUGGESTION = 'loom:create-new-suggestion';
 
+/**
+ * Inline record search attached to a plain text input (modal counterpart of
+ * the views' SearchableSelect): typing filters, picking hands the record over
+ * and clears the input for the next pick.
+ */
 class RecordInputSuggest extends AbstractInputSuggest<EntityRecord> {
 	constructor(
 		app: App,
@@ -1174,34 +1154,43 @@ class RecordInputSuggest extends AbstractInputSuggest<EntityRecord> {
 	}
 }
 
-/** Session file names are managed, never user-facing inside the plugin. */
-export function sessionFileName(project: ProjectDef, dateRaw: string): string {
-	return managedSessionFileName(project.name, dateRaw);
-}
-
-/**
- * Managed entity file name: `<Project> <Type label> <name>` (sessions use
- * `sessionFileName` with their date instead). The user-entered name lives in
- * `loomName` frontmatter and is what every plugin surface displays and
- * searches; the file name exists for the file explorer and link targets.
- */
-export function entityFileName(
-	project: ProjectDef,
-	type: EntityType,
-	name: string,
-	parentName?: string
-): string {
-	return managedEntityFileName(project.name, type, name, parentName);
-}
-
-export async function createEntity(
+/** The sublocation of `main` named `name` (case-insensitive), created when
+ *  missing — a just-created one comes back as a stand-in record, since the
+ *  index hasn't seen it yet. */
+export async function findOrCreateSublocation(
 	plugin: LoomLoomPlugin,
 	project: ProjectDef,
-	type: EntityType,
-	fields: NewEntityFields
-): Promise<TFile> {
-	const folder = projectPath(project, ENTITY_META[type].folder);
-	await ensureFolder(plugin.app, folder);
+	main: EntityRecord,
+	name: string
+): Promise<EntityRecord> {
+	const key = name.trim().toLowerCase();
+	const existing = plugin.indexer
+		.getAll('location', project.root)
+		.find(
+			(r) =>
+				r.parentLocation !== null &&
+				r.name.trim().toLowerCase() === key &&
+				plugin.indexer.resolve(r.parentLocation, r.path)?.path === main.path
+		);
+	if (existing) return existing;
+	const parentLocation = linkTargetOf(main);
+	const created = await createEntity(plugin, project, 'location', {
+		name: name.trim(),
+		tag: '',
+		date: '',
+		description: '',
+		parentLocation,
+	});
+	return { ...pcGroupStub(project.root), path: created.path, name: name.trim(), type: 'location', parentLocation };
+}
+
+/** Types whose names legitimately repeat — sessions are named by date, and
+ *  scenes/acts/chapters by their script or book heading — so a clash gets a
+ *  numbered file. Every other type is named by the user and must be unique. */
+const REPEATABLE_NAME_TYPES: ReadonlySet<EntityType> = new Set(['session', 'scene', 'act', 'chapter']);
+
+/** The managed path a new entity of `type` named by `fields` would take. */
+export function newEntityPath(plugin: LoomLoomPlugin, project: ProjectDef, type: EntityType, fields: NewEntityFields): string {
 	// A new sublocation embeds its parent's name in the file name.
 	const parentName =
 		type === 'location' && fields.parentLocation && fields.parentLocation !== ''
@@ -1209,11 +1198,34 @@ export async function createEntity(
 			: undefined;
 	const base =
 		type === 'session'
-			? sessionFileName(project, fields.date)
-			: entityFileName(project, type, fields.name, parentName);
-	let path = normalizePath(`${folder}/${base}.md`);
+			? managedSessionFileName(project.name, fields.date)
+			: managedEntityFileName(project.name, type, fields.name, parentName);
+	return normalizePath(`${projectPath(project, ENTITY_META[type].folder)}/${base}.md`);
+}
+
+/** Whether a user-named entity's managed file name is already taken. */
+export function entityNameTaken(plugin: LoomLoomPlugin, project: ProjectDef, type: EntityType, fields: NewEntityFields): boolean {
+	return !REPEATABLE_NAME_TYPES.has(type) && plugin.app.vault.getAbstractFileByPath(newEntityPath(plugin, project, type, fields)) !== null;
+}
+
+/** Creates an entity note at its managed path. A user-named entity whose name
+ *  is taken returns the EXISTING note rather than a numbered duplicate
+ *  (numbered copies multiply across synced machines); a repeatable-name type
+ *  gets `<name> 2`, `<name> 3`, …. */
+export async function createEntity(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	type: EntityType,
+	fields: NewEntityFields
+): Promise<TFile> {
+	await ensureFolder(plugin.app, projectPath(project, ENTITY_META[type].folder));
+	const first = newEntityPath(plugin, project, type, fields);
+	let path = first;
+	const existing = plugin.app.vault.getFileByPath(first);
+	if (existing && !REPEATABLE_NAME_TYPES.has(type)) return existing;
+	const base = first.slice(0, -'.md'.length);
 	for (let i = 2; plugin.app.vault.getAbstractFileByPath(path) !== null; i++) {
-		path = normalizePath(`${folder}/${base} ${i}.md`);
+		path = `${base} ${i}.md`;
 	}
 	if (type === 'session' && !fields.dailyNote) {
 		fields = { ...fields, dailyNote: dailyNoteLink(plugin.app, fields.date) ?? undefined };
@@ -1222,43 +1234,22 @@ export async function createEntity(
 }
 
 /**
- * Reads/rewrites the project's Book file — the same small job `editBook`
- * (book-view.tsx) does, duplicated here because book-view.tsx already
- * imports `createEntity`/`entityFileName` FROM this module, so importing it
- * back would cycle. Unlike Script's own scene/act creation (`submitScene`/
- * `submitAct` below, which write through `script-buffer.ts`'s shared
- * in-memory buffer — a module with no dependency on this one, so no cycle
- * to dodge there), Prose hasn't been migrated onto an equivalent shared
- * buffer yet, so this private duplicate is still how a Chapter/Act creation
- * modal writes the Book file. Unlike Script, a Prose project has no Book
- * file scaffolded at project setup, so this creates one on first write
- * rather than returning null when it's missing — mirrors `createBookFile`.
- * Also runs `ensureBookIds` on the result, mirroring `editBookAndSync`'s own
- * chain — this is the ONE write path a Chapter/Act creation modal uses, so
- * without this here too, the blank-line normalization `ensureBookIds` now
- * does (see its own doc comment) would only apply on the NEXT edit through
- * `editBookAndSync`, not at creation time itself — which is exactly when a
- * freshly appended/moved chapter or act picks up its own unwanted blank
- * line in the first place.
- *
- * Serialized against `editBook`'s OWN queue (`queueWrite`'s `'book'`
- * registry, keyed by this same `fullPath`) — a real, confirmed gap this
- * closes: without it, a creation-modal write here and any other write
- * through `editBook` could still race each other on the same file even
- * after `editBook` itself gained internal serialization, since this
- * function went through a completely separate, uncoordinated
- * read-modify-write. `write-queue.ts` exists specifically so this module —
- * which can't import book-view.tsx directly — can still share the SAME
- * queue that one uses.
+ * Reads/rewrites the project's Book file — `editBook`'s job (book-view.tsx),
+ * duplicated here because book-view.tsx imports from this module. Creates the
+ * Book on first write (a Prose project has none scaffolded), like
+ * `createBookFile`, and runs `ensureBookIds` on the result like
+ * `editBookAndSync`, so a chapter/act created through a modal is normalized
+ * at creation time, not on the next edit. Serialized on the same per-path
+ * queue as `editBook` (`queueWrite`, write-queue.ts), so the two can't race
+ * on the file.
  */
 async function editBookFile(
 	plugin: LoomLoomPlugin,
 	project: ProjectDef,
 	apply: (text: string) => string
 ): Promise<string> {
-	const base = `${project.name}.${BOOK_EXTENSION}`;
-	const fullPath = normalizePath(project.root === '' ? base : `${project.root}/${base}`);
-	return queueWrite('book', fullPath, async () => {
+	const fullPath = projectPath(project, `${project.name}.${BOOK_EXTENSION}`);
+	return queueWrite(fullPath, async () => {
 		let file = plugin.app.vault.getFileByPath(fullPath);
 		if (!file) file = await plugin.app.vault.create(fullPath, '');
 		const raw = await plugin.app.vault.read(file);
@@ -1276,18 +1267,10 @@ function newActStub(projectRoot: string): EntityRecord {
 	return { ...pcGroupStub(projectRoot), path: NEW_ACT_SENTINEL, name: t('project.newActStub'), type: 'act' };
 }
 
-/** Matches the file's own frontmatter block — same regex as `FRONTMATTER_RE`
- *  in views/common.tsx, duplicated for the same reason `editBookFile` above
- *  is: common.tsx is a view, and views already import FROM this module.
- *  Used to write a newly-created Scene/Act's Notes as the note's raw body. */
-const FM_BLOCK_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
+/** Writes a newly-created Scene/Act/Chapter's Notes as the note's raw body. */
 async function writeNotesBody(plugin: LoomLoomPlugin, file: TFile, notes: string): Promise<void> {
 	const trimmed = notes.trim();
-	if (trimmed === '') return;
-	await plugin.app.vault.process(file, (data) => {
-		const m = FM_BLOCK_RE.exec(data);
-		return (m ? m[0] : '') + trimmed;
-	});
+	if (trimmed !== '') await writeNoteBody(plugin.app, file, trimmed);
 }
 
 /**
@@ -1306,10 +1289,11 @@ export async function createItemCopy(
 	const folder = projectPath(project, ENTITY_META.item.folder);
 	await ensureFolder(plugin.app, folder);
 	const base = managedEntityFileName(project.name, 'item', original.name, undefined, character.name);
-	let path = normalizePath(`${folder}/${base}.md`);
-	for (let i = 2; plugin.app.vault.getAbstractFileByPath(path) !== null; i++) {
-		path = normalizePath(`${folder}/${base} ${i}.md`);
-	}
+	const path = normalizePath(`${folder}/${base}.md`);
+	// This character already has a copy of this item — reuse it rather than
+	// making a numbered duplicate.
+	const existing = plugin.app.vault.getFileByPath(path);
+	if (existing) return existing;
 	const label = `${original.name} [${character.name}]`;
 	// Every alias of the original gains the "[character]" suffix so native
 	// [[…]] search offers "Excalibur [Arthur]" for each of the original's names.
@@ -1387,7 +1371,24 @@ export interface CreateEntityOptions {
 	defaultAct?: EntityRecord;
 }
 
+/** A `SearchableSelect` "+ Create new <type>" action opening `CreateEntityModal`;
+ *  `undefined` (no action) without a project. */
+export function createAction(
+	plugin: LoomLoomPlugin,
+	type: EntityType,
+	project: ProjectDef | null | undefined,
+	options: CreateEntityOptions
+): { label: string; onPick: () => void } | undefined {
+	if (!project) return undefined;
+	return {
+		label: t('project.createEntity.createNewAction', { label: entityLabel(type) }),
+		onPick: () => new CreateEntityModal(plugin, type, project, options).open(),
+	};
+}
+
 export class CreateEntityModal extends Modal {
+	/** Index subscriptions held while open (chip rows redraw as notes index). */
+	private indexRefs: EventRef[] = [];
 	private fields: NewEntityFields = { name: '', tag: '', date: '' };
 	private relComment = '';
 	/** Event only: session picked via the modal's session search. */
@@ -1450,16 +1451,6 @@ export class CreateEntityModal extends Modal {
 		refresh();
 	}
 
-	/** Standard entity tag (see EntityChip in views/common.tsx) for modal chip rows. */
-	private renderChip(
-		container: HTMLElement,
-		record: EntityRecord | null,
-		label: string,
-		onRemove: () => void
-	): void {
-		renderChipEl(this.plugin, container, record, label, onRemove);
-	}
-
 	/** Resolves a picked name back to its record (for chip colors). */
 	private resolveName(name: string): EntityRecord | null {
 		return this.plugin.indexer.resolve(name, this.project.loomPath);
@@ -1467,17 +1458,15 @@ export class CreateEntityModal extends Modal {
 
 	/**
 	 * A "+ Create new …" pick inside this modal opens a NESTED CreateEntityModal
-	 * and needs the freshly created file back as a real `EntityRecord` (to
-	 * render as a chip) the instant it closes — but Obsidian's metadataCache
-	 * re-parses a just-written file on its own later tick, not synchronously
-	 * within the write's own promise (see `waitForMetadataSync`'s own doc
-	 * comment for the confirmed bug this avoids — `rebuildNow` alone doesn't
-	 * fix it, since it only re-reads whatever metadataCache currently has,
-	 * stale or not). Falls back to a minimal stand-in (name/type only, no
-	 * date/description) on the off chance resolution still misses, so the
-	 * pick never silently does nothing.
+	 * and needs the new file back as an `EntityRecord` (for its chip) as soon
+	 * as it closes — but metadataCache re-parses a just-written file on a later
+	 * tick (see `waitForMetadataSync`). Falls back to a minimal stand-in
+	 * (name/type only) if resolution still misses, so the pick never silently
+	 * does nothing.
 	 */
 	private async resolveAfterCreate(f: TFile, type: EntityType): Promise<EntityRecord> {
+		const indexed = this.plugin.indexer.resolve(f.basename, this.project.loomPath);
+		if (indexed) return indexed;
 		await waitForMetadataSync(this.app, f);
 		return (
 			this.plugin.indexer.resolve(f.basename, this.project.loomPath) ?? {
@@ -1489,22 +1478,215 @@ export class CreateEntityModal extends Modal {
 		);
 	}
 
-	/** Sublocation label: full ancestry ("Secret room, Tavern, City"), or just
-	 *  the own name when `subChipFullAncestry` is off. */
-	private locLabel(r: EntityRecord): string {
-		if (r.type !== 'location' || r.parentLocation === null) return r.name;
-		if (!this.plugin.settings.subChipFullAncestry) return r.name;
-		const parts = [r.name];
-		let cur: EntityRecord | null = r;
-		const seen = new Set<string>([r.path]);
-		for (let guard = 0; guard < 20 && cur?.parentLocation != null; guard++) {
-			const parent = this.plugin.indexer.resolve(cur.parentLocation, cur.path);
-			if (parent?.type !== 'location' || seen.has(parent.path)) break;
-			parts.push(parent.name);
-			seen.add(parent.path);
-			cur = parent;
+	/** Closes the modal and hands the new note on: `onActCreated` (with its
+	 *  record, when given one), else `onCreated`, else opens its page with the
+	 *  type's list as the Back origin. */
+	private finishCreate(created: TFile, record?: EntityRecord): void {
+		this.close();
+		if (record && this.options.onActCreated) this.options.onActCreated(record);
+		else if (this.options.onCreated) this.options.onCreated(created);
+		else {
+			const origin: EntityOrigin = { type: VIEW_LIST, state: { project: this.project.root, entityType: this.type } };
+			this.plugin.openEntityFile(created.path, origin);
 		}
-		return parts.join(', ');
+	}
+
+	/** A picker input whose "+ Create new" opens a nested modal and picks the
+	 *  created record once it's indexed. */
+	private singlePickInput(
+		el: HTMLElement,
+		placeholder: string,
+		options: () => EntityRecord[],
+		label: (r: EntityRecord) => string,
+		type: EntityType,
+		pick: (r: EntityRecord) => void
+	): void {
+		const input = el.createEl('input', { type: 'text', attr: { placeholder } });
+		new RecordInputSuggest(
+			this.app,
+			input,
+			options,
+			pick,
+			label,
+			true,
+			() =>
+				new CreateEntityModal(this.plugin, type, this.project, {
+					onCreated: (f) => {
+						void this.resolveAfterCreate(f, type).then(pick);
+					},
+				}).open(),
+			t('project.createEntity.createNewAction', { label: entityLabel(type) })
+		);
+	}
+
+	/** A multi-pick field: a search whose picks collect into `this.fields[key]`
+	 *  as ✕ chips. `create` runs the "+ Create new" flow and hands it
+	 *  `addCreated`, which waits for the new note to index so its chip shows its
+	 *  name and colour. `onPick` returning true means it handled the pick itself;
+	 *  `leadingChips` draws chips ahead of the list's own. Returns the chip
+	 *  refresher. */
+	private multiPick(o: {
+		key: 'questGivers' | 'involved' | 'places';
+		name: string;
+		placeholder: string;
+		candidates: () => EntityRecord[];
+		label: (r: EntityRecord) => string;
+		createLabel: string;
+		create: (addCreated: (f: TFile, type: EntityType) => void) => void;
+		onPick?: (r: EntityRecord) => boolean;
+		leadingChips?: (el: HTMLElement, refresh: () => void) => void;
+		decorate?: (setting: Setting) => void;
+	}): () => void {
+		const list = () => (this.fields[o.key] ??= []);
+		const refresh = () => {
+			chips.empty();
+			o.leadingChips?.(chips, refresh);
+			for (const target of list()) {
+				const rec = this.resolveName(target);
+				renderChipEl(this.plugin, chips, rec, rec ? o.label(rec) : target, () => {
+					this.fields[o.key] = list().filter((n) => n !== target);
+					refresh();
+				});
+			}
+		};
+		const setting = new Setting(this.contentEl).setName(o.name).addText((text) => {
+			text.setPlaceholder(o.placeholder);
+			new RecordInputSuggest(
+				this.app,
+				text.inputEl,
+				o.candidates,
+				(r) => {
+					if (!o.onPick?.(r)) list().push(linkTargetOf(r));
+					refresh();
+				},
+				o.label,
+				true,
+				() =>
+					o.create((f, type) => {
+						void this.resolveAfterCreate(f, type).then((rec) => {
+							list().push(linkTargetOf(rec));
+							refresh();
+						});
+					}),
+				o.createLabel
+			);
+		});
+		o.decorate?.(setting);
+		const chips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
+		refresh();
+		// A note created from "+ Create new" can land in the index after its chip
+		// was drawn — redraw then, so the chip shows its name and colour.
+		this.indexRefs.push(this.plugin.indexer.events.on('changed', refresh));
+		return refresh;
+	}
+
+	/** Role · (of) target · at location · ✕ rows under a "+ Add" button — a
+	 *  character's Faction(s) or a faction's Members. `rows` is the live
+	 *  `this.fields` list. */
+	private membershipRows<K extends 'faction' | 'character'>(
+		key: K,
+		rows: (Record<K, string> & { role: string; location: string })[],
+		heading: string,
+		addLabel: string
+	): void {
+		const targets = this.plugin.indexer.getAll(key, this.project.root).sort((a, b) => a.name.localeCompare(b.name));
+		const locations = this.plugin.indexer
+			.getAll('location', this.project.root)
+			.sort((a, b) => a.name.localeCompare(b.name));
+		// Row list lives BELOW the add button (created after it).
+		let rowsEl: HTMLElement;
+		// Rebuilds recreate every row's inputs — restore their values from the
+		// stored fields (link targets → display names), or adding a second row
+		// visually wipes every earlier one's text.
+		const displayNameOf = (records: EntityRecord[], linkTarget: string) =>
+			records.find((r) => linkTargetOf(r) === linkTarget)?.name ?? linkTarget;
+		/** Input + suggester + create-new for one record field of a row. */
+		const pickInput = (
+			row: HTMLElement,
+			type: EntityType,
+			placeholder: string,
+			value: string,
+			records: EntityRecord[],
+			options: () => EntityRecord[],
+			label: (r: EntityRecord) => string,
+			set: (target: string) => void
+		) => {
+			const input = row.createEl('input', { type: 'text', attr: { placeholder } });
+			input.value = value === '' ? '' : displayNameOf(records, value);
+			new RecordInputSuggest(
+				this.app,
+				input,
+				options,
+				(r) => {
+					set(linkTargetOf(r));
+					input.value = r.name;
+				},
+				label,
+				false,
+				() =>
+					new CreateEntityModal(this.plugin, type, this.project, {
+						onCreated: (f) => {
+							set(f.basename);
+							void waitForMetadataSync(this.app, f).then(() => {
+								input.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
+							});
+						},
+					}).open(),
+				t('project.createEntity.createNewAction', { label: entityLabel(type) })
+			);
+		};
+		const render = () => {
+			rowsEl.empty();
+			rows.forEach((m, i) => {
+				const row = rowsEl.createDiv({ cls: 'loom-modal-faction-row' });
+				const roleInput = row.createEl('input', {
+					type: 'text',
+					attr: { placeholder: t('project.createEntity.memberPlaceholder') },
+				});
+				roleInput.value = m.role;
+				roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
+				if (key === 'faction') row.createSpan({ text: t('project.createEntity.ofLabel'), cls: 'loom-modal-faction-lbl' });
+				pickInput(
+					row,
+					key,
+					t(key === 'faction' ? 'project.createEntity.factionEllipsis' : 'project.createEntity.characterEllipsis'),
+					m[key],
+					targets,
+					() => targets.filter((r) => !rows.some((x) => x[key] === linkTargetOf(r))),
+					(r) => r.name,
+					(target) => (m[key] = target as (typeof m)[K])
+				);
+				row.createSpan({ text: t('project.createEntity.atLabel'), cls: 'loom-modal-faction-lbl' });
+				pickInput(
+					row,
+					'location',
+					t('project.createEntity.locationEllipsis'),
+					m.location,
+					locations,
+					() => locations,
+					(r) => locationLabel(r, this.plugin),
+					(target) => (m.location = target)
+				);
+				const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
+				rm.addEventListener('click', (e) => {
+					e.preventDefault();
+					rows.splice(i, 1);
+					render();
+				});
+			});
+		};
+		new Setting(this.contentEl).setName(heading).addButton((btn) => {
+			// Sentence-case label + a separate "+ " so it reads "+ Add …" without
+			// tripping the lint.
+			btn.setButtonText(addLabel);
+			btn.buttonEl.prepend('+ ');
+			btn.onClick(() => {
+				rows.push({ [key]: '', role: defaultMemberRole(), location: '' } as (typeof rows)[number]);
+				render();
+			});
+		});
+		rowsEl = this.contentEl.createDiv({ cls: 'loom-modal-factions' });
+		render();
 	}
 
 	onOpen(): void {
@@ -1541,7 +1723,7 @@ export class CreateEntityModal extends Modal {
 			// branch); typing a new name just creates it either way.
 			const searchable = roleOf(this.type) === 'beat' || this.type === 'quest';
 			const noun = entityLabel(this.type).toLowerCase();
-			const article = /^[aeiou]/.test(noun) ? 'an' : 'a';
+			const indefinite = article(noun);
 			new Setting(this.contentEl)
 				.setName(
 					t(
@@ -1554,7 +1736,7 @@ export class CreateEntityModal extends Modal {
 				text
 					.setPlaceholder(
 						searchable
-							? t('project.createEntity.namePlaceholderSearchable', { article, noun })
+							? t('project.createEntity.namePlaceholderSearchable', { article: indefinite, noun })
 							: t('project.createEntity.namePlaceholderNew', { label: entityLabel(this.type) })
 					)
 					.setValue(this.fields.name)
@@ -1595,8 +1777,6 @@ export class CreateEntityModal extends Modal {
 		if (this.type === 'quest') {
 			// New quests are always active — no outcome fields here; they live
 			// on the quest page once the quest actually ends.
-			const sessionLabel = (s: EntityRecord) =>
-				s.date ? formatLoomDate(s.date, this.project.config) : s.name;
 			const sessions = this.plugin.indexer
 				.getAll(projectRoleType(this.project.config, 'anchor'), this.project.root)
 				.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
@@ -1606,39 +1786,18 @@ export class CreateEntityModal extends Modal {
 
 			// Quest givers: search + entity tags with ✕, like the quest page.
 			this.fields.questGivers = [];
-			new Setting(this.contentEl).setName(t('project.createEntity.questGiver')).addText((text) => {
-				text.setPlaceholder(t('project.createEntity.addQuestGiver'));
-				new RecordInputSuggest(
-					this.app,
-					text.inputEl,
-					() => characters.filter((c) => !(this.fields.questGivers ?? []).includes(linkTargetOf(c))),
-					(r) => {
-						(this.fields.questGivers ??= []).push(linkTargetOf(r));
-						refreshGivers();
-					},
-					(r) => r.name,
-					true,
-					() =>
-						new CreateEntityModal(this.plugin, 'character', this.project, {
-							onCreated: (f) => {
-								(this.fields.questGivers ??= []).push(f.basename);
-								refreshGivers();
-							},
-						}).open(),
-					t('project.createEntity.createNewAction', { label: entityLabel('character') })
-				);
+			this.multiPick({
+				key: 'questGivers',
+				name: t('project.createEntity.questGiver'),
+				placeholder: t('project.createEntity.addQuestGiver'),
+				candidates: () => characters.filter((c) => !(this.fields.questGivers ?? []).includes(linkTargetOf(c))),
+				label: (r) => r.name,
+				createLabel: t('project.createEntity.createNewAction', { label: entityLabel('character') }),
+				create: (addCreated) =>
+					new CreateEntityModal(this.plugin, 'character', this.project, {
+						onCreated: (f) => addCreated(f, 'character'),
+					}).open(),
 			});
-			const giverChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
-			const refreshGivers = () => {
-				giverChips.empty();
-				for (const target of this.fields.questGivers ?? []) {
-					const rec = this.resolveName(target);
-					this.renderChip(giverChips, rec, rec?.name ?? target, () => {
-						this.fields.questGivers = (this.fields.questGivers ?? []).filter((n) => n !== target);
-						refreshGivers();
-					});
-				}
-			};
 
 			// Received session: search like the quest page; the pick becomes a
 			// session tag with ✕. Quests born from a session page (or from an event
@@ -1649,35 +1808,21 @@ export class CreateEntityModal extends Modal {
 			const refreshReceived = () => {
 				receivedEl.empty();
 				if (this.receivedSession) {
-					this.renderChip(receivedEl, this.receivedSession, sessionLabel(this.receivedSession), () => {
+					renderChipEl(this.plugin, receivedEl, this.receivedSession, recordLabel(this.receivedSession, this.project), () => {
 						this.receivedSession = null;
 						refreshReceived();
 					});
 				} else {
-					const input = receivedEl.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.pickSession') },
-					});
-					new RecordInputSuggest(
-						this.app,
-						input,
+					this.singlePickInput(
+						receivedEl,
+						t('project.createEntity.pickSession'),
 						() => sessions,
+						(r) => recordLabel(r, this.project),
+						projectRoleType(this.project.config, 'anchor'),
 						(r) => {
 							this.receivedSession = r;
 							refreshReceived();
-						},
-						sessionLabel,
-						true,
-						() =>
-							new CreateEntityModal(this.plugin, projectRoleType(this.project.config, 'anchor'), this.project, {
-								onCreated: (f) => {
-									void this.resolveAfterCreate(f, projectRoleType(this.project.config, 'anchor')).then((rec) => {
-										this.receivedSession = rec;
-										refreshReceived();
-									});
-								},
-							}).open(),
-						t('project.createEntity.createNewAction', { label: entityLabel(projectRoleType(this.project.config, 'anchor')) })
+						}
 					);
 				}
 			};
@@ -1714,8 +1859,6 @@ export class CreateEntityModal extends Modal {
 			// it): search over sessions, the pick becomes a session tag with ✕.
 			// Every event is created through this one session flow.
 			if (!this.options.noteSession) {
-				const sessionLabel = (s: EntityRecord) =>
-					s.date ? formatLoomDate(s.date, this.project.config) : s.name;
 				const sessions = this.plugin.indexer
 					.getAll(projectRoleType(this.project.config, 'anchor'), this.project.root)
 					.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
@@ -1737,39 +1880,23 @@ export class CreateEntityModal extends Modal {
 				const refreshSession = () => {
 					sessionEl.empty();
 					if (this.pickedSession) {
-						this.renderChip(sessionEl, this.pickedSession, sessionLabel(this.pickedSession), () => {
+						renderChipEl(this.plugin, sessionEl, this.pickedSession, recordLabel(this.pickedSession, this.project), () => {
 							this.pickedSession = null;
 							refreshSession();
 						});
 					} else {
-						const input = sessionEl.createEl('input', {
-							type: 'text',
-							attr: {
-								placeholder: this.anchorRequired()
-									? t('project.createEntity.pickAnchor', { anchor: entityLabel(anchorType).toLowerCase() })
-									: t('common.notSpecified'),
-							},
-						});
-						new RecordInputSuggest(
-							this.app,
-							input,
+						this.singlePickInput(
+							sessionEl,
+							this.anchorRequired()
+								? t('project.createEntity.pickAnchor', { anchor: entityLabel(anchorType).toLowerCase() })
+								: t('common.notSpecified'),
 							() => sessions,
+							(r) => recordLabel(r, this.project),
+							anchorType,
 							(r) => {
 								this.pickedSession = r;
 								refreshSession();
-							},
-							sessionLabel,
-							true,
-							() =>
-								new CreateEntityModal(this.plugin, anchorType, this.project, {
-									onCreated: (f) => {
-										void this.resolveAfterCreate(f, anchorType).then((rec) => {
-											this.pickedSession = rec;
-											refreshSession();
-										});
-									},
-								}).open(),
-							t('project.createEntity.createNewAction', { label: entityLabel(anchorType) })
+							}
 						);
 					}
 				};
@@ -1799,101 +1926,56 @@ export class CreateEntityModal extends Modal {
 					: []),
 				...this.plugin.indexer
 					.getAll(undefined, this.project.root)
-					.filter((r) => roleOf(r.type) === null && r.type !== 'decisionPoint')
+					.filter((r) => isInvolvableType(r.type))
 					.filter((r) => involveFilter === null || r.type === involveFilter)
 					.filter((r) => !taken(r))
 					.sort((a, b) => a.name.localeCompare(b.name)),
 			];
-			new Setting(this.contentEl)
-				.setName(t('project.createEntity.involvedEntities'))
-				.addText((text) => {
-					text.setPlaceholder(t('project.createEntity.involvePlaceholder'));
-					new RecordInputSuggest(
-						this.app,
-						text.inputEl,
-						candidates,
-						(r) => {
-							if (r.path === PC_GROUP_VALUE) {
-								const group = (this.fields.group ??= []);
-								for (const pc of missingPcs()) group.push(linkTargetOf(pc));
-							} else {
-								(this.fields.involved ??= []).push(linkTargetOf(r));
-							}
-							refreshInvolved();
-						},
-						(r) => r.name,
-						true,
-						// Same "pick a type, then create" flow as the entity page's own
-						// Involve… control (`view.entity.sessionNotes.createNewEntityAction`,
-						// entity-view.tsx) — reused rather than inventing new copy: when a
-						// type filter is already active it creates that type directly,
-						// otherwise it asks via the same `EntityTypeSuggestModal` every
-						// other "create any involved entity" flow in this codebase uses.
-						() => {
-							const createAs = (type: EntityType) => {
-								new CreateEntityModal(this.plugin, type, this.project, {
-									onCreated: (f) => {
-										void this.resolveAfterCreate(f, type).then((rec) => {
-											(this.fields.involved ??= []).push(linkTargetOf(rec));
-											refreshInvolved();
-										});
-									},
-								}).open();
-							};
-							if (involveFilter !== null) createAs(involveFilter);
-							else new EntityTypeSuggestModal(this.plugin, createAs, this.project, ['decisionPoint']).open();
-						},
-						t('view.entity.sessionNotes.createNewEntityAction')
-					);
-				})
-				.addExtraButton((btn) => {
-					btn.setIcon('filter').setTooltip(t('project.createEntity.filterByType'));
-					btn.extraSettingsEl.addEventListener('click', (e) => {
-						const menu = new Menu();
-						menu.addItem((item) =>
-							item
-								.setTitle(t('project.createEntity.allEntities'))
-								.setIcon('filter')
-								.setChecked(involveFilter === null)
-								.onClick(() => {
-									involveFilter = null;
-									btn.setIcon('filter');
-								})
-						);
-						for (const et of projectTypes(this.project.config).filter((et) => roleOf(et) === null && et !== 'decisionPoint')) {
-							menu.addItem((item) =>
-								item
-									.setTitle(entityPlural(et))
-									.setIcon(ENTITY_META[et].icon)
-									.setChecked(involveFilter === et)
-									.onClick(() => {
-										involveFilter = et;
-										btn.setIcon(ENTITY_META[et].icon);
-									})
-							);
-						}
-						menu.showAtMouseEvent(e);
-					});
-				});
-			const involvedChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
-			const refreshInvolved = () => {
-				involvedChips.empty();
-				if ((this.fields.group ?? []).length > 0) {
+			this.multiPick({
+				key: 'involved',
+				name: t('project.createEntity.involvedEntities'),
+				placeholder: t('project.createEntity.involvePlaceholder'),
+				candidates,
+				label: (r) => r.name,
+				createLabel: t('view.entity.sessionNotes.createNewEntityAction'),
+				// Same "pick a type, then create" flow as the entity page's own
+				// Involve… control: an active type filter creates that type
+				// directly, otherwise `EntityTypeSuggestModal` asks.
+				create: (addCreated) => {
+					const createAs = (type: EntityType) =>
+						new CreateEntityModal(this.plugin, type, this.project, {
+							onCreated: (f) => addCreated(f, type),
+						}).open();
+					if (involveFilter !== null) createAs(involveFilter);
+					else new EntityTypeSuggestModal(this.plugin, createAs, this.project, ['decisionPoint']).open();
+				},
+				// The virtual "Group" snapshots the current party into `group`.
+				onPick: (r) => {
+					if (r.path !== PC_GROUP_VALUE) return false;
+					const group = (this.fields.group ??= []);
+					for (const pc of missingPcs()) group.push(linkTargetOf(pc));
+					return true;
+				},
+				leadingChips: (el, refresh) => {
+					if ((this.fields.group ?? []).length === 0) return;
 					const label = groupNameOf(this.project.config);
-					this.renderChip(involvedChips, pcGroupStub(this.project.root, label), label, () => {
+					renderChipEl(this.plugin, el, pcGroupStub(this.project.root, label), label, () => {
 						this.fields.group = undefined;
-						refreshInvolved();
+						refresh();
 					});
-				}
-				for (const target of this.fields.involved ?? []) {
-					const rec = this.resolveName(target);
-					this.renderChip(involvedChips, rec, rec?.name ?? target, () => {
-						this.fields.involved = (this.fields.involved ?? []).filter((n) => n !== target);
-						refreshInvolved();
+				},
+				decorate: (setting) => {
+					setting.addExtraButton((btn) => {
+						btn.setIcon('filter').setTooltip(t('project.createEntity.filterByType'));
+						btn.extraSettingsEl.addEventListener('click', (e) =>
+							showTypeFilterMenu(e, projectTypes(this.project.config).filter(isInvolvableType), involveFilter, (type) => {
+								involveFilter = type;
+								btn.setIcon(type ? ENTITY_META[type].icon : 'filter');
+							})
+						);
 					});
-				}
-			};
-			refreshInvolved();
+				},
+			});
 
 			// Locations: where the event takes place — written into the starting
 			// note's `places` (like the pages' Location… picker). Main locations
@@ -1903,47 +1985,19 @@ export class CreateEntityModal extends Modal {
 				this.plugin.indexer
 					.getAll('location', this.project.root)
 					.filter((r) => !placeTaken(r))
-					.sort(
-						(a, b) =>
-							(a.parentLocation === null ? 0 : 1) - (b.parentLocation === null ? 0 : 1) ||
-							a.name.localeCompare(b.name)
-					);
-			new Setting(this.contentEl).setName(entityPlural('location')).addText((text) => {
-				text.setPlaceholder(t('project.createEntity.locationEllipsis'));
-				new RecordInputSuggest(
-					this.app,
-					text.inputEl,
-					placeCandidates,
-					(r) => {
-						(this.fields.places ??= []).push(linkTargetOf(r));
-						refreshPlaces();
-					},
-					(r) => this.locLabel(r),
-					true,
-					() =>
-						new CreateEntityModal(this.plugin, 'location', this.project, {
-							onCreated: (f) => {
-								void this.resolveAfterCreate(f, 'location').then((rec) => {
-									(this.fields.places ??= []).push(linkTargetOf(rec));
-									refreshPlaces();
-								});
-							},
-						}).open(),
-					t('project.createEntity.createNewAction', { label: entityLabel('location') })
-				);
+					.sort(mainLocationFirst);
+			this.multiPick({
+				key: 'places',
+				name: entityPlural('location'),
+				placeholder: t('project.createEntity.locationEllipsis'),
+				candidates: placeCandidates,
+				label: (r) => locationLabel(r, this.plugin),
+				createLabel: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
+				create: (addCreated) =>
+					new CreateEntityModal(this.plugin, 'location', this.project, {
+						onCreated: (f) => addCreated(f, 'location'),
+					}).open(),
 			});
-			const placeChips = this.contentEl.createDiv({ cls: 'loom-modal-chips' });
-			const refreshPlaces = () => {
-				placeChips.empty();
-				for (const target of this.fields.places ?? []) {
-					const rec = this.resolveName(target);
-					this.renderChip(placeChips, rec, rec ? this.locLabel(rec) : target, () => {
-						this.fields.places = (this.fields.places ?? []).filter((n) => n !== target);
-						refreshPlaces();
-					});
-				}
-			};
-			refreshPlaces();
 		}
 
 		// Events born from a session page need no date — the session carries it.
@@ -1973,107 +2027,10 @@ export class CreateEntityModal extends Modal {
 		}
 
 		if (this.type === 'character') {
-			// Faction memberships: "+ Add faction" reveals a row — role (default
-			// Member) of <faction> at <location> — applied to the faction's members
-			// after the character is created.
+			// Faction memberships — role (default Member) of <faction> at
+			// <location> — applied to the faction's members after creation.
 			this.fields.factions = [];
-			const factions = this.plugin.indexer
-				.getAll('faction', this.project.root)
-				.sort((a, b) => a.name.localeCompare(b.name));
-			const locations = this.plugin.indexer
-				.getAll('location', this.project.root)
-				.sort((a, b) => a.name.localeCompare(b.name));
-			// Row list lives BELOW the add button (created after it).
-			let rowsEl: HTMLElement;
-			// Rebuilds recreate every row's inputs — restore their values from the
-			// stored fields (link targets → display names), or adding a second row
-			// visually wipes every earlier one's Faction/Location text.
-			const displayNameOf = (records: EntityRecord[], linkTarget: string) =>
-				records.find((r) => linkTargetOf(r) === linkTarget)?.name ?? linkTarget;
-			const render = () => {
-				rowsEl.empty();
-				(this.fields.factions ?? []).forEach((m, i) => {
-					const row = rowsEl.createDiv({ cls: 'loom-modal-faction-row' });
-					const roleInput = row.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.memberPlaceholder') },
-					});
-					roleInput.value = m.role;
-					roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
-					row.createSpan({ text: t('project.createEntity.ofLabel'), cls: 'loom-modal-faction-lbl' });
-					const factionInput = row.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.factionEllipsis') },
-					});
-					factionInput.value = m.faction === '' ? '' : displayNameOf(factions, m.faction);
-					new RecordInputSuggest(
-						this.app,
-						factionInput,
-						() => factions.filter((f) => !(this.fields.factions ?? []).some((x) => x.faction === linkTargetOf(f))),
-						(r) => {
-							m.faction = linkTargetOf(r);
-							factionInput.value = r.name;
-						},
-						(r) => r.name,
-						false,
-						() =>
-							new CreateEntityModal(this.plugin, 'faction', this.project, {
-								onCreated: (f) => {
-									m.faction = f.basename;
-									void waitForMetadataSync(this.app, f).then(() => {
-										factionInput.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
-									});
-								},
-							}).open(),
-						t('project.createEntity.createNewAction', { label: entityLabel('faction') })
-					);
-					row.createSpan({ text: t('project.createEntity.atLabel'), cls: 'loom-modal-faction-lbl' });
-					const locInput = row.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.locationEllipsis') },
-					});
-					locInput.value = m.location === '' ? '' : displayNameOf(locations, m.location);
-					new RecordInputSuggest(
-						this.app,
-						locInput,
-						() => locations,
-						(r) => {
-							m.location = linkTargetOf(r);
-							locInput.value = r.name;
-						},
-						(r) => this.locLabel(r),
-						false,
-						() =>
-							new CreateEntityModal(this.plugin, 'location', this.project, {
-								onCreated: (f) => {
-									m.location = f.basename;
-									void waitForMetadataSync(this.app, f).then(() => {
-										locInput.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
-									});
-								},
-							}).open(),
-						t('project.createEntity.createNewAction', { label: entityLabel('location') })
-					);
-					const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
-					rm.addEventListener('click', (e) => {
-						e.preventDefault();
-						this.fields.factions = (this.fields.factions ?? []).filter((_, j) => j !== i);
-						render();
-					});
-				});
-			};
-			new Setting(this.contentEl).setName(entityLabel('faction')).addButton((btn) => {
-				// "Add faction" (sentence case) + a separate "+ " so it reads
-				// "+ Add faction" like the character page without tripping the lint.
-				btn.setButtonText(t('project.createEntity.addFactionButton'));
-				btn.buttonEl.prepend('+ ');
-				btn.onClick(() => {
-					(this.fields.factions ??= []).push({ faction: '', role: defaultMemberRole(), location: '' });
-					render();
-				});
-			});
-			rowsEl = this.contentEl.createDiv({ cls: 'loom-modal-factions' });
-			render();
+			this.membershipRows('faction', this.fields.factions, entityLabel('faction'), t('project.createEntity.addFactionButton'));
 			const charDesc = new Setting(this.contentEl)
 				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
@@ -2083,102 +2040,12 @@ export class CreateEntityModal extends Modal {
 		if (this.type === 'faction') {
 			// Member characters written straight into this faction's own `members`.
 			this.fields.members = [];
-			const characters = this.plugin.indexer
-				.getAll('character', this.project.root)
-				.sort((a, b) => a.name.localeCompare(b.name));
-			const locations = this.plugin.indexer
-				.getAll('location', this.project.root)
-				.sort((a, b) => a.name.localeCompare(b.name));
-			let rowsEl: HTMLElement;
-			// Rebuilds recreate every row's inputs — restore their values from the
-			// stored fields (link targets → display names), or adding a second
-			// member visually wipes the first.
-			const displayNameOf = (records: EntityRecord[], linkTarget: string) =>
-				records.find((r) => linkTargetOf(r) === linkTarget)?.name ?? linkTarget;
-			const render = () => {
-				rowsEl.empty();
-				(this.fields.members ?? []).forEach((m, i) => {
-					const row = rowsEl.createDiv({ cls: 'loom-modal-faction-row' });
-					const roleInput = row.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.memberPlaceholder') },
-					});
-					roleInput.value = m.role;
-					roleInput.addEventListener('input', () => (m.role = roleInput.value.trim()));
-					const charInput = row.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.characterEllipsis') },
-					});
-					charInput.value = m.character === '' ? '' : displayNameOf(characters, m.character);
-					new RecordInputSuggest(
-						this.app,
-						charInput,
-						() =>
-							characters.filter(
-								(c) => !(this.fields.members ?? []).some((x) => x.character === linkTargetOf(c))
-							),
-						(r) => {
-							m.character = linkTargetOf(r);
-							charInput.value = r.name;
-						},
-						(r) => r.name,
-						false,
-						() =>
-							new CreateEntityModal(this.plugin, 'character', this.project, {
-								onCreated: (f) => {
-									m.character = f.basename;
-									void waitForMetadataSync(this.app, f).then(() => {
-										charInput.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
-									});
-								},
-							}).open(),
-						t('project.createEntity.createNewAction', { label: entityLabel('character') })
-					);
-					row.createSpan({ text: t('project.createEntity.atLabel'), cls: 'loom-modal-faction-lbl' });
-					const locInput = row.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.locationEllipsis') },
-					});
-					locInput.value = m.location === '' ? '' : displayNameOf(locations, m.location);
-					new RecordInputSuggest(
-						this.app,
-						locInput,
-						() => locations,
-						(r) => {
-							m.location = linkTargetOf(r);
-							locInput.value = r.name;
-						},
-						(r) => this.locLabel(r),
-						false,
-						() =>
-							new CreateEntityModal(this.plugin, 'location', this.project, {
-								onCreated: (f) => {
-									m.location = f.basename;
-									void waitForMetadataSync(this.app, f).then(() => {
-										locInput.value = this.plugin.indexer.resolve(f.basename, this.project.loomPath)?.name ?? f.basename;
-									});
-								},
-							}).open(),
-						t('project.createEntity.createNewAction', { label: entityLabel('location') })
-					);
-					const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
-					rm.addEventListener('click', (e) => {
-						e.preventDefault();
-						this.fields.members = (this.fields.members ?? []).filter((_, j) => j !== i);
-						render();
-					});
-				});
-			};
-			new Setting(this.contentEl).setName(t('project.createEntity.membersLabel')).addButton((btn) => {
-				btn.setButtonText(t('project.createEntity.addMemberButton'));
-				btn.buttonEl.prepend('+ ');
-				btn.onClick(() => {
-					(this.fields.members ??= []).push({ character: '', role: defaultMemberRole(), location: '' });
-					render();
-				});
-			});
-			rowsEl = this.contentEl.createDiv({ cls: 'loom-modal-factions' });
-			render();
+			this.membershipRows(
+				'character',
+				this.fields.members,
+				t('project.createEntity.membersLabel'),
+				t('project.createEntity.addMemberButton')
+			);
 			const facDesc = new Setting(this.contentEl)
 				.setName(t('project.createEntity.description'))
 				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
@@ -2197,11 +2064,7 @@ export class CreateEntityModal extends Modal {
 			// sort above their sublocations (same ordering as the other pickers).
 			const locations = this.plugin.indexer
 				.getAll('location', this.project.root)
-				.sort(
-					(a, b) =>
-						(a.parentLocation === null ? 0 : 1) - (b.parentLocation === null ? 0 : 1) ||
-						a.name.localeCompare(b.name)
-				);
+				.sort(mainLocationFirst);
 			let pickedParent: EntityRecord | null = this.options.parentLocation ?? null;
 			if (pickedParent) this.fields.parentLocation = linkTargetOf(pickedParent);
 			const parentSetting = new Setting(this.contentEl).setName(t('project.createEntity.sublocationOf'));
@@ -2225,58 +2088,41 @@ export class CreateEntityModal extends Modal {
 				regionSetting.settingEl.style.display = pickedParent ? 'none' : '';
 				regionEl.empty();
 				if (pickedRegion) {
-					this.renderChip(regionEl, pickedRegion, pickedRegion.name, () => {
+					renderChipEl(this.plugin, regionEl, pickedRegion, pickedRegion.name, () => {
 						pickedRegion = null;
 						this.fields.region = '';
 						refreshRegion();
 					});
 				} else {
-					const input = regionEl.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.notSpecifiedParens') },
-					});
-					new RecordInputSuggest(
-						this.app,
-						input,
+					this.singlePickInput(
+						regionEl,
+						t('project.createEntity.notSpecifiedParens'),
 						() => regions,
+						(r) => r.name,
+						'region',
 						(r) => {
 							pickedRegion = r;
 							this.fields.region = linkTargetOf(r);
 							refreshRegion();
-						},
-						(r) => r.name,
-						true,
-						() =>
-							new CreateEntityModal(this.plugin, 'region', this.project, {
-								onCreated: (f) => {
-									void this.resolveAfterCreate(f, 'region').then((rec) => {
-										pickedRegion = rec;
-										this.fields.region = linkTargetOf(rec);
-										refreshRegion();
-									});
-								},
-							}).open(),
-						t('project.createEntity.createNewAction', { label: entityLabel('region') })
+						}
 					);
 				}
 			};
 			const refreshParent = () => {
 				parentEl.empty();
 				if (pickedParent) {
-					this.renderChip(parentEl, pickedParent, pickedParent.name, () => {
+					renderChipEl(this.plugin, parentEl, pickedParent, pickedParent.name, () => {
 						pickedParent = null;
 						this.fields.parentLocation = '';
 						refreshParent();
 					});
 				} else {
-					const input = parentEl.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.optionalPlaceholder') },
-					});
-					new RecordInputSuggest(
-						this.app,
-						input,
+					this.singlePickInput(
+						parentEl,
+						t('project.createEntity.optionalPlaceholder'),
 						() => locations,
+						(r) => locationLabel(r, this.plugin),
+						'location',
 						(r) => {
 							pickedParent = r;
 							this.fields.parentLocation = linkTargetOf(r);
@@ -2285,23 +2131,7 @@ export class CreateEntityModal extends Modal {
 							this.fields.region = '';
 							refreshParent();
 							refreshRegion();
-						},
-						(r) => this.locLabel(r),
-						true,
-						() =>
-							new CreateEntityModal(this.plugin, 'location', this.project, {
-								onCreated: (f) => {
-									void this.resolveAfterCreate(f, 'location').then((rec) => {
-										pickedParent = rec;
-										this.fields.parentLocation = linkTargetOf(rec);
-										pickedRegion = null;
-										this.fields.region = '';
-										refreshParent();
-										refreshRegion();
-									});
-								},
-							}).open(),
-						t('project.createEntity.createNewAction', { label: entityLabel('location') })
+						}
 					);
 				}
 				refreshRegion();
@@ -2334,38 +2164,23 @@ export class CreateEntityModal extends Modal {
 			const refreshDp = () => {
 				dpEl.empty();
 				if (pickedDp) {
-					this.renderChip(dpEl, pickedDp, pickedDp.name, () => {
+					renderChipEl(this.plugin, dpEl, pickedDp, pickedDp.name, () => {
 						pickedDp = null;
 						this.fields.decisionPoint = '';
 						refreshDp();
 					});
 				} else {
-					const input = dpEl.createEl('input', {
-						type: 'text',
-						attr: { placeholder: t('project.createEntity.notSpecifiedParens') },
-					});
-					new RecordInputSuggest(
-						this.app,
-						input,
+					this.singlePickInput(
+						dpEl,
+						t('project.createEntity.notSpecifiedParens'),
 						() => decisionPoints,
+						(r) => r.name,
+						'decisionPoint',
 						(r) => {
 							pickedDp = r;
 							this.fields.decisionPoint = linkTargetOf(r);
 							refreshDp();
-						},
-						(r) => r.name,
-						true,
-						() =>
-							new CreateEntityModal(this.plugin, 'decisionPoint', this.project, {
-								onCreated: (f) => {
-									void this.resolveAfterCreate(f, 'decisionPoint').then((rec) => {
-										pickedDp = rec;
-										this.fields.decisionPoint = linkTargetOf(rec);
-										refreshDp();
-									});
-								},
-							}).open(),
-						t('project.createEntity.createNewAction', { label: entityLabel('decisionPoint') })
+						}
 					);
 				}
 			};
@@ -2493,6 +2308,10 @@ export class CreateEntityModal extends Modal {
 		else if (this.pickedSession) this.fields.noteSession = linkTargetOf(this.pickedSession);
 		if (this.type === 'quest')
 			this.fields.questReceived = this.receivedSession ? linkTargetOf(this.receivedSession) : '';
+		if (entityNameTaken(this.plugin, this.project, this.type, this.fields)) {
+			new Notice(t('project.common.nameExists'));
+			return;
+		}
 		try {
 			const file = await createEntity(this.plugin, this.project, this.type, this.fields);
 			await this.applyFactions(file.basename);
@@ -2536,12 +2355,9 @@ export class CreateEntityModal extends Modal {
 				if (m.location !== '') o.location = `[[${m.location}]]`;
 				entry = o;
 			}
-			await this.plugin.app.fileManager.processFrontMatter(factionFile, (fm: Record<string, unknown>) => {
-				const cur = fmLoomValue(fm, FM.members);
-				const arr = Array.isArray(cur) ? cur : [];
-				arr.push(entry);
-				setLoomKey(fm, FM.members, arr);
-			});
+			await this.plugin.app.fileManager.processFrontMatter(factionFile, (fm: Record<string, unknown>) =>
+				appendLoomList(fm, FM.members, entry)
+			);
 		}
 	}
 
@@ -2567,24 +2383,17 @@ export class CreateEntityModal extends Modal {
 			return;
 		}
 		try {
-			await this.plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				const cur = fmLoomValue(fm, FM.sessionNotes);
-				const arr = Array.isArray(cur) ? cur : [];
-				// This session note carries whatever was picked in the modal — an
-				// existing event's involved list is per-session-note, so the same
-				// event can involve different entities in different sessions.
-				const note: Record<string, unknown> = {
-					session: `[[${linkTargetOf(session)}]]`,
-					text: '',
-					seq: Date.now(),
-				};
-				const links = (names?: string[]) => (names ?? []).map((n) => `[[${n}]]`);
-				if ((this.fields.involved ?? []).length > 0) note.involved = links(this.fields.involved);
-				if ((this.fields.group ?? []).length > 0) note.group = links(this.fields.group);
-				if ((this.fields.places ?? []).length > 0) note.places = links(this.fields.places);
-				arr.push(note);
-				setLoomKey(fm, FM.sessionNotes, arr);
-			});
+			// This session note carries whatever was picked in the modal — an
+			// existing event's involved list is per-session-note, so the same
+			// event can involve different entities in different sessions.
+			const note = newNoteEntry(`[[${linkTargetOf(session)}]]`);
+			const links = (names?: string[]) => (names ?? []).map((n) => `[[${n}]]`);
+			if ((this.fields.involved ?? []).length > 0) note.involved = links(this.fields.involved);
+			if ((this.fields.group ?? []).length > 0) note.group = links(this.fields.group);
+			if ((this.fields.places ?? []).length > 0) note.places = links(this.fields.places);
+			await this.plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
+				appendLoomList(fm, FM.sessionNotes, note)
+			);
 			this.close();
 			if (this.options.onCreated) this.options.onCreated(f);
 		} catch (e) {
@@ -2684,7 +2493,7 @@ export class CreateEntityModal extends Modal {
 		const refreshAct = () => {
 			actEl.empty();
 			if (pickedAct) {
-				this.renderChip(actEl, pickedAct, pickedAct.name, () => {
+				renderChipEl(this.plugin, actEl, pickedAct, pickedAct.name, () => {
 					pickedAct = null;
 					refreshAct();
 					refreshSceneOrderItems();
@@ -2702,7 +2511,7 @@ export class CreateEntityModal extends Modal {
 					newActStub(this.project.root),
 					...this.plugin.indexer
 						.getAll('act', this.project.root)
-						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created)),
+						.sort(bySeq),
 				],
 				(r) => {
 					if (r.path === NEW_ACT_SENTINEL) {
@@ -2724,39 +2533,16 @@ export class CreateEntityModal extends Modal {
 		};
 		refreshAct();
 
-		new Setting(this.contentEl)
-			.setName(t('project.createEntity.appendToEndAct.name'))
-			.setDesc(t('project.createEntity.appendToEndAct.desc'))
-			.addToggle((tg) =>
-				tg.setValue(true).onChange((v) => {
-					sceneAppendToEnd = v;
-					sceneOrderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
-				})
-			);
-		const sceneOrderWrap = this.contentEl.createDiv({
-			cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden',
-		});
-		const sceneOrderPicker = this.buildOrderPicker(sceneOrderWrap);
-		sceneOrderPicker.setPhantomLabel(t('project.createEntity.newSceneTitle'));
+		const sceneOrderPicker = this.appendOrOrder(t('project.createEntity.appendToEndAct.name'), t('project.createEntity.appendToEndAct.desc'), t('project.createEntity.newSceneTitle'), (v) => (sceneAppendToEnd = v));
 		refreshSceneOrderItems = () => {
 			const actScenes = pickedAct
-				? this.plugin.indexer
-						.getAll('scene', this.project.root)
-						.filter(
-							(sc) =>
-								sc.sceneAct !== '' &&
-								this.plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === pickedAct?.path
-						)
-						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+				? this.plugin.indexer.membersOfAct(pickedAct, 'scene').sort(bySeq)
 				: [];
 			sceneOrderPicker.setItems(actScenes.map((sc) => sc.name));
 		};
 		refreshSceneOrderItems();
 
-		const notesSetting = new Setting(this.contentEl)
-			.setName(t('project.notes'))
-			.addTextArea((text) => text.onChange((v) => (notes = v.trim())));
-		notesSetting.setClass('loom-modal-wide');
+		this.notesField((v) => (notes = v));
 
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
@@ -2801,19 +2587,11 @@ export class CreateEntityModal extends Modal {
 			return;
 		}
 		const act = fields.pickedAct;
-		// Read before the script write below — same query the modal's own
-		// position picker used to build its list, so the index it returned
-		// lines up with this order.
+		// Read before the script write below — the same query the position
+		// picker's list was built from, so its index lines up with this order.
 		const existingSceneIds =
 			act.actId !== ''
-				? this.plugin.indexer
-						.getAll('scene', this.project.root)
-						.filter(
-							(sc) =>
-								sc.sceneAct !== '' &&
-								this.plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === act.path
-						)
-						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+				? this.plugin.indexer.membersOfAct(act, 'scene').sort(bySeq)
 						.map((sc) => sc.sceneId)
 				: [];
 
@@ -2881,13 +2659,7 @@ export class CreateEntityModal extends Modal {
 			// immediately, instead of leaving them stale until some later,
 			// unrelated script edit happens to trigger a sync.
 			await flushScriptBufferNow(this.plugin, this.project);
-			this.close();
-			if (this.options.onCreated) {
-				this.options.onCreated(created);
-			} else {
-				const origin: EntityOrigin = { type: VIEW_LIST, state: { project: this.project.root, entityType: 'scene' } };
-				this.plugin.openEntityFile(created.path, origin);
-			}
+			this.finishCreate(created);
 		} catch (e) {
 			console.error('Loom Loom: failed to create the scene', e);
 			new Notice(t('project.createEntity.createNoteFailed'));
@@ -2915,35 +2687,34 @@ export class CreateEntityModal extends Modal {
 			});
 			mainRecord = { ...pcGroupStub(this.project.root), path: created.path, name: mainName.trim(), type: 'location' };
 		}
-		const subKey = subName.trim().toLowerCase();
-		if (subKey === '') return mainRecord;
-		const parentTarget = linkTargetOf(mainRecord);
-		let subRecord =
-			this.plugin.indexer
-				.getAll('location', this.project.root)
-				.find(
-					(r) =>
-						r.parentLocation !== null &&
-						r.name.trim().toLowerCase() === subKey &&
-						this.plugin.indexer.resolve(r.parentLocation, r.path)?.path === mainRecord.path
-				) ?? null;
-		if (!subRecord) {
-			const created = await createEntity(this.plugin, this.project, 'location', {
-				name: subName.trim(),
-				tag: '',
-				date: '',
-				description: '',
-				parentLocation: parentTarget,
-			});
-			subRecord = {
-				...pcGroupStub(this.project.root),
-				path: created.path,
-				name: subName.trim(),
-				type: 'location',
-				parentLocation: parentTarget,
-			};
-		}
-		return subRecord;
+		if (subName.trim() === '') return mainRecord;
+		return findOrCreateSublocation(this.plugin, this.project, mainRecord, subName);
+	}
+
+	/** "Append to the end" toggle (default on); turning it off reveals an order
+	 *  picker with the new entry as its draggable `phantomLabel` row. */
+	private appendOrOrder(name: string, desc: string, phantomLabel: string, onAppend: (append: boolean) => void) {
+		new Setting(this.contentEl)
+			.setName(name)
+			.setDesc(desc)
+			.addToggle((tg) =>
+				tg.setValue(true).onChange((v) => {
+					onAppend(v);
+					orderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
+				})
+			);
+		const orderWrap = this.contentEl.createDiv({ cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden' });
+		const picker = this.buildOrderPicker(orderWrap);
+		picker.setPhantomLabel(phantomLabel);
+		return picker;
+	}
+
+	/** The structural modals' Notes field (written as the note's body). */
+	private notesField(onChange: (notes: string) => void): void {
+		new Setting(this.contentEl)
+			.setName(t('project.notes'))
+			.addTextArea((text) => text.onChange((v) => onChange(v.trim())))
+			.setClass('loom-modal-wide');
 	}
 
 	/**
@@ -3036,19 +2807,14 @@ export class CreateEntityModal extends Modal {
 	}
 
 	/**
-	 * Act creation: Title (the script's `#` line) and Display title (the
-	 * centered-bold `>**…**<` marker under it), where to insert it — append to
-	 * the end (default) or drag it to a specific spot among the existing
-	 * acts — and a Notes field. Script mode only — Prose has no script to
-	 * write a `#` line or display-title marker into, so it gets its own
-	 * simpler `renderProseActModal`/`submitProseAct` pair instead, stamping
-	 * frontmatter directly the same way `submitChapter` does.
+	 * Act creation, Script and Prose alike: Title (→ the `#` heading), Display
+	 * title (Script only — the centered `>**…**<` marker under the section,
+	 * `applyDisplayTitles`; Prose prints no such line), where to insert it
+	 * (append, or drag among the existing acts), and Notes. Writes the script
+	 * or book FIRST and stamps the note from what that write produced.
 	 */
 	private renderActModal(): void {
-		if (this.project.config.writerMode === 'prose') {
-			this.renderProseActModal();
-			return;
-		}
+		const prose = this.project.config.writerMode === 'prose';
 		this.setTitle(t('project.createEntity.newActTitle'));
 		let title = '';
 		let displayTitle = '';
@@ -3056,7 +2822,7 @@ export class CreateEntityModal extends Modal {
 		let notes = '';
 		const existingActs = this.plugin.indexer
 			.getAll('act', this.project.root)
-			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+			.sort(bySeq);
 
 		let displayTitleInput: TextComponent | null = null;
 		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
@@ -3071,32 +2837,22 @@ export class CreateEntityModal extends Modal {
 			});
 			window.setTimeout(() => text.inputEl.focus());
 		});
-		new Setting(this.contentEl)
-			.setName(t('project.createEntity.displayTitle.name'))
-			.setDesc(t('project.createEntity.displayTitle.desc'))
-			.addText((text) => {
-				displayTitleInput = text;
-				text.onChange((v) => (displayTitle = v));
-			});
+		if (!prose) {
+			new Setting(this.contentEl)
+				.setName(t('project.createEntity.displayTitle.name'))
+				.setDesc(t('project.createEntity.displayTitle.desc'))
+				.addText((text) => {
+					displayTitleInput = text;
+					text.onChange((v) => (displayTitle = v));
+				});
+		}
 
-		new Setting(this.contentEl)
-			.setName(t('project.createEntity.appendToEndScript.name'))
-			.setDesc(t('project.createEntity.appendToEndScript.desc'))
-			.addToggle((tg) =>
-				tg.setValue(true).onChange((v) => {
-					appendToEnd = v;
-					orderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
-				})
-			);
-		const orderWrap = this.contentEl.createDiv({ cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden' });
-		const orderPicker = this.buildOrderPicker(orderWrap);
-		orderPicker.setPhantomLabel(t('project.createEntity.newActTitle'));
+		const orderPicker = prose
+			? this.appendOrOrder(t('project.createEntity.appendToEndBook.name'), t('project.createEntity.appendToEndBook.desc'), t('project.createEntity.newActTitle'), (v) => (appendToEnd = v))
+			: this.appendOrOrder(t('project.createEntity.appendToEndScript.name'), t('project.createEntity.appendToEndScript.desc'), t('project.createEntity.newActTitle'), (v) => (appendToEnd = v));
 		orderPicker.setItems(existingActs.map((c) => c.name));
 
-		const notesSetting = new Setting(this.contentEl)
-			.setName(t('project.notes'))
-			.addTextArea((text) => text.onChange((v) => (notes = v.trim())));
-		notesSetting.setClass('loom-modal-wide');
+		this.notesField((v) => (notes = v));
 
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
@@ -3105,7 +2861,7 @@ export class CreateEntityModal extends Modal {
 				.onClick(() =>
 					void this.submitAct({
 						title,
-						displayTitle,
+						displayTitle: prose ? '' : displayTitle,
 						appendToEnd,
 						insertIndex: orderPicker.getIndex(),
 						existingActs,
@@ -3129,34 +2885,45 @@ export class CreateEntityModal extends Modal {
 			return;
 		}
 		const displayTitle = fields.displayTitle.trim();
+		const prose = this.project.config.writerMode === 'prose';
+		/** Act ids in document order — the new act is the last one appended. */
+		const actIds = (text: string): string[] =>
+			prose
+				? parseBook(text).acts.filter((a) => a.loomId !== null).sort((a, b) => a.line - b.line).map((a) => a.loomId as string)
+				: parseFountain(text)
+						.sections.filter((sec) => sec.level === 1 && sec.loomId !== null)
+						.sort((a, b) => a.line - b.line)
+						.map((sec) => sec.loomId as string);
 
 		let newId: string | null = null;
-		let nextText: string | null = null;
-		await ensureScriptBufferLoaded(this.plugin, this.project);
-		const applied = mutateScriptBuffer(this.plugin, this.project, (raw) => {
-			let t = appendAct(raw, title);
-			const parsed = parseFountain(t);
-			const last = [...parsed.sections].reverse().find((sec) => sec.level === 1 && sec.loomId !== null);
-			newId = last?.loomId ?? null;
-			if (!newId) return t;
+		const place = (raw: string): string => {
+			let text = prose ? appendBookAct(raw, title) : appendAct(raw, title);
+			const ids = actIds(text);
+			newId = ids[ids.length - 1] ?? null;
+			if (!newId) return text;
 			if (!fields.appendToEnd) {
 				const order = fields.existingActs.map((c) => c.actId);
 				const clamped = Math.max(0, Math.min(fields.insertIndex, order.length));
 				order.splice(clamped, 0, newId);
-				t = reorderTopSections(t, order) ?? t;
+				text = (prose ? reorderBookActs(text, order) : reorderTopSections(text, order)) ?? text;
 			}
-			if (displayTitle !== '') t = applyDisplayTitles(t, new Map([[newId, displayTitle]]));
-			nextText = t;
-			return t;
-		});
-		if (!applied || nextText === null || !newId) {
+			if (displayTitle !== '') text = applyDisplayTitles(text, new Map([[newId, displayTitle]]));
+			return text;
+		};
+		let nextText: string | null = null;
+		if (prose) {
+			nextText = await editBookFile(this.plugin, this.project, place);
+		} else {
+			await ensureScriptBufferLoaded(this.plugin, this.project);
+			const applied = mutateScriptBuffer(this.plugin, this.project, (raw) => (nextText = place(raw)));
+			if (!applied) nextText = null;
+		}
+		if (nextText === null || !newId) {
 			new Notice(t('project.createEntity.actWriteFailed'));
 			return;
 		}
-		const sections = parseFountain(nextText)
-			.sections.filter((sec) => sec.level === 1 && sec.loomId !== null)
-			.sort((a, b) => a.line - b.line);
-		const seq = sections.findIndex((sec) => sec.loomId === newId) + 1;
+		const actId: string = newId;
+		const seq = actIds(nextText).indexOf(actId) + 1;
 
 		try {
 			const created = await createEntity(this.plugin, this.project, 'act', {
@@ -3166,7 +2933,7 @@ export class CreateEntityModal extends Modal {
 				description: '',
 			});
 			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, FM.actId, newId);
+				setLoomKey(fm, FM.actId, actId);
 				setLoomKey(fm, FM.seq, seq);
 				if (displayTitle !== '') setLoomKey(fm, FM.displayTitle, displayTitle);
 			});
@@ -3176,168 +2943,15 @@ export class CreateEntityModal extends Modal {
 				path: created.path,
 				name: title,
 				type: 'act',
-				actId: newId,
+				actId,
 				seq,
 				displayTitle,
 			};
 			// Same reasoning as `submitScene`'s own flush — the note already
-			// carries `newId`, so `syncScenes` (this flush's post-flush hook)
+			// carries the id, so `syncScenes` (this flush's post-flush hook)
 			// matches and updates it rather than creating a duplicate.
-			await flushScriptBufferNow(this.plugin, this.project);
-			this.close();
-			if (this.options.onActCreated) {
-				this.options.onActCreated(record);
-			} else if (this.options.onCreated) {
-				this.options.onCreated(created);
-			} else {
-				const origin: EntityOrigin = {
-					type: VIEW_LIST,
-					state: { project: this.project.root, entityType: 'act' },
-				};
-				this.plugin.openEntityFile(created.path, origin);
-			}
-		} catch (e) {
-			console.error('Loom Loom: failed to create the act', e);
-			new Notice(t('project.createEntity.createNoteFailed'));
-		}
-	}
-
-	/**
-	 * Act creation (Writer/Prose): just Title, an Append-to-the-end-of-the-book
-	 * toggle (same `buildOrderPicker` reorder-when-off UI Script's own Act
-	 * modal uses), and Notes — no Display title field (that marker only
-	 * matters for the printed/exported Fountain page, which Prose has no
-	 * equivalent of). Writes the Book file first (`editBookFile`/
-	 * `appendBookAct`, creating it if this is the project's first act) and
-	 * stamps the note from what that write actually produced — mirrors
-	 * `submitAct`.
-	 */
-	private renderProseActModal(): void {
-		this.setTitle(t('project.createEntity.newActTitle'));
-		let title = '';
-		let appendToEnd = true;
-		let notes = '';
-		const existingActs = this.plugin.indexer
-			.getAll('act', this.project.root)
-			.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
-
-		new Setting(this.contentEl).setName(t('project.createEntity.titleLabel')).addText((text) => {
-			text.setPlaceholder(t('project.createEntity.newActTitle'));
-			text.onChange((v) => {
-				title = v;
-				orderPicker.setPhantomLabel(v.trim() === '' ? t('project.createEntity.newActTitle') : v.trim());
-			});
-			window.setTimeout(() => text.inputEl.focus());
-		});
-
-		new Setting(this.contentEl)
-			.setName(t('project.createEntity.appendToEndBook.name'))
-			.setDesc(t('project.createEntity.appendToEndBook.desc'))
-			.addToggle((tg) =>
-				tg.setValue(true).onChange((v) => {
-					appendToEnd = v;
-					orderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
-				})
-			);
-		const orderWrap = this.contentEl.createDiv({ cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden' });
-		const orderPicker = this.buildOrderPicker(orderWrap);
-		orderPicker.setPhantomLabel(t('project.createEntity.newActTitle'));
-		orderPicker.setItems(existingActs.map((c) => c.name));
-
-		const notesSetting = new Setting(this.contentEl)
-			.setName(t('project.notes'))
-			.addTextArea((text) => text.onChange((v) => (notes = v.trim())));
-		notesSetting.setClass('loom-modal-wide');
-
-		new Setting(this.contentEl).addButton((btn) =>
-			btn
-				.setButtonText(t('project.createEntity.createButton'))
-				.setCta()
-				.onClick(() =>
-					void this.submitProseAct({
-						title,
-						appendToEnd,
-						insertIndex: orderPicker.getIndex(),
-						existingActs,
-						notes,
-					})
-				)
-		);
-	}
-
-	private async submitProseAct(fields: {
-		title: string;
-		appendToEnd: boolean;
-		insertIndex: number;
-		existingActs: EntityRecord[];
-		notes: string;
-	}): Promise<void> {
-		const title = fields.title.trim();
-		if (title === '') {
-			new Notice(t('project.createEntity.titleRequired'));
-			return;
-		}
-
-		// Write the Book FIRST, same "one creation surface, the book owns
-		// names" principle Script's own `submitAct` follows — the note is
-		// stamped from what the write actually produced, not computed
-		// independently and hoped to match.
-		let newId: string | null = null;
-		const nextText = await editBookFile(this.plugin, this.project, (raw) => {
-			let text = appendBookAct(raw, title);
-			const parsed = parseBook(text);
-			const last = [...parsed.acts].reverse().find((a) => a.loomId !== null);
-			newId = last?.loomId ?? null;
-			if (!newId) return text;
-			if (!fields.appendToEnd) {
-				const order = fields.existingActs.map((c) => c.actId);
-				const clamped = Math.max(0, Math.min(fields.insertIndex, order.length));
-				order.splice(clamped, 0, newId);
-				text = reorderBookActs(text, order) ?? text;
-			}
-			return text;
-		});
-		if (!newId) {
-			new Notice(t('project.createEntity.actWriteFailed'));
-			return;
-		}
-		const acts = parseBook(nextText)
-			.acts.filter((a) => a.loomId !== null)
-			.sort((a, b) => a.line - b.line);
-		const seq = acts.findIndex((a) => a.loomId === newId) + 1;
-
-		try {
-			const created = await createEntity(this.plugin, this.project, 'act', {
-				name: title,
-				tag: '',
-				date: '',
-				description: '',
-			});
-			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, FM.actId, newId);
-				setLoomKey(fm, FM.seq, seq);
-			});
-			await writeNotesBody(this.plugin, created, fields.notes);
-			const record: EntityRecord = {
-				...pcGroupStub(this.project.root),
-				path: created.path,
-				name: title,
-				type: 'act',
-				actId: newId,
-				seq,
-			};
-			this.close();
-			if (this.options.onActCreated) {
-				this.options.onActCreated(record);
-			} else if (this.options.onCreated) {
-				this.options.onCreated(created);
-			} else {
-				const origin: EntityOrigin = {
-					type: VIEW_LIST,
-					state: { project: this.project.root, entityType: 'act' },
-				};
-				this.plugin.openEntityFile(created.path, origin);
-			}
+			if (!prose) await flushScriptBufferNow(this.plugin, this.project);
+			this.finishCreate(created, record);
 		} catch (e) {
 			console.error('Loom Loom: failed to create the act', e);
 			new Notice(t('project.createEntity.createNoteFailed'));
@@ -3385,7 +2999,7 @@ export class CreateEntityModal extends Modal {
 		const refreshAct = () => {
 			actEl.empty();
 			if (pickedAct) {
-				this.renderChip(actEl, pickedAct, pickedAct.name, () => {
+				renderChipEl(this.plugin, actEl, pickedAct, pickedAct.name, () => {
 					pickedAct = null;
 					refreshAct();
 					refreshChapterOrderItems();
@@ -3403,7 +3017,7 @@ export class CreateEntityModal extends Modal {
 					newActStub(this.project.root),
 					...this.plugin.indexer
 						.getAll('act', this.project.root)
-						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created)),
+						.sort(bySeq),
 				],
 				(r) => {
 					if (r.path === NEW_ACT_SENTINEL) {
@@ -3425,35 +3039,16 @@ export class CreateEntityModal extends Modal {
 		};
 		refreshAct();
 
-		new Setting(this.contentEl)
-			.setName(t('project.createEntity.appendToEndActChapter.name'))
-			.setDesc(t('project.createEntity.appendToEndActChapter.desc'))
-			.addToggle((tg) =>
-				tg.setValue(true).onChange((v) => {
-					chapterAppendToEnd = v;
-					chapterOrderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
-				})
-			);
-		const chapterOrderWrap = this.contentEl.createDiv({
-			cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden',
-		});
-		const chapterOrderPicker = this.buildOrderPicker(chapterOrderWrap);
-		chapterOrderPicker.setPhantomLabel(newEntityTitle('chapter'));
+		const chapterOrderPicker = this.appendOrOrder(t('project.createEntity.appendToEndActChapter.name'), t('project.createEntity.appendToEndActChapter.desc'), newEntityTitle('chapter'), (v) => (chapterAppendToEnd = v));
 		refreshChapterOrderItems = () => {
 			const actChapters = pickedAct
-				? this.plugin.indexer
-						.getAll('chapter', this.project.root)
-						.filter((ch) => ch.chapterAct !== '' && this.plugin.indexer.resolve(ch.chapterAct, ch.path)?.path === pickedAct?.path)
-						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+				? this.plugin.indexer.membersOfAct(pickedAct, 'chapter').sort(bySeq)
 				: [];
 			chapterOrderPicker.setItems(actChapters.map((ch) => ch.name));
 		};
 		refreshChapterOrderItems();
 
-		const notesSetting = new Setting(this.contentEl)
-			.setName(t('project.notes'))
-			.addTextArea((text) => text.onChange((v) => (notes = v.trim())));
-		notesSetting.setClass('loom-modal-wide');
+		this.notesField((v) => (notes = v));
 
 		new Setting(this.contentEl).addButton((btn) =>
 			btn
@@ -3492,19 +3087,11 @@ export class CreateEntityModal extends Modal {
 			return;
 		}
 		const act = fields.pickedAct;
-		// Read before the Book write below — same query the modal's own
-		// position picker used to build its list, so the index it returned
-		// lines up with this order.
+		// Read before the Book write below — the same query the position
+		// picker's list was built from, so its index lines up with this order.
 		const existingChapterIds =
 			act.actId !== ''
-				? this.plugin.indexer
-						.getAll('chapter', this.project.root)
-						.filter(
-							(ch) =>
-								ch.chapterAct !== '' &&
-								this.plugin.indexer.resolve(ch.chapterAct, ch.path)?.path === act.path
-						)
-						.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+				? this.plugin.indexer.membersOfAct(act, 'chapter').sort(bySeq)
 						.map((ch) => ch.chapterId)
 				: [];
 
@@ -3548,16 +3135,7 @@ export class CreateEntityModal extends Modal {
 				setLoomKey(fm, FM.seq, seq);
 			});
 			await writeNotesBody(this.plugin, created, fields.notes);
-			this.close();
-			if (this.options.onCreated) {
-				this.options.onCreated(created);
-			} else {
-				const origin: EntityOrigin = {
-					type: VIEW_LIST,
-					state: { project: this.project.root, entityType: 'chapter' },
-				};
-				this.plugin.openEntityFile(created.path, origin);
-			}
+			this.finishCreate(created);
 		} catch (e) {
 			console.error('Loom Loom: failed to create the chapter', e);
 			new Notice(t('project.createEntity.createNoteFailed'));
@@ -3565,6 +3143,8 @@ export class CreateEntityModal extends Modal {
 	}
 
 	onClose(): void {
+		for (const ref of this.indexRefs) this.plugin.indexer.events.offref(ref);
+		this.indexRefs = [];
 		this.contentEl.empty();
 	}
 }
@@ -3575,22 +3155,8 @@ export class CreateEntityModal extends Modal {
  * typeable — unlike a pick-only fuzzy modal.
  */
 export class FolderSuggest extends AbstractInputSuggest<TFolder> {
-	/** Whether the popup is showing — lets the host input tell "Enter picks a
-	 *  suggestion" apart from "Enter means submit". */
-	suggestionsShown = false;
-
 	constructor(app: App, private input: HTMLInputElement) {
 		super(app, input);
-	}
-
-	open(): void {
-		super.open();
-		this.suggestionsShown = true;
-	}
-
-	close(): void {
-		super.close();
-		this.suggestionsShown = false;
 	}
 
 	getSuggestions(query: string): TFolder[] {
@@ -3627,12 +3193,9 @@ export class SetupProjectModal extends Modal {
 
 	onOpen(): void {
 		this.setTitle(t('project.setup.title'));
-		// Obsidian vertically centers a modal by default — this one's height
-		// changes with the picked kind (Writer adds its Script/Prose pills and
-		// a longer "Holds" line), so centering kept shifting the box's own TOP edge up and down on
-		// every switch (centering holds the MIDDLE fixed, not the top).
-		// Anchoring to the top instead keeps the top edge planted in one spot
-		// regardless of height.
+		// Anchored to the top instead of Obsidian's vertical centering: the
+		// modal's height changes with the picked kind (Writer adds its pills),
+		// and centering would move its top edge on every switch.
 		this.containerEl.addClass('loom-setup-modal-container');
 		this.render();
 	}
@@ -3672,15 +3235,8 @@ export class SetupProjectModal extends Modal {
 				const icon = createSpan({ cls: 'loom-setup-kind-icon' });
 				setIcon(icon, PROJECT_KIND_META[this.kind].icon);
 				dd.selectEl.before(icon);
-				// A fixed width covering the longest option ("Game Master") — without
-				// it the control resized per selection (narrow for "Player", wider for
-				// "Game Master"), and the OPEN option list, which matches the
-				// control's own width, was cramped against "Game Master"'s text with
-				// no breathing room when "Player" (the narrower option) was selected.
-				// Set as an INLINE style (via `setCssProps`, not a CSS class) —
-				// Obsidian's own `.dropdown` rule was still winning the width
-				// over a class-based override, and an inline style outranks any
-				// external stylesheet rule that isn't itself `!important`.
+				// Fixed width for the longest option ("Game Master") as an inline
+				// style (see settings.ts `renderFixedWidthDropdown` for why).
 				dd.selectEl.setCssProps({ width: '17ch' });
 			});
 
@@ -3712,11 +3268,9 @@ export class SetupProjectModal extends Modal {
 			}),
 		});
 
-		// Freemium gate: one project of each kind is free with every feature
-		// available; a license key unlocks unlimited projects. Only gates NEW
-		// creation here — existing projects (however many) are never touched, so
-		// a vault that already has several from before this shipped is never
-		// blocked from opening or using them. See src/license/gating.ts.
+		// Freemium gate: one project of each kind is free with every feature;
+		// a license key unlocks unlimited projects. Gates NEW creation only —
+		// existing projects are never blocked. See src/license/gating.ts.
 		const blocked = !canCreateProjectOfKind(
 			this.plugin.licenseManager.getTier(),
 			this.plugin.indexer.getProjects(),
@@ -3794,48 +3348,6 @@ export class SetupProjectModal extends Modal {
  * (graph node-on-node drop). Empty input falls back to 'related', matching
  * the entity page's relationships editor.
  */
-export class RelationshipPromptModal extends Modal {
-	private value = '';
-
-	constructor(
-		app: App,
-		private fromLabel: string,
-		private toLabel: string,
-		private onSubmit: (relType: string) => void
-	) {
-		super(app);
-	}
-
-	onOpen(): void {
-		this.setTitle(t('project.relationshipPrompt.title'));
-		new Setting(this.contentEl)
-			.setName(t('project.createEntity.relationship'))
-			.setDesc(t('project.relationshipPrompt.desc', { from: this.fromLabel, to: this.toLabel }))
-			.addText((text) => {
-				text.setPlaceholder(t('project.createEntity.identifierPlaceholder')).onChange((v) => (this.value = v.trim()));
-				text.inputEl.addEventListener('keydown', (e) => {
-					if (e.key === 'Enter') this.submit();
-				});
-				window.setTimeout(() => text.inputEl.focus());
-			});
-		new Setting(this.contentEl).addButton((btn) =>
-			btn
-				.setButtonText(t('project.relationshipPrompt.connectButton'))
-				.setCta()
-				.onClick(() => this.submit())
-		);
-	}
-
-	private submit(): void {
-		this.close();
-		this.onSubmit(this.value === '' ? 'related' : this.value);
-	}
-
-	onClose(): void {
-		this.contentEl.empty();
-	}
-}
-
 export class ConfirmModal extends Modal {
 	constructor(
 		app: App,

@@ -1,24 +1,15 @@
 /**
- * Ambient link suggester — a genuinely shared, format-agnostic CM6 building
- * block for `markdown-field.tsx` and `fountain-field.tsx` (same precedent as
- * `annotation-cm6.ts`: verified format-agnostic before landing here, not a
- * hasty extraction). As the user types plain text that happens to match an
- * existing entity's name/alias, a small floating pill appears above the
- * matched span offering to convert it into a real link — no need to type
- * `[[`/`@[` first. Click, or press Enter right after the match, to accept.
+ * Ambient link suggester — a format-agnostic CM6 building block shared by
+ * `markdown-field.tsx` and `fountain-field.tsx`. As the user types plain text
+ * matching an existing entity's name/alias, a small floating pill appears
+ * above the match offering to convert it into a real link — no `[[`/`@[`
+ * needed. Click, or press Enter right after the match, to accept.
  *
- * Reimplemented from scratch against this codebase's own entity model,
- * after studying (not copying) the equivalent feature in a different
- * plugin: same overall mechanism — a CM6 `ViewPlugin`, debounced trailing-
- * phrase matching, a plain `position: fixed` DOM pill (not a CM6 `Tooltip`,
- * not an Obsidian `Menu`) positioned via `requestMeasure`+`coordsAtPos` —
- * adapted to loom-loom's own project-scoped corpus (a few dozen to a few
- * hundred entities, not a vault-wide note index) and its own existing `[[`/
- * `@[` autocomplete, which this has to coexist with rather than compete
- * against (see the `completionStatus` guard in `onKeydown` below).
- *
- * Deliberately out of scope for v1: paste-scanning (a separate trigger path
- * in the reference feature) — this only ever reacts to typing.
+ * A CM6 `ViewPlugin` with debounced trailing-phrase matching and a plain
+ * `position: fixed` DOM pill positioned via `requestMeasure`+`coordsAtPos`,
+ * over the project's own entity corpus; it defers to the fields' own
+ * `[[`/`@[` autocomplete (the `completionStatus` guard in `onKeydown`). Only
+ * reacts to typing, not paste.
  */
 
 import { completionStatus } from '@codemirror/autocomplete';
@@ -28,17 +19,10 @@ import { EditorView, PluginValue, ViewPlugin, ViewUpdate } from '@codemirror/vie
 const TRIGGER_DEBOUNCE_MS = 150;
 const WORD_BOUNDARY_RE = /[\s.,;:!?()[\]{}"'`]/;
 
-/** `insert` is already the exact, full string to splice in place of the
- *  matched plain text — `[[target|label]]` (markdown, brackets included —
- *  a real, reported bug otherwise: without them the "link" is just plain
- *  text) or `@[Name]` (fountain). This module never constructs link syntax
- *  itself, only accepts pre-built strings from each field, keeping it
- *  genuinely format-agnostic. `displayLabel` is what the PILL actually
- *  shows — never `insert` itself, which for markdown is `target|label` and
- *  would show the entity's raw, ugly managed filename right in the
- *  suggestion pill (another real, reported bug: "married with clean
- *  wikilinks" — the pill has to follow the same clean-display convention
- *  the accepted link itself gets once rendered, not just the document). */
+/** `insert` is the exact, full string spliced in place of the matched text —
+ *  `[[target|label]]` (markdown, brackets included) or `@[Name]` (fountain);
+ *  this module never builds link syntax itself. `displayLabel` is what the
+ *  pill shows: the clean label, never the raw managed filename. */
 export interface LinkSuggestEntry {
 	insert: string;
 	displayLabel: string;
@@ -151,15 +135,9 @@ export function buildLinkSuggestExtension(config: LinkSuggestConfig) {
 			}
 
 			update(update: ViewUpdate): void {
-				// A pill is `position: fixed` on `document.body` (see `show()`), so
-				// a hidden ANCESTOR (a backgrounded Obsidian tab, or this field
-				// tearing down without `destroy()` running — see below) never clips
-				// it: left alone, it would keep floating at its last screen
-				// position over whatever the user switches to next. Losing focus is
-				// the field's own signal that it's no longer the thing being
-				// edited, so every pending suggestion is dropped outright here —
-				// not just hidden — matching this module's own "only ever reacts
-				// while actively being typed into" scope.
+				// A pill is `position: fixed` on `document.body`, so a hidden
+				// ancestor never clips it. Losing focus means the field is no
+				// longer being edited, so every pending suggestion is dropped.
 				if (update.focusChanged && !update.view.hasFocus && this.suggestions.length > 0) {
 					this.dismissAll();
 				}
@@ -274,16 +252,10 @@ export function buildLinkSuggestExtension(config: LinkSuggestConfig) {
 							to: view.coordsAtPos(s.to, -1),
 						})),
 					write: (measured) => {
-						// Belt-and-suspenders alongside the focus-loss dismissal in
-						// `update()` above: `view.dom.offsetParent === null` is the
-						// standard "is this actually rendered right now" check for a
-						// backgrounded-but-not-destroyed tab (same test
-						// `AnnotationHandlesOverlay` uses for the identical
-						// `position: fixed`-on-`document.body` leak) — catches a
-						// reposition triggered by something other than this view's
-						// own focus changing (e.g. a doc change landing while the
-						// tab sits in the background), which `update()`'s
-						// `focusChanged` check alone wouldn't see.
+						// Alongside the focus-loss dismissal in `update()`: a
+						// backgrounded tab (`offsetParent === null`, same test as
+						// `AnnotationHandlesOverlay`) can still get a reposition from
+						// a doc change, so hide here too.
 						if (this.view.dom.offsetParent === null) {
 							for (const m of measured) m.s.el.setCssProps({ display: 'none' });
 							return;

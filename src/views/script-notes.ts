@@ -15,11 +15,16 @@
  * sidecar under `Entities/`, addressed by project name/root, not by note.
  */
 
-import { App, normalizePath, TFile } from 'obsidian';
-import { useEffect, useState } from 'react';
+import { App } from 'obsidian';
+import { useMemo, useRef, useState } from 'react';
+import { useVaultFileText } from './hooks';
 import { SCRIPT_NOTES_FOLDER } from '../types';
-import { findAnnotationSpans, type AnnotationSpan } from '../fountain';
+import { findAnnotationSpans, liveAnnotationIds, type AnnotationSpan } from '../fountain';
 import type LoomLoomPlugin from '../main';
+import { projectPath } from '../naming';
+import { AltTextModal, ensureFolder, TextInputModal } from '../project';
+import { t } from '../i18n';
+import { queueWrite } from '../write-queue';
 
 /** One comment. `comments` below is keyed by marker id -> CommentEntry[] — a
  *  single marked range is a THREAD, not a single note: `handleAddCommentReply`
@@ -69,19 +74,9 @@ const EMPTY: ScriptNotesFile = { version: 1, comments: {}, altText: {} };
 
 type ProjectRef = { root: string; name: string };
 
-function projectPath(project: ProjectRef, sub: string): string {
-	return normalizePath(project.root === '' ? sub : `${project.root}/${sub}`);
-}
-
 /** Path of a project's Script Notes store — `Entities/Script Notes/<Project> Script Notes.json`. */
 export function scriptNotesFilePath(project: ProjectRef): string {
 	return projectPath(project, `${SCRIPT_NOTES_FOLDER}/${project.name} Script Notes.json`);
-}
-
-/** A project's Script Notes store, or null when it has none yet (no comment/
- *  alt-text ever added). */
-export function findScriptNotesFile(app: App, project: ProjectRef): TFile | null {
-	return app.vault.getFileByPath(scriptNotesFilePath(project));
 }
 
 /** Tolerant parse — any malformed/missing field falls back to empty rather
@@ -132,18 +127,9 @@ function parseScriptNotesFile(text: string): ScriptNotesFile {
 }
 
 // --- Safe read-modify-write --------------------------------------------------
-//
-// Unlike Maps (realistically one open view per project) this file can be
-// mutated from three independently-mounted editors at once — the main Script
-// view, a Scene page, and an Act page can all be open together. A queue
-// keyed by the sidecar's own vault path serializes overlapping calls (so two
-// near-simultaneous actions from the SAME view can't interleave their own
-// read/write pair), and every call re-reads the file with `vault.read` (never
-// `cachedRead`, which can lag behind a sibling view's just-landed write)
-// immediately before applying its own change — mirroring the spirit of
-// script-view.tsx's own `commitQueue`, one level up, for a file with
-// genuinely multiple writers instead of one.
-const writeQueues = new Map<string, Promise<unknown>>();
+// Three editors can mutate this file at once (Script view, a Scene page, an
+// Act page), so writes queue per path and each re-reads with `vault.read`
+// right before applying its change.
 
 /** Reads the current file (or an empty one), applies `mutate`, writes the
  *  result back. `mutate` should be pure and cheap — it may run against a
@@ -154,7 +140,7 @@ export async function mutateScriptNotes(
 	mutate: (file: ScriptNotesFile) => ScriptNotesFile
 ): Promise<ScriptNotesFile> {
 	const path = scriptNotesFilePath(project);
-	const run = (writeQueues.get(path) ?? Promise.resolve()).then(async () => {
+	return queueWrite(path, async () => {
 		const existing = app.vault.getFileByPath(path);
 		const current = existing ? parseScriptNotesFile(await app.vault.read(existing)) : EMPTY;
 		const next = mutate(current);
@@ -163,23 +149,11 @@ export async function mutateScriptNotes(
 		if (existing) {
 			await app.vault.modify(existing, text);
 		} else {
-			const folder = path.slice(0, path.lastIndexOf('/'));
-			if (folder && !app.vault.getAbstractFileByPath(folder)) {
-				try {
-					await app.vault.createFolder(folder);
-				} catch {
-					/* raced/exists */
-				}
-			}
+			await ensureFolder(app, path.slice(0, path.lastIndexOf('/')));
 			await app.vault.create(path, text);
 		}
 		return next;
 	});
-	writeQueues.set(
-		path,
-		run.catch(() => {})
-	);
-	return run;
 }
 
 // --- React read hook ----------------------------------------------------------
@@ -192,45 +166,8 @@ export async function mutateScriptNotes(
 // the `.fountain` file itself already works.
 
 export function useScriptNotes(plugin: LoomLoomPlugin, project: ProjectRef | null): ScriptNotesFile {
-	const [notes, setNotes] = useState<ScriptNotesFile>(EMPTY);
-	const path = project ? scriptNotesFilePath(project) : null;
-	useEffect(() => {
-		if (path === null) {
-			setNotes(EMPTY);
-			return;
-		}
-		let cancelled = false;
-		const read = () => {
-			const file = plugin.app.vault.getFileByPath(path);
-			if (!file) {
-				setNotes(EMPTY);
-				return;
-			}
-			// `vault.read`, never `cachedRead` — same reasoning as
-			// `mutateScriptNotes`'s own read: `cachedRead` can lag behind a
-			// write this SAME session just made (the 'modify' event that
-			// triggers this `read()` can fire before Obsidian's read cache is
-			// updated), which made a just-saved comment look empty again the
-			// next time its icon was clicked.
-			void plugin.app.vault.read(file).then((raw) => {
-				if (!cancelled) setNotes(parseScriptNotesFile(raw));
-			});
-		};
-		read();
-		const touched = (f: { path: string }) => {
-			if (f.path === path) read();
-		};
-		const refs = [
-			plugin.app.vault.on('modify', touched),
-			plugin.app.vault.on('create', touched),
-			plugin.app.vault.on('delete', touched),
-		];
-		return () => {
-			cancelled = true;
-			for (const ref of refs) plugin.app.vault.offref(ref);
-		};
-	}, [plugin, path]);
-	return notes;
+	const raw = useVaultFileText(plugin.app, project ? scriptNotesFilePath(project) : null);
+	return useMemo(() => (raw === null ? EMPTY : parseScriptNotesFile(raw)), [raw]);
 }
 
 /** A short single-line preview of a span's CURRENT wrapped text — a browser
@@ -282,4 +219,320 @@ export function undecidedAltRows(text: string, altText: Record<string, AltTextEn
 	return findAnnotationSpans(text)
 		.filter((s) => s.kind === 'alt' && (altText[s.id]?.acceptedIndex ?? null) === null)
 		.map((s) => ({ span: s, excerpt: annotationExcerpt(text, s) }));
+}
+
+/** Drops every comment/alt-text entry whose marker id is no longer live in
+ *  `text` — deleting a marked span needs no handling of its own; this clears
+ *  the orphaned sidecar data afterwards. */
+export function pruneScriptNotes(app: App, project: ProjectRef, text: string): void {
+	const liveIds = liveAnnotationIds(text);
+	const live = <T>(entries: Record<string, T>): Record<string, T> =>
+		Object.fromEntries(Object.entries(entries).filter(([id]) => liveIds.has(id)));
+	void mutateScriptNotes(app, project, (notes) => {
+		const comments = live(notes.comments);
+		const altText = live(notes.altText);
+		const touched =
+			Object.keys(comments).length !== Object.keys(notes.comments).length ||
+			Object.keys(altText).length !== Object.keys(notes.altText).length;
+		return touched ? { ...notes, comments, altText } : notes;
+	});
+}
+
+// --- Pure sidecar edits -------------------------------------------------------
+// The `mutate` bodies shared by every comment/alt-text handler (Script view,
+// Act/Scene pages, Book). Each returns `notes` untouched when there's nothing
+// to change, so `mutateScriptNotes` skips the write.
+
+function editCommentEntry(
+	notes: ScriptNotesFile,
+	id: string,
+	index: number,
+	patch: (entry: CommentEntry) => CommentEntry
+): ScriptNotesFile {
+	const list = notes.comments[id];
+	if (!list || index < 0 || index >= list.length) return notes;
+	const next = list.slice();
+	next[index] = patch(list[index]);
+	return { ...notes, comments: { ...notes.comments, [id]: next } };
+}
+
+/** Edits one reply's text — never touches `resolved`/`resolvedAt`. */
+export function setCommentText(notes: ScriptNotesFile, id: string, index: number, text: string): ScriptNotesFile {
+	return editCommentEntry(notes, id, index, (e) => ({ ...e, text, updatedAt: Date.now() }));
+}
+
+/** Flips one reply's resolved state, stamping/clearing `resolvedAt`. */
+export function toggleCommentResolved(notes: ScriptNotesFile, id: string, index: number): ScriptNotesFile {
+	return editCommentEntry(notes, id, index, (e) => {
+		const resolved = !e.resolved;
+		return { ...e, resolved, resolvedAt: resolved ? Date.now() : null };
+	});
+}
+
+/** Removes one reply; an emptied thread drops its whole `comments[id]` key. */
+export function removeCommentEntry(notes: ScriptNotesFile, id: string, index: number): ScriptNotesFile {
+	const list = notes.comments[id];
+	if (!list || index < 0 || index >= list.length) return notes;
+	const next = list.filter((_, i) => i !== index);
+	if (next.length === 0) {
+		const { [id]: _dropped, ...rest } = notes.comments;
+		return { ...notes, comments: rest };
+	}
+	return { ...notes, comments: { ...notes.comments, [id]: next } };
+}
+
+/** Appends a new, unresolved reply to the thread. */
+export function addCommentReply(notes: ScriptNotesFile, id: string, text: string): ScriptNotesFile {
+	const list = notes.comments[id] ?? [];
+	const entry: CommentEntry = {
+		id,
+		text,
+		resolved: false,
+		createdAt: Date.now(),
+		updatedAt: Date.now(),
+		resolvedAt: null,
+	};
+	return { ...notes, comments: { ...notes.comments, [id]: [...list, entry] } };
+}
+
+/** A freshly wrapped alt-text span: the selection is option 0. */
+export function startAltText(notes: ScriptNotesFile, id: string, selectedText: string): ScriptNotesFile {
+	return { ...notes, altText: { ...notes.altText, [id]: { id, options: [selectedText], activeIndex: 0, acceptedIndex: null } } };
+}
+
+export function dropAltText(notes: ScriptNotesFile, id: string): ScriptNotesFile {
+	const { [id]: _dropped, ...rest } = notes.altText;
+	return { ...notes, altText: rest };
+}
+
+/** Appends an option without activating it. */
+export function addAltOption(notes: ScriptNotesFile, id: string, text: string): ScriptNotesFile {
+	const cur = notes.altText[id];
+	if (!cur) return notes;
+	return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options: [...cur.options, text] } } };
+}
+
+/** Rewrites one option's wording in place. */
+export function setAltOptionText(notes: ScriptNotesFile, id: string, index: number, text: string): ScriptNotesFile {
+	const cur = notes.altText[id];
+	if (!cur || index < 0 || index >= cur.options.length) return notes;
+	const options = cur.options.slice();
+	options[index] = text;
+	return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options } } };
+}
+
+/** Makes `index` the active option — Accept also stamps `acceptedIndex`,
+ *  Draft clears it. */
+export function pickAltOption(notes: ScriptNotesFile, id: string, index: number, accept: boolean): ScriptNotesFile {
+	const cur = notes.altText[id];
+	if (!cur || index < 0 || index >= cur.options.length) return notes;
+	return {
+		...notes,
+		altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: accept ? index : null } },
+	};
+}
+
+/** Advances to the next option (Draft semantics: clears `acceptedIndex`). */
+export function cycleAltOption(notes: ScriptNotesFile, id: string): ScriptNotesFile {
+	const cur = notes.altText[id];
+	if (!cur || cur.options.length < 2) return notes;
+	return pickAltOption(notes, id, (cur.activeIndex + 1) % cur.options.length, false);
+}
+
+/** Copies `live` (the span's current document text) into the active option
+ *  when it differs. The active option is normally edited by hand right in
+ *  the document, and the sidecar only learns of it here — so every swap
+ *  away from the active option runs this first, or the edit is lost. */
+export function syncActiveAltOption(notes: ScriptNotesFile, id: string, live: string | null): ScriptNotesFile {
+	const cur = notes.altText[id];
+	if (!cur || live === null || live === cur.options[cur.activeIndex]) return notes;
+	return setAltOptionText(notes, id, cur.activeIndex, live);
+}
+
+/** Deletes one option, renumbering `activeIndex`/`acceptedIndex` past it.
+ *  Deleting down to one survivor drops the entry and returns that survivor's
+ *  text as `strippedTo` — the caller unwraps the span to it. */
+export function deleteAltOption(
+	notes: ScriptNotesFile,
+	id: string,
+	index: number
+): { notes: ScriptNotesFile; strippedTo: string | null } {
+	const cur = notes.altText[id];
+	if (!cur || cur.options.length <= 1 || index < 0 || index >= cur.options.length) return { notes, strippedTo: null };
+	const options = cur.options.slice();
+	options.splice(index, 1);
+	if (options.length <= 1) return { notes: dropAltText(notes, id), strippedTo: options[0] ?? '' };
+	let activeIndex = cur.activeIndex;
+	if (index === activeIndex) activeIndex = Math.min(index, options.length - 1);
+	else if (index < activeIndex) activeIndex -= 1;
+	let acceptedIndex = cur.acceptedIndex;
+	if (acceptedIndex !== null) {
+		if (index === acceptedIndex) acceptedIndex = null;
+		else if (index < acceptedIndex) acceptedIndex -= 1;
+	}
+	return { notes: { ...notes, altText: { ...notes.altText, [id]: { ...cur, options, activeIndex, acceptedIndex } } }, strippedTo: null };
+}
+
+// --- Comment + alt-text handlers -----------------------------------------------
+
+/** Where an annotation surface reads and writes its document. */
+export interface AnnotationIO {
+	/** The span's CURRENT document text, or null. */
+	liveAltText: (id: string) => string | null | Promise<string | null>;
+	/** Replaces an alt-text span's wrapped content. */
+	replaceAlt: (id: string, text: string) => void | Promise<void>;
+	/** Strips a span's marker pair, leaving its content. */
+	stripMarkers: (id: string) => void | Promise<void>;
+}
+
+/**
+ * The comment-thread and alt-text handlers shared by the Script view, the
+ * Scene/Act pages and the Book surfaces; each passes its own `AnnotationIO`.
+ *
+ * Alt-text actions run one at a time (`runAlt`), each finishing its document
+ * write before the next starts. That is what makes reading `liveAltText` at
+ * the start of each action safe: it can't see a previous swap still in
+ * flight and mistake it for a hand-edit of the newly active option.
+ */
+export function useAnnotationHandlers(plugin: LoomLoomPlugin, project: ProjectRef | null, io: AnnotationIO) {
+	const scriptNotes = useScriptNotes(plugin, project);
+	const [openComment, setOpenComment] = useState<{ id: string; rect: DOMRect } | null>(null);
+	/** Threads that got a reply this session — `scriptNotes` only catches up
+	 *  after the sidecar's write + file-watch round trip, so closing the
+	 *  popover right after replying must not read the thread as empty. */
+	const commentsWithNewEntryRef = useRef<Set<string>>(new Set());
+	const altQueue = useRef<Promise<unknown>>(Promise.resolve());
+
+	const mutate = (fn: (notes: ScriptNotesFile) => ScriptNotesFile) =>
+		project ? mutateScriptNotes(plugin.app, project, fn) : Promise.resolve(EMPTY);
+	const runAlt = <T,>(fn: () => Promise<T>): Promise<T> => {
+		const run = altQueue.current.then(fn);
+		altQueue.current = run.catch((e) => console.error('Loom Loom: alt-text action failed', e));
+		return run;
+	};
+	/** Syncs the outgoing option, applies `change`, then writes the newly
+	 *  active option into the document — unless `swapped` (the caller's own
+	 *  field already did, handing over the pre-swap text as `outgoing`). */
+	const swapAlt = (id: string, change: (notes: ScriptNotesFile) => ScriptNotesFile, outgoing?: string) =>
+		runAlt(async () => {
+			const live = outgoing ?? (await io.liveAltText(id));
+			const next = await mutate((notes) => change(syncActiveAltOption(notes, id, live)));
+			const cur = next.altText[id];
+			if (cur && outgoing === undefined) await io.replaceAlt(id, cur.options[cur.activeIndex]);
+		});
+
+	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
+	/** Closing a thread nothing was ever added to abandons the comment: its
+	 *  freshly inserted markers come back out of the document. */
+	const handleCloseComment = () => {
+		if (openComment && !commentsWithNewEntryRef.current.has(openComment.id) && !scriptNotes.comments[openComment.id]) {
+			void io.stripMarkers(openComment.id);
+		}
+		setOpenComment(null);
+	};
+	const handleSaveCommentEntry = (id: string, index: number, text: string) =>
+		void mutate((notes) => setCommentText(notes, id, index, text));
+	const handleToggleCommentResolved = (id: string, index: number) =>
+		void mutate((notes) => toggleCommentResolved(notes, id, index));
+	/** Deleting a thread's last reply strips its markers too, and closes the
+	 *  popover — there's nothing left in the document to reply to. */
+	const handleDeleteCommentEntry = (id: string, index: number) =>
+		void mutate((notes) => removeCommentEntry(notes, id, index)).then((next) => {
+			if (next.comments[id]) return;
+			void io.stripMarkers(id);
+			setOpenComment((prev) => (prev && prev.id === id ? null : prev));
+		});
+	const handleAddCommentReply = (id: string, text: string) => {
+		commentsWithNewEntryRef.current.add(id);
+		void mutate((notes) => addCommentReply(notes, id, text));
+	};
+
+	/** A new alt-text span wraps the selection as option 0 and immediately
+	 *  asks for a second wording; cancelling backs the whole span out. */
+	const handleCreateAlt = (id: string, selectedText: string) => {
+		void mutate((notes) => startAltText(notes, id, selectedText));
+		new TextInputModal(plugin.app, {
+			title: t('view.entity.altText.addWordingTitle'),
+			placeholder: selectedText,
+			cta: t('project.common.add'),
+			multiline: true,
+			onSubmit: (value) => void mutate((notes) => addAltOption(notes, id, value)),
+			onCancel: () => void mutate((notes) => dropAltText(notes, id)).then(() => io.stripMarkers(id)),
+		}).open();
+	};
+	/** Left-click cycle. `outgoing` is passed only by a field that already
+	 *  swapped its own document (Book's editable `MarkdownField`). */
+	const handleCycleAlt = (id: string, outgoing?: string) =>
+		void swapAlt(id, (notes) => cycleAltOption(notes, id), outgoing);
+	const handleDraftAlt = (id: string, index: number) =>
+		void swapAlt(id, (notes) => pickAltOption(notes, id, index, false));
+	const handleAcceptAlt = (id: string, index: number) =>
+		void swapAlt(id, (notes) => pickAltOption(notes, id, index, true));
+	/** An option's wording edited in `AltTextModal` — the document follows
+	 *  when it's the active one. */
+	const handleEditAltOption = (id: string, index: number, text: string) =>
+		void runAlt(async () => {
+			const next = await mutate((notes) => setAltOptionText(notes, id, index, text));
+			if (next.altText[id]?.activeIndex === index) await io.replaceAlt(id, text);
+		});
+	const handleAddAltOption = (id: string, text: string) => void mutate((notes) => addAltOption(notes, id, text));
+	/** Deleting down to one option unwraps the span to the survivor's wording
+	 *  and drops the entry; `undefined` tells `AltTextModal` to close. */
+	const handleDeleteAltOption = (id: string, index: number) =>
+		runAlt(async () => {
+			const live = await io.liveAltText(id);
+			let strippedTo: string | null = null;
+			const next = await mutate((notes) => {
+				const r = deleteAltOption(syncActiveAltOption(notes, id, live), id, index);
+				strippedTo = r.strippedTo;
+				return r.notes;
+			});
+			if (strippedTo !== null) {
+				// The survivor has to BE the document text before the markers
+				// come out, or whichever option was active would stay instead.
+				await io.replaceAlt(id, strippedTo);
+				await io.stripMarkers(id);
+				return undefined;
+			}
+			const cur = next.altText[id];
+			if (cur) await io.replaceAlt(id, cur.options[cur.activeIndex]);
+			return cur;
+		});
+	/** Right-click: `AltTextModal`, showing the active option's live wording. */
+	const handleOpenAltMenu = (id: string) =>
+		void runAlt(async () => {
+			const live = await io.liveAltText(id);
+			const entry = syncActiveAltOption(scriptNotes, id, live).altText[id];
+			if (!entry) return;
+			new AltTextModal(plugin.app, {
+				options: entry.options,
+				activeIndex: entry.activeIndex,
+				acceptedIndex: entry.acceptedIndex,
+				onDraft: (index) => handleDraftAlt(id, index),
+				onAccept: (index) => handleAcceptAlt(id, index),
+				onEditOption: (index, text) => handleEditAltOption(id, index, text),
+				onAddOption: (text) => handleAddAltOption(id, text),
+				onDeleteOption: (index) => handleDeleteAltOption(id, index),
+			}).open();
+		});
+
+	return {
+		scriptNotes,
+		openComment,
+		setOpenComment,
+		handleOpenComment,
+		handleCloseComment,
+		handleSaveCommentEntry,
+		handleToggleCommentResolved,
+		handleDeleteCommentEntry,
+		handleAddCommentReply,
+		handleCreateAlt,
+		handleCycleAlt,
+		handleDraftAlt,
+		handleAcceptAlt,
+		handleEditAltOption,
+		handleAddAltOption,
+		handleDeleteAltOption,
+		handleOpenAltMenu,
+	};
 }

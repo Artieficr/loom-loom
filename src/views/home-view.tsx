@@ -1,5 +1,4 @@
-import { TAbstractFile } from 'obsidian';
-import { CSSProperties, ReactElement, useEffect, useState } from 'react';
+import { CSSProperties, ReactElement } from 'react';
 import {
 	BOOK_ICON,
 	ENTITY_META,
@@ -22,10 +21,10 @@ import { groupNameOf } from '../calendar';
 import { features, projectTypes } from '../project-kind';
 import { LoomFileReactView } from './react-view';
 import { Icon, NavRail } from './common';
-import { useIndexVersion } from './hooks';
-import { countMapPages, mapsFilePath } from './map-view';
-import { createScriptFile, scriptFilePath } from './script-buffer';
-import { createBookFile, findBookFile } from './book-view';
+import { useIndexVersion, useVaultFileText } from './hooks';
+import { mapPageCount, mapsFilePath } from './map-view';
+import { createScriptFile } from './script-buffer';
+import { createBookFile } from './book-view';
 import { t } from '../i18n';
 import type LoomLoomPlugin from '../main';
 
@@ -62,34 +61,7 @@ export class HomeView extends LoomFileReactView {
  * whenever it changes — the index version never moves for a maps edit.
  */
 function useMapPageCount(plugin: LoomLoomPlugin, project: { root: string; name: string } | undefined): number {
-	const [count, setCount] = useState(0);
-	const root = project?.root;
-	const name = project?.name;
-	useEffect(() => {
-		if (root === undefined || name === undefined) return;
-		const proj = { root, name };
-		const mapsPath = mapsFilePath(proj);
-		let cancelled = false;
-		const refresh = () => {
-			void countMapPages(plugin.app, proj).then((n) => {
-				if (!cancelled) setCount(n);
-			});
-		};
-		refresh();
-		const touched = (file: TAbstractFile) => {
-			if (file.path === mapsPath) refresh();
-		};
-		const refs = [
-			plugin.app.vault.on('modify', touched),
-			plugin.app.vault.on('create', touched),
-			plugin.app.vault.on('delete', touched),
-		];
-		return () => {
-			cancelled = true;
-			for (const ref of refs) plugin.app.vault.offref(ref);
-		};
-	}, [plugin, root, name]);
-	return count;
+	return mapPageCount(useVaultFileText(plugin.app, project ? mapsFilePath(project) : null));
 }
 
 function Home({ view }: { view: HomeView }) {
@@ -130,12 +102,7 @@ function Home({ view }: { view: HomeView }) {
 						label: scriptLabel(),
 						color: plugin.settings.groupColor,
 						// No count: a project has exactly one script, so "1" is noise.
-						open: () => {
-							const path = scriptFilePath(project);
-							const scriptFile = plugin.app.vault.getFileByPath(path);
-							if (scriptFile) view.openLoomFile(path);
-							else void createScriptFile(plugin, project).then((f) => view.openLoomFile(f.path));
-						},
+						open: () => void createScriptFile(plugin, project).then((f) => view.openLoomFile(f.path)),
 					},
 				]
 			: []),
@@ -153,11 +120,7 @@ function Home({ view }: { view: HomeView }) {
 						color: plugin.settings.groupColor,
 						// No count: a project has exactly one Book, so "1" is noise —
 						// same reasoning as Script's own entry above.
-						open: () => {
-							const bookFile = findBookFile(plugin, project);
-							if (bookFile) view.openLoomFile(bookFile.path);
-							else void createBookFile(plugin, project).then((f) => view.openLoomFile(f.path));
-						},
+						open: () => void createBookFile(plugin, project).then((f) => view.openLoomFile(f.path)),
 					},
 				]
 			: []),
@@ -256,7 +219,7 @@ function Home({ view }: { view: HomeView }) {
 					} as CSSProperties;
 					return (
 						<button key={s.key} className="loom-card loom-wheel-card" style={style} onClick={s.open}>
-							<Icon name={s.icon} fallback={s.key === 'group' ? 'star' : undefined} />
+							<Icon name={s.icon} />
 							<span className="loom-card-label">{s.label}</span>
 							{s.count !== undefined ? <span className="loom-card-count">{s.count}</span> : null}
 						</button>

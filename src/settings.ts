@@ -6,14 +6,11 @@ import {
 	Setting,
 	SettingDefinition,
 	SettingDefinitionItem,
-	TFile,
 	normalizePath,
-	setIcon,
 } from 'obsidian';
 import { ENTITY_TYPES, EntityType, GLOBAL_TYPES, GraphCamera, bookLabel, entityLabel, entityPlural, scriptLabel } from './types';
 import {
 	DEFAULT_PROJECT_KIND,
-	PROJECT_KIND_META,
 	PROJECT_KINDS,
 	ProjectKind,
 	isProjectKind,
@@ -91,8 +88,6 @@ export interface SavedGraphView {
 }
 
 export interface LoomLoomSettings {
-	/** Legacy single-project root (pre-.loom-files); migrated on load, kept for that migration only. */
-	projectRoot: string;
 	/** Base text size of all plugin views (applied as a body class). */
 	textSize: LoomTextSize;
 	/** Interface language. 'auto' resolves via `resolveActiveLocale` to
@@ -142,17 +137,11 @@ export interface LoomLoomSettings {
 	nodeColors: Record<EntityType, string>;
 	/** Graph node radius (px) per entity type. */
 	nodeSizes: Record<EntityType, number>;
-	/** Color of the virtual Group (its chips, home-wheel button, page header)
-	 *  AND the Writer project's whole-document 12-o'clock home-wheel
-	 *  satellite (Script in Script mode, Book in Prose mode — mutually
-	 *  exclusive per project, so one color covers both) — all three share
-	 *  this ONE color deliberately: none of them is a real entity type (no
-	 *  note, no graph node for Script/Book; Group has a page but no backing
-	 *  note either), so none belongs in `nodeColors`, and they read as one
-	 *  family of "virtual, whole-project-scope" UI, distinct from any real
-	 *  entity's own color — including the Scene/Chapter/Event BEAT color,
-	 *  which this is NOT the same as (see `nodeColors.chapter`'s own doc
-	 *  comment for that separate, unrelated sharing). */
+	/** Color of the virtual Group (chips, home-wheel button, page header) AND
+	 *  the Writer project's 12-o'clock home-wheel satellite (Script or Book —
+	 *  one per project). None of them is a real entity type, so none belongs
+	 *  in `nodeColors`; they share one "virtual, whole-project" color, separate
+	 *  from the beat color `nodeColors.scene` covers. */
 	groupColor: string;
 	/** Color of the Maps feature — its home-wheel button and default new-zone fill. */
 	mapsColor: string;
@@ -182,9 +171,6 @@ export interface LoomLoomSettings {
 	/** Named saved graph views per project root — curated filter/focus/pin
 	 *  snapshots the user switches between from the graph header. */
 	graphViews: Record<string, SavedGraphView[]>;
-	/** Manual vertical order of timeline event bubbles, per project root then
-	 *  note path (rank within its column/drawer) — not user-facing. */
-	timelineManualOrder: Record<string, Record<string, number>>;
 	/** Last timeline-drawer height (px) — remembered across sessions/restarts. */
 	timelineDrawerHeight: number;
 	/** The user's license key, if any. Deliberately vault-synced (unlike the
@@ -216,7 +202,6 @@ export interface LoomLoomSettings {
 }
 
 export const DEFAULT_SETTINGS: LoomLoomSettings = {
-	projectRoot: '',
 	textSize: 'normal',
 	locale: 'auto',
 	followThemeTextColoring: false,
@@ -290,7 +275,6 @@ export const DEFAULT_SETTINGS: LoomLoomSettings = {
 	graphPins: {},
 	graphFilters: {},
 	graphViews: {},
-	timelineManualOrder: {},
 	timelineDrawerHeight: 240,
 	licenseKey: '',
 	loomRoot: 'loom-loom',
@@ -357,27 +341,22 @@ function parseNumberMapSetting(value: unknown): Record<string, Record<string, nu
 }
 
 export function mergeSettings(loaded: unknown): LoomLoomSettings {
-	const base: LoomLoomSettings = {
-		...DEFAULT_SETTINGS,
-		questTagColors: { ...DEFAULT_SETTINGS.questTagColors },
-		nodeColors: { ...DEFAULT_SETTINGS.nodeColors },
-		nodeSizes: { ...DEFAULT_SETTINGS.nodeSizes },
-		globalLayerOrder: [...DEFAULT_SETTINGS.globalLayerOrder],
-		graphCameras: {},
-		mapCameras: {},
-		graphManualX: {},
-		graphManualY: {},
-		graphPins: {},
-		graphFilters: {},
-		graphViews: {},
-		timelineManualOrder: {},
-		timelineDrawerHeight: 240,
-		projectOrder: [],
-		collapsedProjectKinds: [],
-	};
+	const base = structuredClone(DEFAULT_SETTINGS);
 	if (typeof loaded !== 'object' || loaded === null) return base;
 	const data = loaded as Partial<LoomLoomSettings>;
-	if (typeof data.projectRoot === 'string') base.projectRoot = data.projectRoot;
+	type BoolKey = { [K in keyof LoomLoomSettings]: LoomLoomSettings[K] extends boolean ? K : never }[keyof LoomLoomSettings];
+	const takeBool = (k: BoolKey) => {
+		const v = data[k];
+		if (typeof v === 'boolean') base[k] = v;
+	};
+	const takeClamped = (
+		k: 'graphFocusZoom' | 'graphLineGap' | 'graphTrunkGap' | 'graphArrowSize',
+		min: number,
+		max: number
+	) => {
+		const v = data[k];
+		if (typeof v === 'number') base[k] = Math.max(min, Math.min(max, v));
+	};
 	if (data.textSize === 'compact' || data.textSize === 'normal' || data.textSize === 'large') {
 		base.textSize = data.textSize;
 	}
@@ -387,43 +366,29 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	if (typeof data.graphCollapseThreshold === 'number' && data.graphCollapseThreshold >= 1) {
 		base.graphCollapseThreshold = Math.floor(data.graphCollapseThreshold);
 	}
-	if (typeof data.graphFocusZoom === 'number') {
-		base.graphFocusZoom = Math.max(0.3, Math.min(3, data.graphFocusZoom));
-	}
-	if (typeof data.graphLineGap === 'number') {
-		base.graphLineGap = Math.max(10, Math.min(40, data.graphLineGap));
-	}
-	if (typeof data.graphTrunkGap === 'number') {
-		base.graphTrunkGap = Math.max(10, Math.min(40, data.graphTrunkGap));
-	}
-	if (typeof data.graphArrowSize === 'number') {
-		base.graphArrowSize = Math.max(4, Math.min(20, data.graphArrowSize));
-	}
+	takeClamped('graphFocusZoom', 0.3, 3);
+	takeClamped('graphLineGap', 10, 40);
+	takeClamped('graphTrunkGap', 10, 40);
+	takeClamped('graphArrowSize', 4, 20);
 	if (data.graphDropEdits === 'target' || data.graphDropEdits === 'dragged') {
 		base.graphDropEdits = data.graphDropEdits;
 	}
-	if (typeof data.confirmTimelineMove === 'boolean') {
-		base.confirmTimelineMove = data.confirmTimelineMove;
-	}
-	if (typeof data.notesNewestFirst === 'boolean') {
-		base.notesNewestFirst = data.notesNewestFirst;
-	}
+	takeBool('confirmTimelineMove');
+	takeBool('notesNewestFirst');
 	if (typeof data.licenseKey === 'string') {
 		base.licenseKey = data.licenseKey;
 	}
 	if (typeof data.loomRoot === 'string' && normalizeLoomRoot(data.loomRoot) !== '') {
 		base.loomRoot = normalizeLoomRoot(data.loomRoot);
 	}
-	if (typeof data.projectsSidebarTab === 'boolean') {
-		base.projectsSidebarTab = data.projectsSidebarTab;
-	}
+	takeBool('projectsSidebarTab');
 	if (Array.isArray(data.projectOrder)) {
 		base.projectOrder = data.projectOrder.filter((r): r is string => typeof r === 'string');
 	}
 	if (Array.isArray(data.collapsedProjectKinds)) {
 		base.collapsedProjectKinds = (data.collapsedProjectKinds as unknown[]).filter(isProjectKind);
 	}
-	if (typeof data.snapshotsEnabled === 'boolean') base.snapshotsEnabled = data.snapshotsEnabled;
+	takeBool('snapshotsEnabled');
 	if ((SNAPSHOT_INTERVALS as readonly unknown[]).includes(data.snapshotIntervalMin)) {
 		base.snapshotIntervalMin = data.snapshotIntervalMin as number;
 	}
@@ -442,12 +407,8 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	) {
 		base.sessionResolvedQuests = data.sessionResolvedQuests;
 	}
-	if (typeof data.subChipFullAncestry === 'boolean') {
-		base.subChipFullAncestry = data.subChipFullAncestry;
-	}
-	if (typeof data.followThemeTextColoring === 'boolean') {
-		base.followThemeTextColoring = data.followThemeTextColoring;
-	}
+	takeBool('subChipFullAncestry');
+	takeBool('followThemeTextColoring');
 	if (
 		typeof data.ambientLinkSuggestDismissMs === 'number' &&
 		[0, 5000, 10000, 20000].includes(data.ambientLinkSuggestDismissMs)
@@ -474,18 +435,10 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			}
 		}
 	}
-	// `event`/`chapter`'s colors are not independently stored — they always
-	// mirror `scene` (the shared BEAT color); `session`'s mirrors `act` (the
-	// shared ANCHOR color) — see `entitiesItems`'s `ANCHOR_GROUP`/`BEAT_GROUP`
-	// and `nodeColors`'s own doc comment. Enforced unconditionally on every
-	// load rather than as a one-time migration, since `setControlValue` also
-	// keeps each group in sync live on every edit — hand-editing a running
-	// Obsidian's `data.json` directly doesn't stick anyway, since the
-	// in-memory settings object overwrites it again on next save, so a
-	// one-time-only correction risks the exact trap an earlier version of
-	// this fix hit (shipped correctly, but needed a real rebuild+reload
-	// before it visibly took effect). Node SIZE stays independently
-	// configurable per type — only color is meant to be shared.
+	// `event`/`chapter`'s colors always mirror `scene` (the shared BEAT color)
+	// and `session`'s mirrors `act` (the shared ANCHOR color) — see
+	// `entitiesItems`' `ANCHOR_GROUP`/`BEAT_GROUP`. Enforced on every load
+	// (and live in `setControlValue`); node SIZE stays per type.
 	base.nodeColors.event = base.nodeColors.scene;
 	base.nodeColors.chapter = base.nodeColors.scene;
 	base.nodeColors.session = base.nodeColors.act;
@@ -493,12 +446,6 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 	base.mapsColor = parseHexColor(data.mapsColor, base.mapsColor);
 	if (data.loomButtonStyle === 'original' || data.loomButtonStyle === 'custom') {
 		base.loomButtonStyle = data.loomButtonStyle;
-	} else if (
-		(data.loomButtonStyle as unknown) === 'original-light' ||
-		(data.loomButtonStyle as unknown) === 'original-dark'
-	) {
-		// Short-lived fixed presets, superseded by the theme-following original.
-		base.loomButtonStyle = 'original';
 	}
 	base.loomButtonBg = parseHexColor(data.loomButtonBg, base.loomButtonBg);
 	base.loomButtonIcon = parseHexColor(data.loomButtonIcon, base.loomButtonIcon);
@@ -568,7 +515,6 @@ export function mergeSettings(loaded: unknown): LoomLoomSettings {
 			if (views.length > 0) base.graphViews[root] = views;
 		}
 	}
-	base.timelineManualOrder = parseNumberMapSetting(data.timelineManualOrder);
 	// Region/Decision Point colors are derived, never stored independently.
 	syncRegionColor(base);
 	syncDecisionPointColor(base);
@@ -638,21 +584,21 @@ const PAGE_SETTINGS_KEYS = {
 
 /**
  * `setControlValue` writes through a dotted path (`'nodeColors.character'`) so
- * a single generic override can bind every top-level AND nested setting
- * (per-entity-type colors/sizes, quest tag colors) to a real `control`
- * definition instead of hand-rolled `onChange` plumbing. Keys in this set also
- * get `indexer.refreshViews()` after the write — mirroring EXACTLY which
- * settings triggered a live refresh in the pre-1.13 imperative code (most did;
- * a few — text size, every graph slider/dropdown, the license key — never
- * called it, since those views already read straight from `plugin.settings`
- * on their own next render). Preserved as-is rather than unified, since
- * widening it is a behavior change beyond "port to the declarative API."
+ * one generic override binds every top-level AND nested setting (per-type
+ * colors/sizes, quest tag colors) to a real `control` definition. Keys in this
+ * set also get `indexer.refreshViews()` after the write; the rest (text size,
+ * graph sliders/dropdowns, the license key) are read straight from
+ * `plugin.settings` on the views' own next render.
  */
+/** Number-valued settings edited through a dropdown — see `getControlValue`. */
+type NumericDropdownKey = 'sessionResolvedQuests' | 'ambientLinkSuggestDismissMs';
+const NUMERIC_DROPDOWN_KEYS = new Set<string>(['sessionResolvedQuests', 'ambientLinkSuggestDismissMs'] satisfies NumericDropdownKey[]);
 const REFRESH_VIEWS_PREFIXES = ['nodeColors.', 'nodeSizes.', 'questTagColors.'];
 const REFRESH_VIEWS_KEYS = new Set<string>([
 	'locale',
 	'groupColor',
 	'sessionResolvedQuests',
+	'ambientLinkSuggestDismissMs',
 	'subChipFullAncestry',
 	'mapsColor',
 	'loomButtonStyle',
@@ -692,14 +638,11 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	/** Reads through a dotted path (`'nodeColors.character'`) as well as a
 	 *  plain top-level key — see `REFRESH_VIEWS_KEYS`'s doc comment for why
 	 *  this exists instead of the base class's flat `this.plugin.settings[key]`.
-	 *  `sessionResolvedQuests` is special-cased: every `control` value is a
-	 *  `string`/`number`/`boolean` bound 1:1 to its stored type, but that
-	 *  field is a `number` in storage rendered through a `dropdown` (whose
-	 *  control type is always `string`) — coerced to a string here and back
-	 *  to a number in `setControlValue`, the one field in this settings tab
-	 *  where the control's value type and the storage type actually differ. */
+	 *  `NUMERIC_DROPDOWN_KEYS` are numbers in storage shown through a dropdown
+	 *  (whose value is always a string) — coerced to a string here and back to
+	 *  a number in `setControlValue`. */
 	getControlValue(key: string): unknown {
-		if (key === 'sessionResolvedQuests') return String(this.plugin.settings.sessionResolvedQuests);
+		if (NUMERIC_DROPDOWN_KEYS.has(key)) return String(this.plugin.settings[key as NumericDropdownKey]);
 		let v: unknown = this.plugin.settings;
 		for (const part of key.split('.')) {
 			if (v === null || typeof v !== 'object') return undefined;
@@ -709,8 +652,8 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	}
 
 	async setControlValue(key: string, value: unknown): Promise<void> {
-		if (key === 'sessionResolvedQuests') {
-			this.plugin.settings.sessionResolvedQuests = Number(value);
+		if (NUMERIC_DROPDOWN_KEYS.has(key)) {
+			this.plugin.settings[key as NumericDropdownKey] = Number(value);
 		} else {
 			const parts = key.split('.');
 			let obj: Record<string, unknown> = this.plugin.settings as unknown as Record<string, unknown>;
@@ -741,57 +684,21 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		}
 	}
 
-	/** Every dropdown in this codebase needs this: Obsidian's native `<select>`
-	 *  resizes to match whichever option is CURRENTLY selected, and its open
-	 *  option list matches that same width — so a short selection (e.g.
-	 *  "English") leaves a longer one (e.g. "Auto (system language)") cramped
-	 *  the next time the list opens. A CSS class loses this fight against
-	 *  Obsidian's own `.dropdown` rule specificity, so the fix has to be an
-	 *  INLINE style via `setCssProps` (never raw `.style.width =`, which
-	 *  `eslint-plugin-obsidianmd`'s `no-static-styles-assignment` rule flags),
-	 *  sized to the LONGEST option's own text plus a little breathing room for
-	 *  the dropdown's arrow glyph — computed fresh from whatever options are
-	 *  actually passed in, never a hardcoded guess, so it's automatically
-	 *  right no matter how the option list changes later. This is the
-	 *  `control: { type: 'dropdown', … }` shorthand's one real gap: it has no
-	 *  hook onto the underlying `DropdownComponent`, so any dropdown that
-	 *  needs this fix has to be a `render:` block calling this helper instead
-	 *  — value read/write and the `REFRESH_VIEWS_KEYS` side effect still go
-	 *  through the exact same `getControlValue`/`setControlValue` pair a
-	 *  `control:` row would have used, so switching shapes changes nothing
-	 *  about how the setting is stored or reacted to. **One real behavior
-	 *  difference to compensate for**: a `control:` row's own change triggers
-	 *  the framework's automatic `visible` predicate re-evaluation on every
-	 *  OTHER row of the same page (documented above `loomButtonStyle`'s own
-	 *  conditional bg/icon rows) — a `render:` block's `dd.onChange` bypasses
-	 *  that entirely, since it never goes through the framework's own control
-	 *  wiring. Calling `refreshDomState()` after the write reproduces the
-	 *  same effect explicitly (its own doc comment: "re-evaluate every
-	 *  `visible`/`disabled` predicate… cheap, no re-render" — exactly this
-	 *  case), so a dropdown converted to this helper can't silently stop
-	 *  driving a sibling row's `visible` predicate. **Not `update()`** — that
-	 *  one WAS tried first here and caused a real bug: picking a new language
-	 *  from the `locale` dropdown blanked the whole settings page until
-	 *  reopened, because `update()` does a full structural re-render (it
-	 *  re-runs `getSettingDefinitions()` and rebuilds the DOM from scratch),
-	 *  and doing that while every `t()` string on the page is simultaneously
-	 *  changing language raced badly; `refreshDomState()` only toggles
-	 *  existing DOM in place and never rebuilds anything, so it's both the
-	 *  correct tool for a `visible` predicate per Obsidian's own docs AND the
-	 *  fix for that bug. The identical `longest + 6`ch formula is necessarily
-	 *  duplicated (no shared component to hang it on) in `project.ts`'s Set-up-project kind
-	 *  dropdown, `timeline-settings.ts`'s Date-format dropdown, and this
-	 *  file's own Graph-tab "Project" dropdown (`renderTimeline`) — those
-	 *  build a `Setting` by hand rather than through this declarative array,
-	 *  so they apply the same two lines directly instead of calling this.
-	 *  **`+6`, not `+3`**: an earlier pass here used `+3` and it clipped a
-	 *  7-character label ("Compact") — `ch` approximates the WIDEST digit
-	 *  glyph's width, not a typical letter's, so it underestimates a
-	 *  proportional font more the SHORTER the label is (the arrow glyph's own
-	 *  reserved width is a bigger fraction of a short label's total box); `+6`
-	 *  matches the number `project.ts`'s kind dropdown already needed after
-	 *  its own `+3`-equivalent (`14ch` for an 11-char longest label) also
-	 *  clipped. */
+	/** A dropdown with a fixed width. A native `<select>` resizes to the
+	 *  CURRENT option and its open list matches that width, so a short
+	 *  selection leaves longer options cramped. A CSS class loses to
+	 *  Obsidian's `.dropdown` specificity, so the width is an inline style via
+	 *  `setCssProps` (the lint rule forbids `.style.width =`), sized to the
+	 *  longest option `+ 6ch` (`ch` underestimates proportional text, more so
+	 *  for short labels; `+3` clipped "Compact"). The `control: { type:
+	 *  'dropdown' }` shorthand exposes no `DropdownComponent`, hence a
+	 *  `render:` block — values still go through `getControlValue`/
+	 *  `setControlValue`. Its `onChange` bypasses the framework's automatic
+	 *  `visible` re-evaluation, so it calls `refreshDomState()` (not
+	 *  `update()`, which rebuilds the page and blanks it while a language
+	 *  switch re-translates every string). Hand-built dropdowns elsewhere
+	 *  (project.ts kind, timeline-settings.ts date format, `renderTimeline`'s
+	 *  Project) apply the same two lines directly. */
 	private renderFixedWidthDropdown(
 		setting: Setting,
 		key: string,
@@ -925,34 +832,13 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 							{
 								name: t('settings.general.ambientLinkSuggestDismiss.name'),
 								desc: t('settings.general.ambientLinkSuggestDismiss.desc'),
-								// Not `renderFixedWidthDropdown` — that helper reads/writes
-								// through `getControlValue`/`setControlValue`, which only
-								// coerces string<->number for the ONE field it hardcodes by
-								// name (`sessionResolvedQuests`); a second numeric dropdown
-								// through that same generic path would silently store a
-								// STRING into this `number`-typed setting. A small, self-
-								// contained dropdown here avoids touching that shared,
-								// name-hardcoded mechanism for an unrelated field.
-								render: (setting) => {
-									const options: [number, string][] = [
-										[0, t('settings.general.ambientLinkSuggestDismiss.persist')],
-										[5000, t('settings.general.ambientLinkSuggestDismiss.sec5')],
-										[10000, t('settings.general.ambientLinkSuggestDismiss.sec10')],
-										[20000, t('settings.general.ambientLinkSuggestDismiss.sec20')],
-									];
-									setting.addDropdown((dd) => {
-										for (const [ms, label] of options) dd.addOption(String(ms), label);
-										dd.setValue(String(this.plugin.settings.ambientLinkSuggestDismissMs)).onChange(
-											async (value) => {
-												this.plugin.settings.ambientLinkSuggestDismissMs = Number(value);
-												await this.plugin.saveSettings();
-												this.plugin.indexer.refreshViews();
-											}
-										);
-										const longest = Math.max(...options.map(([, label]) => label.length));
-										dd.selectEl.setCssProps({ width: `${longest + 6}ch` });
-									});
-								},
+								render: (setting) =>
+									this.renderFixedWidthDropdown(setting, 'ambientLinkSuggestDismissMs', [
+										['0', t('settings.general.ambientLinkSuggestDismiss.persist')],
+										['5000', t('settings.general.ambientLinkSuggestDismiss.sec5')],
+										['10000', t('settings.general.ambientLinkSuggestDismiss.sec10')],
+										['20000', t('settings.general.ambientLinkSuggestDismiss.sec20')],
+									]),
 							},
 						],
 					},
@@ -1015,12 +901,6 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 							},
 						],
 					},
-					{
-						type: 'group',
-						items: [
-							{ name: t('settings.projects.heading'), render: (setting) => this.renderProjectsTable(setting) },
-						],
-					},
 					this.restoreDefaultsRow(
 						'projects',
 						t('settings.projects.restore.name'),
@@ -1048,9 +928,7 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	 *  30-day offline grace period all live there, not here. Re-verification
 	 *  is silent and automatic (the periodic tick in main.ts, plus a `window`
 	 *  `'online'` listener there so reconnecting doesn't have to wait for the
-	 *  next tick), so there is no manual "Re-check" button; "Re-activate"
-	 *  still hits the network unconditionally (unlike `revalidateNow`, no
-	 *  throttle) for anyone who wants to force a fresh check by hand. A
+	 *  next tick), so there is no manual re-check control. A
 	 *  `render` block — one row within General's own declarative `items`,
 	 *  under its own "License" heading — rather than declarative `control`
 	 *  definitions: its content is heavily async/status-dependent (several
@@ -1090,16 +968,9 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		}
 
 		// --- License key + activate/deactivate ----------------------------
-		// Hand-rolled divs/inputs/`ButtonComponent`s rather than a `Setting` —
-		// `Setting`'s own `.setting-item`/`.setting-item-info`/`.setting-item-
-		// control` DOM comes with box-model rules (padding, margin-inline-end
-		// on the first child, flex alignment) that fought every attempt to
-		// force it into a plain full-width stacked layout, including a real
-		// left-edge misalignment against the plain description text above it
-		// that even `!important` overrides on the obvious properties didn't
-		// fully pin down. Plain elements guarantee the same left/right edges
-		// as `textBlock`/`info` above and below, since they share the exact
-		// same box-model as those (no Setting-specific CSS in the way).
+		// Plain divs/inputs/`ButtonComponent`s rather than a `Setting`, whose
+		// `.setting-item` box model wouldn't line up with the plain text
+		// blocks above and below it.
 		const keyBlock = containerEl.createDiv({ cls: 'loom-settings-divider loom-license-key-block' });
 		const keyLabel = keyBlock.createDiv({ cls: 'setting-item-name' });
 		keyLabel.createEl('strong', { text: t('settings.license.keyLabel') });
@@ -1298,66 +1169,6 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		describe();
 	}
 
-	/** Read-only Title | Type table — one row per project. Clicking a title
-	 *  opens that project's `.loom` file (same as `main.ts`'s `openHome()`).
-	 *  No control to change a project's kind here (or anywhere) any more —
-	 *  switching after creation was a rarely-used escape hatch that mostly
-	 *  existed because the dropdown was already there; dropped rather than
-	 *  replaced. */
-	private renderProjectsTable(setting: Setting): void {
-		const containerEl = setting.settingEl;
-		containerEl.empty();
-		// Obsidian's own `.setting-item` styling on `settingEl` is a flex ROW
-		// (name column + control column, meant for one setting) — without
-		// overriding it to block layout, a `<table>` dropped straight in here
-		// is squeezed into a single flex item, which visually corrupts row
-		// height and can crush borders on a taller cell (see `renderTimeline`'s
-		// own doc comment for the worse version of this same bug).
-		containerEl.addClass('loom-settings-block', 'loom-settings-block-zero-pad');
-		const projects = this.plugin.indexer.getProjects();
-		if (projects.length === 0) {
-			containerEl.createEl('p', {
-				text: t('settings.common.noProjects'),
-				cls: 'setting-item-description',
-			});
-			return;
-		}
-		const table = containerEl.createEl('table', { cls: 'loom-settings-table' });
-		const headRow = table.createEl('thead').createEl('tr');
-		headRow.createEl('th', { text: t('settings.projects.colTitle') });
-		headRow.createEl('th', { text: t('settings.projects.colType') });
-		const tbody = table.createEl('tbody');
-		for (const project of projects) {
-			const row = tbody.createEl('tr');
-			const titleCell = row.createEl('td');
-			// A plain clickable span, NOT a `<button>` — Obsidian's base button
-			// chrome (background/border) out-specifies a single-class reset and
-			// left a visible highlight block behind the text, which also masked
-			// the row's own bottom border where it overlapped. `tabindex` +
-			// `Enter`/`Space` keep it keyboard-operable without adopting native
-			// button styling.
-			const link = titleCell.createSpan({
-				cls: 'loom-settings-project-link',
-				text: project.name,
-				attr: { tabindex: '0', role: 'button' },
-			});
-			const open = () => {
-				const file = this.plugin.app.vault.getFileByPath(project.loomPath);
-				if (file instanceof TFile) void this.plugin.app.workspace.getLeaf('tab').openFile(file);
-			};
-			link.addEventListener('click', open);
-			link.addEventListener('keydown', (e) => {
-				if (e.key === 'Enter' || e.key === ' ') {
-					e.preventDefault();
-					open();
-				}
-			});
-			const typeCell = row.createEl('td', { cls: 'loom-settings-table-type' });
-			setIcon(typeCell.createSpan(), PROJECT_KIND_META[project.config.kind].icon);
-			typeCell.createSpan({ text: projectKindLabel(project.config.kind) });
-		}
-	}
-
 	// --- Entities ---------------------------------------------------------
 
 	private entitiesItems(): SettingDefinitionItem[] {
@@ -1415,22 +1226,12 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 			],
 		});
 
-		// Each entity type gets its OWN box (a heading-less `type: 'group'` —
-		// Obsidian gives it the native boxed look for free, same trick
-		// `restoreDefaultsRow` already uses) rather than one shared box for
-		// every type: the declarative Settings API has no nested-group support
-		// (`SettingDefinitionGroup` items can't themselves be groups), which is
-		// what used to let a color+size PAIR nest visually under its own type
-		// in the pre-1.13 imperative UI — this is the closest equivalent now
-		// available. A row WITHIN one type's box still gets Obsidian's own
-		// native per-row separator (color → size, or color → size → tag colors
-		// for Quest). Every row's own name is now "Color: {label}"/"Size:
-		// {label}" rather than a bare type name, since a name-only row no
-		// longer has a heading above it to say which SECTION it belongs to.
-		// Group has no box here at all — it's a virtual entity (no backing
-		// note), so its color lives with Script/Book's in "Other colors"
-		// below instead (see `groupColor`'s own doc comment for why all
-		// three share it).
+		// Each entity type gets its OWN box (a heading-less `type: 'group'`,
+		// boxed natively like `restoreDefaultsRow`) — the declarative API can't
+		// nest groups, so this is how a color+size pair stays together. Row
+		// names say "Color: {label}"/"Size: {label}" since no heading names the
+		// section. Group has no box here — it's virtual, so its color lives
+		// with Script/Book's in "Other colors" (see `groupColor`).
 		const colorSizeBoxes: SettingDefinitionItem[] = [{ type: 'group', heading: t('settings.entities.colorsHeading') }];
 		for (const type of ENTITY_TYPES) {
 			// Region/Decision Point have no color/size row — their color is
@@ -1717,14 +1518,9 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 		// line in a tiny column, and "Project"/"Date format" land side by side
 		// instead of as their own stacked rows.
 		containerEl.addClass('loom-settings-block');
-		// A plain string `desc`/`text` can't carry a real line break — a raw
-		// `\n` collapses under `.setting-item-description`'s ordinary
-		// `white-space: normal` (confirmed against the real Obsidian CSS, not
-		// assumed), so the break point has to be an actual `<br>` element,
-		// which means building the paragraph in two translated halves around
-		// it rather than one interpolated string — same "Pre/Post" split this
-		// codebase already uses wherever translated text wraps a non-text
-		// element (e.g. `noBranchStructurePre`/`Post` around a `<code>` tag).
+		// A `desc` string can't carry a line break (`\n` collapses under
+		// `white-space: normal`), so the paragraph is built in two translated
+		// halves around a real `<br>`, like `noBranchStructurePre`/`Post`.
 		const timelineDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
 		timelineDescEl.appendText(t('settings.graph.timelineDescPre'));
 		timelineDescEl.createEl('br');
@@ -1748,14 +1544,8 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 					const next = projects.find((p) => p.root === root);
 					if (next) new TimelineSettingsEditor(this.plugin, next, editorEl).render();
 				});
-				// A fixed width covering the longest project name (unlike the kind
-				// dropdown's three fixed labels, project names are open-ended, so
-				// this is computed here rather than a constant in CSS) — same
-				// "resizes per selection, open list ends up cramped" issue as the
-				// Set-up-project kind dropdown, and the same fix: an INLINE style,
-				// since a class-based `width` was still losing to Obsidian's own
-				// `.dropdown` rule. `ch` approximates one character's width — not
-				// exact for a proportional font, but comfortably wide either way.
+				// Fixed width covering the longest project name (see
+				// `renderFixedWidthDropdown` for why it's an inline style).
 				const longest = Math.max(...projects.map((p) => p.name.length));
 				dd.selectEl.setCssProps({ width: `${longest + 3}ch` });
 			});
@@ -1771,16 +1561,9 @@ export class LoomLoomSettingTab extends PluginSettingTab {
 	}
 
 	/** The "Restore defaults" row every page ends on — a `type: 'group'` with
-	 *  NO `heading` set (Obsidian still gives a group its own boxed look with
-	 *  no heading text at all — that box is Obsidian's own native group
-	 *  styling, not anything drawn by this file's CSS, and every OTHER group
-	 *  here gets the exact same box; there is nothing "extra" or `cls`-driven
-	 *  about it any more) holding just the one `name`/`desc` + button row —
-	 *  omitting `heading` is what avoids a redundant "Restore defaults" title
-	 *  floating above a row whose own name already says e.g. "Restore general
-	 *  defaults". `loom-restore-group` (styles.css) adds the plain horizontal
-	 *  divider ahead of the box, set apart from whatever the page's last
-	 *  content section was. */
+	 *  no `heading` (Obsidian still boxes it), since the row's own name already
+	 *  says e.g. "Restore general defaults". `loom-restore-group` (styles.css)
+	 *  adds the divider above it. */
 	private restoreDefaultsRow(
 		page: keyof typeof PAGE_SETTINGS_KEYS,
 		name: string,

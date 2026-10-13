@@ -1,4 +1,4 @@
-import { EntityRecord, TimelineDef } from './types';
+import { EntityRecord, TimelineDef, seqKey } from './types';
 import { LoomIndexer } from './indexer';
 import { features, projectRoleType } from './project-kind';
 
@@ -29,8 +29,8 @@ function bySortKey(a: EntityRecord, b: EntityRecord): number {
 /** Anchors that aren't dated (acts) order by their manual `loomSeq` stamp,
  *  falling back to creation order so an unstamped one still lands sensibly. */
 function bySequence(a: EntityRecord, b: EntityRecord): number {
-	const ka = a.seq ?? a.created;
-	const kb = b.seq ?? b.created;
+	const ka = seqKey(a);
+	const kb = seqKey(b);
 	return ka === kb ? a.name.localeCompare(b.name) : ka - kb;
 }
 

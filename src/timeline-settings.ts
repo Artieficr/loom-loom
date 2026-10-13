@@ -39,7 +39,7 @@ export class TimelineSettingsEditor {
 		private containerEl: HTMLElement
 	) {
 		// Deep copy so edits don't mutate the indexer's copy before saving.
-		this.config = JSON.parse(JSON.stringify(project.config)) as ProjectConfig;
+		this.config = structuredClone(project.config);
 	}
 
 	private saveLater = debounce(() => void this.save(), 400, true);
@@ -90,7 +90,7 @@ export class TimelineSettingsEditor {
 				// sample-formatted dates vary a lot in length ("Mar 4th, 2003" vs.
 				// "2003-03-04"), so without this the control (and the cramped
 				// open option list matching its width) resized per selection.
-				dd.selectEl.setCssProps({ width: `${Math.max(...labels.map((l) => l.length)) + 3}ch` });
+				dd.selectEl.setCssProps({ width: `${Math.max(...labels.map((l) => l.length)) + 6}ch` });
 			});
 
 		new Setting(containerEl)

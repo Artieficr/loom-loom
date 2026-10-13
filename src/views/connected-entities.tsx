@@ -1,11 +1,12 @@
 import { Notice } from 'obsidian';
 import { useEffect, useState } from 'react';
 import { ENTITY_TYPES, EntityRecord, EntityType, FM, entityPlural } from '../types';
-import { setLoomKey } from '../fm';
+import { setLoomKey, stripFrontmatter, writeNoteBody } from '../fm';
 import { ProjectDef } from '../indexer';
 import { t } from '../i18n';
 import { LoomNavigator } from './react-view';
-import { FRONTMATTER_RE, Icon, Truncated, autoGrowTextarea, recordLabel } from './common';
+import { Icon, SectionHeader, Truncated } from './common';
+import { autoGrowTextarea, recordLabel } from '../display';
 
 /**
  * Inline view of every entity connected to the page's record: one collapsible
@@ -66,11 +67,7 @@ function Section({
 	const [open, setOpen] = useState(false);
 	return (
 		<div className="loom-section">
-			<button className="loom-section-header" onClick={() => setOpen(!open)}>
-				<span className={open ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
-				{label}
-				<span className="loom-section-count">{entries.length}</span>
-			</button>
+			<SectionHeader open={open} onToggle={() => setOpen(!open)} label={label} count={entries.length} />
 			{open ? (
 				<div className="loom-connected-body">
 					{entries.map((r) => (
@@ -106,7 +103,7 @@ function Entry({
 		if (!file) return;
 		let cancelled = false;
 		void plugin.app.vault.cachedRead(file).then((data) => {
-			if (!cancelled) setBody(data.replace(FRONTMATTER_RE, '').trim());
+			if (!cancelled) setBody(stripFrontmatter(data).trim());
 		});
 		return () => {
 			cancelled = true;
@@ -128,10 +125,7 @@ function Entry({
 			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 				setLoomKey(fm, FM.description, descDraft);
 			});
-			await plugin.app.vault.process(file, (data) => {
-				const m = FRONTMATTER_RE.exec(data);
-				return (m ? m[0] : '') + bodyDraft;
-			});
+			await writeNoteBody(plugin.app, file, bodyDraft);
 			setBody(bodyDraft.trim());
 			setEditing(false);
 		} catch (e) {

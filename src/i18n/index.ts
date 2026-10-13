@@ -31,8 +31,11 @@ export function setLocale(code: LocaleCode): void {
 	active = code;
 }
 
-export function getLocale(): LocaleCode {
-	return active;
+/** Short month names (Jan…Dec) in the active UI language, from the system's
+ *  own `Intl` data rather than the catalogs. */
+export function shortMonthNames(): string[] {
+	const fmt = new Intl.DateTimeFormat(active, { month: 'short' });
+	return Array.from({ length: 12 }, (_, i) => fmt.format(new Date(2000, i, 1)));
 }
 
 /** Hand-rolled `{varName}` substitution — no ICU MessageFormat dependency,
@@ -72,6 +75,13 @@ export function tn(key: string, count: number, vars?: Record<string, string | nu
 	const fallback = `${key}_other`;
 	const raw = FLAT[active][primary] ?? FLAT[active][fallback] ?? FLAT.en[primary] ?? FLAT.en[fallback] ?? key;
 	return interpolate(raw, { count, ...vars });
+}
+
+/** The English indefinite article for `noun` ("a" / "an") — the value of the
+ *  `{article}` placeholder some English templates use; other locales' templates
+ *  leave the placeholder out. */
+export function article(noun: string): string {
+	return /^[aeiou]/i.test(noun) ? 'an' : 'a';
 }
 
 /** Reads the ISO code Obsidian itself is configured to display its UI in

@@ -40,13 +40,9 @@ export interface DeactivateResult {
 	 *  instead of a generic failure message). */
 	unreachable?: boolean;
 	/** True when `ok` is false because the server has no record of this
-	 *  activation any more (a definite 404, not a network issue) — the
-	 *  device is, as far as the license server is concerned, already not
-	 *  activated. `LicenseManager.deactivateThisDevice` treats this as
-	 *  success and reconciles the local cache to match, rather than leaving
-	 *  the device stuck looking activated forever with no way to recover
-	 *  (this cache/server mismatch is exactly what a stale/incorrectly
-	 *  parsed activation id from a much earlier bug would produce). */
+	 *  activation (a definite 404, not a network issue) — the device is
+	 *  already not activated as far as the server is concerned;
+	 *  `LicenseManager.deactivateThisDevice` treats it as success. */
 	notFound?: boolean;
 }
 

@@ -1,4 +1,4 @@
-import { ItemView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, normalizePath } from 'obsidian';
+import { ItemView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
 import {
 	BOOK_EXTENSION,
 	EntityOrigin,
@@ -23,7 +23,6 @@ import {
 	ProjectSuggestModal,
 	SetupProjectModal,
 	ensureFolder,
-	scaffoldProject,
 } from './project';
 import { projectFolderPath } from './project-kind';
 import { HomeView } from './views/home-view';
@@ -41,8 +40,8 @@ import { LicenseManager } from './license/manager';
 import { POLAR_ORGANIZATION_ID, PolarLicenseProvider } from './license/polar-provider';
 import { resolveActiveLocale, setLocale, t } from './i18n';
 
-/** How often the plugin re-checks an activated license in the background,
- *  independent of the manual "Re-check now" button. Well inside the 30-day
+/** How often the plugin re-checks an activated license in the background.
+ *  Well inside the 30-day
  *  offline grace period (see `license/grace.ts`), so a machine that's online
  *  most days re-verifies quietly long before the grace window could matter. */
 const LICENSE_RECHECK_TICK_MS = 6 * 60 * 60 * 1000;
@@ -56,8 +55,20 @@ export default class LoomLoomPlugin extends Plugin {
 	 *  `POLAR_ORGANIZATION_ID`, `src/license/polar-provider.ts`). */
 	licenseManager!: LicenseManager;
 
+	/** Every open window's `<body>` — the main one plus any popouts — so the
+	 *  body-level classes/properties below reach views in a popout too. */
+	private windowBodies = new Set<HTMLElement>([document.body]);
+
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.registerEvent(
+			this.app.workspace.on('window-open', (_w, win) => {
+				this.windowBodies.add(win.document.body);
+				this.applyTextSize();
+				this.applyThemeTextColoring();
+			})
+		);
+		this.registerEvent(this.app.workspace.on('window-close', (_w, win) => this.windowBodies.delete(win.document.body)));
 		this.applyTextSize();
 		this.applyLocale();
 		this.applyThemeTextColoring();
@@ -196,19 +207,23 @@ export default class LoomLoomPlugin extends Plugin {
 			// call fired earlier, inline in `onload()`, can run before theme
 			// CSS is fully applied, which left the measured colors wrong
 			// until the user happened to toggle the setting off and on again.
+			// Popouts already open when the plugin loads never fire
+			// `window-open`, so pick their bodies up from their leaves here.
+			this.app.workspace.iterateAllLeaves((leaf) => this.windowBodies.add(leaf.view.containerEl.doc.body));
+			this.applyTextSize();
 			this.applyThemeTextColoring();
 			this.applyProjectsSidebarTab();
 			this.registerTimestampPropertyTypes();
-			void this.migrateLegacyProject().then(async () => {
+			void (async () => {
 				await this.indexer.rebuildNow();
-				// Frontmatter-key + managed-file-name migration of existing notes.
-				// It reads records and resolves links, so it needs a built index and
-				// a vault that has stopped moving under it — see `waitForVaultSettled`.
+				// Managed-file-name migration of existing notes. It reads records
+				// and resolves links, so it needs a built index and a vault that has
+				// stopped moving under it — see `waitForVaultSettled`.
 				await this.waitForVaultSettled();
 				await this.indexer.rebuildNow();
 				await this.indexer.migrateFiles();
 				startSnapshots(this);
-			});
+			})();
 			// Internally throttled and a no-op with no local activation, so this
 			// costs nothing for a free-tier user and doesn't fight the migration
 			// work above for startup time.
@@ -243,7 +258,6 @@ export default class LoomLoomPlugin extends Plugin {
 			...Object.values(this.settings.graphManualX),
 			...Object.values(this.settings.graphManualY),
 			...Object.values(this.settings.graphPins),
-			...Object.values(this.settings.timelineManualOrder),
 		];
 	}
 
@@ -268,7 +282,6 @@ export default class LoomLoomPlugin extends Plugin {
 			s.graphPins,
 			s.graphFilters,
 			s.graphViews,
-			s.timelineManualOrder,
 		];
 		for (const map of maps) {
 			for (const key of Object.keys(map)) {
@@ -438,23 +451,6 @@ export default class LoomLoomPlugin extends Plugin {
 		}
 	}
 
-	/** Pre-.loom versions stored a single project root in settings. */
-	private async migrateLegacyProject(): Promise<void> {
-		const root = this.settings.projectRoot;
-		if (root === '') return;
-		const folder = this.app.vault.getFolderByPath(normalizePath(root));
-		if (folder && !folder.children.some((f) => f instanceof TFile && f.extension === LOOM_EXTENSION)) {
-			try {
-				await scaffoldProject(this.app, folder.path);
-			} catch (e) {
-				console.error('Loom Loom: legacy project migration failed', e);
-				return;
-			}
-		}
-		this.settings.projectRoot = '';
-		await this.saveSettings();
-	}
-
 	/**
 	 * Project implied by the active leaf: a loom view carrying a project in its
 	 * state (list/graph), or any open file inside a project folder (entity
@@ -508,15 +504,6 @@ export default class LoomLoomPlugin extends Plugin {
 		});
 	}
 
-	/** Opens an entity page in a fresh tab (for middle-click). */
-	openEntityInTab(path: string): void {
-		void this.app.workspace.getLeaf('tab').setViewState({
-			type: VIEW_ENTITY,
-			active: true,
-			state: { file: path },
-		});
-	}
-
 	async activateView(viewType: string, state?: Record<string, unknown>): Promise<void> {
 		const wanted = state?.project;
 		const existing = this.app.workspace.getLeavesOfType(viewType).find((leaf: WorkspaceLeaf) => {
@@ -546,26 +533,23 @@ export default class LoomLoomPlugin extends Plugin {
 
 	/** Reflects the text-size setting as a body class the stylesheet keys off. */
 	applyTextSize(): void {
-		document.body.classList.toggle('loom-text-compact', this.settings.textSize === 'compact');
-		document.body.classList.toggle('loom-text-large', this.settings.textSize === 'large');
+		for (const body of this.windowBodies) {
+			body.classList.toggle('loom-text-compact', this.settings.textSize === 'compact');
+			body.classList.toggle('loom-text-large', this.settings.textSize === 'large');
+		}
 	}
 
 	/** Reflects the "Follow theme text coloring" setting as a body class, AND
-	 *  (unlike `applyTextSize`) also measures what the active theme actually
-	 *  renders headings/bold/italic as, since there's no reliable way to read
-	 *  this from CSS variables alone — confirmed live: many themes color
-	 *  `h1`-`h6`/`strong`/`em` directly on those selectors rather than
-	 *  exposing a reusable `--h1-color`-style custom property, so `var(--h1-color, …)`
-	 *  silently fell through to the fallback for a theme that never set it.
-	 *  The only genuinely universal read is asking the browser what color it
-	 *  actually computed for a real themed element — `measureThemeTextColors`
-	 *  does that by rendering throwaway probe elements and reading
-	 *  `getComputedStyle`, then this stores each result as our OWN CSS custom
-	 *  property (`--loom-measured-h1` etc.) on `document.body`, which
-	 *  `styles.css`'s opt-in rules read with the same `--text-accent`
-	 *  fallback as before for anything the probe couldn't resolve. */
+	 *  measures what the active theme actually renders headings/bold/italic as:
+	 *  many themes color `h1`-`h6`/`strong`/`em` directly rather than through a
+	 *  reusable custom property. `measureThemeTextColors` renders throwaway
+	 *  probe elements and reads `getComputedStyle`; the results are stored as
+	 *  our own `--loom-measured-*` properties on `document.body`, which
+	 *  `styles.css` reads with a `--text-accent` fallback. */
 	applyThemeTextColoring(): void {
-		document.body.classList.toggle('loom-follow-theme-color', this.settings.followThemeTextColoring);
+		for (const body of this.windowBodies) {
+			body.classList.toggle('loom-follow-theme-color', this.settings.followThemeTextColoring);
+		}
 		if (this.settings.followThemeTextColoring) this.measureThemeTextColors();
 	}
 
@@ -579,19 +563,11 @@ export default class LoomLoomPlugin extends Plugin {
 	 *  load, on every settings save, and on Obsidian's own `css-change`
 	 *  event) rather than trying to cache and invalidate. */
 	private measureThemeTextColors(): void {
-		// Obsidian's Live Preview (where notes are actually edited, the same
-		// context this plugin's own CM6 editors sit in) renders a heading as a
-		// plain `<span class="cm-header cm-header-N">` inside a
-		// `.cm-line.HyperMD-header.HyperMD-header-N` — never a semantic
-		// `<h1>`-`<h6>` tag, confirmed directly against a real note's DOM.
-		// Emphasis follows the identical span-plus-class convention
-		// (`cm-strong`/`cm-em`), not `<strong>`/`<em>`. Mounted under
-		// `workspace.containerEl` (the real app root Obsidian itself renders
-		// every leaf inside), not a bare `document.body` child — a theme
-		// whose colors resolve through several layers of custom properties
-		// (confirmed live: one theme's compiled `light-dark()` output) can
-		// depend on that exact ancestry to resolve the same way a real note
-		// does, not just on `body`'s own theme-mode class.
+		// Probes mirror Live Preview's DOM: a heading is a `cm-header-N` span in
+		// a `.cm-line.HyperMD-header.HyperMD-header-N` (never `<h1>`), emphasis
+		// is `cm-strong`/`cm-em`. Mounted under `workspace.containerEl` so
+		// themes whose colors resolve through ancestor-dependent custom
+		// properties resolve the same way a real note does.
 		const probe = this.app.workspace.containerEl.createDiv({
 			cls: 'markdown-source-view mod-cm6 cm-editor cm-s-obsidian',
 			attr: { style: 'position:fixed; top:-9999px; left:-9999px; visibility:hidden; pointer-events:none;' },
@@ -613,7 +589,8 @@ export default class LoomLoomPlugin extends Plugin {
 			['italic', content.createSpan({ cls: 'cm-em', text: 'X' })],
 		];
 		for (const [key, el] of targets) {
-			document.body.style.setProperty(`--loom-measured-${key}`, measure(el));
+			const color = measure(el);
+			for (const body of this.windowBodies) body.style.setProperty(`--loom-measured-${key}`, color);
 		}
 		probe.remove();
 	}
@@ -627,6 +604,8 @@ export default class LoomLoomPlugin extends Plugin {
 	}
 
 	onunload(): void {
-		document.body.classList.remove('loom-text-compact', 'loom-text-large', 'loom-follow-theme-color');
+		for (const body of this.windowBodies) {
+			body.classList.remove('loom-text-compact', 'loom-text-large', 'loom-follow-theme-color');
+		}
 	}
 }

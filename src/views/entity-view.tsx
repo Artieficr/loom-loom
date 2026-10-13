@@ -1,4 +1,4 @@
-import { App, Menu, Notice, TFile, ViewStateResult, normalizePath } from 'obsidian';
+import { App, Menu, Notice, TFile, ViewStateResult, debounce, normalizePath } from 'obsidian';
 import {
 	CSSProperties,
 	MouseEvent as ReactMouseEvent,
@@ -33,28 +33,28 @@ import {
 	VIEW_GROUP,
 	VIEW_LIST,
 	pcGroupStub,
+	bySeq,
+	seqKey,
 } from '../types';
 import {
-	AltTextModal,
 	ConfirmModal,
 	CreateEntityModal,
+	createAction,
 	EntityTypeSuggestModal,
 	RecordSuggestModal,
 	SessionConflictModal,
-	TextInputModal,
 	createEntity,
 	createItemCopy,
 	dailyNoteLink,
-	entityFileName,
-	purgeEntityReferences,
+	deleteEntityNote,
 	renameEntityRecord,
-	sessionFileName,
+	showTypeFilterMenu,
 } from '../project';
+import { managedEntityFileName, managedSessionFileName } from '../naming';
 import { formatLoomDateShort, groupNameOf, todayRaw } from '../calendar';
 import { LoomFileReactView } from './react-view';
 import {
 	EntityChip,
-	FRONTMATTER_RE,
 	Icon,
 	InfoIcon,
 	NavRail,
@@ -64,38 +64,46 @@ import {
 	Truncated,
 	buildEntityLinkNames,
 	buildLinkTargetLabels,
-	locationLabel,
-	mainLocationFirst,
+	moveItem,
 	openCreateLinkEntity,
 	openEntityLink,
-	recordLabel,
 	scrollIntoContainer,
+	useCloseOnOutsideClick,
+	useSeqDrag,
+	SectionHeader,
+	SearchNav,
+	MatchStat,
+	AnnotationPanelToggles,
 } from './common';
+import { locationLabel, mainLocationFirst, recordLabel } from '../display';
 import { ConnectedEntities } from './connected-entities';
-import { LinkOption } from './link-textarea';
+import type { LinkOption } from './markdown-field';
 import { MarkdownField, type MarkdownFieldHandle } from './markdown-field';
 import { FountainField, FountainFieldHandle } from './fountain-field';
 import { BranchDraft, BranchOverlay } from './branch-overlay';
 import { extractLinkpath, linkTargetOf, memberEntryLinkpath, type ProjectDef } from '../indexer';
-import { evaluateEvent, recomputeEventLocks, waitForMetadataSync } from '../gm-lock';
-import { cascadeDecisionPointSession, reconcileSessionBeforeLink } from '../gm-decision-point';
-import { clearFmKeys, fmLoomValue, setLoomKey } from '../fm';
+import { evaluateEvent, recomputeEventLocks, resolveFresh, waitForMetadataSync } from '../gm-lock';
+import { cascadeDecisionPointSession, decisionPointEventsOf, reconcileSessionBeforeLink } from '../gm-decision-point';
+import { clearFmKeys, editLoomList, involveInFirstNote, setLoomKey, stripFrontmatter, writeFmAt, writeNoteBody } from '../fm';
 import { MiniGraph } from './mini-graph';
 import { findMapsFile } from './map-view';
-import { useIndexVersion } from './hooks';
+import { useIndexVersion, usePersistedChoice } from './hooks';
 import {
 	PagesPreviewBody,
 	buildNavTree,
 	actScriptText,
-	deleteScriptEntity,
 	pushActTitles,
 	renderNavTreeItem,
+	liveAltTextInScript,
 	replaceAltContentInScript,
 	sceneScriptText,
 	stripAnnotationMarkerInScript,
 	type NavItem,
 	type NavNode,
-	type ScriptSearchMatch,
+	openSceneAtLine,
+	scriptSearchMatches,
+	deleteEntity,
+	deleteEntityMessage,
 } from './script-view';
 import {
 	mutateScriptBuffer,
@@ -106,10 +114,11 @@ import {
 } from './script-buffer';
 import {
 	ActChapterBlocks,
-	deleteBookEntity,
 	editBookAndSync,
 	openThisChapter,
 	useBookAnnotations,
+	BookSidePanels,
+	type BookSidePanel,
 	useBookText,
 } from './book-view';
 import {
@@ -121,12 +130,9 @@ import {
 	reorderBookChaptersInAct,
 } from '../prose';
 import {
-	AltTextEntry,
-	CommentEntry,
-	mutateScriptNotes,
 	undecidedAltRows,
 	unresolvedCommentRows,
-	useScriptNotes,
+	useAnnotationHandlers,
 } from './script-notes';
 import { AlternativesBrowserPanel, CommentPopover, CommentsBrowserPanel } from './annotation-popover';
 import {
@@ -144,7 +150,6 @@ import {
 	parseFountain,
 	parseSceneHeading,
 	reorderBranchGroup,
-	sceneAtLine,
 	sceneBodyLineOffset as computeSceneBodyLineOffset,
 	sceneEndLine,
 	type ParsedScript,
@@ -161,10 +166,10 @@ import {
 	setBranchTagValue,
 } from '../fountain';
 import { getBranchClipboard, setBranchClipboard } from './branch-clipboard';
-import { pdfPages } from '../pdf';
-import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
+import { pageOfLine, pageRange, pdfPages } from '../pdf';
+import { features, projectRoleType, projectTypes, roleOf, isInvolvableType } from '../project-kind';
 import type LoomLoomPlugin from '../main';
-import { LocaleKey, t, tn } from '../i18n';
+import { LocaleKey, article, t, tn } from '../i18n';
 import { entityLabel, entityPlural } from '../types';
 
 /**
@@ -258,22 +263,24 @@ function useFrontmatterWriter(plugin: LoomLoomPlugin, file: TFile | null) {
  *  fires before navigation), differing only in which key to write and what to
  *  log on failure. */
 function useDebouncedFrontmatterField(plugin: LoomLoomPlugin, file: TFile | null, key: string, label: string) {
-	return useMemo(() => {
-		let timer = 0;
-		return (value: string) => {
-			window.clearTimeout(timer);
-			timer = window.setTimeout(() => {
-				if (!file) return;
-				plugin.app.fileManager
-					.processFrontMatter(file, (fm: Record<string, unknown>) => {
-						setLoomKey(fm, key, value);
-					})
-					.catch((e) => {
-						console.error(`Loom Loom: failed to save ${label}`, e);
-					});
-			}, 600);
-		};
-	}, [plugin, file, key, label]);
+	return useMemo(
+		() =>
+			debounce(
+				(value: string) => {
+					if (!file) return;
+					plugin.app.fileManager
+						.processFrontMatter(file, (fm: Record<string, unknown>) => {
+							setLoomKey(fm, key, value);
+						})
+						.catch((e) => {
+							console.error(`Loom Loom: failed to save ${label}`, e);
+						});
+				},
+				600,
+				true
+			),
+		[plugin, file, key, label]
+	);
 }
 
 interface RelationshipDraft {
@@ -337,7 +344,10 @@ function HubNoteText({
 	onCommit: (value: string) => void;
 }) {
 	const [value, setValue] = useState(initial);
-	const timer = useRef(0);
+	const onCommitRef = useRef(onCommit);
+	onCommitRef.current = onCommit;
+	/** Commits 600ms after typing stops. */
+	const commit = useMemo(() => debounce((v: string) => onCommitRef.current(v), 600, true), []);
 	useEffect(() => setValue(initial), [initial]);
 	return (
 		<MarkdownField
@@ -351,8 +361,7 @@ function HubNoteText({
 			onCreateEntity={onCreateEntity}
 			onChange={(v) => {
 				setValue(v);
-				window.clearTimeout(timer.current);
-				timer.current = window.setTimeout(() => onCommit(v), 600);
+				commit(v);
 			}}
 		/>
 	);
@@ -405,22 +414,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  it's opened from. */
 	const bookAnnotations = useBookAnnotations(plugin, project);
 	/** Guards `commitName`/`commitActTitle` against firing twice concurrently
-	 *  (Enter then blur) — see those functions' own doc comments. Read here,
-	 *  not down next to them, for the same reason as `scriptText`/`bookText`
-	 *  above: a hook can't sit behind the early return below (`!file ||
-	 *  !record`) — a real, reported bug this fixes: this ref used to live
-	 *  right next to `commitName` itself, past that return, so a component
-	 *  instance whose `record` only became available on a LATER render (the
-	 *  vault's index still cold right after Obsidian's own startup, well
-	 *  after this same view had already rendered once with `record`
-	 *  undefined) called one MORE hook than its previous render had — a
-	 *  genuine Rules-of-Hooks violation (React error #310, "rendered more
-	 *  hooks than during the previous render"), surfacing as every page in
-	 *  the workspace going blank until the affected tab was closed and
-	 *  reopened fresh (a plain navigation always hits a warm index, so it
-	 *  never took this path) — restoring a saved workspace on the next
-	 *  launch reliably reproduced it again, since the same cold-index race
-	 *  replayed identically. */
+	 *  (Enter then blur). Declared up here, before the early return below
+	 *  (`!file || !record`): a hook past it would be called on some renders
+	 *  and not others once a cold index delivers `record` late (React #310). */
 	const commitNameInFlightRef = useRef(false);
 	/** Session page's own event hub: the bottom "+ Add" button (mirrors the
 	 *  top one, added so a long play session doesn't need scrolling back up
@@ -502,17 +498,12 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  computation below, near `actChapters`) rather than over the whole
 	 *  book — this act's own chapters only, matching the "this page's own
 	 *  content" scope every other browse panel on this file uses. */
-	const [actBookSidePanel, setActBookSidePanel] = useState<'comments' | 'alt' | null>(null);
+	const [actBookSidePanel, setActBookSidePanel] = useState<BookSidePanel>(null);
 	const actBookPreviewWrapRef = useRef<HTMLDivElement | null>(null);
 	const actBookCommitQueueRef = useRef<Promise<unknown>>(Promise.resolve());
-	/** Same fix as `book-view.tsx`'s `queueBookEdit` (see its own doc comment
-	 *  — a straight port of `script-view.tsx`'s `commit`'s `.catch`
-	 *  reasoning): without swallowing a failed run's rejection on the queue
-	 *  itself, one throwing `editBookAndSync` call would silently wedge
-	 *  every edit queued after it on this Act page for the rest of its
-	 *  lifetime. Outline's own chapter-reorder is the only thing left using
-	 *  this — Act's own Editor field (which used to share it via
-	 *  `commitActBookDraft`) is gone. */
+	/** Serializes this Act page's Outline chapter-reorder edits; a failed run's
+	 *  rejection is swallowed on the queue itself so it can't wedge every edit
+	 *  queued after it (same as book-view.tsx's `queueBookEdit`). */
 	const queueActBookEdit = (apply: (text: string) => string | null) => {
 		if (!project) return;
 		const run = actBookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
@@ -520,20 +511,28 @@ function EntityPage({ view }: { view: EntityView }) {
 			console.error('Loom Loom: could not commit an act book edit', e);
 		});
 	};
-	/** Comment bodies + alt-text option lists — same project-level sidecar
-	 *  the main Script view reads/writes, kept live the same way. Unused by
-	 *  every entity type but Scene/Act, same as `scriptText` above. */
-	const scriptNotes = useScriptNotes(plugin, project);
-	/** Which comment's popover is open (Scene and Act pages share this
-	 *  one piece of state — a page is only ever one or the other, never
-	 *  both, so there's no risk of them fighting over it). */
-	const [openComment, setOpenComment] = useState<{ id: string; rect: DOMRect } | null>(null);
-	/** Marker ids that have had a reply added THIS session — same reasoning
-	 *  as script-view.tsx's own copy: `scriptNotes` only catches up once the
-	 *  sidecar's `vault.modify` + file-watch round trip completes, so
-	 *  `handleCloseComment` below checks this instead of trusting
-	 *  `scriptNotes` alone at close time. */
-	const commentsWithNewEntryRef = useRef<Set<string>>(new Set());
+	/** Comment threads + alt-text options for the Scene/Act Script sections
+	 *  (a page is only ever one or the other, so they share this). Writes go
+	 *  through Scene's live field when it's mounted, else the shared buffer
+	 *  (`applyAltContentChange`/`applyRemoveMarkers` below). */
+	const {
+		scriptNotes,
+		openComment,
+		setOpenComment,
+		handleOpenComment,
+		handleCloseComment,
+		handleSaveCommentEntry,
+		handleToggleCommentResolved,
+		handleDeleteCommentEntry,
+		handleAddCommentReply,
+		handleCreateAlt,
+		handleCycleAlt,
+		handleOpenAltMenu,
+	} = useAnnotationHandlers(plugin, project, {
+		liveAltText: (id) => (project ? liveAltTextInScript(project, id) : null),
+		replaceAlt: (id, text) => applyAltContentChange(id, text),
+		stripMarkers: (id) => applyRemoveMarkers(id),
+	});
 	/** A marker id the current Act/Scene search match points at — same
 	 *  role as the main Script view's own `highlightedAnnotationId`. */
 	const [highlightedAnnotationId, setHighlightedAnnotationId] = useState<string | null>(null);
@@ -565,46 +564,6 @@ function EntityPage({ view }: { view: EntityView }) {
 			if (icon instanceof HTMLElement) handleOpenComment(id, icon.getBoundingClientRect());
 		});
 	};
-	/** Wraps the selection as option 0, then immediately prompts for a SECOND
-	 *  option (same `TextInputModal` the right-click menu's "Add
-	 *  alternative…" uses) — matches the comment flow's "picking the menu
-	 *  item opens something to type into" expectation. Cancelling (closing
-	 *  the modal without submitting) undoes the WHOLE creation — same
-	 *  reasoning as script-view.tsx's own copy of this handler: a span stuck
-	 *  at one option is exactly the "nothing left to alternate between" case
-	 *  `handleDeleteAltOption` already strips back to plain text for, so
-	 *  backing out here does the same. Only ever reachable from the Scene
-	 *  section's own `FountainField` — creating a NEW span needs a live
-	 *  selection, which only Scene (and Chapter, on the Prose side) still
-	 *  has. */
-	const handleCreateAlt = (id: string, selectedText: string) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => ({
-			...notes,
-			altText: { ...notes.altText, [id]: { id, options: [selectedText], activeIndex: 0, acceptedIndex: null } },
-		}));
-		new TextInputModal(plugin.app, {
-			title: t('view.entity.altText.addWordingTitle'),
-			placeholder: selectedText,
-			cta: t('project.common.add'),
-			multiline: true,
-			onSubmit: (value) => {
-				if (!project) return;
-				void mutateScriptNotes(plugin.app, project, (notes) => {
-					const cur = notes.altText[id];
-					if (!cur) return notes;
-					return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options: [...cur.options, value] } } };
-				});
-			},
-			onCancel: () => {
-				if (!project) return;
-				void mutateScriptNotes(plugin.app, project, (notes) => {
-					const { [id]: _dropped, ...rest } = notes.altText;
-					return { ...notes, altText: rest };
-				}).then(() => applyRemoveMarkers(id));
-			},
-		}).open();
-	};
 	/** Persists whatever the Scene section's own live CM6 instance currently
 	 *  holds — same reasoning as script-view.tsx's own (now-deleted, raw-text
 	 *  based) `commitFieldEdit`: alt-text cycling/drafting/accepting/deleting,
@@ -624,24 +583,12 @@ function EntityPage({ view }: { view: EntityView }) {
 		mutateScriptBuffer(plugin, project, (raw) => replaceSceneBody(raw, record.sceneId, fresh));
 		scheduleFlush(plugin, project);
 	};
-	/** The single write path every alt-text mutation handler below goes
-	 *  through: Scene's own field mutates then commits through it whenever
-	 *  it's actually mounted (`sceneScriptEditorRef.current` truthy — Scene's
-	 *  own Script/live-editor mode), byte-identical to what this codebase did
-	 *  before Act lost its own field. **Falls to the raw-text
-	 *  `replaceAltContentInScript` (script-view.tsx) whenever the ref is
-	 *  null, full stop — not just for Act.** A real, confirmed bug this
-	 *  fixes: the ref is ALSO null while viewing Scene's own Pages/Outline
-	 *  mode (its `FountainField` only mounts in Script mode), and the
-	 *  previous `record?.type === 'act'` guard silently no-op'd there too —
-	 *  cycling/picking alt-text from Scene's Pages view (or deleting an
-	 *  option down to one, which strips the sidecar entry unconditionally
-	 *  regardless of whether the raw-text strip below succeeds) looked like
-	 *  it worked from the sidecar's own perspective but never touched the
-	 *  actual document, leaving a stale marker with no sidecar data behind
-	 *  it. Same raw-text-find-and-rewrite approach `book-view.tsx`'s
-	 *  `replaceAltContentInBook` already uses for the identical "no live
-	 *  field to dispatch through" problem. */
+	/** The single write path every alt-text mutation below goes through:
+	 *  Scene's live field when it's mounted (`sceneScriptEditorRef.current` —
+	 *  Scene's Script mode), else the raw-text `replaceAltContentInScript`
+	 *  (script-view.tsx) — for Act, and for Scene's own Pages/Outline modes,
+	 *  where the field isn't mounted. Same raw-text approach as book-view.tsx's
+	 *  `replaceAltContentInBook`. */
 	const applyAltContentChange = (id: string, text: string) => {
 		if (sceneScriptEditorRef.current) {
 			sceneScriptEditorRef.current.replaceAltContent(id, text);
@@ -662,257 +609,6 @@ function EntityPage({ view }: { view: EntityView }) {
 			void stripAnnotationMarkerInScript(plugin, project, id);
 		}
 	};
-	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
-
-	/** Closing the popover with nothing ever added to the thread abandons the
-	 *  whole comment creation — same reasoning as `handleCreateAlt`'s own
-	 *  cancel above: a freshly inserted marker pair backed by no
-	 *  `comments[id]` entry (only `handleAddCommentReply` ever creates one)
-	 *  would otherwise sit in the document forever as a permanently-empty
-	 *  gutter icon. Checks BOTH `scriptNotes` (an existing comment, reopened)
-	 *  and `commentsWithNewEntryRef` (a reply just added this session, ahead
-	 *  of the sidecar's own async round trip). Reachable from either the
-	 *  Act's (Pages, read-only) or the Scene's (live editor) own section, so
-	 *  goes through `applyRemoveMarkers` — its own `record.type` branch
-	 *  picks the right path regardless of which page this is. */
-	const handleCloseComment = () => {
-		if (
-			openComment &&
-			!commentsWithNewEntryRef.current.has(openComment.id) &&
-			!scriptNotes.comments[openComment.id]
-		) {
-			applyRemoveMarkers(openComment.id);
-		}
-		setOpenComment(null);
-	};
-	/** Saves an EDIT to one reply's text — same reasoning as script-view.tsx's
-	 *  own `handleSaveCommentEntry`. */
-	const handleSaveCommentEntry = (id: string, index: number, text: string) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const list = notes.comments[id];
-			if (!list || index < 0 || index >= list.length) return notes;
-			const next = list.slice();
-			next[index] = { ...next[index], text, updatedAt: Date.now() };
-			return { ...notes, comments: { ...notes.comments, [id]: next } };
-		});
-	};
-	const handleToggleCommentResolved = (id: string, index: number) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const list = notes.comments[id];
-			if (!list || index < 0 || index >= list.length) return notes;
-			const existing = list[index];
-			const resolved = !existing.resolved;
-			const next = list.slice();
-			next[index] = { ...existing, resolved, resolvedAt: resolved ? Date.now() : null };
-			return { ...notes, comments: { ...notes.comments, [id]: next } };
-		});
-	};
-	/** Same reasoning as script-view.tsx's own `handleDeleteCommentEntry` — an
-	 *  empty thread also has to strip the marker pair from the document, or
-	 *  an orphaned marker with no sidecar data behind it keeps rendering as a
-	 *  live span. This page's `CommentPopover` is shared by the Act and
-	 *  Scene sections, so goes through `applyRemoveMarkers` the same way
-	 *  `handleCloseComment` above does. */
-	const handleDeleteCommentEntry = (id: string, index: number) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const list = notes.comments[id];
-			if (!list || index < 0 || index >= list.length) return notes;
-			const next = list.filter((_, i) => i !== index);
-			if (next.length === 0) {
-				const { [id]: _dropped, ...rest } = notes.comments;
-				return { ...notes, comments: rest };
-			}
-			return { ...notes, comments: { ...notes.comments, [id]: next } };
-		}).then((next) => {
-			if (!next.comments[id]) {
-				applyRemoveMarkers(id);
-				setOpenComment((prev) => (prev && prev.id === id ? null : prev));
-			}
-		});
-	};
-	const handleAddCommentReply = (id: string, text: string) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const list = notes.comments[id] ?? [];
-			const entry: CommentEntry = {
-				id,
-				text,
-				resolved: false,
-				createdAt: Date.now(),
-				updatedAt: Date.now(),
-				resolvedAt: null,
-			};
-			return { ...notes, comments: { ...notes.comments, [id]: [...list, entry] } };
-		});
-	};
-	/** The CURRENT live text between an alt-text span's markers — read from
-	 *  `sceneDraft` ONLY, not the sidecar's own stored copy: the active
-	 *  option's wording is normally edited directly in the script, not
-	 *  through `AltTextModal`, and that edit needs somewhere to land before a
-	 *  swap moves away from it. **Scene only, deliberately, since the
-	 *  modular-only editing change (2026-08-25)**: `actDraft` used to also be
-	 *  checked here, back when Act had its own live editable field — now it's
-	 *  always just a disk mirror (no live typing possible on Act's own page
-	 *  any more), so comparing an option's stored text against it doesn't
-	 *  detect a "hand-edit," it detects ordinary replication lag from the
-	 *  PREVIOUS swap's write not having round-tripped back into `actDraft`
-	 *  yet — treating that lag as a hand-edit worth preserving corrupted a
-	 *  DIFFERENT option's text with stale wording, the exact bug reported as
-	 *  "cycling turns every option into the same one" (mirrors the identical
-	 *  fix in script-view.tsx's own `handleCycleAlt`, which had no live
-	 *  editor to protect either, for the same reason). */
-	const liveAltSpanText = (id: string): string | null => {
-		const span = findAnnotationSpans(sceneDraft).find((s) => s.kind === 'alt' && s.id === id);
-		return span ? sceneDraft.slice(span.contentFrom, span.contentTo) : null;
-	};
-	const syncOutgoingAltOption = (id: string, cur: AltTextEntry): AltTextEntry => {
-		const live = liveAltSpanText(id);
-		if (live === null || live === cur.options[cur.activeIndex]) return cur;
-		const options = cur.options.slice();
-		options[cur.activeIndex] = live;
-		return { ...cur, options };
-	};
-	/** Same "compute the next index INSIDE the fresh re-read" shape as
-	 *  script-view.tsx's own `handleCycleAlt` — a click landing before
-	 *  `scriptNotes` React state has caught up with a just-written change
-	 *  would otherwise recompute the same "next" index every time and the
-	 *  cycle would stall after one step. */
-	const handleCycleAlt = (id: string) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur0 = notes.altText[id];
-			if (!cur0 || cur0.options.length === 0) return notes;
-			const cur = syncOutgoingAltOption(id, cur0);
-			const nextIndex = (cur.activeIndex + 1) % cur.options.length;
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: nextIndex } } };
-		}).then((next) => {
-			const cur = next.altText[id];
-			if (cur) applyAltContentChange(id, cur.options[cur.activeIndex]);
-		});
-	};
-	/** A row was picked as the DRAFT — clears `acceptedIndex` (choosing a
-	 *  different draft means the span is back to "still deciding"), same
-	 *  reasoning as script-view.tsx's own `handleDraftAlt`. */
-	const handleDraftAlt = (id: string, index: number) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur0 = notes.altText[id];
-			if (!cur0 || index < 0 || index >= cur0.options.length) return notes;
-			const cur = syncOutgoingAltOption(id, cur0);
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: null } } };
-		}).then((next) => {
-			const cur = next.altText[id];
-			if (cur) applyAltContentChange(id, cur.options[cur.activeIndex]);
-		});
-	};
-	/** A row was picked as the ACCEPTED, final option. */
-	const handleAcceptAlt = (id: string, index: number) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur0 = notes.altText[id];
-			if (!cur0 || index < 0 || index >= cur0.options.length) return notes;
-			const cur = syncOutgoingAltOption(id, cur0);
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: index } } };
-		}).then((next) => {
-			const cur = next.altText[id];
-			if (cur) applyAltContentChange(id, cur.options[cur.activeIndex]);
-		});
-	};
-	/** An existing option's wording was edited in place inside `AltTextModal`
-	 *  — same reasoning as script-view.tsx's own `handleEditAltOption`: if
-	 *  it's the currently ACTIVE option, the live document has to follow. */
-	const handleEditAltOption = (id: string, index: number, newText: string) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || index < 0 || index >= cur.options.length) return notes;
-			const options = cur.options.slice();
-			options[index] = newText;
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options } } };
-		}).then((next) => {
-			const cur = next.altText[id];
-			if (cur && cur.activeIndex === index) applyAltContentChange(id, newText);
-		});
-	};
-	const handleAddAltOption = (id: string, text: string) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur) return notes;
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options: [...cur.options, text] } } };
-		});
-	};
-	/** Same reasoning/renumbering as script-view.tsx's own
-	 *  `handleDeleteAltOption` — deleting down to exactly one remaining
-	 *  option strips the `[[loom-alt:<id>]]` wrapper entirely (nothing left
-	 *  to alternate between), leaving the survivor's wording as plain text,
-	 *  same as a comment thread's own "delete the last one" behavior. The
-	 *  modal awaits the resolved value to re-sync its own local list. */
-	const handleDeleteAltOption = (id: string, index: number) => {
-		if (!project) return Promise.resolve(undefined);
-		let strippedTo: string | null = null;
-		return mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || cur.options.length <= 1 || index < 0 || index >= cur.options.length) return notes;
-			const options = cur.options.slice();
-			options.splice(index, 1);
-			if (options.length <= 1) {
-				strippedTo = options[0] ?? '';
-				const { [id]: _dropped, ...rest } = notes.altText;
-				return { ...notes, altText: rest };
-			}
-			let activeIndex = cur.activeIndex;
-			if (index === activeIndex) activeIndex = Math.min(index, options.length - 1);
-			else if (index < activeIndex) activeIndex -= 1;
-			let acceptedIndex = cur.acceptedIndex;
-			if (acceptedIndex !== null) {
-				if (index === acceptedIndex) acceptedIndex = null;
-				else if (index < acceptedIndex) acceptedIndex -= 1;
-			}
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options, activeIndex, acceptedIndex } } };
-		}).then((next) => {
-			if (strippedTo !== null) {
-				applyAltContentChange(id, strippedTo);
-				applyRemoveMarkers(id);
-				return undefined;
-			}
-			const cur = next.altText[id];
-			if (cur) applyAltContentChange(id, cur.options[cur.activeIndex]);
-			return cur;
-		});
-	};
-	/** Right-click: opens `AltTextModal` (project.ts — a real closeable
-	 *  window, same as script-view.tsx's own) instead of the old truncating
-	 *  `Menu`. Reachable from both the Act's (Pages) and the Scene's (live
-	 *  editor) own section — `applyAltContentChange`/`applyRemoveMarkers`
-	 *  pick the right write path via `record.type`, closed over directly by
-	 *  the modal's callbacks since the modal is a one-shot imperative dialog
-	 *  with no need to remember it across a React re-render. */
-	const handleOpenAltMenu = (id: string) => {
-		if (!project) return;
-		const entry = scriptNotes.altText[id];
-		if (!entry) return;
-		// Patches the active row's DISPLAYED text with whatever's actually live
-		// in the document right now — same reasoning as script-view.tsx's own
-		// copy of this fix: `entry` is the sidecar's stored copy, which only
-		// catches up lazily on the next cycle/draft/accept swap, so opening
-		// the modal right after a hand-edit used to show stale wording for the
-		// active option until the next swap resynced it.
-		const { options } = syncOutgoingAltOption(id, entry);
-		new AltTextModal(plugin.app, {
-			options,
-			activeIndex: entry.activeIndex,
-			acceptedIndex: entry.acceptedIndex,
-			onDraft: (index) => handleDraftAlt(id, index),
-			onAccept: (index) => handleAcceptAlt(id, index),
-			onEditOption: (index, newText) => handleEditAltOption(id, index, newText),
-			onAddOption: (text) => handleAddAltOption(id, text),
-			onDeleteOption: (index) => handleDeleteAltOption(id, index),
-		}).open();
-	};
 	/** Feeds the scene excerpt's live-preview autocomplete the same known
 	 *  names as the main Script view — parsed from the WHOLE script, not
 	 *  just this scene's own slice, so it offers every character/location
@@ -926,21 +622,11 @@ function EntityPage({ view }: { view: EntityView }) {
 			)
 		: [];
 	/** Writes a keystroke straight into the project's shared in-memory script
-	 *  buffer (`script-buffer.ts`) — synchronous, no read-modify-write race
-	 *  window against disk at all — then schedules the background flush:
-	 *  debounced while merely typing (matches `saveDescription`/`saveBody`'s
-	 *  own idle-debounce elsewhere in this component), immediate for an
-	 *  `urgent` change. `urgent` covers undo/redo transactions specifically
-	 *  — a real, reported bug this exists to fix: pasting a branch, undoing
-	 *  it (Ctrl+Z), then pasting again before a debounced write had reached
-	 *  disk used to read stale (pre-undo) content, since the undo only ever
-	 *  reverted the LOCAL CM6 buffer while disk still held the old text —
-	 *  silently reviving the "undone" branch and leaving two instead of one.
-	 *  Replaces the old `saveSceneScript`/`commitSceneScript` pair and the
-	 *  local `sceneBody` override they existed to protect: `scriptText` (the
-	 *  buffer itself, via `useScriptBuffer` above) now reflects every
-	 *  keystroke immediately, so `sceneDraft` below reads straight off it —
-	 *  nothing left to reconcile on blur. */
+	 *  buffer (`script-buffer.ts`) — synchronous, so `sceneDraft` reads it back
+	 *  immediately — then schedules the background flush: debounced while
+	 *  typing, immediate for an `urgent` change (undo/redo — see
+	 *  `FountainField`'s `onChange` doc: a later action reading pre-undo text
+	 *  back from disk would revive what was undone). */
 	const writeSceneScript = (sceneId: string, proj: ProjectDef, value: string, urgent: boolean) => {
 		mutateScriptBuffer(plugin, proj, (raw) => replaceSceneBody(raw, sceneId, value));
 		scheduleFlush(plugin, proj, urgent ? undefined : { debounceMs: 600 });
@@ -951,10 +637,11 @@ function EntityPage({ view }: { view: EntityView }) {
 	 *  time" preference the main Script view keeps under `loom-script-mode:`,
 	 *  just keyed separately since a Scene note's own excerpt view is a
 	 *  distinct surface from the whole-script one. */
-	const [sceneScriptMode, setSceneScriptMode] = useState<'script' | 'pages' | 'outline'>(() => {
-		const saved = record ? window.localStorage.getItem(`loom-scene-script-mode:${record.path}`) : null;
-		return saved === 'pages' || saved === 'outline' ? saved : 'script';
-	});
+	const [sceneScriptMode, setSceneScriptMode] = usePersistedChoice(
+		record ? `loom-scene-script-mode:${record.path}` : null,
+		['script', 'pages', 'outline'] as const,
+		'script'
+	);
 	const [sceneScriptQuery, setSceneScriptQuery] = useState('');
 	const [sceneScriptMatchIndex, setSceneScriptMatchIndex] = useState(0);
 	const sceneScriptEditorRef = useRef<FountainFieldHandle | null>(null);
@@ -991,31 +678,15 @@ function EntityPage({ view }: { view: EntityView }) {
 	useEffect(() => {
 		setPendingBranchTitleFocusId(null);
 	}, [record?.path]);
-	/** Applies a patch to one draft and, once its required fields are all
-	 *  filled, transitions it to a real branch (`insertBranch`, fountain.ts)
-	 *  through `mutateScriptBufferAndFlush` — operating on the live shared
-	 *  buffer, which already reflects every keystroke `sceneDraft`'s own
-	 *  field has made (typing writes into the buffer synchronously, see
-	 *  `writeSceneScript` above), so there's nothing to reconcile here: no
-	 *  stale-disk-read window the way a fresh `vault.read` could once have
-	 *  left open. */
-	/** A draft field changed — updates state only, never commits. Committing
-	 *  used to happen automatically the instant `title`/`identifier`/
-	 *  `subidentifier` all became non-empty, which meant typing the FIRST
-	 *  character of whichever of the three happened to be filled in LAST
-	 *  wrote the branch immediately, mid-keystroke, before the user had
-	 *  finished typing that field — a real, reported complaint. Committing
-	 *  is now exclusively `handleCommitBranchDraft`'s job, fired only by the
-	 *  draft's own explicit "Create" button. */
+	/** A draft field changed — updates state only, never commits; committing
+	 *  is `handleCommitBranchDraft`'s job (the draft's explicit "Create"
+	 *  button), so a branch is never written mid-keystroke. */
 	const handleBranchDraftField = (id: string, patch: Partial<BranchDraft>) => {
 		setBranchDrafts((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
 	};
 	/** The draft's own "Create" button — the one place a `new-group` draft
-	 *  actually becomes a real branch (see `handleBranchDraftField`'s own
-	 *  doc comment for why this is no longer automatic). A no-op if the
-	 *  required fields (title/identifier/subidentifier) aren't all filled —
-	 *  the button itself is disabled in that state too, this is just the
-	 *  same guard against a stale click racing a field clearing back out. */
+	 *  becomes a real branch. A no-op unless title/identifier/subidentifier are
+	 *  all filled (the button is disabled then too; this guards a stale click). */
 	const handleCommitBranchDraft = (id: string) => {
 		const draft = branchDrafts.find((d) => d.id === id);
 		if (!draft) return;
@@ -1055,50 +726,19 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!id) return;
 		setBranchDrafts((prev) => [...prev, { id, title: '', identifier: '', subidentifier: '', numberOverride: '' }]);
 	};
-	/** The group's own "+" — writes a real new branch to the document
-	 *  IMMEDIATELY (no draft/staging step at all), titled with a literal
-	 *  `'Untitled'` placeholder, then focuses its Title field
-	 *  (`pendingBranchTitleFocusId`, claimed by `BranchHeaderRowWidget`'s own
-	 *  `autoFocusEmpty`, fountain-field.tsx, which shows that field blank
-	 *  rather than literally "Untitled" until something is actually typed).
+	/** The group's own "+" — writes a real new branch IMMEDIATELY (no draft),
+	 *  titled with a literal `'Untitled'` placeholder, then focuses its Title
+	 *  field (`pendingBranchTitleFocusId`, claimed by `BranchHeaderRowWidget`'s
+	 *  `autoFocusEmpty`, which shows the field blank until something is typed).
+	 *  A join-existing-group branch inherits identifier/subidentifier/number
+	 *  from the group, so there's nothing to fill in first.
 	 *
-	 *  This USED TO stage a `kind: 'new-branch'` draft instead, committed
-	 *  only once its Title field's `ready` check passed — which, for a
-	 *  join-existing-group branch, needed nothing but a non-empty title, so
-	 *  it silently became a real section the instant the FIRST character
-	 *  landed in that field: a visible, jarring "the card you're typing into
-	 *  just turned into a different card" moment (a real, reported
-	 *  complaint) despite the panel looking identical before and after.
-	 *  Creating it for real up front and masking the placeholder instead
-	 *  removes that mode switch entirely — the card is always the SAME real
-	 *  card, start to finish.
-	 *
-	 *  No `ready`/ `insertBranch`-on-edit path is needed here the way
-	 *  `handleBranchDraftField` still has for a brand-new decision point
-	 *  (`new-group`, from the editor's own right-click) — unlike that case,
-	 *  a join-existing-group branch has nothing else to fill in first
-	 *  (`identifier`/`subidentifier`/`numberOverride` are inherited verbatim
-	 *  from the group, never composed), so there was never a real reason to
-	 *  wait.
-	 *
-	 *  **The new section's id is rolled HERE, synchronously, not learned by
-	 *  re-parsing the file after the write lands** — a real, reported bug
-	 *  from the first version of this, and if anything MORE load-bearing
-	 *  now than when it was fixed: `mutateScriptBufferAndFlush`'s own
-	 *  `mutateScriptBuffer` half notifies every subscriber of the shared
-	 *  buffer SYNCHRONOUSLY, before any disk I/O even starts — so the Scene
-	 *  page's own reactive `scriptText` (`useScriptBuffer`) can re-render
-	 *  and mount the new card before this function's `await` on the
-	 *  eventual disk flush has even had a chance to return. Rolling the id
-	 *  up front and calling `setPendingBranchTitleFocusId` BEFORE that first
-	 *  synchronous mutation guarantees it's already in React state by the
-	 *  time any reactive re-render — however fast — could possibly mount
-	 *  that card; without it, `BranchHeaderRowWidget`'s masked-blank display
-	 *  would seed from a still-`null` pending id and show the literal
-	 *  `'Untitled'` text instead of masking it. `insertBranch` (fountain.ts)
-	 *  re-validates the id against the actual `parsed` set at write time
-	 *  regardless (its own `id?` doc comment), so a caller-supplied id is
-	 *  never trusted blindly. */
+	 *  **The new section's id is rolled HERE, synchronously.**
+	 *  `mutateScriptBufferAndFlush` notifies buffer subscribers before any disk
+	 *  I/O, so the Scene page can re-render and mount the new card before this
+	 *  function's `await` returns; setting the pending-focus id first means the
+	 *  widget never seeds from a `null` id and shows the literal 'Untitled'.
+	 *  `insertBranch` still re-validates the id against `parsed`. */
 	const handleAddBranch = async (groupId: string) => {
 		if (!project || !scriptParsed) return;
 		const newId = freshLoomId(collectLoomIds(scriptParsed.scenes, scriptParsed.sections, scriptParsed.pageBreaks));
@@ -1122,25 +762,13 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project) return;
 		void mutateScriptBufferAndFlush(plugin, project, (raw) => setBranchTagValue(raw, groupId, newValue));
 	};
-	/** Cuts a whole decision point, then hands the field's own new body
-	 *  straight to `replaceBody` (fountain-field.tsx) once the write lands —
-	 *  the SAME direct imperative sync `handlePasteBranchGroupInScene` below
-	 *  already uses, not the normal reactive `scriptText`/passive-`value`-prop
-	 *  round trip. Needed for the identical reason that field's own doc
-	 *  comment on `pasteBranchGroup`'s treatment explains, PLUS one more:
-	 *  this write is triggered from the right-click menu's own "Cut branch
-	 *  group" item, and Obsidian's `Menu` items are plain non-focusable divs
-	 *  — clicking one never blurs the field, so the passive external-sync
-	 *  effect (which only ever applies a changed `value` prop while
-	 *  UNFOCUSED) never gets a chance to run at all, leaving the cut branch
-	 *  still visibly sitting there until some LATER, unrelated blur. A real,
-	 *  reported bug ("I click and nothing happens") — `fountain-field.tsx`'s
-	 *  own `openContextMenu` already documents this exact class of problem
-	 *  and its fix for "Paste branch group"; this mirrors it. The cursor
-	 *  lands roughly where the removed group used to start (`bounds.start`,
-	 *  read from the PRE-cut parse, mapped into the scene's own body-relative
-	 *  line space) — `replaceBody` clamps it into range regardless, so this
-	 *  doesn't need to be exact. */
+	/** Cuts a whole decision point, then hands the field's new body straight to
+	 *  `replaceBody` (fountain-field.tsx) once the write lands, like
+	 *  `handlePasteBranchGroupInScene` below: it's triggered from a right-click
+	 *  menu item, which never blurs the field, so the focus-gated external
+	 *  sync wouldn't run until some later blur. The cursor lands roughly where
+	 *  the removed group started (`bounds.start` from the pre-cut parse, in the
+	 *  scene's body-relative lines); `replaceBody` clamps it. */
 	const handleCutBranchGroupInScene = (groupId: string) => {
 		if (!project) return;
 		let newBody: string | null = null;
@@ -1205,20 +833,10 @@ function EntityPage({ view }: { view: EntityView }) {
 			});
 		});
 	};
-	/** Pastes a cut-or-copied decision point, then hands the field's own new
-	 *  body straight to `replaceBody` (fountain-field.tsx) once the write
-	 *  lands — a direct imperative sync, not the normal reactive
-	 *  `scriptText`/passive-`value`-prop round trip. Needed because this is
-	 *  triggered from the right-click menu's own "Paste branch group" item,
-	 *  and Obsidian's `Menu` items are plain non-focusable divs — clicking
-	 *  one never blurs the field, so the passive external-sync effect
-	 *  (which only ever applies a changed `value` prop while UNFOCUSED)
-	 *  never gets a chance to run at all; without this, the pasted group
-	 *  would sit invisible until some LATER, unrelated blur (the exact bug
-	 *  `handleCutBranchGroupInScene`, above, was separately found and fixed
-	 *  for). Computing the new body directly from `result.text` inside
-	 *  `apply` and pushing it into the field ourselves sidesteps the
-	 *  focus-gated sync entirely. */
+	/** Pastes a cut-or-copied decision point, then pushes the field's new body
+	 *  (computed from `result.text` inside `apply`) straight into `replaceBody`
+	 *  — the menu item never blurs the field, so the focus-gated external sync
+	 *  wouldn't show the pasted group until some later blur. */
 	const handlePasteBranchGroupInScene = (line: number) => {
 		if (!project) return;
 		const block = getBranchClipboard();
@@ -1274,24 +892,20 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** Same per-note pane memory as `sceneScriptMode` above, own key since a
 	 *  Act note's excerpt is its own separate surface too. No Script mode —
 	 *  Act lost its own editable field, so only Pages/Outline remain. */
-	const [actScriptMode, setActScriptMode] = useState<'pages' | 'outline'>(() => {
-		const saved = record ? window.localStorage.getItem(`loom-act-script-mode:${record.path}`) : null;
-		return saved === 'outline' ? saved : 'pages';
-	});
+	const [actScriptMode, setActScriptMode] = usePersistedChoice(
+		record ? `loom-act-script-mode:${record.path}` : null,
+		['pages', 'outline'] as const,
+		'pages'
+	);
 	const [actScriptQuery, setActScriptQuery] = useState('');
 	const [actScriptMatchIndex, setActScriptMatchIndex] = useState(0);
 	const actScriptPagesRef = useRef<HTMLDivElement | null>(null);
 	/** Same as `sceneScriptTabsRef`, for the Act page's own Script section. */
 	const actScriptTabsRef = useRef<HTMLDivElement | null>(null);
-	/** `openComment.rect` is a one-time snapshot — without this, scrolling
-	 *  the Scene/Act Script section left the popover floating in the same
-	 *  screen spot while the commented text scrolled out from under it. Same
-	 *  live-tracking approach as the main Script view's own copy of this
-	 *  effect (script-view.tsx): re-measure the icon's rect on every scroll
-	 *  and follow it, closing if the icon can no longer be found. Only one of
-	 *  the Scene/Act sections is ever mounted at a time, so trying every
-	 *  container is safe — exactly the "chain of ??" pattern
-	 *  `handleCreateComment` above already uses. */
+	/** `openComment.rect` is a one-time snapshot: re-measure the icon on every
+	 *  scroll and follow it, closing if it's gone (same as the main Script
+	 *  view). Only one of the Scene/Act sections is mounted at a time, so
+	 *  trying every container is safe. */
 	useEffect(() => {
 		if (!openComment) return;
 		const id = openComment.id;
@@ -1328,8 +942,10 @@ function EntityPage({ view }: { view: EntityView }) {
 			}
 			setOpenComment((prev) => (prev && prev.id === id ? { id, rect } : prev));
 		};
-		document.addEventListener('scroll', track, true);
-		return () => document.removeEventListener('scroll', track, true);
+		// The popover was just opened by a click, so the active window is its own.
+		const ownerDoc = activeDocument;
+		ownerDoc.addEventListener('scroll', track, true);
+		return () => ownerDoc.removeEventListener('scroll', track, true);
 	}, [openComment?.id]);
 	/** Same collapsible nav panel as the main Script view, scoped to just this
 	 *  scene's/act's own bounded tree — rendered INSIDE the editor box
@@ -1340,27 +956,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [actNavOpen, setActNavOpen] = useState(false);
 	const writeFm = useFrontmatterWriter(plugin, file);
 
-	useEffect(() => {
-		if (!sceneNavOpen) return;
-		const onDown = (e: MouseEvent) => {
-			const el = e.target as HTMLElement | null;
-			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle')) return;
-			setSceneNavOpen(false);
-		};
-		document.addEventListener('mousedown', onDown);
-		return () => document.removeEventListener('mousedown', onDown);
-	}, [sceneNavOpen]);
-
-	useEffect(() => {
-		if (!actNavOpen) return;
-		const onDown = (e: MouseEvent) => {
-			const el = e.target as HTMLElement | null;
-			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle')) return;
-			setActNavOpen(false);
-		};
-		document.addEventListener('mousedown', onDown);
-		return () => document.removeEventListener('mousedown', onDown);
-	}, [actNavOpen]);
+	const NAV_INSIDE = '.loom-script-nav, .loom-script-nav-toggle';
+	const BUBBLE_MOUSEDOWN = { event: 'mousedown', capture: false } as const;
+	useCloseOnOutsideClick(NAV_INSIDE, sceneNavOpen, () => setSceneNavOpen(false), BUBBLE_MOUSEDOWN);
+	useCloseOnOutsideClick(NAV_INSIDE, actNavOpen, () => setActNavOpen(false), BUBBLE_MOUSEDOWN);
 
 	// `scriptText` is in the dependency list for the same reason the main
 	// Script view's identical effect needs `text`: on the initial-open restore
@@ -1408,17 +1007,6 @@ function EntityPage({ view }: { view: EntityView }) {
 		sceneScriptEditorRef.current?.selectRange(range.from, range.to);
 	}, [sceneScriptMode]);
 
-	// Persists the Scene/Act pane memory above — separate from the read,
-	// which only needs to happen once (the lazy `useState` initializers),
-	// while these need to re-fire on every later switch.
-	useEffect(() => {
-		if (!record) return;
-		window.localStorage.setItem(`loom-scene-script-mode:${record.path}`, sceneScriptMode);
-	}, [record?.path, sceneScriptMode]);
-	useEffect(() => {
-		if (!record) return;
-		window.localStorage.setItem(`loom-act-script-mode:${record.path}`, actScriptMode);
-	}, [record?.path, actScriptMode]);
 
 	/** Comments/Alternatives browser panels — same overlaid side-panel slot as
 	 *  the nav toggle, one independent pair per Act/Scene section (only
@@ -1440,26 +1028,14 @@ function EntityPage({ view }: { view: EntityView }) {
 		setActCommentsPanelOpen(panel === 'comments');
 		setActAltPanelOpen(panel === 'alt');
 	};
-	useEffect(() => {
-		if (!sceneCommentsPanelOpen && !sceneAltPanelOpen) return;
-		const onDown = (e: MouseEvent) => {
-			const el = e.target as HTMLElement | null;
-			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle, .loom-script-side-toggles')) return;
-			openSceneSidePanel(null);
-		};
-		document.addEventListener('mousedown', onDown);
-		return () => document.removeEventListener('mousedown', onDown);
-	}, [sceneCommentsPanelOpen, sceneAltPanelOpen]);
-	useEffect(() => {
-		if (!actCommentsPanelOpen && !actAltPanelOpen) return;
-		const onDown = (e: MouseEvent) => {
-			const el = e.target as HTMLElement | null;
-			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle, .loom-script-side-toggles')) return;
-			openActSidePanel(null);
-		};
-		document.addEventListener('mousedown', onDown);
-		return () => document.removeEventListener('mousedown', onDown);
-	}, [actCommentsPanelOpen, actAltPanelOpen]);
+	const SIDE_INSIDE = '.loom-script-nav, .loom-script-nav-toggle, .loom-script-side-toggles';
+	useCloseOnOutsideClick(
+		SIDE_INSIDE,
+		sceneCommentsPanelOpen || sceneAltPanelOpen,
+		() => openSceneSidePanel(null),
+		BUBBLE_MOUSEDOWN
+	);
+	useCloseOnOutsideClick(SIDE_INSIDE, actCommentsPanelOpen || actAltPanelOpen, () => openActSidePanel(null), BUBBLE_MOUSEDOWN);
 
 	/** Label a record is searched/shown by in free-text draft inputs: the
 	 *  display name — for sessions, their formatted date (their file name is
@@ -1544,6 +1120,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (open) openSessionGraphs.add(file.path);
 		else openSessionGraphs.delete(file.path);
 	};
+	const graphSectionRef = useRef<HTMLDivElement | null>(null);
 	const [questsOpen, setQuestsOpen] = useState<{
 		active: boolean;
 		resolvedThis: boolean;
@@ -1559,12 +1136,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [hubFilter, setHubFilter] = useState<Record<string, EntityType | null>>({});
 	/** Live reorder of entity lists by loomSeq (session-page events + quests);
 	 *  `group` scopes the slide so only the dragged list moves. */
-	const [seqDrag, setSeqDrag] = useState<{ group: string; from: number; over: number; dy: number } | null>(
-		null
-	);
-	/** `mids` = each row's viewport-Y center, snapshotted at grab time so the
-	 *  target index reads off the *static* layout (immune to the live slide). */
-	const seqDragRef = useRef<{ startY: number; slot: number; mids: number[] } | null>(null);
+	const { drag: seqDrag, rowStyle: seqRowStyle, grip: seqDragGrip } = useSeqDrag();
 	/** Quest-card grid reorder (timeline-style): the grabbed card rides the
 	 *  cursor while the rest stay put; a portalled bar previews the drop slot.
 	 *  `over` is the insertion index among the *other* cards, read from a static
@@ -1581,8 +1153,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		null
 	);
 	/** Live reorder of the active objectives list (indices within that sublist). */
-	const [objDrag, setObjDrag] = useState<{ from: number; over: number; dy: number } | null>(null);
-	const objDragRef = useRef<{ startY: number; slot: number; mids: number[] } | null>(null);
+	const { drag: objDrag, rowStyle: objDragRowStyle, grip: objDragGrip } = useSeqDrag('data-obj-row');
 
 	// A freshly created note opens before metadataCache has indexed it, so the
 	// record can arrive one tick after mount — seed the drafts then.
@@ -1609,7 +1180,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!file) return;
 		let cancelled = false;
 		void plugin.app.vault.cachedRead(file).then((data) => {
-			if (!cancelled) setBody(data.replace(FRONTMATTER_RE, ''));
+			if (!cancelled) setBody(stripFrontmatter(data));
 		});
 		return () => {
 			cancelled = true;
@@ -1629,19 +1200,17 @@ function EntityPage({ view }: { view: EntityView }) {
 		[plugin, project, version]
 	);
 
-	const saveBody = useMemo(() => {
-		let timer = 0;
-		return (value: string) => {
-			window.clearTimeout(timer);
-			timer = window.setTimeout(() => {
-				if (!file) return;
-				void plugin.app.vault.process(file, (data) => {
-					const m = FRONTMATTER_RE.exec(data);
-					return (m ? m[0] : '') + value;
-				});
-			}, 600);
-		};
-	}, [plugin, file]);
+	const saveBody = useMemo(
+		() =>
+			debounce(
+				(value: string) => {
+					if (file) void writeNoteBody(plugin.app, file, value);
+				},
+				600,
+				true
+			),
+		[plugin, file]
+	);
 
 	// Description commits on idle (the markdown field has no blur-style
 	// moment that reliably fires before navigation).
@@ -1659,10 +1228,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	};
 
 	/** Act's own Preview's right-click "Open this chapter" (`ActChapterBlocks`'s
-	 *  `onOpenChapter`, via `MarkdownField`'s own contextmenu handler) —
-	 *  `Book`'s own `openThisChapter` (book-view.tsx), shared rather than
-	 *  duplicated a second time (found byte-identical to a copy that used to
-	 *  live here). */
+	 *  `onOpenChapter`) — book-view.tsx's `openThisChapter`. */
 	const openThisChapterFromAct = (chapterId: string, offset: number) =>
 		openThisChapter(plugin, project, view, chapterId, offset);
 
@@ -1709,13 +1275,6 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** Named by the script rather than here — see the Name field. */
 	const scriptNamed =
 		scriptMode && (record.type === 'act' ? record.actId !== '' : record.sceneId !== '');
-	/** Named by the Book rather than here, Prose's own counterpart to
-	 *  `scriptNamed` — an Act/Chapter note IS its stretch of the
-	 *  `.loomprose` file the same way a Scene/Act note is its stretch of the
-	 *  script. */
-	const bookNamed =
-		bookMode &&
-		(record.type === 'act' ? record.actId !== '' : record.type === 'chapter' ? record.chapterId !== '' : false);
 	const sceneActRecord =
 		record.sceneAct !== '' ? plugin.indexer.resolve(record.sceneAct, record.path) : null;
 	const chapterActRecord =
@@ -1754,37 +1313,55 @@ function EntityPage({ view }: { view: EntityView }) {
 	/** Script-recognized cast — `loomSceneCast`, derived from the script's own
 	 *  character cues by `syncScenes`, shown read-only (editing a scene's cast
 	 *  means writing the dialogue that names them, not this list). */
-	const sceneCastRecords = record.sceneCast
-		.map((lp) => plugin.indexer.resolve(lp, record.path))
-		.filter((r): r is EntityRecord => r != null);
+	const sceneCastRecords = plugin.indexer.resolveAll(record.sceneCast, record.path);
 	/** Factions/Items/other-Locations named via `@[...]` in this scene's
 	 *  text — same read-only, script-derived shape as `sceneCastRecords`. */
-	const sceneFactionRecords = record.sceneFactions
-		.map((lp) => plugin.indexer.resolve(lp, record.path))
-		.filter((r): r is EntityRecord => r != null);
-	const sceneItemRecords = record.sceneItems
-		.map((lp) => plugin.indexer.resolve(lp, record.path))
-		.filter((r): r is EntityRecord => r != null);
-	const sceneMentionedLocationRecords = record.sceneMentionedLocations
-		.map((lp) => plugin.indexer.resolve(lp, record.path))
-		.filter((r): r is EntityRecord => r != null);
+	const sceneFactionRecords = plugin.indexer.resolveAll(record.sceneFactions, record.path);
+	const sceneItemRecords = plugin.indexer.resolveAll(record.sceneItems, record.path);
+	const sceneMentionedLocationRecords = plugin.indexer.resolveAll(record.sceneMentionedLocations, record.path);
 	/** Book-recognized cast/factions/items/mentioned-locations — `loomChapterCast`
 	 *  etc., derived from a plain `[[...]]` wikilink anywhere in the chapter's
 	 *  own text by `syncActsChapters`, shown read-only (same "the writing
 	 *  itself is the source" reasoning as `sceneCastRecords`, just reading
 	 *  Prose's native wikilink syntax instead of Fountain's `@[...]`). */
-	const chapterCastRecords = record.chapterCast
-		.map((lp) => plugin.indexer.resolve(lp, record.path))
-		.filter((r): r is EntityRecord => r != null);
-	const chapterFactionRecords = record.chapterFactions
-		.map((lp) => plugin.indexer.resolve(lp, record.path))
-		.filter((r): r is EntityRecord => r != null);
-	const chapterItemRecords = record.chapterItems
-		.map((lp) => plugin.indexer.resolve(lp, record.path))
-		.filter((r): r is EntityRecord => r != null);
-	const chapterMentionedLocationRecords = record.chapterMentionedLocations
-		.map((lp) => plugin.indexer.resolve(lp, record.path))
-		.filter((r): r is EntityRecord => r != null);
+	const chapterCastRecords = plugin.indexer.resolveAll(record.chapterCast, record.path);
+	const chapterFactionRecords = plugin.indexer.resolveAll(record.chapterFactions, record.path);
+	const chapterItemRecords = plugin.indexer.resolveAll(record.chapterItems, record.path);
+	const chapterMentionedLocationRecords = plugin.indexer.resolveAll(record.chapterMentionedLocations, record.path);
+	type EntityGroups = readonly (readonly [EntityType, EntityRecord[]])[];
+	const sceneEntityGroups: EntityGroups = [
+		['character', sceneCastRecords],
+		['faction', sceneFactionRecords],
+		['location', sceneMentionedLocationRecords],
+		['item', sceneItemRecords],
+	];
+	const chapterEntityGroups: EntityGroups = [
+		['character', chapterCastRecords],
+		['faction', chapterFactionRecords],
+		['location', chapterMentionedLocationRecords],
+		['item', chapterItemRecords],
+	];
+	const noEntities = (groups: EntityGroups) => groups.every(([, rs]) => rs.length === 0);
+	/** The Scene/Chapter page's read-only "Entities in the …" column — one chip
+	 *  group per non-empty type; `null` when there's nothing (the grid goes solo). */
+	const entitiesColumn = (label: string, groups: EntityGroups) =>
+		noEntities(groups) ? null : (
+			<div className="loom-scene-act-right">
+				<span className="loom-field-label">{label}</span>
+				{groups.map(([type, records]) =>
+					records.length === 0 ? null : (
+						<div key={type} className="loom-scene-entity-group">
+							<span className="loom-field-sublabel">{entityPlural(type)}</span>
+							<div className="loom-tag-row">
+								{records.map((r) => (
+									<EntityChip key={r.path} plugin={plugin} record={r} onOpen={() => view.openEntity(r.path)} />
+								))}
+							</div>
+						</div>
+					)
+				)}
+			</div>
+		);
 	const sceneExcerpt = sceneScriptText(scriptText, record.sceneId);
 	/** This scene's own mini nav panel: whatever `##`+ (branch or ordinary)
 	 *  sections exist inside its own line span, using the exact same
@@ -1843,30 +1420,12 @@ function EntityPage({ view }: { view: EntityView }) {
 		const section = sceneExcerptParsed.sections.find((s) => s.line === node.line);
 		if (!section) return '—';
 		const end = nextSectionAtLevel(sceneExcerptParsed, section.line, section.level) ?? Infinity;
-		const hits: number[] = [];
-		sceneBodyPages.forEach((els, i) => {
-			if (els.some((el) => el.line >= section.line && el.line < end)) hits.push(i + 1);
-		});
-		if (hits.length === 0) return '—';
-		const first = hits[0];
-		const last = hits[hits.length - 1];
-		return first === last ? String(first) : `${first}–${last}`;
+		return pageRange(sceneBodyPages, section.line, end);
 	};
-	const sceneElementSpan = (el: ParsedScript['elements'][number]) =>
-		el.type === 'dialogue' ? el.text.split('\n').length : 1;
 	/** `bodyLine` is 0-based against `sceneDraft` (what `FountainField.getTopLine`
 	 *  returns); translated to the excerpt's own line numbering before matching
 	 *  against `sceneBodyPages`. */
-	const scenePageOfLine = (bodyLine: number) => {
-		const line = bodyLine + sceneBodyLineOffset;
-		for (let i = 0; i < sceneBodyPages.length; i++) {
-			if (sceneBodyPages[i].some((el) => line >= el.line && line < el.line + sceneElementSpan(el))) return i + 1;
-		}
-		for (let i = 0; i < sceneBodyPages.length; i++) {
-			if (sceneBodyPages[i].some((el) => el.line > line)) return i + 1;
-		}
-		return Math.max(1, sceneBodyPages.length);
-	};
+	const scenePageOfLine = (bodyLine: number) => pageOfLine(sceneBodyPages, bodyLine + sceneBodyLineOffset);
 	const sceneLineOfPage = (page: number) => {
 		const idx = page - 1;
 		if (idx < 0 || idx >= sceneBodyPages.length) return 0;
@@ -1908,27 +1467,13 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!actExcerptParsed) return '—';
 		const scene = actExcerptParsed.scenes[index];
 		if (!scene) return '—';
-		const end = sceneEndLine(actExcerptParsed, scene);
-		const hits: number[] = [];
-		actBodyPages.forEach((els, i) => {
-			if (els.some((el) => el.line >= scene.line && el.line < end)) hits.push(i + 1);
-		});
-		if (hits.length === 0) return '—';
-		const first = hits[0];
-		const last = hits[hits.length - 1];
-		return first === last ? String(first) : `${first}–${last}`;
+		return pageRange(actBodyPages, scene.line, sceneEndLine(actExcerptParsed, scene));
 	};
 	/** Act pages: the scenes pointing at this act, in script order. */
-	const actScenes = plugin.indexer
-		.getAll('scene', record.project)
-		.filter((sc) => sc.sceneAct !== '' && plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === record.path)
-		.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+	const actScenes = plugin.indexer.membersOfAct(record, 'scene').sort(bySeq);
 	/** Prose Act page: the chapters pointing at this act, in book order —
 	 *  mirrors `actScenes` above. */
-	const actChapters = plugin.indexer
-		.getAll('chapter', record.project)
-		.filter((c) => c.chapterAct !== '' && plugin.indexer.resolve(c.chapterAct, c.path)?.path === record.path)
-		.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+	const actChapters = plugin.indexer.membersOfAct(record, 'chapter').sort(bySeq);
 	/** Act's own browse-all panel row data — computed PER CHAPTER (each via
 	 *  its own `chapterBookText` slice, the same text `ActChapterBlocks`
 	 *  itself renders from) and concatenated, rather than run once over the
@@ -1980,7 +1525,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	// sequence. Computed live (never stored), so it self-corrects when one is
 	// deleted or reordered. Ties fall back to creation time, then path.
 	const anchorKey = (r: EntityRecord) =>
-		kindFeatures.anchorOrder === 'sequence' ? r.seq ?? r.created : r.date?.sortKey ?? 0;
+		kindFeatures.anchorOrder === 'sequence' ? seqKey(r) : r.date?.sortKey ?? 0;
 	const sessionNumber = isSession
 		? [...sessions]
 				.sort(
@@ -2002,34 +1547,20 @@ function EntityPage({ view }: { view: EntityView }) {
 		key: string,
 		apply: (arr: unknown[]) => unknown[] | void
 	) => {
-		const f = plugin.app.vault.getFileByPath(path);
-		if (!f) return;
-		plugin.app.fileManager
-			.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				const cur = fmLoomValue(fm, key);
-				const arr = Array.isArray(cur) ? cur : [];
-				setLoomKey(fm, key, apply(arr) ?? arr);
-			})
-			.catch((e) => {
-				console.error(`Loom Loom: failed to update ${key}`, e);
-				new Notice(t('view.entity.common.saveFailed'));
-			});
+		writeFmAt(plugin.app, path, (fm) => editLoomList(fm, key, apply)).catch((e) => {
+			console.error(`Loom Loom: failed to update ${key}`, e);
+			new Notice(t('view.entity.common.saveFailed'));
+		});
 	};
 
 	/** Renames the file to its managed name and stores the entered display
 	 *  name (`loomName` + a native alias so [[…]] autocomplete finds it).
 	 *
-	 *  Guarded against re-entrant calls (`commitNameInFlightRef`): the Name
-	 *  input commits on BOTH Enter (below) and blur, and pressing Enter then
-	 *  clicking/tabbing away fires both in quick succession — a real,
-	 *  reported bug for Chapter/Act (whose commit cascades into
-	 *  `editBookAndSync` → `syncActsChapters`, itself several awaited
-	 *  `processFrontMatter`/`renameFile` calls across multiple notes): two
-	 *  unqueued, concurrent runs of that cascade could race on the SAME
-	 *  files — one run's `renameFile` landing while the other's own
-	 *  `existingChapters` snapshot (read once at that run's own start) still
-	 *  pointed at the pre-rename path, silently dropping that run's write
-	 *  and leaving the title looking reverted once the dust settled. */
+	 *  Guarded against re-entry (`commitNameInFlightRef`): the Name input
+	 *  commits on both Enter and blur, and for a Chapter/Act the commit
+	 *  cascades through `editBookAndSync` → `syncActsChapters` (several awaited
+	 *  renames/frontmatter writes); two concurrent runs could race on the same
+	 *  files and drop a rename. */
 	const commitName = async () => {
 		if (commitNameInFlightRef.current) return;
 		const entered = name.trim();
@@ -2053,7 +1584,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				record.type === 'location' && record.parentLocation !== null
 					? plugin.indexer.resolve(record.parentLocation, record.path)?.name
 					: undefined;
-			const base = entityFileName(project, record.type, entered, parentName);
+			const base = managedEntityFileName(project.name, record.type, entered, parentName);
 			const parent = file.parent?.path ?? '';
 			const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
 			if (newPath !== file.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
@@ -2139,7 +1670,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			}
 		});
 		if (record.type === 'session' && project && value !== '') {
-			const base = sessionFileName(project, value);
+			const base = managedSessionFileName(project.name, value);
 			const parent = file.parent?.path ?? '';
 			const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
 			if (newPath !== file.path && !plugin.app.vault.getAbstractFileByPath(newPath)) {
@@ -2374,14 +1905,10 @@ function EntityPage({ view }: { view: EntityView }) {
 	};
 
 	/**
-	 * The Sublocation field's own blur handler — clearing it (while one was
-	 * actually linked) used to just detach it from this scene's heading and
-	 * leave the sublocation's own note behind, orphaned but still sitting in
-	 * the vault. Now it asks first, since "clear the field" reads as "I don't
-	 * want this sublocation" rather than "keep the note around unreferenced".
-	 * Reverts the field immediately (so it doesn't sit visually empty while
-	 * the vault still points at the old sublocation) and only actually clears
-	 * it — deleting the note — if the user confirms.
+	 * The Sublocation field's own blur handler. Clearing a linked sublocation
+	 * asks first — "clear the field" reads as "I don't want this sublocation",
+	 * so confirming deletes its note. The field reverts immediately and is
+	 * only actually cleared on confirm.
 	 */
 	const commitSceneSubBlur = () => {
 		const currentSub = initialSceneLocationParent ? initialSceneLocation : null;
@@ -2395,13 +1922,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			).then((ok) => {
 				if (!ok) return;
 				setSceneSub('');
-				void commitSceneLocation().then(() => {
-					const f = plugin.app.vault.getFileByPath(currentSub.path);
-					if (!f) return;
-					void purgeEntityReferences(plugin, currentSub.path, currentSub.project).finally(() =>
-						plugin.app.fileManager.trashFile(f)
-					);
-				});
+				void commitSceneLocation().then(() => deleteEntityNote(plugin, currentSub));
 			});
 			return;
 		}
@@ -2495,63 +2016,11 @@ function EntityPage({ view }: { view: EntityView }) {
 	// Objective reorder (active sublist): live sliding modeled on the sublocation
 	// grip. `active`/`resolved` are the two draft partitions; a drop rewrites the
 	// stored list as reordered-actives followed by the resolved ones.
-	const objRowStyle = (i: number): CSSProperties | undefined => {
-		if (!objDrag) return undefined;
-		const slot = objDragRef.current?.slot ?? 40;
-		if (objDrag.from === i)
-			return { transform: `translateY(${objDrag.dy}px)`, position: 'relative', zIndex: 2 };
-		const { from, over } = objDrag;
-		let sh = 0;
-		if (from < i && i <= over) sh = -1;
-		else if (over <= i && i < from) sh = 1;
-		return sh !== 0 ? { transform: `translateY(${sh * slot}px)` } : undefined;
-	};
-	const objGrip = (i: number, active: ObjectiveDraft[], resolved: ObjectiveDraft[]) => (
-		<span
-			className="loom-subloc-grip"
-			onPointerDown={(e) => {
-				e.preventDefault();
-				e.currentTarget.setPointerCapture(e.pointerId);
-				const rowEl = e.currentTarget.closest('[data-obj-row]');
-				const row = rowEl instanceof HTMLElement ? rowEl : null;
-				const rows = row?.parentElement
-					? [...row.parentElement.querySelectorAll(':scope > [data-obj-row]')]
-					: [];
-				const mids = rows.map((r) => {
-					const b = r.getBoundingClientRect();
-					return b.top + b.height / 2;
-				});
-				objDragRef.current = { startY: e.clientY, slot: (row?.offsetHeight ?? 40) + 8, mids };
-				setObjDrag({ from: i, over: i, dy: 0 });
-			}}
-			onPointerMove={(e) => {
-				const start = objDragRef.current;
-				if (!start) return;
-				const dy = e.clientY - start.startY;
-				const over = Math.max(
-					0,
-					Math.min(active.length - 1, start.mids.filter((m) => m < e.clientY).length)
-				);
-				setObjDrag((cur) => (cur && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur));
-			}}
-			onPointerUp={() => {
-				const drag = objDrag;
-				objDragRef.current = null;
-				setObjDrag(null);
-				if (!drag || drag.from === drag.over) return;
-				const nextActive = [...active];
-				const [moved] = nextActive.splice(drag.from, 1);
-				nextActive.splice(drag.over, 0, moved);
-				commitObjectives([...nextActive, ...resolved]);
-			}}
-			onPointerCancel={() => {
-				objDragRef.current = null;
-				setObjDrag(null);
-			}}
-		>
-			<Icon name="grip-vertical" />
-		</span>
-	);
+	const objRowStyle = (i: number) => objDragRowStyle('objectives', i);
+	const objGrip = (i: number, active: ObjectiveDraft[], resolved: ObjectiveDraft[]) =>
+		objDragGrip('objectives', i, active.length, (from, over) =>
+			commitObjectives([...moveItem(active, from, over), ...resolved])
+		);
 
 	// Session attendance: PC characters offered as toggle chips. A PC who died
 	// in an earlier session is no longer offered in sessions after it.
@@ -2627,9 +2096,9 @@ function EntityPage({ view }: { view: EntityView }) {
 	const questAnchorsSorted = (project ? plugin.indexer.getAll(questAnchorType, project.root) : [])
 		.slice()
 		.sort((a, b) =>
-			seqOrdered ? (a.seq ?? a.created) - (b.seq ?? b.created) : (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)
+			seqOrdered ? (seqKey(a)) - (seqKey(b)) : (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)
 		);
-	const sessionChip = (s: EntityRecord, clear: () => void) => (
+	const sessionChip = (s: EntityRecord, clear: () => void, removeLabel = t('view.entity.common.clearSession')) => (
 		<div className="loom-tag-row">
 			<EntityChip
 				plugin={plugin}
@@ -2637,10 +2106,30 @@ function EntityPage({ view }: { view: EntityView }) {
 				label={recordLabel(s, project)}
 				onOpen={() => view.openEntity(s.path)}
 				onRemove={clear}
-				removeLabel={t('view.entity.common.clearSession')}
+				removeLabel={removeLabel}
 			/>
 		</div>
 	);
+	/** A session/scene anchor field: the chip when set, else a picker + create. */
+	const anchorPicker = (
+		current: EntityRecord | null,
+		onPick: (target: string) => void,
+		onClear: () => void,
+		placeholder: string,
+		options: EntityRecord[],
+		createType: EntityType,
+		removeLabel?: string
+	) =>
+		current ? (
+			sessionChip(current, onClear, removeLabel)
+		) : (
+			<SearchableSelect
+				placeholder={placeholder}
+				options={options.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
+				onPick={onPick}
+				action={createAction(plugin, createType, project, { onCreated: (created) => onPick(created.basename) })}
+			/>
+		);
 
 	// Locations: `parentLocation` makes this a sublocation — dedicated logic,
 	// deliberately not a relationship. Any location can hold sublocations of
@@ -2718,16 +2207,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		})();
 		writeSublocationOrder(sublocations.filter((o) => o.path !== s.path));
 	};
-	const descendsFromThis = (l: EntityRecord): boolean => {
-		let cur: EntityRecord | null = l;
-		for (let guard = 0; guard < 20 && cur !== null; guard++) {
-			const parent: EntityRecord | null = resolveParentOf(cur);
-			if (!parent) return false;
-			if (parent.path === record.path) return true;
-			cur = parent;
-		}
-		return false;
-	};
+	const descendsFromThis = (l: EntityRecord): boolean =>
+		plugin.indexer.locationAncestors(l).some((p) => p.path === record.path);
 
 	// --- Regions: a grouping layer above locations (item "Part of region"). -----
 	const isRegion = record.type === 'region';
@@ -2742,36 +2223,17 @@ function EntityPage({ view }: { view: EntityView }) {
 	// sublocation->location edges are wanted; see `FM.region`'s own doc
 	// comment for the full reasoning).
 	const isSublocationPage = isLocation && record.parentLocation !== null;
-	const effectiveRegionOwner = (() => {
-		if (!isLocation) return null;
-		let cur: EntityRecord = record;
-		const seen = new Set<string>([record.path]);
-		for (let guard = 0; guard < 20 && cur.parentLocation !== null; guard++) {
-			const parent = plugin.indexer.resolve(cur.parentLocation, cur.path);
-			if (!parent || parent.type !== 'location' || seen.has(parent.path)) break;
-			cur = parent;
-			seen.add(parent.path);
-		}
-		return cur;
-	})();
+	const effectiveRegionOwner = isLocation
+		? ([record, ...plugin.indexer.locationAncestors(record)].pop() ?? record)
+		: null;
 	const currentRegion =
 		effectiveRegionOwner?.region && effectiveRegionOwner.region !== ''
 			? plugin.indexer.resolve(effectiveRegionOwner.region, effectiveRegionOwner.path)
 			: null;
-	const setLocationRegion = (target: string) => {
-		const f = plugin.app.vault.getFileByPath(record.path);
-		if (!f) return;
-		void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
-			setLoomKey(fm, FM.region, `[[${target}]]`)
-		);
-	};
-	const clearLocationRegion = () => {
-		const f = plugin.app.vault.getFileByPath(record.path);
-		if (!f) return;
-		void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-			clearFmKeys(fm, 'loomregion', 'region');
-		});
-	};
+	const setLocationRegion = (target: string) =>
+		void writeFmAt(plugin.app, record.path, (fm) => setLoomKey(fm, FM.region, `[[${target}]]`));
+	const clearLocationRegion = () =>
+		void writeFmAt(plugin.app, record.path, (fm) => clearFmKeys(fm, 'loomregion', 'region'));
 	// Region page: its member locations, ordered by the region's `regionOrder`.
 	const regionLocations = (() => {
 		if (!isRegion || !project) return [];
@@ -2802,47 +2264,29 @@ function EntityPage({ view }: { view: EntityView }) {
 			// immediately first (the common case: an already-existing pick,
 			// where waiting would just be a pointless delay); only fall back to
 			// waiting when that comes up empty.
-			let rec = plugin.indexer.resolve(target, record.path);
-			if (!rec) {
-				const pending = plugin.app.metadataCache.getFirstLinkpathDest(target, record.path);
-				if (!pending) return;
-				await waitForMetadataSync(plugin.app, pending);
-				rec = plugin.indexer.resolve(target, record.path);
-				if (!rec) return;
+			const rec = await resolveFresh(plugin.app, plugin.indexer, target, record.path);
+			if (!rec) return;
+			if (!(await writeFmAt(plugin.app, rec.path, (fm) => setLoomKey(fm, FM.region, `[[${linkTargetOf(record)}]]`)))) {
+				return;
 			}
-			const f = plugin.app.vault.getFileByPath(rec.path);
-			if (!f) return;
-			await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
-				setLoomKey(fm, FM.region, `[[${linkTargetOf(record)}]]`)
-			);
 			writeRegionOrder([...regionLocations, rec]);
 		})();
 	};
 	/** Removes a location from this region (clears its `region`). */
 	const removeRegionLocation = (l: EntityRecord) => {
-		const f = plugin.app.vault.getFileByPath(l.path);
-		if (!f) return;
-		void plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-			clearFmKeys(fm, 'loomregion', 'region');
-		});
+		if (!plugin.app.vault.getFileByPath(l.path)) return;
+		void writeFmAt(plugin.app, l.path, (fm) => clearFmKeys(fm, 'loomregion', 'region'));
 		writeRegionOrder(regionLocations.filter((o) => o.path !== l.path));
 	};
 	/** Whether a place location falls under this region (it or an ancestor is a
 	 *  member) — mirrors the location `places` ancestor-propagation, one layer up. */
-	const placeInThisRegion = (place: EntityRecord): boolean => {
-		let cur: EntityRecord | null = place;
-		for (let guard = 0; guard < 25 && cur !== null; guard++) {
-			if (
+	const placeInThisRegion = (place: EntityRecord): boolean =>
+		[place, ...plugin.indexer.locationAncestors(place)].some(
+			(cur) =>
 				cur.type === 'location' &&
 				cur.region !== null &&
 				plugin.indexer.resolve(cur.region, cur.path)?.path === record.path
-			) {
-				return true;
-			}
-			cur = cur.parentLocation ? plugin.indexer.resolve(cur.parentLocation, cur.path) : null;
-		}
-		return false;
-	};
+		);
 
 	// --- Decision Points (GM projects): a grouping layer above events, --------
 	// --- mirroring Regions above locations exactly. ---------------------------
@@ -2890,14 +2334,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			// Same fast-path-then-wait resolve as `addDecisionPointEvent` — a
 			// Decision Point just made via this field's own "+ Create new"
 			// action isn't indexed yet the instant `onCreated` fires.
-			let dp = plugin.indexer.resolve(target, record.path);
-			if (!dp) {
-				const pending = plugin.app.metadataCache.getFirstLinkpathDest(target, record.path);
-				if (!pending) return;
-				await waitForMetadataSync(plugin.app, pending);
-				dp = plugin.indexer.resolve(target, record.path);
-				if (!dp) return;
-			}
+			const dp = await resolveFresh(plugin.app, plugin.indexer, target, record.path);
+			if (!dp) return;
 			// A brand-new Decision Point has no session of its own yet, so this
 			// always auto-adopts THIS event's session with no conflict (see
 			// `reconcileSessionBeforeLink`) — the same call handles "picked an
@@ -2932,10 +2370,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				.map((lp, i) => [plugin.indexer.resolve(lp, record.path)?.path, i] as const)
 				.filter((e): e is [string, number] => e[0] !== undefined)
 		);
-		return plugin.indexer
-			.getAll('event', project.root)
-			.filter((e) => e.decisionPoint !== null && plugin.indexer.resolve(e.decisionPoint, e.path)?.path === record.path)
-			.sort(
+		return decisionPointEventsOf(record, plugin.indexer).sort(
 				(a, b) =>
 					(orderIdx.get(a.path) ?? Number.MAX_SAFE_INTEGER) -
 						(orderIdx.get(b.path) ?? Number.MAX_SAFE_INTEGER) || a.name.localeCompare(b.name)
@@ -2950,14 +2385,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			// Same fast-path-then-wait pattern as `addRegionLocation` above — an
 			// event just made via this field's own "+ New event" action isn't
 			// indexed yet the instant `onCreated` fires.
-			let rec = plugin.indexer.resolve(target, record.path);
-			if (!rec) {
-				const pending = plugin.app.metadataCache.getFirstLinkpathDest(target, record.path);
-				if (!pending) return;
-				await waitForMetadataSync(plugin.app, pending);
-				rec = plugin.indexer.resolve(target, record.path);
-				if (!rec) return;
-			}
+			const rec = await resolveFresh(plugin.app, plugin.indexer, target, record.path);
+			if (!rec) return;
 			// A brand-new event has no session of its own yet, so this always
 			// auto-adopts THIS decision point's session with no conflict (see
 			// `reconcileSessionBeforeLink`) — the same call handles "picked an
@@ -3013,17 +2442,12 @@ function EntityPage({ view }: { view: EntityView }) {
 	const commitSpecialConditions = (next: SpecialConditionGroup[]) => {
 		setSpecialConditions(next);
 		void (async () => {
-			// Compute the new lock state synchronously, in memory, against the
-			// EDITED conditions, and write it in the SAME transaction as the
-			// edit itself — a real, reported bug this fixes: writing just the
-			// conditions and leaving `eventKind`/`eventLockReasons` for the
-			// later async `triggerEventLockRecompute` pass to catch up left the
-			// event showing as still Locked for however long `waitForMetadataSync`
-			// took to see its own write land (bounded, but not instant), which
-			// read as "deleting a condition doesn't unlock the event." A frozen
-			// (`happened`/`lore`) event is never touched here, matching
-			// `recomputeEventLocks`'s own skip — its status doesn't reopen for
-			// re-evaluation just because its conditions were edited afterward.
+			// Compute the new lock state synchronously against the EDITED
+			// conditions and write it in the same transaction as the edit, so
+			// deleting a condition unlocks the event immediately rather than
+			// after `triggerEventLockRecompute` catches up. A frozen
+			// (`happened`/`lore`) event is never touched, matching
+			// `recomputeEventLocks`.
 			const stillFrozen = record.eventKind === 'happened' || record.eventKind === 'lore';
 			const result =
 				!stillFrozen && project && kindFeatures.eventPlanning
@@ -3112,12 +2536,15 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project) return;
 		const f = plugin.app.vault.getFileByPath(rec.path);
 		if (!f) return;
-		const base = entityFileName(project, 'location', rec.name, parentName);
+		const base = managedEntityFileName(project.name, 'location', rec.name, parentName);
 		if (f.basename === base) return;
 		const dir = f.parent?.path ?? '';
-		let newPath = normalizePath(dir === '' ? `${base}.md` : `${dir}/${base}.md`);
-		for (let i = 2; plugin.app.vault.getAbstractFileByPath(newPath) !== null; i++) {
-			newPath = normalizePath(dir === '' ? `${base} ${i}.md` : `${dir}/${base} ${i}.md`);
+		const newPath = normalizePath(dir === '' ? `${base}.md` : `${dir}/${base}.md`);
+		// A same-named sublocation already sits under that parent: keep this
+		// file's name rather than numbering it.
+		if (plugin.app.vault.getAbstractFileByPath(newPath) !== null) {
+			new Notice(t('project.common.nameExists'));
+			return;
 		}
 		try {
 			await plugin.app.fileManager.renameFile(f, newPath);
@@ -3288,7 +2715,21 @@ function EntityPage({ view }: { view: EntityView }) {
 		)
 		.sort((a, b) => a.faction.name.localeCompare(b.faction.name));
 	const membershipLocations =
-		record.type === 'character' ? plugin.indexer.getAll('location', record.project) : [];
+		record.type === 'character' || record.type === 'faction' ? plugin.indexer.getAll('location', record.project) : [];
+	/** A faction page's members as rows — character, role, location. */
+	const factionMemberRows =
+		record.type === 'faction'
+			? record.members
+					.map((m) => ({
+						character: plugin.indexer.resolve(m.linkpath, record.path),
+						role: m.role,
+						location: m.location !== null ? plugin.indexer.resolve(m.location, record.path) : null,
+					}))
+					.filter(
+						(m): m is { character: EntityRecord; role: string; location: EntityRecord | null } =>
+							m.character != null && m.character.type === 'character'
+					)
+			: [];
 	// Location page: the characters serving a faction AT this location — read
 	// from every faction's `members` whose per-membership `location` is this one.
 	const locationFactionRows =
@@ -3366,7 +2807,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				map.get(key)?.entries.push(e);
 			}
 			for (const g of map.values())
-				g.entries.sort((a, b) => (a.owner.seq ?? a.owner.created) - (b.owner.seq ?? b.owner.created));
+				g.entries.sort((a, b) => bySeq(a.owner, b.owner));
 			return [...map.values()].sort((a, b) => {
 				const ka = a.session?.date?.sortKey;
 				const kb = b.session?.date?.sortKey;
@@ -3394,9 +2835,8 @@ function EntityPage({ view }: { view: EntityView }) {
 		// its own file) and drag-reorderable here.
 		const showsItems = record.type === 'character' || record.type === 'location';
 		const itemRecords = showsItems
-			? record.items
-					.map((lp) => plugin.indexer.resolve(lp, record.path))
-					.filter((r): r is EntityRecord => r != null && r.type === 'item')
+			? plugin.indexer.resolveAll(record.items, record.path)
+					.filter((r) => r.type === 'item')
 			: [];
 		// "Items in sublocations": every descendant sublocation's items, grouped by
 		// the holding sublocation (persistent — shown even if the same item is also
@@ -3406,9 +2846,8 @@ function EntityPage({ view }: { view: EntityView }) {
 					.filter((l) => descendsFromThis(l))
 					.map((subloc) => ({
 						holder: subloc,
-						items: subloc.items
-							.map((lp) => plugin.indexer.resolve(lp, subloc.path))
-							.filter((it): it is EntityRecord => it != null && it.type === 'item')
+						items: plugin.indexer.resolveAll(subloc.items, subloc.path)
+							.filter((r) => r.type === 'item')
 							.sort((a, b) => a.name.localeCompare(b.name)),
 					}))
 					.filter((g) => g.items.length > 0)
@@ -3422,7 +2861,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			? plugin.indexer
 					.getAll('scene', record.project)
 					.filter((sc) => sc.sceneLocation !== '' && plugin.indexer.resolve(sc.sceneLocation, sc.path)?.path === record.path)
-					.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+					.sort(bySeq)
 			: [];
 		const inheritedSceneGroups: { holder: EntityRecord; scenes: EntityRecord[] }[] = isLocation
 			? projectLocations
@@ -3436,7 +2875,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									sc.sceneLocation !== '' &&
 									plugin.indexer.resolve(sc.sceneLocation, sc.path)?.path === subloc.path
 							)
-							.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created)),
+							.sort(bySeq),
 					}))
 					.filter((g) => g.scenes.length > 0)
 					.sort((a, b) => recordLabel(a.holder, project).localeCompare(recordLabel(b.holder, project)))
@@ -3495,17 +2934,16 @@ function EntityPage({ view }: { view: EntityView }) {
 			const f = plugin.app.vault.getFileByPath(holder.path);
 			if (!f) return;
 			void (async () => {
-				await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-					const cur = fmLoomValue(fm, FM.items);
-					const arr = Array.isArray(cur) ? [...(cur as unknown[])] : [];
-					const present = arr.some(
-						(x) =>
-							typeof x === 'string' &&
-							plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
-					);
-					if (!present) arr.push(`[[${linkTargetOf(record)}]]`);
-					setLoomKey(fm, FM.items, arr);
-				});
+				await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
+					editLoomList(fm, FM.items, (arr) => {
+						const present = arr.some(
+							(x) =>
+								typeof x === 'string' &&
+								plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
+						);
+						if (!present) arr.push(`[[${linkTargetOf(record)}]]`);
+					})
+				);
 				// A GM "Group carries an item" condition reads a PC's own
 				// `loomItems`, so a new holder can flip which events are locked.
 				triggerEventLockRecompute(f);
@@ -3515,12 +2953,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			const f = plugin.app.vault.getFileByPath(holder.path);
 			if (!f) return;
 			void (async () => {
-				await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-					const cur = fmLoomValue(fm, FM.items);
-					const arr = Array.isArray(cur) ? (cur as unknown[]) : [];
-					setLoomKey(
-						fm,
-						FM.items,
+				await plugin.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
+					editLoomList(fm, FM.items, (arr) =>
 						arr.filter(
 							(x) =>
 								!(
@@ -3528,8 +2962,8 @@ function EntityPage({ view }: { view: EntityView }) {
 									plugin.indexer.resolve(extractLinkpath(x) ?? '', holder.path)?.path === record.path
 								)
 						)
-					);
-				});
+					)
+				);
 				triggerEventLockRecompute(f);
 			})();
 		};
@@ -3544,46 +2978,18 @@ function EntityPage({ view }: { view: EntityView }) {
 		// first note (or, for a location page, add it to that note's places),
 		// creating a session-less note if the event has none yet.
 		const addExistingEventToPage = (event: EntityRecord) => {
-			const f = plugin.app.vault.getFileByPath(event.path);
-			if (!f) return;
 			const key = isLocation ? 'places' : 'involved';
-			const link = `[[${linkTargetOf(record)}]]`;
-			plugin.app.fileManager
-				.processFrontMatter(f, (fm: Record<string, unknown>) => {
-					const cur = fmLoomValue(fm, FM.sessionNotes);
-					const arr = Array.isArray(cur) ? [...(cur as unknown[])] : [];
-					if (arr.length === 0) {
-						arr.push({ session: '', text: '', seq: Date.now(), [key]: [link] });
-					} else {
-						const first = arr[0];
-						const note: Record<string, unknown> =
-							typeof first === 'object' && first !== null
-								? { ...(first as Record<string, unknown>) }
-								: { session: '', text: typeof first === 'string' ? first : '' };
-						const list = Array.isArray(note[key]) ? [...(note[key] as unknown[])] : [];
-						list.push(link);
-						note[key] = list;
-						arr[0] = note;
-					}
-					setLoomKey(fm, FM.sessionNotes, arr);
-				})
-				.catch((e) => {
+			writeFmAt(plugin.app, event.path, (fm) => involveInFirstNote(fm, key, `[[${linkTargetOf(record)}]]`)).catch(
+				(e) => {
 					console.error('Loom Loom: failed to add event to page', e);
 					new Notice(t('view.entity.events.addFailed'));
-				});
+				}
+			);
 		};
-		// A plain chip per item (2026-08-26, per user request — the old
-		// always-expanded inline editor read like a session-note entry, not the
-		// light chip list every other "entities on this page" section uses, e.g.
-		// "Items in sublocations" just beneath this; a later request dropped
-		// drag-reorder entirely too, so `loomItems`' own stored order is no
-		// longer meaningful — `setItemLinks` still writes the list in whatever
-		// order it's built, just never reordered by the user any more). Renaming
-		// and description-editing moved from here to the item's own page (opened
-		// via the chip itself). Right-click for Delete + — on a character page,
-		// for a non-copy item — "Replace with a character specific copy"; the
-		// chip's own ✕ already covers unlinking, so no separate "Remove" menu
-		// item.
+		// A plain chip per item. The chip opens the item's page (renaming and
+		// description editing live there); right-click offers Delete and — on a
+		// character page, for a non-copy item — "Replace with a character
+		// specific copy"; the chip's ✕ unlinks it. Not drag-reorderable.
 		const itemRow = (item: EntityRecord) => {
 			// A character-specific copy's name is derived (original + owner), so
 			// it can't be re-copied — the copy action is omitted for it.
@@ -3608,13 +3014,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								plugin.app,
 								t('view.list.deleteConfirmTitle', { name: item.name }),
 								t('view.list.deleteMessageGeneral'),
-								() => {
-									const f = plugin.app.vault.getFileByPath(item.path);
-									if (!f) return;
-									void purgeEntityReferences(plugin, item.path, item.project).finally(() =>
-										plugin.app.fileManager.trashFile(f)
-									);
-								},
+								() => void deleteEntityNote(plugin, item),
 								t('project.common.delete')
 							).open()
 						)
@@ -3633,17 +3033,19 @@ function EntityPage({ view }: { view: EntityView }) {
 				</span>
 			);
 		};
+	/** Rewrites `member`'s entry in `faction`'s members list (role/location). */
 	const setMembershipField = (
 		faction: EntityRecord,
+		member: EntityRecord,
 		patch: { role?: string; location?: string | null }
 	) => {
 		editMembersOf(faction, (arr) =>
 			arr.map((item) => {
 				const lp = memberEntryLinkpath(item);
-				if (lp === null || plugin.indexer.resolve(lp, faction.path)?.path !== record.path) return item;
+				if (lp === null || plugin.indexer.resolve(lp, faction.path)?.path !== member.path) return item;
 				const obj = typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : null;
 				const rawCharacter = typeof item === 'string' ? item : obj?.character;
-				const character = typeof rawCharacter === 'string' ? rawCharacter : `[[${linkTargetOf(record)}]]`;
+				const character = typeof rawCharacter === 'string' ? rawCharacter : `[[${linkTargetOf(member)}]]`;
 				const role = (
 					patch.role ??
 					(typeof obj?.role === 'string' ? obj.role : defaultMemberRole())
@@ -3665,6 +3067,34 @@ function EntityPage({ view }: { view: EntityView }) {
 			})
 		);
 	};
+	/** A membership's "at [location]" cell — the location chip (✕ clears it)
+	 *  or a picker. Shared by a character's Faction(s) rows and a faction's
+	 *  Members rows. */
+	const memberLocationCell = (faction: EntityRecord, member: EntityRecord, location: EntityRecord | null) => (
+		<div className="loom-member-loc">
+			{location ? (
+				<EntityChip
+					plugin={plugin}
+					record={location}
+					onOpen={() => view.openEntity(location.path)}
+					onRemove={() => setMembershipField(faction, member, { location: null })}
+					removeLabel={t('view.entity.faction.clearLocation')}
+				/>
+			) : (
+				<SearchableSelect
+					placeholder={t('common.notSpecified')}
+					options={membershipLocations
+						.slice()
+						.sort((a, b) => a.name.localeCompare(b.name))
+						.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
+					onPick={(name) => setMembershipField(faction, member, { location: name })}
+					action={createAction(plugin, 'location', project, {
+						onCreated: (created) => setMembershipField(faction, member, { location: created.basename }),
+					})}
+				/>
+			)}
+		</div>
+	);
 
 	const writeOwnerNotes = (owner: EntityRecord, apply: (arr: unknown[]) => void) =>
 		editFmList(owner.path, FM.sessionNotes, (arr) => {
@@ -3672,151 +3102,60 @@ function EntityPage({ view }: { view: EntityView }) {
 		});
 
 
+	/** A removable row of entity chips, each opening its own page. */
+	const chipRow = (
+		records: EntityRecord[],
+		onRemove: (r: EntityRecord) => void,
+		removeLabel: string,
+		labelOf?: (r: EntityRecord) => string
+	) =>
+		records.length > 0 ? (
+			<div className="loom-tag-row">
+				{records.map((r) => (
+					<EntityChip
+						key={r.path}
+						plugin={plugin}
+						record={r}
+						label={labelOf?.(r)}
+						onOpen={() => view.openEntity(r.path)}
+						onRemove={() => onRemove(r)}
+						removeLabel={removeLabel}
+					/>
+				))}
+			</div>
+		) : null;
+
 	// --- loomSeq drag-reorder (session-page events + quests) ------------------
 	// Order lives in each entity's `loomSeq`, shared with the timeline, so a drop
 	// re-stamps the whole list and re-indexing re-sorts every view that reads it.
 	const writeRecordSeq = (path: string, seq: number) => {
-		const f = plugin.app.vault.getFileByPath(path);
-		if (!f) return;
-		plugin.app.fileManager
-			.processFrontMatter(f, (fm: Record<string, unknown>) => setLoomKey(fm, FM.seq, seq))
-			.catch((e) => {
-				console.error('Loom Loom: failed to save order', e);
-				new Notice(t('view.entity.common.orderSaveFailed'));
-			});
+		writeFmAt(plugin.app, path, (fm) => setLoomKey(fm, FM.seq, seq)).catch((e) => {
+			console.error('Loom Loom: failed to save order', e);
+			new Notice(t('view.entity.common.orderSaveFailed'));
+		});
 	};
-	const seqShift = (group: string, i: number): number => {
-		if (!seqDrag || seqDrag.group !== group) return 0;
-		const { from, over } = seqDrag;
-		if (i === from) return 0;
-		if (from < i && i <= over) return -1;
-		if (over <= i && i < from) return 1;
-		return 0;
-	};
-	const seqRowStyle = (group: string, i: number): CSSProperties | undefined => {
-		if (!seqDrag || seqDrag.group !== group) return undefined;
-		const slot = seqDragRef.current?.slot ?? 40;
-		if (seqDrag.from === i)
-			return { transform: `translateY(${seqDrag.dy}px)`, position: 'relative', zIndex: 2 };
-		const sh = seqShift(group, i);
-		return sh !== 0 ? { transform: `translateY(${sh * slot}px)` } : undefined;
-	};
-	const endSeqDrag = (
-		group: string,
-		records: EntityRecord[],
-		commit: boolean,
-		onCommit?: (reordered: EntityRecord[], moved: EntityRecord) => void
-	) => {
-		seqDragRef.current = null;
-		const drag = seqDrag;
-		setSeqDrag(null);
-		if (!commit || !drag || drag.group !== group || drag.from === drag.over) return;
-		const next = [...records];
-		const [moved] = next.splice(drag.from, 1);
-		next.splice(drag.over, 0, moved);
-		// Default order home is each record's loomSeq; callers with their own
-		// stored order (e.g. a page's item list, or a script to rewrite) pass
-		// onCommit instead — it also gets the single record that moved, since a
-		// script rewrite only needs to relocate that one block.
-		if (onCommit) onCommit(next, moved);
-		else {
-			const base = Date.now();
-			next.forEach((r, i) => writeRecordSeq(r.path, base + i));
-		}
-	};
-	/** The 6-dot grab handle placed before an entry's title. */
+	/** The 6-dot grab handle placed before an entry's title. Default order home
+	 *  is each record's loomSeq; callers with their own stored order (a page's
+	 *  item list, or a script to rewrite) pass `onCommit` — it also gets the one
+	 *  record that moved, since a script rewrite only relocates that block. */
 	const seqGrip = (
 		group: string,
 		i: number,
 		records: EntityRecord[],
 		onCommit?: (reordered: EntityRecord[], moved: EntityRecord) => void
-	) => (
-		<span
-			className="loom-subloc-grip"
-			onPointerDown={(e) => {
-				e.preventDefault();
-				e.currentTarget.setPointerCapture(e.pointerId);
-				const rowEl = e.currentTarget.closest('[data-seq-row]');
-				const row = rowEl instanceof HTMLElement ? rowEl : null;
-				// Snapshot every row's center now, before anything slides; the target
-				// index is then the count of centers the cursor has passed — the
-				// sublocation trick, but per-row so it copes with varying heights.
-				const rows = row?.parentElement
-					? [...row.parentElement.querySelectorAll(':scope > [data-seq-row]')]
-					: [];
-				const mids = rows.map((r) => {
-					const b = r.getBoundingClientRect();
-					return b.top + b.height / 2;
-				});
-				// Slide distance = the grabbed block's own height + the inter-card gap
-				// (--size-4-2), so neighbours open a gap that matches this row.
-				seqDragRef.current = { startY: e.clientY, slot: (row?.offsetHeight ?? 40) + 8, mids };
-				setSeqDrag({ group, from: i, over: i, dy: 0 });
-			}}
-			onPointerMove={(e) => {
-				const start = seqDragRef.current;
-				if (!start) return;
-				const dy = e.clientY - start.startY;
-				const over = Math.max(
-					0,
-					Math.min(records.length - 1, start.mids.filter((m) => m < e.clientY).length)
-				);
-				setSeqDrag((cur) => (cur && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur));
-			}}
-			onPointerUp={() => endSeqDrag(group, records, true, onCommit)}
-			onPointerCancel={() => endSeqDrag(group, records, false, onCommit)}
-		>
-			<Icon name="grip-vertical" />
-		</span>
-	);
-	/** Like `seqGrip`, but generic over a plain item count rather than
-	 *  `EntityRecord[]` — the Scene page's Outline drags branch SECTIONS,
-	 *  which have no backing entity to type against. Reuses the SAME
-	 *  `seqDrag`/`seqDragRef` state (and so `seqRowStyle`, unchanged — it
-	 *  never cared what the dragged items ARE, only their index), just
-	 *  calling `onCommit(from, over)` directly instead of `endSeqDrag`'s
-	 *  EntityRecord-shaped splice-and-callback. */
-	const branchGrip = (group: string, i: number, length: number, onCommit: (from: number, over: number) => void) => (
-		<span
-			className="loom-subloc-grip"
-			onPointerDown={(e) => {
-				e.preventDefault();
-				e.currentTarget.setPointerCapture(e.pointerId);
-				const rowEl = e.currentTarget.closest('[data-seq-row]');
-				const row = rowEl instanceof HTMLElement ? rowEl : null;
-				const rows = row?.parentElement
-					? [...row.parentElement.querySelectorAll(':scope > [data-seq-row]')]
-					: [];
-				const mids = rows.map((r) => {
-					const b = r.getBoundingClientRect();
-					return b.top + b.height / 2;
-				});
-				seqDragRef.current = { startY: e.clientY, slot: (row?.offsetHeight ?? 34) + 8, mids };
-				setSeqDrag({ group, from: i, over: i, dy: 0 });
-			}}
-			onPointerMove={(e) => {
-				const start = seqDragRef.current;
-				if (!start) return;
-				const dy = e.clientY - start.startY;
-				const over = Math.max(0, Math.min(length - 1, start.mids.filter((m) => m < e.clientY).length));
-				setSeqDrag((cur) =>
-					cur && cur.group === group && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur
-				);
-			}}
-			onPointerUp={() => {
-				const drag = seqDrag;
-				seqDragRef.current = null;
-				setSeqDrag(null);
-				if (drag && drag.group === group && drag.from !== drag.over) onCommit(drag.from, drag.over);
-			}}
-			onPointerCancel={() => {
-				seqDragRef.current = null;
-				setSeqDrag(null);
-			}}
-		>
-			<Icon name="grip-vertical" />
-		</span>
-	);
+	) =>
+		seqDragGrip(group, i, records.length, (from, over) => {
+			const next = moveItem(records, from, over);
+			if (onCommit) onCommit(next, records[from]);
+			else {
+				const base = Date.now();
+				next.forEach((r, j) => writeRecordSeq(r.path, base + j));
+			}
+		});
+	/** Like `seqGrip`, but over a plain item count — the Scene page's Outline
+	 *  drags branch SECTIONS, which have no backing entity. */
+	const branchGrip = (group: string, i: number, length: number, onCommit: (from: number, over: number) => void) =>
+		seqDragGrip(group, i, length, onCommit, 34);
 	/**
 	 * The Scene page's own Outline: this scene's branch structure
 	 * (`sceneOutlineTree`, bounded to just this scene's line span and
@@ -3871,7 +3210,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					<span className="loom-row-caret" aria-hidden="true" />
 					<span className="loom-writer-row-num" aria-hidden="true" />
 					<span className="loom-writer-outline-pagebreak-label">
-						<Icon name="git-branch" fallback="split" /> {item.id}
+						<Icon name="git-branch" /> {item.id}
 					</span>
 					<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
 					<span className="loom-writer-row-count">
@@ -3999,9 +3338,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	const hubEntries: LocNoteEntry[] = isSession
 		? plugin.indexer
 				.getAll(undefined, record.project)
-				// Quests no longer author their own session notes — they take part in
-				// events (their own Events section) and get their own Quests section
-				// below, so they never appear in the session-note hub.
+				// Quests don't author session notes — they take part in events and
+				// have their own Quests section below.
 				.filter((owner) => owner.type !== 'quest')
 				.flatMap((owner) =>
 					owner.sessionNotes
@@ -4014,26 +3352,6 @@ function EntityPage({ view }: { view: EntityView }) {
 				)
 				.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
 		: [];
-	// Involve targets for the hub event rows — populated for every page that
-	// renders them (session hub + the Events section on character/item/faction/
-	// location pages), not just sessions/characters.
-	const hubTargets =
-		(isSession || showsEvents) && project
-			? plugin.indexer
-					.getAll(undefined, project.root)
-					.filter((r) => roleOf(r.type) === null && r.type !== 'decisionPoint')
-					.sort((a, b) => a.name.localeCompare(b.name))
-			: [];
-	/** The note's involved entities, resolved and grouped by type then name. */
-	const involvedOfEntry = (en: LocNoteEntry) =>
-		en.involved
-			.map((lp) => ({ lp, target: plugin.indexer.resolve(lp, en.owner.path) }))
-			.sort(
-				(a, b) =>
-					(a.target ? ENTITY_TYPES.indexOf(a.target.type) : 99) -
-						(b.target ? ENTITY_TYPES.indexOf(b.target.type) : 99) ||
-					(a.target?.name ?? a.lp).localeCompare(b.target?.name ?? b.lp)
-			);
 	/** Rewrites one list field on a note entry's frontmatter object (`involved`/
 	 *  `group`/`places` are the same shape, differing only in the key and
 	 *  whether an emptied-out list drops the key entirely — a `group` snapshot
@@ -4065,7 +3383,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				.getAll(undefined, project.root)
 				// Locations can be involved (a place discussed/featured in the event)
 				// as well as a `places` entry (where it happened) — both are allowed.
-				.filter((r) => roleOf(r.type) === null && r.type !== 'decisionPoint' && r.path !== record.path)
+				.filter((r) => isInvolvableType(r.type) && r.path !== record.path)
 				.sort((a, b) => a.name.localeCompare(b.name))
 		: [];
 	/** The current party (alive + active PCs, minus this page's own entity) —
@@ -4090,7 +3408,160 @@ function EntityPage({ view }: { view: EntityView }) {
 					origin: { type: view.getViewType(), state: view.getState() },
 				})
 		: undefined;
-	const writeOwnerRels = (owner: EntityRecord, apply: (rels: unknown[]) => unknown[]) =>
+	/** A note's Involve column — picker (Group entry + type filter) over its
+	 *  chips — shared by this page's own notes and other entities' notes.
+	 *  "Already on the note" compares resolved files, so a path-form or
+	 *  differently-cased link still counts as taken. Callers store `add`ed
+	 *  names in their own link format. */
+	const involveColumn = (o: {
+		filterKey: string;
+		sourcePath: string;
+		involved: string[];
+		group: string[];
+		session: EntityRecord | null;
+		add: (names: string[], toGroup: boolean) => void;
+		clearGroup: () => void;
+		remove: (lp: string, target: EntityRecord | null) => void;
+	}) => {
+		const chips = o.involved
+			.map((lp) => ({ lp, target: plugin.indexer.resolve(lp, o.sourcePath) }))
+			.sort(
+				(a, b) =>
+					(a.target ? ENTITY_TYPES.indexOf(a.target.type) : 99) -
+						(b.target ? ENTITY_TYPES.indexOf(b.target.type) : 99) ||
+					(a.target?.name ?? a.lp).localeCompare(b.target?.name ?? b.lp)
+			);
+		const taken = new Set(
+			[...o.involved, ...o.group]
+				.map((lp) => plugin.indexer.resolve(lp, o.sourcePath)?.path)
+				.filter((p): p is string => p !== undefined)
+		);
+		const missingPcs = groupPcs.filter((c) => !taken.has(c.path));
+		const filter = hubFilter[o.filterKey];
+		return (
+			<div className="loom-hub-col">
+				<div className="loom-hub-involve">
+					<SearchableSelect
+						placeholder={t('view.entity.sessionNotes.involvePlaceholder')}
+						options={[
+							...groupOption(missingPcs.length, filter),
+							...involveTargets
+								.filter((c) => !taken.has(c.path) && (!filter || c.type === filter))
+								.map((c) => ({ value: linkTargetOf(c), label: c.name })),
+						]}
+						onPick={(name) =>
+							// The Group entry snapshots the current party into the group list.
+							name === PC_GROUP_VALUE ? o.add(missingPcs.map(linkTargetOf), true) : o.add([name], false)
+						}
+						action={
+							project
+								? {
+										label: t('view.entity.sessionNotes.createNewEntityAction'),
+										onPick: () =>
+											new EntityTypeSuggestModal(plugin, (type) =>
+												new CreateEntityModal(plugin, type, project, {
+													// A quest created here inherits the note's session as
+													// its "Received in session".
+													...(o.session && roleOf(o.session.type) === 'anchor'
+														? { receivedSession: o.session }
+														: {}),
+													onCreated: (created) => o.add([created.basename], false),
+												}).open(),
+												project,
+												['decisionPoint']
+											).open(),
+									}
+								: undefined
+						}
+					/>
+					<button
+						className="loom-rel-filter"
+						aria-label={t('project.createEntity.filterByType')}
+						onClick={(e) =>
+							showTypeFilterMenu(
+								e.nativeEvent,
+								projectTypes(project?.config).filter(isInvolvableType),
+								filter ?? null,
+								(type) => setHubFilter({ ...hubFilter, [o.filterKey]: type })
+							)
+						}
+					>
+						<Icon name={filter ? ENTITY_META[filter].icon : 'filter'} />
+					</button>
+				</div>
+				{chips.length > 0 || o.group.length > 0 ? (
+					<div className="loom-tag-row">
+						{o.group.length > 0 ? (
+							<EntityChip
+								plugin={plugin}
+								record={project ? pcGroupStub(project.root, groupName) : null}
+								label={groupName}
+								onOpen={openGroupPage}
+								onRemove={o.clearGroup}
+								removeLabel={t('view.entity.common.removeTheGroup')}
+							/>
+						) : null}
+						{chips.map(({ lp, target }, ii) => (
+							<EntityChip
+								key={lp + String(ii)}
+								plugin={plugin}
+								record={target}
+								label={target?.name ?? lp}
+								onOpen={target ? () => view.openEntity(target.path) : undefined}
+								onRemove={() => o.remove(lp, target)}
+								removeLabel={t('view.entity.common.removeInvolvedEntity')}
+							/>
+						))}
+					</div>
+				) : null}
+			</div>
+		);
+	};
+	/** A note's Location column — picker over its place chips. */
+	const placesColumn = (
+		locs: { key: string; target: EntityRecord | null; remove: () => void }[],
+		add: (name: string) => void
+	) => (
+		<div className="loom-hub-col">
+			<div className="loom-hub-location">
+				<SearchableSelect
+					placeholder={t('view.entity.common.locationPlaceholder')}
+					options={(project ? plugin.indexer.getAll('location', project.root) : [])
+						.filter((l) => !locs.some((q) => q.target?.path === l.path))
+						.sort(mainLocationFirst)
+						.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
+					onPick={add}
+					action={
+						project
+							? {
+									label: t('view.entity.sessionNotes.createNewLocationAction'),
+									onPick: () =>
+										new CreateEntityModal(plugin, 'location', project, {
+											onCreated: (created) => add(created.basename),
+										}).open(),
+								}
+							: undefined
+					}
+				/>
+			</div>
+			{locs.length > 0 ? (
+				<div className="loom-tag-row">
+					{locs.map(({ key, target, remove }) => (
+						<EntityChip
+							key={key}
+							plugin={plugin}
+							record={target}
+							label={target ? locationLabel(target, plugin) : key}
+							onOpen={target ? () => view.openEntity(target.path) : undefined}
+							onRemove={remove}
+							removeLabel={t('view.entity.common.removeLocation')}
+						/>
+					))}
+				</div>
+			) : null}
+		</div>
+	);
+	const writeOwnerRels =(owner: EntityRecord, apply: (rels: unknown[]) => unknown[]) =>
 		editFmList(owner.path, FM.relationships, apply);
 	/** Renames another entity in place (hub rows): stores the entered name as
 	 *  its loomName + alias and moves the file to its managed name. */
@@ -4099,7 +3570,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (entered === '' || entered === owner.name || !project) return;
 		const f = plugin.app.vault.getFileByPath(owner.path);
 		if (!f) return;
-		const base = entityFileName(project, owner.type, entered);
+		const base = managedEntityFileName(project.name, owner.type, entered);
 		const parent = f.parent?.path ?? '';
 		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
 		if (newPath !== f.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
@@ -4129,13 +3600,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	// OWN position is the one special case, since "as of this act" means "as
 	// of its last scene" (`actScenes` is already sorted ascending by `seq`).
 	const anchorPositionKey = (r: EntityRecord): number | null =>
-		seqOrdered ? r.seq ?? r.created : (r.date?.sortKey ?? null);
+		seqOrdered ? seqKey(r) : (r.date?.sortKey ?? null);
 	const showsQuestSection = (isSession || record.type === 'scene' || record.type === 'chapter') && project;
 	const lastActScene = actScenes.length > 0 ? actScenes[actScenes.length - 1] : null;
 	const asOf = seqOrdered
 		? record.type === 'act'
-			? (lastActScene?.seq ?? lastActScene?.created ?? record.seq ?? record.created)
-			: (record.seq ?? record.created)
+			? (lastActScene ? seqKey(lastActScene) : seqKey(record))
+			: (seqKey(record))
 		: (record.date?.sortKey ?? Number.MAX_SAFE_INTEGER);
 	const sessionQuests = (showsQuestSection ? plugin.indexer.getAll('quest', project.root) : [])
 		.map((q) => {
@@ -4160,7 +3631,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		})
 		.filter((e): e is { quest: EntityRecord; state: string } => e !== null)
 		// Manual order (drag-reorderable), then chronological for the unstamped.
-		.sort((a, b) => (a.quest.seq ?? a.quest.created) - (b.quest.seq ?? b.quest.created));
+		.sort((a, b) => bySeq(a.quest, b.quest));
 	// Scene/Act/Chapter pages hide the whole Quests block when nothing
 	// resolves against them yet — Session pages keep showing it empty (a
 	// session's quest involvement is worth surfacing as an invitation to add
@@ -4246,25 +3717,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	};
 
 	const openRelFilterMenu = (e: ReactMouseEvent<HTMLButtonElement>, i: number) => {
-		const current = relationships[i]?.filter ?? null;
-		const menu = new Menu();
-		menu.addItem((item) =>
-			item
-				.setTitle(t('project.createEntity.allEntities'))
-				.setIcon('filter')
-				.setChecked(current === null)
-				.onClick(() => setRowFilter(i, null))
-		);
-		for (const et of ENTITY_TYPES) {
-			menu.addItem((item) =>
-				item
-					.setTitle(entityPlural(et))
-					.setIcon(ENTITY_META[et].icon)
-					.setChecked(current === et)
-					.onClick(() => setRowFilter(i, et))
-			);
-		}
-		menu.showAtMouseEvent(e.nativeEvent);
+		showTypeFilterMenu(e.nativeEvent, ENTITY_TYPES, relationships[i]?.filter ?? null, (type) => setRowFilter(i, type));
 	};
 
 	const relRow = (rel: RelationshipDraft, i: number) => (
@@ -4464,178 +3917,27 @@ function EntityPage({ view }: { view: EntityView }) {
 								.map((s) => ({ value: linkTargetOf(s), label: shortSessionLabel(s) }))}
 							onPick={(name) => setNote({ session: name }, true)}
 							action={
-								project
-									? {
-											label: t('project.createEntity.createNewAction', { label: entityLabel(anchorType) }),
-											onPick: () =>
-												new CreateEntityModal(plugin, anchorType, project, {
-													onCreated: (created) => setNote({ session: created.basename }, true),
-												}).open(),
-										}
-									: undefined
+								createAction(plugin, anchorType, project, {
+									onCreated: (created) => setNote({ session: created.basename }, true),
+								})
 							}
 						/>
 					)}
 				</div>
-			<div className="loom-hub-col">
-					<div className="loom-hub-involve">
-						<SearchableSelect
-							placeholder={t('view.entity.sessionNotes.involvePlaceholder')}
-							options={[
-								...groupOption(
-									groupPcs.filter(
-										(c) =>
-											!note.involved.includes(linkTargetOf(c)) && !note.group.includes(linkTargetOf(c))
-									).length,
-									hubFilter['row:' + String(i)]
-								),
-								...involveTargets
-									.filter(
-										(t) =>
-											!note.involved.includes(linkTargetOf(t)) && !note.group.includes(linkTargetOf(t))
-									)
-									.filter((t) => !hubFilter['row:' + String(i)] || t.type === hubFilter['row:' + String(i)])
-									.map((t) => ({ value: linkTargetOf(t), label: t.name })),
-							]}
-							onPick={(name) => {
-								if (name === PC_GROUP_VALUE) {
-									// Snapshot the current party into the note's group list.
-									const adds = groupPcs
-										.map(linkTargetOf)
-										.filter((n) => !note.involved.includes(n) && !note.group.includes(n));
-									setNote({ group: [...note.group, ...adds] }, true);
-								} else {
-									setNote({ involved: [...note.involved, name] }, true);
-								}
-							}}
-							action={
-								project
-									? {
-											label: t('view.entity.sessionNotes.createNewEntityAction'),
-											onPick: () =>
-												new EntityTypeSuggestModal(plugin, (type) =>
-													new CreateEntityModal(plugin, type, project, {
-														// A quest involved via a session-pinned note defaults its
-														// "Received in session" to that session.
-														...(picked && roleOf(picked.type) === 'anchor'
-															? { receivedSession: picked }
-															: {}),
-														onCreated: (created) =>
-															setNote({ involved: [...note.involved, created.basename] }, true),
-													}).open(),
-													project,
-													['decisionPoint']
-												).open(),
-										}
-									: undefined
-							}
-						/>
-						<button
-							className="loom-rel-filter"
-							aria-label={t('project.createEntity.filterByType')}
-							onClick={(e) => {
-								const menu = new Menu();
-								const fkey = 'row:' + String(i);
-								const current = hubFilter[fkey] ?? null;
-								menu.addItem((item) =>
-									item
-										.setTitle(t('project.createEntity.allEntities'))
-										.setIcon('filter')
-										.setChecked(current === null)
-										.onClick(() => setHubFilter({ ...hubFilter, [fkey]: null }))
-								);
-								for (const et of projectTypes(project?.config).filter((et) => roleOf(et) === null && et !== 'decisionPoint')) {
-									menu.addItem((item) =>
-										item
-											.setTitle(entityPlural(et))
-											.setIcon(ENTITY_META[et].icon)
-											.setChecked(current === et)
-											.onClick(() => setHubFilter({ ...hubFilter, [fkey]: et }))
-									);
-								}
-								menu.showAtMouseEvent(e.nativeEvent);
-							}}
-						>
-							<Icon
-								name={hubFilter['row:' + String(i)] ? ENTITY_META[hubFilter['row:' + String(i)] as EntityType].icon : 'filter'}
-							/>
-						</button>
-					</div>
-					{note.involved.length > 0 || note.group.length > 0 ? (
-						<div className="loom-tag-row">
-							{note.group.length > 0 ? (
-								<EntityChip
-									plugin={plugin}
-									record={project ? pcGroupStub(project.root, groupName) : null}
-									label={groupName}
-									onOpen={openGroupPage}
-									onRemove={() => setNote({ group: [] }, true)}
-									removeLabel={t('view.entity.common.removeTheGroup')}
-								/>
-							) : null}
-							{note.involved
-								.map((lp) => ({ lp, target: plugin.indexer.resolve(lp, record.path) }))
-								.sort(
-									(a, b) =>
-										(a.target ? ENTITY_TYPES.indexOf(a.target.type) : 99) -
-											(b.target ? ENTITY_TYPES.indexOf(b.target.type) : 99) ||
-										(a.target?.name ?? a.lp).localeCompare(b.target?.name ?? b.lp)
-								)
-								.map(({ lp, target }, ii) => (
-									<EntityChip
-										key={lp + String(ii)}
-										plugin={plugin}
-										record={target}
-										label={target?.name ?? lp}
-										onOpen={target ? () => view.openEntity(target.path) : undefined}
-										onRemove={() => setNote({ involved: note.involved.filter((v) => v !== lp) }, true)}
-										removeLabel={t('view.entity.common.removeInvolvedEntity')}
-									/>
-								))}
-						</div>
-					) : null}
-					</div>
-					{hasNoteLocation ? (
-						<div className="loom-hub-col">
-						<div className="loom-hub-location">
-							<SearchableSelect
-								placeholder={t('view.entity.common.locationPlaceholder')}
-								options={(project ? plugin.indexer.getAll('location', project.root) : [])
-									.filter((l) => !noteLocs.some((q) => q.target?.path === l.path))
-									.sort(mainLocationFirst)
-									.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
-								onPick={(name) => setNote({ places: [...note.places, name] }, true)}
-								action={
-									project
-										? {
-												label: t('view.entity.sessionNotes.createNewLocationAction'),
-												onPick: () =>
-													new CreateEntityModal(plugin, 'location', project, {
-														onCreated: (created) =>
-															setNote({ places: [...note.places, created.basename] }, true),
-													}).open(),
-											}
-										: undefined
-								}
-							/>
-						</div>
-						{noteLocs.length > 0 ? (
-							<div className="loom-tag-row">
-								{noteLocs.map(({ key, target, remove }) => (
-									<EntityChip
-										key={key}
-										plugin={plugin}
-										record={target}
-										label={target ? locationLabel(target, plugin) : key}
-										onOpen={target ? () => view.openEntity(target.path) : undefined}
-										onRemove={remove}
-										removeLabel={t('view.entity.common.removeLocation')}
-									/>
-								))}
-							</div>
-						) : null}
-						</div>
-					) : null}
+				{involveColumn({
+					filterKey: 'row:' + String(i),
+					sourcePath: record.path,
+					involved: note.involved,
+					group: note.group,
+					session: picked,
+					add: (names, toGroup) =>
+						setNote(toGroup ? { group: [...note.group, ...names] } : { involved: [...note.involved, ...names] }, true),
+					clearGroup: () => setNote({ group: [] }, true),
+					remove: (lp) => setNote({ involved: note.involved.filter((v) => v !== lp) }, true),
+				})}
+				{hasNoteLocation
+					? placesColumn(noteLocs, (name) => setNote({ places: [...note.places, name] }, true))
+					: null}
 								<button
 					className="loom-nav-btn loom-note-remove loom-entity-delete"
 					aria-label={t('view.entity.sessionNotes.deleteNote')}
@@ -4680,16 +3982,10 @@ function EntityPage({ view }: { view: EntityView }) {
 								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
 							onPick={(name) => setNote({ places: [...note.places, name] }, true)}
 							action={
-								project
-									? {
-											label: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
-											onPick: () =>
-												new CreateEntityModal(plugin, 'location', project, {
-													onCreated: (created) =>
-														setNote({ places: [...note.places, created.basename] }, true),
-												}).open(),
-										}
-									: undefined
+								createAction(plugin, 'location', project, {
+									onCreated: (created) =>
+										setNote({ places: [...note.places, created.basename] }, true),
+								})
 							}
 						/>
 					</div>
@@ -4724,14 +4020,6 @@ function EntityPage({ view }: { view: EntityView }) {
 		index?: number
 	) => {
 		const menuKey = en.owner.path + String(en.idx);
-		const involved = involvedOfEntry(en);
-		/** Resolved paths of the note's group-snapshot members (chip is collapsed,
-		 *  but they count as involved for picker dedupe/removal). */
-		const groupPaths = new Set(
-			en.group
-				.map((lp) => plugin.indexer.resolve(lp, en.owner.path)?.path)
-				.filter((p): p is string => p !== undefined)
-		);
 		// A note's location(s) live per-note in `places`; legacy event-level
 		// `location` relationships are still shown/removable for older notes.
 		const locs: { key: string; target: EntityRecord | null; remove: () => void }[] = [
@@ -4805,13 +4093,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									plugin.app,
 									t('view.list.deleteConfirmTitle', { name: en.owner.name }),
 									t('view.list.deleteMessageGeneral'),
-									() => {
-										const f = plugin.app.vault.getFileByPath(en.owner.path);
-										if (!f) return;
-										void purgeEntityReferences(plugin, en.owner.path, en.owner.project).finally(() =>
-											plugin.app.fileManager.trashFile(f)
-										);
-									},
+									() => void deleteEntityNote(plugin, en.owner),
 									t('project.common.delete')
 								).open()
 							}
@@ -4904,195 +4186,61 @@ function EntityPage({ view }: { view: EntityView }) {
 					</button>
 				</div>
 				<div className="loom-hub-involve-row loom-hub-location-row">
-					<div className="loom-hub-col">
-						<div className="loom-hub-involve">
-							<SearchableSelect
-							placeholder={t('view.entity.sessionNotes.involvePlaceholder')}
-					options={[
-								...groupOption(
-									groupPcs.filter(
-										(c) => !involved.some((iv) => iv.target?.path === c.path) && !groupPaths.has(c.path)
-									).length,
-									hubFilter[menuKey]
-								),
-								...hubTargets
-									.filter(
-										(t) => !involved.some((iv) => iv.target?.path === t.path) && !groupPaths.has(t.path)
-									)
-									.filter((t) => !hubFilter[menuKey] || t.type === hubFilter[menuKey])
-									.map((t) => ({ value: linkTargetOf(t), label: t.name })),
-							]}
-							onPick={(name) => {
-								if (name === PC_GROUP_VALUE) {
-									// Snapshot the current party into the note's group list.
-									const adds = groupPcs
-										.filter(
-											(c) => !involved.some((iv) => iv.target?.path === c.path) && !groupPaths.has(c.path)
-										)
-										.map(linkTargetOf);
-									writeEntryGroup(en, (list) => [...list, ...adds.map((n) => `[[${n}]]`)]);
-								} else {
-									writeEntryInvolved(en, (list) => [...list, `[[${name}]]`]);
-								}
-							}}
-							action={
-								project
-									? {
-											label: t('view.entity.sessionNotes.createNewEntityAction'),
-											onPick: () => {
-												// A quest created here inherits the note's session as its
-												// "Received in session".
-												const entrySession = en.session
-													? plugin.indexer.resolve(en.session, en.owner.path)
-													: null;
-												new EntityTypeSuggestModal(plugin, (type) =>
-													new CreateEntityModal(plugin, type, project, {
-														...(entrySession && roleOf(entrySession.type) === 'anchor'
-															? { receivedSession: entrySession }
-															: {}),
-														onCreated: (created) =>
-															writeEntryInvolved(en, (list) => [...list, `[[${created.basename}]]`]),
-													}).open(),
-													project,
-													['decisionPoint']
-												).open();
-											},
-										}
-									: undefined
-							}
-						/>
-							<button
-							className="loom-rel-filter"
-							aria-label={t('project.createEntity.filterByType')}
-							onClick={(e) => {
-								const menu = new Menu();
-								const current = hubFilter[menuKey] ?? null;
-								menu.addItem((item) =>
-									item
-										.setTitle(t('project.createEntity.allEntities'))
-										.setIcon('filter')
-										.setChecked(current === null)
-										.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: null }))
-								);
-								for (const et of projectTypes(project?.config).filter((et) => roleOf(et) === null && et !== 'decisionPoint')) {
-									menu.addItem((item) =>
-										item
-											.setTitle(entityPlural(et))
-											.setIcon(ENTITY_META[et].icon)
-											.setChecked(current === et)
-											.onClick(() => setHubFilter({ ...hubFilter, [menuKey]: et }))
-									);
-								}
-								menu.showAtMouseEvent(e.nativeEvent);
-							}}
-						>
-							<Icon
-								name={hubFilter[menuKey] ? ENTITY_META[hubFilter[menuKey]].icon : 'filter'}
-							/>
-						</button>
-						</div>
-						{involved.length > 0 || en.group.length > 0 ? (
-							<div className="loom-tag-row">
-								{en.group.length > 0 ? (
-									<EntityChip
-										plugin={plugin}
-										record={project ? pcGroupStub(project.root, groupName) : null}
-										label={groupName}
-										onOpen={openGroupPage}
-										onRemove={() => writeEntryGroup(en, () => [])}
-										removeLabel={t('view.entity.common.removeTheGroup')}
-									/>
-								) : null}
-								{involved.map(({ lp, target }, ii) => (
-									<EntityChip
-										key={lp + String(ii)}
-										plugin={plugin}
-										record={target}
-										label={target?.name ?? lp}
-										onOpen={target ? () => view.openEntity(target.path) : undefined}
-										onRemove={() => {
-											const doRemove = () =>
-												writeEntryInvolved(en, (list) => {
-													const ri = list.findIndex(
-														(r) => typeof r === 'string' && extractLinkpath(r) === lp
-													);
-													if (ri >= 0) list.splice(ri, 1);
-													return list;
-												});
-											// Removing the page's own character unlists the
-											// event from this page — warn before it vanishes.
-											if (target && target.path === record.path) {
-												new ConfirmModal(
-													plugin.app,
-													t('view.entity.events.removeFromInvolvedTitle'),
-													t('view.entity.events.removeFromNoteDetail', { name: target.name, owner: en.owner.name }),
-													doRemove,
-													t('common.remove')
-												).open();
-											} else doRemove();
-										}}
-										removeLabel={t('view.entity.common.removeInvolvedEntity')}
-									/>
-								))}
-							</div>
-						) : null}
-					</div>
-					<div className="loom-hub-col">
-						<div className="loom-hub-location">
-						<SearchableSelect
-							placeholder={t('view.entity.common.locationPlaceholder')}
-							options={(project ? plugin.indexer.getAll('location', project.root) : [])
-								.filter((t) => !locs.some((l) => l.target?.path === t.path))
-								.sort(mainLocationFirst)
-								.map((t) => ({ value: linkTargetOf(t), label: locationLabel(t, plugin) }))}
-							onPick={(name) => writeEntryPlaces(en, (list) => [...list, `[[${name}]]`])}
-							action={
-								project
-									? {
-											label: t('view.entity.sessionNotes.createNewLocationAction'),
-											onPick: () =>
-												new CreateEntityModal(plugin, 'location', project, {
-													onCreated: (created) =>
-														writeEntryPlaces(en, (list) => [...list, `[[${created.basename}]]`]),
-												}).open(),
-										}
-									: undefined
-							}
-					/>
-						</div>
-						{locs.length > 0 ? (
-							<div className="loom-tag-row">
-								{locs.map(({ key, target, remove }) => (
-									<EntityChip
-										key={key}
-										plugin={plugin}
-										record={target}
-										label={target ? locationLabel(target, plugin) : key}
-										onOpen={target ? () => view.openEntity(target.path) : undefined}
-										onRemove={() => {
-											// Removing the place that surfaces this event here — this
-											// location OR a descendant shown by ancestor propagation —
-											// unlists the event from this page. Warn either way.
-											if (
-												isLocation &&
-												target &&
-												(target.path === record.path || descendsFromThis(target))
-											) {
-												new ConfirmModal(
-													plugin.app,
-													t('view.entity.events.removeFromLocationTitle'),
-													t('view.entity.events.removeFromNoteDetail', { name: target.name, owner: en.owner.name }),
-													remove,
-													t('common.remove')
-												).open();
-											} else remove();
-										}}
-										removeLabel={t('view.entity.common.removeLocation')}
-									/>
-								))}
-							</div>
-						) : null}
-					</div>
+					{involveColumn({
+						filterKey: menuKey,
+						sourcePath: en.owner.path,
+						involved: en.involved,
+						group: en.group,
+						session: en.session ? plugin.indexer.resolve(en.session, en.owner.path) : null,
+						add: (names, toGroup) =>
+							(toGroup ? writeEntryGroup : writeEntryInvolved)(en, (list) => [
+								...list,
+								...names.map((n) => `[[${n}]]`),
+							]),
+						clearGroup: () => writeEntryGroup(en, () => []),
+						remove: (lp, target) => {
+							const doRemove = () =>
+								writeEntryInvolved(en, (list) => {
+									const ri = list.findIndex((r) => typeof r === 'string' && extractLinkpath(r) === lp);
+									if (ri >= 0) list.splice(ri, 1);
+									return list;
+								});
+							// Removing the page's own character unlists the event from
+							// this page — warn before it vanishes.
+							if (target && target.path === record.path) {
+								new ConfirmModal(
+									plugin.app,
+									t('view.entity.events.removeFromInvolvedTitle'),
+									t('view.entity.events.removeFromNoteDetail', { name: target.name, owner: en.owner.name }),
+									doRemove,
+									t('common.remove')
+								).open();
+							} else doRemove();
+						},
+					})}
+					{placesColumn(
+						locs.map((l) => ({
+							...l,
+							// Removing the place that surfaces this event here — this location
+							// OR a descendant shown by ancestor propagation — unlists the
+							// event from this page. Warn either way.
+							remove:
+								isLocation && l.target && (l.target.path === record.path || descendsFromThis(l.target))
+									? () =>
+											new ConfirmModal(
+												plugin.app,
+												t('view.entity.events.removeFromLocationTitle'),
+												t('view.entity.events.removeFromNoteDetail', {
+													name: l.target?.name ?? '',
+													owner: en.owner.name,
+												}),
+												l.remove,
+												t('common.remove')
+											).open()
+									: l.remove,
+						})),
+						(name) => writeEntryPlaces(en, (list) => [...list, `[[${name}]]`])
+					)}
 				</div>
 				<div className="loom-note-text">
 					<HubNoteText
@@ -5126,7 +4274,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				<div className="loom-hub-add-row">
 					<SearchableSelect
 						placeholder={t('view.list.addBeatTitle', {
-							article: /^[aeiou]/.test(beatLabel) ? 'an' : 'a',
+							article: article(beatLabel),
 							beat: beatLabel,
 						}) + '…'}
 						options={plugin.indexer
@@ -5138,16 +4286,12 @@ function EntityPage({ view }: { view: EntityView }) {
 							const ev = plugin.indexer.resolve(linkTarget, record.path);
 							if (ev) addExistingEventToPage(ev);
 						}}
-						action={{
-							label: t('project.createEntity.createNewAction', { label: entityLabel(beatType) }),
-							onPick: () =>
-								new CreateEntityModal(plugin, beatType, project, {
-									...(isLocation
-										? { defaultPlace: linkTargetOf(record) }
-										: { defaultInvolved: [linkTargetOf(record)] }),
-									onCreated: () => {},
-								}).open(),
-						}}
+						action={createAction(plugin, beatType, project, {
+							...(isLocation
+								? { defaultPlace: linkTargetOf(record) }
+								: { defaultInvolved: [linkTargetOf(record)] }),
+							onCreated: () => {},
+						})}
 					/>
 					{orderToggle}
 				</div>
@@ -5207,13 +4351,9 @@ function EntityPage({ view }: { view: EntityView }) {
 							.sort((a, b) => a.name.localeCompare(b.name))
 							.map((it) => ({ value: linkTargetOf(it), label: it.name }))}
 						onPick={(linkTarget) => addItemLink(linkTarget)}
-						action={{
-							label: t('project.createEntity.createNewAction', { label: entityLabel('item') }),
-							onPick: () =>
-								new CreateEntityModal(plugin, 'item', project, {
-									onCreated: (created) => addItemLink(created.basename),
-								}).open(),
-						}}
+						action={createAction(plugin, 'item', project, {
+							onCreated: (created) => addItemLink(created.basename),
+						})}
 					/>
 				</div>
 				{itemRecords.length > 0 ? (
@@ -5292,22 +4432,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						new ConfirmModal(
 							plugin.app,
 							t('view.list.deleteConfirmTitle', { name: recordLabel(record, project) }),
-							// A scene/act IS its stretch of the script — deleting the
-							// note while leaving the writing behind would just resurrect it
-							// on the next parse, so the two go together. Deleting an act
-							// also takes its scenes' notes with it (their headings live in
-							// the act's own script block, which is about to go too). An
-							// Act/Chapter in a Prose project is the identical story one
-							// level over, against the Book instead of the script.
-							scriptNamed
-								? record.type === 'act'
-									? t('view.list.deleteMessageAct')
-									: t('view.list.deleteMessageScene')
-								: bookNamed
-									? record.type === 'act'
-										? t('view.list.deleteMessageBookAct')
-										: t('view.list.deleteMessageBookChapter')
-									: t('view.list.deleteMessageGeneral'),
+							project ? deleteEntityMessage(project, record) : t('view.list.deleteMessageGeneral'),
 							() => {
 								// Leave the page first so the view never sits on a
 								// trashed file, then delete.
@@ -5316,15 +4441,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								else if (project) {
 									view.navigateTo(VIEW_LIST, { project: project.root, entityType: record.type });
 								}
-								if (scriptNamed && project) {
-									void deleteScriptEntity(plugin, project, record);
-								} else if (bookNamed && project) {
-									void deleteBookEntity(plugin, project, record);
-								} else {
-									void purgeEntityReferences(plugin, record.path, record.project).finally(() =>
-										plugin.app.fileManager.trashFile(file)
-									);
-								}
+								void (project ? deleteEntity(plugin, project, record) : deleteEntityNote(plugin, record));
 							},
 							t('project.common.delete')
 						).open()
@@ -5569,18 +4686,12 @@ function EntityPage({ view }: { view: EntityView }) {
 									.sort((a, b) => a.label.localeCompare(b.label))}
 								initialQuery={editingRegion ? currentRegion?.name ?? '' : ''}
 								action={
-									project
-										? {
-												label: t('project.createEntity.createNewAction', { label: entityLabel('region') }),
-												onPick: () =>
-													new CreateEntityModal(plugin, 'region', project, {
-														onCreated: (created) => {
-															setLocationRegion(created.basename);
-															setEditingRegion(false);
-														},
-													}).open(),
-											}
-										: undefined
+									createAction(plugin, 'region', project, {
+										onCreated: (created) => {
+											setLocationRegion(created.basename);
+											setEditingRegion(false);
+										},
+									})
 								}
 								onPick={(target) => {
 									setLocationRegion(target);
@@ -5613,7 +4724,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								aria-label={t('view.entity.location.changeRegion')}
 								onClick={() => setEditingRegion(true)}
 							>
-								<Icon name="square-pen" fallback="pencil" />
+								<Icon name="square-pen" />
 							</button>
 						</div>
 					)}
@@ -5803,25 +4914,22 @@ function EntityPage({ view }: { view: EntityView }) {
 									: t('view.entity.quests.resolvedPreviously');
 						return (
 							<div key={state} className="loom-section">
-								<button
-									className="loom-section-header"
-									onClick={() => setQuestsOpen({ ...questsOpen, [state]: !open })}
-								>
-									<span className={open ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
-									{heading}
-									<span className="loom-section-count">
-										{state === 'resolvedPrev' && limit > 0 && total > list.length
+								<SectionHeader
+									open={open}
+									onToggle={() => setQuestsOpen({ ...questsOpen, [state]: !open })}
+									label={heading}
+									count={
+										state === 'resolvedPrev' && limit > 0 && total > list.length
 											? t('view.entity.quests.countOfTotal', { count: list.length, total })
-											: list.length}
-									</span>
-								</button>
+											: list.length
+									}
+								/>
 								{open
 									? (
 									<div className="loom-quest-cards">
 									{list.map(({ quest }) => {
-											const givers = quest.questGivers
-												.map((lp) => plugin.indexer.resolve(lp, quest.path))
-												.filter((r): r is EntityRecord => r != null && r.type === 'character');
+											const givers = plugin.indexer.resolveAll(quest.questGivers, quest.path)
+												.filter((r) => r.type === 'character');
 											const received =
 												quest.questReceived !== null
 													? plugin.indexer.resolve(quest.questReceived, quest.path)
@@ -5962,7 +5070,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										className="loom-quest-drop"
 										style={{ left: bar.left, top: bar.top, height: bar.height }}
 									/>,
-									document.body
+									activeDocument.body
 								);
 							})()
 						: null}
@@ -5984,62 +5092,29 @@ function EntityPage({ view }: { view: EntityView }) {
 								.map((c) => ({ value: linkTargetOf(c), label: c.name }))}
 							onPick={(target) => writeQuestGivers([...questGiverRecords.map((g) => linkTargetOf(g)), target])}
 							action={
-								project
-									? {
-											label: t('project.createEntity.createNewAction', { label: entityLabel('character') }),
-											onPick: () =>
-												new CreateEntityModal(plugin, 'character', project, {
-													onCreated: (created) =>
-														writeQuestGivers([...questGiverRecords.map((g) => linkTargetOf(g)), created.basename]),
-												}).open(),
-										}
-									: undefined
+								createAction(plugin, 'character', project, {
+									onCreated: (created) =>
+										writeQuestGivers([...questGiverRecords.map((g) => linkTargetOf(g)), created.basename]),
+								})
 							}
 						/>
-						{questGiverRecords.length > 0 ? (
-							<div className="loom-tag-row">
-								{questGiverRecords.map((c) => (
-									<EntityChip
-										key={c.path}
-										plugin={plugin}
-										record={c}
-										onOpen={() => view.openEntity(c.path)}
-										onRemove={() =>
-											writeQuestGivers(
-												questGiverRecords.filter((o) => o.path !== c.path).map((o) => o.name)
-											)
-										}
-										removeLabel={t('view.entity.quests.removeQuestGiver')}
-									/>
-								))}
-							</div>
-						) : null}
+						{chipRow(
+							questGiverRecords,
+							(c) => writeQuestGivers(questGiverRecords.filter((o) => o.path !== c.path).map((o) => o.name)),
+							t('view.entity.quests.removeQuestGiver')
+						)}
 					</div>
 					<div className="loom-quest-right">
 						<div className="loom-quest-sessions">
 							<div className="loom-field">
 								<span className="loom-field-label">{t('view.entity.quests.receivedIn', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel })}</span>
-								{questReceived && roleOf(questReceived.type) === questAnchorRole ? (
-									sessionChip(questReceived, () => setQuestSession('questReceived', null))
-								) : (
-									<SearchableSelect
-										placeholder={t('project.createEntity.pickAnchor', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel })}
-										options={questAnchorsSorted.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
-										onPick={(name) => setQuestSession('questReceived', name)}
-										action={
-											project
-												? {
-														label: t('project.createEntity.createNewAction', {
-															label: entityLabel(questAnchorType),
-														}),
-														onPick: () =>
-															new CreateEntityModal(plugin, questAnchorType, project, {
-																onCreated: (created) => setQuestSession('questReceived', created.basename),
-															}).open(),
-													}
-												: undefined
-										}
-									/>
+								{anchorPicker(
+									questReceived && roleOf(questReceived.type) === questAnchorRole ? questReceived : null,
+									(name) => setQuestSession('questReceived', name),
+									() => setQuestSession('questReceived', null),
+									t('project.createEntity.pickAnchor', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel }),
+									questAnchorsSorted,
+									questAnchorType
 								)}
 							</div>
 							{record.questOutcome !== '' ? (
@@ -6050,28 +5125,15 @@ function EntityPage({ view }: { view: EntityView }) {
 											anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel,
 										})}
 									</span>
-									{questOutcomeSession && roleOf(questOutcomeSession.type) === questAnchorRole ? (
-										sessionChip(questOutcomeSession, () => setQuestSession('questOutcomeSession', null))
-									) : (
-										<SearchableSelect
-											placeholder={t('project.createEntity.pickAnchor', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel })}
-											options={questAnchorsSorted.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
-											onPick={(name) => setQuestSession('questOutcomeSession', name)}
-											action={
-												project
-													? {
-															label: t('project.createEntity.createNewAction', {
-																label: entityLabel(questAnchorType),
-															}),
-															onPick: () =>
-																new CreateEntityModal(plugin, questAnchorType, project, {
-																	onCreated: (created) =>
-																		setQuestSession('questOutcomeSession', created.basename),
-																}).open(),
-														}
-													: undefined
-											}
-										/>
+									{anchorPicker(
+										questOutcomeSession && roleOf(questOutcomeSession.type) === questAnchorRole
+											? questOutcomeSession
+											: null,
+										(name) => setQuestSession('questOutcomeSession', name),
+										() => setQuestSession('questOutcomeSession', null),
+										t('project.createEntity.pickAnchor', { anchor: questAnchorRole === 'beat' ? beatLabel : anchorLabel }),
+										questAnchorsSorted,
+										questAnchorType
 									)}
 								</div>
 							) : null}
@@ -6166,37 +5228,14 @@ function EntityPage({ view }: { view: EntityView }) {
 				{showsLifecycle && !record.alive ? (
 					<div className="loom-death-row">
 						<span className="loom-field-label">{t('view.entity.common.deathSession')}</span>
-						{deathSession && roleOf(deathSession.type) === 'anchor' ? (
-							<div className="loom-tag-row">
-								<EntityChip
-									plugin={plugin}
-									record={deathSession}
-									label={recordLabel(deathSession, project)}
-									onOpen={() => view.openEntity(deathSession.path)}
-									onRemove={() => setDeathSession(null)}
-									removeLabel={t('view.entity.common.clearDeathSession')}
-								/>
-							</div>
-						) : (
-							<SearchableSelect
-								placeholder={t('project.createEntity.pickSession')}
-								options={sessions
-									.slice()
-									.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
-									.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
-								onPick={(name) => setDeathSession(name)}
-								action={
-									project
-										? {
-												label: t('project.createEntity.createNewAction', { label: entityLabel(anchorType) }),
-												onPick: () =>
-													new CreateEntityModal(plugin, anchorType, project, {
-														onCreated: (created) => setDeathSession(created.basename),
-													}).open(),
-											}
-										: undefined
-								}
-							/>
+						{anchorPicker(
+							deathSession && roleOf(deathSession.type) === 'anchor' ? deathSession : null,
+							(name) => setDeathSession(name),
+							() => setDeathSession(null),
+							t('project.createEntity.pickSession'),
+							sessions.slice().sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)),
+							anchorType,
+							t('view.entity.common.clearDeathSession')
 						)}
 					</div>
 				) : null}
@@ -6216,11 +5255,22 @@ function EntityPage({ view }: { view: EntityView }) {
 			)}
 
 		{isSession && project ? (
-				<div className="loom-field loom-graph-under">
-					<button className="loom-section-header" onClick={() => setGraphOpen(!graphOpen)}>
-						<span className={graphOpen ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
-						{t('view.entity.common.anchorGraph', { anchor: entityLabel(anchorType) })}
-					</button>
+				<div className="loom-field loom-graph-under" ref={graphSectionRef}>
+					<SectionHeader
+						open={graphOpen}
+						onToggle={() => {
+							setGraphOpen(!graphOpen);
+							if (graphOpen) return;
+							// Opening scrolls the section to the top of the page — the
+							// graph gets the most room there. Deferred until it's rendered.
+							window.setTimeout(() => {
+								const el = graphSectionRef.current;
+								const scroller = el?.closest('.loom-entity');
+								if (el && scroller instanceof HTMLElement) scrollIntoContainer(scroller, el, 'smooth');
+							});
+						}}
+						label={t('view.entity.common.anchorGraph', { anchor: entityLabel(anchorType) })}
+					/>
 					{graphOpen ? (
 						<MiniGraph
 							plugin={plugin}
@@ -6250,7 +5300,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												aria-label={actNavOpen ? t('view.entity.script.hideNavigation') : t('view.entity.script.showNavigation')}
 												onClick={() => openActSidePanel(actNavOpen ? null : 'nav')}
 											>
-												<Icon name={actNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
+												<Icon name={actNavOpen ? 'panel-left-close' : 'panel-left-open'} />
 											</button>
 											{actNavOpen ? (
 												<aside className="loom-script-nav">
@@ -6288,12 +5338,7 @@ function EntityPage({ view }: { view: EntityView }) {
 															const targetEl = target
 																? container?.querySelector(`[data-line="${target.line}"]`)
 																: null;
-															if (container && targetEl) {
-																const containerRect = container.getBoundingClientRect();
-																const targetRect = targetEl.getBoundingClientRect();
-																const top = container.scrollTop + (targetRect.top - containerRect.top);
-																container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
-															}
+															if (container && targetEl) scrollIntoContainer(container, targetEl, 'smooth');
 														})
 													)}
 												</aside>
@@ -6301,29 +5346,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										</div>
 									) : null;
 								const actAnnotationSpans = findAnnotationSpans(actExcerpt);
-								const actMatches: ScriptSearchMatch[] = [];
-								if (actScriptQuery.trim() !== '') {
-									const needle = actScriptQuery.toLowerCase();
-									const hay = actDraft.toLowerCase();
-									for (
-										let at = hay.indexOf(needle);
-										at !== -1;
-										at = hay.indexOf(needle, at + needle.length)
-									) {
-										actMatches.push({ kind: 'text', offset: at });
-									}
-									for (const [id, entries] of Object.entries(scriptNotes.comments)) {
-										if (entries.some((e) => e.text.toLowerCase().includes(needle))) actMatches.push({ kind: 'comment', id });
-									}
-									for (const [id, entry] of Object.entries(scriptNotes.altText)) {
-										entry.options.forEach((opt, optionIndex) => {
-											if (opt.toLowerCase().includes(needle)) actMatches.push({ kind: 'altOption', id, optionIndex });
-										});
-									}
-									const posOf = (m: ScriptSearchMatch) =>
-										m.kind === 'text' ? m.offset : (actAnnotationSpans.find((s) => s.id === m.id)?.from ?? Infinity);
-									actMatches.sort((a, b) => posOf(a) - posOf(b));
-								}
+								const actMatches = scriptSearchMatches(actDraft, actAnnotationSpans, scriptNotes, actScriptQuery);
 								const gotoActMatch = (index: number) => {
 									if (actMatches.length === 0) return;
 									const next =
@@ -6342,14 +5365,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											const container = actScriptPagesRef.current;
 											const mark = container?.querySelectorAll('mark')[textIndex];
 											if (!container || !mark) return;
-											const containerRect = container.getBoundingClientRect();
-											const markRect = mark.getBoundingClientRect();
-											const target =
-												container.scrollTop +
-												(markRect.top - containerRect.top) -
-												container.clientHeight / 2 +
-												markRect.height / 2;
-											container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+											scrollIntoContainer(container, mark, 'smooth', 'center');
 										});
 										return;
 									}
@@ -6381,21 +5397,8 @@ function EntityPage({ view }: { view: EntityView }) {
 								 *  excerpt-relative ones). Marker ids are globally unique
 								 *  regardless of which slice of the script they're scanned from,
 								 *  so `scriptNotes` lookups by id still resolve correctly. */
-								const actAnnotationSpansAll = findAnnotationSpans(actDraft);
-								const actUnresolvedCommentSpans = actAnnotationSpansAll
-									.filter((s) => s.kind === 'comment')
-									.map((s) => ({
-										span: s,
-										unresolvedEntries: (scriptNotes.comments[s.id] ?? []).filter((e) => !e.resolved),
-									}))
-									.filter((x) => x.unresolvedEntries.length > 0);
-								const actUndecidedAltSpans = actAnnotationSpansAll.filter(
-									(s) => s.kind === 'alt' && (scriptNotes.altText[s.id]?.acceptedIndex ?? null) === null
-								);
-								const actExcerptOf = (span: AnnotationSpan): string => {
-									const raw = actDraft.slice(span.contentFrom, span.contentTo).replace(/\s+/g, ' ').trim();
-									return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
-								};
+								const actUnresolvedCommentRows = unresolvedCommentRows(actDraft, scriptNotes.comments);
+								const actUndecidedAltRows = undecidedAltRows(actDraft, scriptNotes.altText);
 								const jumpToActAnnotation = (span: AnnotationSpan) => {
 									openActSidePanel(null);
 									switchActMode('pages');
@@ -6422,72 +5425,20 @@ function EntityPage({ view }: { view: EntityView }) {
 								// tree.
 								const actCommentsAside = actCommentsPanelOpen ? (
 									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
-										<aside className="loom-script-nav">
-											<div className="loom-script-nav-head">
-												{t('view.entity.script.unresolvedComments')}
-												<button
-													className="loom-rel-filter"
-													aria-label={t('view.entity.script.hideComments')}
-													onClick={() => setActCommentsPanelOpen(false)}
-												>
-													<Icon name="chevron-left" />
-												</button>
-											</div>
-											{actUnresolvedCommentSpans.length === 0 ? (
-												<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
-											) : (
-												actUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
-													<div key={span.id} className="loom-script-comments-panel-group">
-														<button
-															className="loom-script-nav-act loom-script-comments-panel-excerpt"
-															onClick={() => jumpToActAnnotation(span)}
-														>
-															{actExcerptOf(span)}
-														</button>
-														<div className="loom-script-comments-panel-nested">
-															{unresolvedEntries.map((entry) => (
-																<button
-																	key={entry.id + entry.createdAt}
-																	className="loom-script-comments-panel-reply"
-																	onClick={() => jumpToActAnnotation(span)}
-																>
-																	{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
-																</button>
-															))}
-														</div>
-													</div>
-												))
-											)}
-										</aside>
+										<CommentsBrowserPanel
+											rows={actUnresolvedCommentRows}
+											onJump={jumpToActAnnotation}
+											onClose={() => setActCommentsPanelOpen(false)}
+										/>
 									</div>
 								) : null;
 								const actAltAside = actAltPanelOpen ? (
 									<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
-										<aside className="loom-script-nav">
-											<div className="loom-script-nav-head">
-												{t('view.entity.script.unfinalizedAlternatives')}
-												<button
-													className="loom-rel-filter"
-													aria-label={t('view.entity.script.hideAlternatives')}
-													onClick={() => setActAltPanelOpen(false)}
-												>
-													<Icon name="chevron-left" />
-												</button>
-											</div>
-											{actUndecidedAltSpans.length === 0 ? (
-												<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
-											) : (
-												actUndecidedAltSpans.map((span) => (
-													<button
-														key={span.id}
-														className="loom-script-nav-act loom-script-comments-panel-excerpt"
-														onClick={() => jumpToActAnnotation(span)}
-													>
-														{actExcerptOf(span)}
-													</button>
-												))
-											)}
-										</aside>
+										<AlternativesBrowserPanel
+											rows={actUndecidedAltRows}
+											onJump={jumpToActAnnotation}
+											onClose={() => setActAltPanelOpen(false)}
+										/>
 									</div>
 								) : null;
 								/** Scrolls the section into view on every tab click, even a
@@ -6517,18 +5468,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								 *  this extra excerpt-to-absolute step. */
 								const openThisSceneFromAct = (line: number) => {
 									if (!scriptParsed || !actNavSection) return;
-									const absLine = line + actNavSection.line;
-									const scene = sceneAtLine(scriptParsed, absLine);
-									if (!scene || scene.loomId === null) return;
-									const note = plugin.indexer
-										.getAll('scene', record.project)
-										.find((s) => s.sceneId === scene.loomId);
-									if (!note) return;
-									const excerpt = sceneScriptText(scriptText, scene.loomId);
-									if (excerpt === null) return;
-									const bodyLine = Math.max(0, absLine - scene.line - computeSceneBodyLineOffset(excerpt));
-									window.localStorage.setItem(`loom-scene-script-line:${note.path}`, String(bodyLine));
-									view.openEntity(note.path);
+									openSceneAtLine(plugin, view, record.project, scriptParsed, scriptText, line + actNavSection.line);
 								};
 								return (
 									<>
@@ -6544,81 +5484,32 @@ function EntityPage({ view }: { view: EntityView }) {
 											</button>
 											{actScriptMode !== 'outline' ? (
 												<>
-											<div className="loom-search-wrap">
-												<input
-													className="loom-writer-search"
-													type="search"
-													placeholder={t('view.entity.script.searchThisAct')}
-													value={actScriptQuery}
-													onChange={(e) => {
-														setActScriptQuery(e.target.value);
-														setActScriptMatchIndex(0);
-													}}
-													onKeyDown={(e) => {
-														if (e.key !== 'Enter') return;
-														e.preventDefault();
-														gotoActMatch(
-															e.shiftKey ? actScriptMatchIndex - 1 : actScriptMatchIndex + 1
-														);
-													}}
-												/>
-												{actScriptQuery !== '' ? (
-													<button
-														className="loom-chip-remove loom-search-clear"
-														aria-label={t('view.entity.script.clearSearch')}
-														onClick={() => {
-															setActScriptQuery('');
-															setActScriptMatchIndex(0);
-														}}
-													>
-														✕
-													</button>
-												) : null}
-											</div>
-											<button
-												className="loom-rel-filter"
-												aria-label={t('view.entity.script.previousMatch')}
-												disabled={actMatches.length === 0}
-												onClick={() => gotoActMatch(actScriptMatchIndex - 1)}
-											>
-												<Icon name="chevron-up" />
-											</button>
-											<button
-												className="loom-rel-filter"
-												aria-label={t('view.entity.script.nextMatch')}
-												disabled={actMatches.length === 0}
-												onClick={() => gotoActMatch(actScriptMatchIndex + 1)}
-											>
-												<Icon name="chevron-down" />
-											</button>
+											<SearchNav
+												placeholder={t('view.entity.script.searchThisAct')}
+												query={actScriptQuery}
+												onQuery={(q) => {
+													setActScriptQuery(q);
+													setActScriptMatchIndex(0);
+												}}
+												onEnter={(e) => {
+													e.preventDefault();
+													gotoActMatch(
+														e.shiftKey ? actScriptMatchIndex - 1 : actScriptMatchIndex + 1
+													);
+												}}
+												matchCount={actMatches.length}
+												onPrev={() => gotoActMatch(actScriptMatchIndex - 1)}
+												onNext={() => gotoActMatch(actScriptMatchIndex + 1)}
+											/>
+											<AnnotationPanelToggles open={actCommentsPanelOpen ? 'comments' : actAltPanelOpen ? 'alt' : null} onToggle={openActSidePanel} />
 											</>
-											) : null}
-											<div className="loom-script-side-toggles">
-												<button
-													className={
-														actCommentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
-													}
-													aria-label={actCommentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
-													onClick={() => openActSidePanel(actCommentsPanelOpen ? null : 'comments')}
-												>
-													<Icon name="message-square" />
+											) : (
+												<button className="loom-writer-outline-btn" onClick={() => clickActTab('pages')}>
+													{t('view.entity.script.preview')}
 												</button>
-												<button
-													className={actAltPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-													aria-label={actAltPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
-													onClick={() => openActSidePanel(actAltPanelOpen ? null : 'alt')}
-												>
-													<Icon name="repeat" fallback="arrow-right-left" />
-												</button>
-											</div>
+											)}
 											{actScriptMode !== 'outline' ? (
-												<span className="loom-writer-stat">
-													{actScriptQuery.trim() === ''
-														? ''
-														: actMatches.length === 0
-															? t('view.entity.script.noMatches')
-															: t('view.entity.script.matchCount', { current: (actScriptMatchIndex % actMatches.length) + 1, total: actMatches.length })}
-												</span>
+												<MatchStat query={actScriptQuery} count={actMatches.length} index={actScriptMatchIndex} />
 											) : null}
 											<div className="loom-shell-spacer" />
 											{/* Deliberately NOT part of the pill Script-mode Act's own
@@ -6750,33 +5641,14 @@ function EntityPage({ view }: { view: EntityView }) {
 									}
 								}}
 							/>
+						) : (
+							<button className="loom-writer-outline-btn" onClick={() => clickActBookTab('preview')}>
+								{t('view.entity.script.preview')}
+							</button>
+						)}
+						{actBookMode !== 'outline' ? (
+							<AnnotationPanelToggles open={actBookSidePanel === 'nav' ? null : actBookSidePanel} onToggle={setActBookSidePanel} />
 						) : null}
-						<div className="loom-script-side-toggles">
-							<button
-								className={
-									actBookSidePanel === 'comments' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
-								}
-								aria-label={
-									actBookSidePanel === 'comments'
-										? t('view.entity.script.hideComments')
-										: t('view.entity.script.browseComments')
-								}
-								onClick={() => setActBookSidePanel(actBookSidePanel === 'comments' ? null : 'comments')}
-							>
-								<Icon name="message-square" />
-							</button>
-							<button
-								className={actBookSidePanel === 'alt' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-								aria-label={
-									actBookSidePanel === 'alt'
-										? t('view.entity.script.hideAlternatives')
-										: t('view.entity.script.browseAlternatives')
-								}
-								onClick={() => setActBookSidePanel(actBookSidePanel === 'alt' ? null : 'alt')}
-							>
-								<Icon name="repeat" fallback="arrow-right-left" />
-							</button>
-						</div>
 						<div className="loom-shell-spacer" />
 						{/* Deliberately NOT part of the pill Book's own Editor/Preview
 						    toggle used to be — same reasoning as Script-mode Act's own
@@ -6834,25 +5706,17 @@ function EntityPage({ view }: { view: EntityView }) {
 						// embedded Act/Scene sections use (`.loom-scene-pages`) — a
 						// nested page section, not the main BookView.
 						<div className="loom-screenplay loom-scene-pages" ref={actBookPreviewWrapRef}>
-							{actBookSidePanel === 'comments' ? (
-								<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
-									<CommentsBrowserPanel
-										rows={actUnresolvedCommentRowsList}
-										onJump={jumpToActBookAnnotation}
-										onClose={() => setActBookSidePanel(null)}
-									/>
-								</div>
-							) : null}
-							{actBookSidePanel === 'alt' ? (
-								<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
-									<AlternativesBrowserPanel
-										rows={actUndecidedAltRowsList}
-										onJump={jumpToActBookAnnotation}
-										onClose={() => setActBookSidePanel(null)}
-									/>
-								</div>
-							) : null}
-							<div className="loom-book-page">
+							<BookSidePanels
+								panel={actBookSidePanel}
+								setPanel={setActBookSidePanel}
+								acts={[record]}
+								chaptersOf={() => actChapters}
+								scroller={actBookPreviewWrapRef}
+								commentRows={actUnresolvedCommentRowsList}
+								altRows={actUndecidedAltRowsList}
+								onJumpAnnotation={jumpToActBookAnnotation}
+							/>
+							<div className="loom-book-page" data-book-act={record.actId}>
 								<ActChapterBlocks
 									plugin={plugin}
 									bookText={bookText}
@@ -6877,12 +5741,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			{isSession && !scriptMode && project ? (
 				(() => {
 					const hubTypes = ENTITY_TYPES.filter((et) => hubEntries.some((e) => e.owner.type === et));
-					// One group whose type is already the section's own label
-					// (in practice always just Events, since quests no longer
-					// author session notes) — printing that type's own group
-					// label too would just repeat "Events" underneath "Events".
-					// A future second type sharing this hub would still get its
-					// own label, same as today.
+					// One group whose type is already the section's own label (in
+					// practice always Events) — don't repeat it as a group label.
 					const showGroupLabel = hubTypes.length > 1 || (hubTypes.length === 1 && hubTypes[0] !== beatType);
 					const addEventBtn = (ref?: (el: HTMLButtonElement | null) => void) => (
 						<button
@@ -6895,7 +5755,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								}).open()
 							}
 						>
-							+ {t('view.list.addBeatTitle', { article: /^[aeiou]/.test(beatLabel) ? 'an' : 'a', beat: beatLabel })}
+							+ {t('view.list.addBeatTitle', { article: article(beatLabel), beat: beatLabel })}
 						</button>
 					);
 					return (
@@ -6919,7 +5779,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								}
 								const ordered = entries
 									.slice()
-									.sort((a, b) => (a.owner.seq ?? a.owner.created) - (b.owner.seq ?? b.owner.created));
+									.sort((a, b) => bySeq(a.owner, b.owner));
 								const owners = ordered.map((e) => e.owner);
 								return (
 									<div
@@ -7009,30 +5869,13 @@ function EntityPage({ view }: { view: EntityView }) {
 									/>
 								</div>
 								<div className="loom-obj-finished">
-									{finished && roleOf(finished.type) === questAnchorRole ? (
-										sessionChip(finished, () => commitSet(idx, { finishedOn: '' }))
-									) : (
-										<SearchableSelect
-											placeholder={t('view.entity.quests.finishedOn')}
-											options={questAnchorsSorted.map((s) => ({
-												value: linkTargetOf(s),
-												label: recordLabel(s, project),
-											}))}
-											onPick={(name) => commitSet(idx, { finishedOn: name })}
-											action={
-												project
-													? {
-															label: t('project.createEntity.createNewAction', {
-																label: entityLabel(questAnchorType),
-															}),
-															onPick: () =>
-																new CreateEntityModal(plugin, questAnchorType, project, {
-																	onCreated: (created) => commitSet(idx, { finishedOn: created.basename }),
-																}).open(),
-														}
-													: undefined
-											}
-										/>
+									{anchorPicker(
+										finished && roleOf(finished.type) === questAnchorRole ? finished : null,
+										(name) => commitSet(idx, { finishedOn: name }),
+										() => commitSet(idx, { finishedOn: '' }),
+										t('view.entity.quests.finishedOn'),
+										questAnchorsSorted,
+										questAnchorType
 									)}
 								</div>
 								<button
@@ -7111,32 +5954,45 @@ function EntityPage({ view }: { view: EntityView }) {
 							editMembersOf(record, (arr) => [...arr, ...adds.map((n) => `[[${n}]]`)]);
 						}}
 						action={
-							project
-								? {
-										label: t('project.createEntity.createNewAction', { label: entityLabel('character') }),
-										onPick: () =>
-											new CreateEntityModal(plugin, 'character', project, {
-												onCreated: (created) =>
-													editMembersOf(record, (arr) => [...arr, `[[${created.basename}]]`]),
-											}).open(),
-									}
-								: undefined
+							createAction(plugin, 'character', project, {
+								onCreated: (created) =>
+									editMembersOf(record, (arr) => [...arr, `[[${created.basename}]]`]),
+							})
 						}
 					/>
-					{memberRecords.length > 0 ? (
-						<div className="loom-tag-row">
-							{memberRecords.map((c) => (
-								<EntityChip
-									key={c.path}
-									plugin={plugin}
-									record={c}
-									onOpen={() => view.openEntity(c.path)}
-									onRemove={() => removeMemberEntry(record, c)}
-									removeLabel={t('view.entity.faction.removeMember')}
-								/>
-							))}
+					{factionMemberRows.map((m) => (
+						<div key={m.character.path + ':' + m.role} className="loom-rel-row loom-member-row">
+							<EntityChip plugin={plugin} record={m.character} onOpen={() => view.openEntity(m.character.path)} />
+							<span className="loom-member-sep">{t('project.createEntity.isLabel')}</span>
+							<input
+								type="text"
+								className="loom-rel-type"
+								placeholder={t('project.createEntity.memberPlaceholder')}
+								defaultValue={m.role}
+								onBlur={(e) => {
+									if (e.target.value.trim() !== m.role)
+										setMembershipField(record, m.character, { role: e.target.value });
+								}}
+							/>
+							<span className="loom-member-sep">{t('project.createEntity.atLabel')}</span>
+							{memberLocationCell(record, m.character, m.location)}
+							<button
+								className="loom-nav-btn"
+								aria-label={t('view.entity.faction.removeMember')}
+								onClick={() =>
+									new ConfirmModal(
+										plugin.app,
+										t('view.entity.faction.removeMembershipTitle'),
+										t('view.entity.faction.removeMembershipDetail', { name: m.character.name, faction: record.name }),
+										() => removeMemberEntry(record, m.character),
+										t('common.remove')
+									).open()
+								}
+							>
+								✕
+							</button>
 						</div>
-					) : null}
+					))}
 				</div>
 			) : null}
 
@@ -7158,22 +6014,16 @@ function EntityPage({ view }: { view: EntityView }) {
 									setFactionDraft(false);
 								}}
 								action={
-									project
-										? {
-												label: t('project.createEntity.createNewAction', { label: entityLabel('faction') }),
-												onPick: () =>
-													new CreateEntityModal(plugin, 'faction', project, {
-														onCreated: (created) => {
-															// A fresh faction's `EntityRecord` isn't indexed yet the
-															// instant `onCreated` fires — `editFmList` only needs the
-															// file's own PATH, so it writes straight through the
-															// `TFile` without waiting on the index at all.
-															editFmList(created.path, FM.members, (arr) => [...arr, `[[${linkTargetOf(record)}]]`]);
-															setFactionDraft(false);
-														},
-													}).open(),
-											}
-										: undefined
+									createAction(plugin, 'faction', project, {
+										onCreated: (created) => {
+											// A fresh faction's `EntityRecord` isn't indexed yet the
+											// instant `onCreated` fires — `editFmList` only needs the
+											// file's own PATH, so it writes straight through the
+											// `TFile` without waiting on the index at all.
+											editFmList(created.path, FM.members, (arr) => [...arr, `[[${linkTargetOf(record)}]]`]);
+											setFactionDraft(false);
+										},
+									})
 								}
 							/>
 							<button
@@ -7198,7 +6048,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								defaultValue={m.role}
 								onBlur={(e) => {
 									if (e.target.value.trim() !== m.role)
-										setMembershipField(m.faction, { role: e.target.value });
+										setMembershipField(m.faction, record, { role: e.target.value });
 								}}
 							/>
 							<span className="loom-member-sep">{t('project.createEntity.ofLabel')}</span>
@@ -7208,38 +6058,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								onOpen={() => view.openEntity(m.faction.path)}
 							/>
 							<span className="loom-member-sep">{t('project.createEntity.atLabel')}</span>
-							<div className="loom-member-loc">
-								{m.location ? (
-									<EntityChip
-										plugin={plugin}
-										record={m.location}
-										onOpen={() => m.location && view.openEntity(m.location.path)}
-										onRemove={() => setMembershipField(m.faction, { location: null })}
-										removeLabel={t('view.entity.faction.clearLocation')}
-									/>
-								) : (
-									<SearchableSelect
-										placeholder={t('common.notSpecified')}
-										options={membershipLocations
-											.slice()
-											.sort((a, b) => a.name.localeCompare(b.name))
-											.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
-										onPick={(name) => setMembershipField(m.faction, { location: name })}
-										action={
-											project
-												? {
-														label: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
-														onPick: () =>
-															new CreateEntityModal(plugin, 'location', project, {
-																onCreated: (created) =>
-																	setMembershipField(m.faction, { location: created.basename }),
-															}).open(),
-													}
-												: undefined
-										}
-									/>
-								)}
-							</div>
+							{memberLocationCell(m.faction, record, m.location)}
 							<button
 								className="loom-nav-btn"
 								aria-label={t('view.entity.faction.removeMembership')}
@@ -7355,15 +6174,9 @@ function EntityPage({ view }: { view: EntityView }) {
 													.map((r) => ({ value: linkTargetOf(r), label: r.name }))
 													.sort((a, b) => a.label.localeCompare(b.label))}
 												action={
-													project
-														? {
-																label: t('project.createEntity.createNewAction', { label: entityLabel('decisionPoint') }),
-																onPick: () =>
-																	new CreateEntityModal(plugin, 'decisionPoint', project, {
-																		onCreated: (created) => setEventDecisionPoint(created.basename),
-																	}).open(),
-															}
-														: undefined
+													createAction(plugin, 'decisionPoint', project, {
+														onCreated: (created) => setEventDecisionPoint(created.basename),
+													})
 												}
 												onPick={(target) => setEventDecisionPoint(target)}
 											/>
@@ -7409,37 +6222,20 @@ function EntityPage({ view }: { view: EntityView }) {
 																options={picker.list
 																	.map((r) => ({ value: linkTargetOf(r), label: r.name }))
 																	.sort((a, b) => a.label.localeCompare(b.label))}
-																action={
-																	project
-																		? {
-																				label: t('project.createEntity.createNewAction', {
-																					label: entityLabel(conditionTargetType(cond.type)),
-																				}),
-																				onPick: () =>
-																					new CreateEntityModal(
-																						plugin,
-																						conditionTargetType(cond.type),
-																						project,
-																						{
-																							onCreated: (created) => {
-																								const next = specialConditions.map((g, i) =>
-																									i !== gi
-																										? g
-																										: {
-																												conditions: g.conditions.map((c, j) =>
-																													j !== ci
-																														? c
-																														: { ...c, target: created.basename }
-																												),
-																											}
-																								);
-																								commitSpecialConditions(next);
-																							},
-																						}
-																					).open(),
-																			}
-																		: undefined
-																}
+																action={createAction(plugin, conditionTargetType(cond.type), project, {
+																	onCreated: (created) => {
+																		const next = specialConditions.map((g, i) =>
+																			i !== gi
+																				? g
+																				: {
+																						conditions: g.conditions.map((c, j) =>
+																							j !== ci ? c : { ...c, target: created.basename }
+																						),
+																					}
+																		);
+																		commitSpecialConditions(next);
+																	},
+																})}
 																onPick={(target) => {
 																	const next = specialConditions.map((g, i) =>
 																		i !== gi
@@ -7523,15 +6319,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					    the script's own character cues, never edited here. */}
 					<div className="loom-field loom-field-sep">
 					<div
-						className={
-							sceneCastRecords.length +
-								sceneFactionRecords.length +
-								sceneMentionedLocationRecords.length +
-								sceneItemRecords.length ===
-							0
-								? 'loom-scene-act-grid loom-scene-act-grid-solo'
-								: 'loom-scene-act-grid'
-						}
+						className={noEntities(sceneEntityGroups) ? 'loom-scene-act-grid loom-scene-act-grid-solo' : 'loom-scene-act-grid'}
 					>
 					<div className="loom-scene-act-left">
 						<span className="loom-field-label">{entityLabel(anchorType)}</span>
@@ -7553,7 +6341,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									options={plugin.indexer
 										.getAll(anchorType, record.project)
 										.filter((c) => c.path !== sceneActRecord?.path)
-										.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+										.sort(bySeq)
 										.map((c) => ({ value: c.path, label: c.name }))}
 									onPick={(path) => {
 										const target = plugin.indexer.get(path);
@@ -7572,14 +6360,9 @@ function EntityPage({ view }: { view: EntityView }) {
 						{moveTargetAct && project
 							? (() => {
 									const siblings = plugin.indexer
-										.getAll('scene', record.project)
-										.filter(
-											(sc) =>
-												sc.path !== record.path &&
-												sc.sceneAct !== '' &&
-												plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === moveTargetAct.path
-										)
-										.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created));
+										.membersOfAct(moveTargetAct, 'scene')
+										.filter((sc) => sc.path !== record.path)
+										.sort(bySeq);
 									const placeAt = Math.max(0, Math.min(siblings.length, movePlaceAt));
 									// Dragging only updates `movePlaceAt` (a pending placement);
 									// nothing moves in the script until this commits it — a drop
@@ -7667,39 +6450,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								})()
 							: null}
 					</div>
-					{sceneCastRecords.length +
-						sceneFactionRecords.length +
-						sceneMentionedLocationRecords.length +
-						sceneItemRecords.length ===
-					0 ? null : (
-						<div className="loom-scene-act-right">
-							<span className="loom-field-label">{t('view.entity.scene.entitiesInScene')}</span>
-							{(
-								[
-									['character', sceneCastRecords],
-									['faction', sceneFactionRecords],
-									['location', sceneMentionedLocationRecords],
-									['item', sceneItemRecords],
-								] as const
-							).map(([type, records]) =>
-								records.length === 0 ? null : (
-									<div key={type} className="loom-scene-entity-group">
-										<span className="loom-field-sublabel">{entityPlural(type)}</span>
-										<div className="loom-tag-row">
-											{records.map((r) => (
-												<EntityChip
-													key={r.path}
-													plugin={plugin}
-													record={r}
-													onOpen={() => view.openEntity(r.path)}
-												/>
-											))}
-										</div>
-									</div>
-								)
-							)}
-						</div>
-					)}
+					{entitiesColumn(t('view.entity.scene.entitiesInScene'), sceneEntityGroups)}
 					</div>
 					</div>
 					{/* A focused window onto this scene's stretch of the script. The
@@ -7712,29 +6463,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						{sceneExcerpt !== null
 							? (() => {
 									const sceneAnnotationSpans = findAnnotationSpans(sceneExcerpt);
-									const sceneMatches: ScriptSearchMatch[] = [];
-									if (sceneScriptQuery.trim() !== '') {
-										const needle = sceneScriptQuery.toLowerCase();
-										const hay = sceneDraft.toLowerCase();
-										for (
-											let at = hay.indexOf(needle);
-											at !== -1;
-											at = hay.indexOf(needle, at + needle.length)
-										) {
-											sceneMatches.push({ kind: 'text', offset: at });
-										}
-										for (const [id, entries] of Object.entries(scriptNotes.comments)) {
-											if (entries.some((e) => e.text.toLowerCase().includes(needle))) sceneMatches.push({ kind: 'comment', id });
-										}
-										for (const [id, entry] of Object.entries(scriptNotes.altText)) {
-											entry.options.forEach((opt, optionIndex) => {
-												if (opt.toLowerCase().includes(needle)) sceneMatches.push({ kind: 'altOption', id, optionIndex });
-											});
-										}
-										const posOf = (m: ScriptSearchMatch) =>
-											m.kind === 'text' ? m.offset : (sceneAnnotationSpans.find((s) => s.id === m.id)?.from ?? Infinity);
-										sceneMatches.sort((a, b) => posOf(a) - posOf(b));
-									}
+									const sceneMatches = scriptSearchMatches(sceneDraft, sceneAnnotationSpans, scriptNotes, sceneScriptQuery);
 									const gotoSceneMatch = (index: number) => {
 										if (sceneMatches.length === 0) return;
 										const next = ((index % sceneMatches.length) + sceneMatches.length) % sceneMatches.length;
@@ -7763,14 +6492,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													const container = sceneScriptPagesRef.current;
 													const mark = container?.querySelectorAll('mark')[textIndex];
 													if (!container || !mark) return;
-													const containerRect = container.getBoundingClientRect();
-													const markRect = mark.getBoundingClientRect();
-													const target =
-														container.scrollTop +
-														(markRect.top - containerRect.top) -
-														container.clientHeight / 2 +
-														markRect.height / 2;
-													container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+													scrollIntoContainer(container, mark, 'smooth', 'center');
 												});
 											}
 											return;
@@ -7853,21 +6575,8 @@ function EntityPage({ view }: { view: EntityView }) {
 									 *  `sceneDraft` (heading stripped) is the EXACT text
 									 *  `sceneScriptEditorRef`'s CM6 instance holds, so a span's
 									 *  offsets already line up with `selectRange` directly. */
-									const sceneAnnotationSpansAll = findAnnotationSpans(sceneDraft);
-									const sceneUnresolvedCommentSpans = sceneAnnotationSpansAll
-										.filter((s) => s.kind === 'comment')
-										.map((s) => ({
-											span: s,
-											unresolvedEntries: (scriptNotes.comments[s.id] ?? []).filter((e) => !e.resolved),
-										}))
-										.filter((x) => x.unresolvedEntries.length > 0);
-									const sceneUndecidedAltSpans = sceneAnnotationSpansAll.filter(
-										(s) => s.kind === 'alt' && (scriptNotes.altText[s.id]?.acceptedIndex ?? null) === null
-									);
-									const sceneExcerptOf = (span: AnnotationSpan): string => {
-										const raw = sceneDraft.slice(span.contentFrom, span.contentTo).replace(/\s+/g, ' ').trim();
-										return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
-									};
+									const sceneUnresolvedCommentRows = unresolvedCommentRows(sceneDraft, scriptNotes.comments);
+									const sceneUndecidedAltRows = undecidedAltRows(sceneDraft, scriptNotes.altText);
 									const jumpToSceneAnnotation = (span: AnnotationSpan) => {
 										openSceneSidePanel(null);
 										if (sceneScriptMode === 'script') {
@@ -7879,72 +6588,20 @@ function EntityPage({ view }: { view: EntityView }) {
 									};
 									const sceneCommentsAside = sceneCommentsPanelOpen ? (
 										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
-											<aside className="loom-script-nav">
-												<div className="loom-script-nav-head">
-													{t('view.entity.script.unresolvedComments')}
-													<button
-														className="loom-rel-filter"
-														aria-label={t('view.entity.script.hideComments')}
-														onClick={() => setSceneCommentsPanelOpen(false)}
-													>
-														<Icon name="chevron-left" />
-													</button>
-												</div>
-												{sceneUnresolvedCommentSpans.length === 0 ? (
-													<div className="loom-script-nav-empty">{t('view.entity.script.noUnresolvedComments')}</div>
-												) : (
-													sceneUnresolvedCommentSpans.map(({ span, unresolvedEntries }) => (
-														<div key={span.id} className="loom-script-comments-panel-group">
-															<button
-																className="loom-script-nav-act loom-script-comments-panel-excerpt"
-																onClick={() => jumpToSceneAnnotation(span)}
-															>
-																{sceneExcerptOf(span)}
-															</button>
-															<div className="loom-script-comments-panel-nested">
-																{unresolvedEntries.map((entry) => (
-																	<button
-																		key={entry.id + entry.createdAt}
-																		className="loom-script-comments-panel-reply"
-																		onClick={() => jumpToSceneAnnotation(span)}
-																	>
-																		{entry.text.trim() === '' ? t('view.entity.script.emptyReply') : entry.text}
-																	</button>
-																))}
-															</div>
-														</div>
-													))
-												)}
-											</aside>
+											<CommentsBrowserPanel
+												rows={sceneUnresolvedCommentRows}
+												onJump={jumpToSceneAnnotation}
+												onClose={() => setSceneCommentsPanelOpen(false)}
+											/>
 										</div>
 									) : null;
 									const sceneAltAside = sceneAltPanelOpen ? (
 										<div className="loom-script-nav-sticky loom-script-nav-sticky-inset">
-											<aside className="loom-script-nav">
-												<div className="loom-script-nav-head">
-													{t('view.entity.script.unfinalizedAlternatives')}
-													<button
-														className="loom-rel-filter"
-														aria-label={t('view.entity.script.hideAlternatives')}
-														onClick={() => setSceneAltPanelOpen(false)}
-													>
-														<Icon name="chevron-left" />
-													</button>
-												</div>
-												{sceneUndecidedAltSpans.length === 0 ? (
-													<div className="loom-script-nav-empty">{t('view.entity.script.everyAlternativeAccepted')}</div>
-												) : (
-													sceneUndecidedAltSpans.map((span) => (
-														<button
-															key={span.id}
-															className="loom-script-nav-act loom-script-comments-panel-excerpt"
-															onClick={() => jumpToSceneAnnotation(span)}
-														>
-															{sceneExcerptOf(span)}
-														</button>
-													))
-												)}
-											</aside>
+											<AlternativesBrowserPanel
+												rows={sceneUndecidedAltRows}
+												onJump={jumpToSceneAnnotation}
+												onClose={() => setSceneAltPanelOpen(false)}
+											/>
 										</div>
 									) : null;
 									/** Same as the Act panel's `clickActTab` (switch first,
@@ -7976,7 +6633,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													aria-label={sceneNavOpen ? t('view.entity.script.hideNavigation') : t('view.entity.script.showNavigation')}
 													onClick={() => openSceneSidePanel(sceneNavOpen ? null : 'nav')}
 												>
-													<Icon name={sceneNavOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
+													<Icon name={sceneNavOpen ? 'panel-left-close' : 'panel-left-open'} />
 												</button>
 												{sceneNavOpen ? (
 													<aside className="loom-script-nav">
@@ -8010,12 +6667,7 @@ function EntityPage({ view }: { view: EntityView }) {
 																	const targetEl = target
 																		? container?.querySelector(`[data-line="${target.line}"]`)
 																		: null;
-																	if (container && targetEl) {
-																		const containerRect = container.getBoundingClientRect();
-																		const targetRect = targetEl.getBoundingClientRect();
-																		const top = container.scrollTop + (targetRect.top - containerRect.top);
-																		container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
-																	}
+																	if (container && targetEl) scrollIntoContainer(container, targetEl, 'smooth');
 																	return;
 																}
 																const offset =
@@ -8065,79 +6717,28 @@ function EntityPage({ view }: { view: EntityView }) {
 												</div>
 												{sceneScriptMode === 'outline' ? null : (
 												<>
-												<div className="loom-search-wrap">
-													<input
-														className="loom-writer-search"
-														type="search"
-														placeholder={t('view.entity.script.searchThisScene')}
-														value={sceneScriptQuery}
-														onChange={(e) => {
-															setSceneScriptQuery(e.target.value);
-															setSceneScriptMatchIndex(0);
-														}}
-														onKeyDown={(e) => {
-															if (e.key !== 'Enter') return;
-															e.preventDefault();
-															gotoSceneMatch(e.shiftKey ? sceneScriptMatchIndex - 1 : sceneScriptMatchIndex + 1);
-														}}
-													/>
-													{sceneScriptQuery !== '' ? (
-														<button
-															className="loom-chip-remove loom-search-clear"
-															aria-label={t('view.entity.script.clearSearch')}
-															onClick={() => {
-																setSceneScriptQuery('');
-																setSceneScriptMatchIndex(0);
-															}}
-														>
-															✕
-														</button>
-													) : null}
-												</div>
-												<button
-													className="loom-rel-filter"
-													aria-label={t('view.entity.script.previousMatch')}
-													disabled={sceneMatches.length === 0}
-													onClick={() => gotoSceneMatch(sceneScriptMatchIndex - 1)}
-												>
-													<Icon name="chevron-up" />
-												</button>
-												<button
-													className="loom-rel-filter"
-													aria-label={t('view.entity.script.nextMatch')}
-													disabled={sceneMatches.length === 0}
-													onClick={() => gotoSceneMatch(sceneScriptMatchIndex + 1)}
-												>
-													<Icon name="chevron-down" />
-												</button>
+												<SearchNav
+													placeholder={t('view.entity.script.searchThisScene')}
+													query={sceneScriptQuery}
+													onQuery={(q) => {
+														setSceneScriptQuery(q);
+														setSceneScriptMatchIndex(0);
+													}}
+													onEnter={(e) => {
+														e.preventDefault();
+														gotoSceneMatch(e.shiftKey ? sceneScriptMatchIndex - 1 : sceneScriptMatchIndex + 1);
+													}}
+													matchCount={sceneMatches.length}
+													onPrev={() => gotoSceneMatch(sceneScriptMatchIndex - 1)}
+													onNext={() => gotoSceneMatch(sceneScriptMatchIndex + 1)}
+												/>
 												</>
 												)}
-												<div className="loom-script-side-toggles">
-													<button
-														className={
-															sceneCommentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
-														}
-														aria-label={sceneCommentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
-														onClick={() => openSceneSidePanel(sceneCommentsPanelOpen ? null : 'comments')}
-													>
-														<Icon name="message-square" />
-													</button>
-													<button
-														className={sceneAltPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-														aria-label={sceneAltPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
-														onClick={() => openSceneSidePanel(sceneAltPanelOpen ? null : 'alt')}
-													>
-														<Icon name="repeat" fallback="arrow-right-left" />
-													</button>
-												</div>
 												{sceneScriptMode === 'outline' ? null : (
-													<span className="loom-writer-stat">
-														{sceneScriptQuery.trim() === ''
-															? ''
-															: sceneMatches.length === 0
-																? t('view.entity.script.noMatches')
-																: t('view.entity.script.matchCount', { current: (sceneScriptMatchIndex % sceneMatches.length) + 1, total: sceneMatches.length })}
-													</span>
+													<AnnotationPanelToggles open={sceneCommentsPanelOpen ? 'comments' : sceneAltPanelOpen ? 'alt' : null} onToggle={openSceneSidePanel} />
+												)}
+												{sceneScriptMode === 'outline' ? null : (
+													<MatchStat query={sceneScriptQuery} count={sceneMatches.length} index={sceneScriptMatchIndex} />
 												)}
 												<div className="loom-shell-spacer" />
 												{/* Deliberately NOT part of the Script/Pages pill —
@@ -8224,6 +6825,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														onTitleFocusConsumed={() => setPendingBranchTitleFocusId(null)}
 													/>
 													<BranchOverlay
+														app={plugin.app}
 														fieldRef={sceneScriptEditorRef}
 														wrapRef={sceneScriptEditorWrapRef}
 														text={sceneDraft}
@@ -8282,15 +6884,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					    another act…" before the tabs. The "solo" variant (no right
 					    column) is exactly this case. */}
 					<div
-						className={
-							chapterCastRecords.length +
-								chapterFactionRecords.length +
-								chapterMentionedLocationRecords.length +
-								chapterItemRecords.length ===
-							0
-								? 'loom-scene-act-grid loom-scene-act-grid-solo'
-								: 'loom-scene-act-grid'
-						}
+						className={noEntities(chapterEntityGroups) ? 'loom-scene-act-grid loom-scene-act-grid-solo' : 'loom-scene-act-grid'}
 					>
 						<div className="loom-scene-act-left">
 							<span className="loom-field-label">{entityLabel(anchorType)}</span>
@@ -8313,7 +6907,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									options={plugin.indexer
 										.getAll('act', record.project)
 										.filter((a) => a.path !== chapterActRecord?.path)
-										.sort((a, b) => (a.seq ?? a.created) - (b.seq ?? b.created))
+										.sort(bySeq)
 										.map((a) => ({ value: a.path, label: a.name }))}
 									onPick={(path) => {
 										const target = plugin.indexer.get(path);
@@ -8325,39 +6919,7 @@ function EntityPage({ view }: { view: EntityView }) {
 								/>
 							) : null}
 						</div>
-						{chapterCastRecords.length +
-							chapterFactionRecords.length +
-							chapterMentionedLocationRecords.length +
-							chapterItemRecords.length ===
-						0 ? null : (
-							<div className="loom-scene-act-right">
-								<span className="loom-field-label">{t('view.entity.scene.entitiesInChapter')}</span>
-								{(
-									[
-										['character', chapterCastRecords],
-										['faction', chapterFactionRecords],
-										['location', chapterMentionedLocationRecords],
-										['item', chapterItemRecords],
-									] as const
-								).map(([type, records]) =>
-									records.length === 0 ? null : (
-										<div key={type} className="loom-scene-entity-group">
-											<span className="loom-field-sublabel">{entityPlural(type)}</span>
-											<div className="loom-tag-row">
-												{records.map((r) => (
-													<EntityChip
-														key={r.path}
-														plugin={plugin}
-														record={r}
-														onOpen={() => view.openEntity(r.path)}
-													/>
-												))}
-											</div>
-										</div>
-									)
-								)}
-							</div>
-						)}
+						{entitiesColumn(t('view.entity.scene.entitiesInChapter'), chapterEntityGroups)}
 					</div>
 					<div className="loom-writer-tabs" ref={chapterTabsRef}>
 						<div className="loom-seg">
@@ -8388,32 +6950,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							}
 							}}
 						/>
-						<div className="loom-script-side-toggles">
-							<button
-								className={
-									chapterSidePanel === 'comments' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'
-								}
-								aria-label={
-									chapterSidePanel === 'comments'
-										? t('view.entity.script.hideComments')
-										: t('view.entity.script.browseComments')
-								}
-								onClick={() => setChapterSidePanel(chapterSidePanel === 'comments' ? null : 'comments')}
-							>
-								<Icon name="message-square" />
-							</button>
-							<button
-								className={chapterSidePanel === 'alt' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-								aria-label={
-									chapterSidePanel === 'alt'
-										? t('view.entity.script.hideAlternatives')
-										: t('view.entity.script.browseAlternatives')
-								}
-								onClick={() => setChapterSidePanel(chapterSidePanel === 'alt' ? null : 'alt')}
-							>
-								<Icon name="repeat" fallback="arrow-right-left" />
-							</button>
-						</div>
+						<AnnotationPanelToggles open={chapterSidePanel} onToggle={setChapterSidePanel} />
 					</div>
 					{chapterExcerpt !== null ? (
 						chapterEditorMode === 'editor' ? (
@@ -8522,101 +7059,47 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{/* Reverse of a character/location's Items section: who carries this
 			    item. Chips (persistent entities), an "Add to …" search, remove only. */}
-			{showsItemHolders && project ? (
-				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">{entityPlural('character')}</span>
-					<div className="loom-hub-add-row">
-						<SearchableSelect
-							placeholder={t('view.entity.items.addToCharacterPlaceholder')}
-							options={plugin.indexer
-								.getAll('character', project.root)
-								.filter((c) => !holderCharacters.some((h) => h.path === c.path))
-								.sort((a, b) => a.name.localeCompare(b.name))
-								.map((c) => ({ value: c.path, label: c.name }))}
-							onPick={(path) => {
-								const c = plugin.indexer.get(path);
-								if (c) addItemToHolder(c);
-							}}
-							action={{
-								label: t('project.createEntity.createNewAction', { label: entityLabel('character') }),
-								onPick: () =>
-									new CreateEntityModal(plugin, 'character', project, {
-										onCreated: (f) => {
-											// A fresh character isn't indexed yet the instant
-											// `onCreated` fires — wait for it, same pattern the
-											// Decision Point fields above use.
-											void waitForMetadataSync(plugin.app, f).then(() => {
-												const c = plugin.indexer.resolve(f.basename, project.loomPath);
-												if (c) addItemToHolder(c);
-											});
-										},
-									}).open(),
-							}}
-						/>
-					</div>
-					{holderCharacters.length > 0 ? (
-						<div className="loom-tag-row">
-							{holderCharacters.map((c) => (
-								<EntityChip
-									key={c.path}
-									plugin={plugin}
-									record={c}
-									onOpen={() => view.openEntity(c.path)}
-									onRemove={() => removeItemFromHolder(c)}
-									removeLabel={t('view.entity.items.removeFromCharacter')}
-								/>
-							))}
-						</div>
-					) : null}
-				</div>
-			) : null}
-
-			{showsItemHolders && project ? (
-				<div className="loom-field loom-field-sep">
-					<span className="loom-field-label">{entityPlural('location')}</span>
-					<div className="loom-hub-add-row">
-						<SearchableSelect
-							placeholder={t('view.entity.items.addToLocationPlaceholder')}
-							options={plugin.indexer
-								.getAll('location', project.root)
-								.filter((l) => !holderLocations.some((h) => h.path === l.path))
-								.sort((a, b) => locationLabel(a, plugin).localeCompare(locationLabel(b, plugin)))
-								.map((l) => ({ value: l.path, label: locationLabel(l, plugin) }))}
-							onPick={(path) => {
-								const l = plugin.indexer.get(path);
-								if (l) addItemToHolder(l);
-							}}
-							action={{
-								label: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
-								onPick: () =>
-									new CreateEntityModal(plugin, 'location', project, {
-										onCreated: (f) => {
-											void waitForMetadataSync(plugin.app, f).then(() => {
-												const l = plugin.indexer.resolve(f.basename, project.loomPath);
-												if (l) addItemToHolder(l);
-											});
-										},
-									}).open(),
-							}}
-						/>
-					</div>
-					{holderLocations.length > 0 ? (
-						<div className="loom-tag-row">
-							{holderLocations.map((l) => (
-								<EntityChip
-									key={l.path}
-									plugin={plugin}
-									record={l}
-									label={locationLabel(l, plugin)}
-									onOpen={() => view.openEntity(l.path)}
-									onRemove={() => removeItemFromHolder(l)}
-									removeLabel={t('view.entity.items.removeFromLocation')}
-								/>
-							))}
-						</div>
-					) : null}
-				</div>
-			) : null}
+			{showsItemHolders && project
+				? (
+						[
+							['character', holderCharacters, t('view.entity.items.addToCharacterPlaceholder'), t('view.entity.items.removeFromCharacter')],
+							['location', holderLocations, t('view.entity.items.addToLocationPlaceholder'), t('view.entity.items.removeFromLocation')],
+						] as const
+					).map(([type, holders, placeholder, removeLabel]) => {
+						const labelOf = type === 'location' ? (r: EntityRecord) => locationLabel(r, plugin) : undefined;
+						const sortLabel = labelOf ?? ((r: EntityRecord) => r.name);
+						return (
+							<div key={type} className="loom-field loom-field-sep">
+								<span className="loom-field-label">{entityPlural(type)}</span>
+								<div className="loom-hub-add-row">
+									<SearchableSelect
+										placeholder={placeholder}
+										options={plugin.indexer
+											.getAll(type, project.root)
+											.filter((r) => !holders.some((h) => h.path === r.path))
+											.sort((x, y) => sortLabel(x).localeCompare(sortLabel(y)))
+											.map((r) => ({ value: r.path, label: sortLabel(r) }))}
+										onPick={(path) => {
+											const h = plugin.indexer.get(path);
+											if (h) addItemToHolder(h);
+										}}
+										action={createAction(plugin, type, project, {
+											onCreated: (f) => {
+												// A fresh holder isn't indexed yet the instant `onCreated`
+												// fires — wait for it.
+												void waitForMetadataSync(plugin.app, f).then(() => {
+													const h = plugin.indexer.resolve(f.basename, project.loomPath);
+													if (h) addItemToHolder(h);
+												});
+											},
+										})}
+									/>
+								</div>
+								{chipRow(holders, removeItemFromHolder, removeLabel, labelOf)}
+							</div>
+						);
+					})
+				: null}
 
 
 			{/* Characters serving a faction at this location (reverse of the
@@ -8833,31 +7316,13 @@ function EntityPage({ view }: { view: EntityView }) {
 								.filter((l) => !regionLocations.some((m) => m.path === l.path))
 								.sort((a, b) => locationLabel(a, plugin).localeCompare(locationLabel(b, plugin)))
 								.map((l) => ({ value: linkTargetOf(l), label: locationLabel(l, plugin) }))}
-							action={{
-								label: t('project.createEntity.createNewAction', { label: entityLabel('location') }),
-								onPick: () =>
-									new CreateEntityModal(plugin, 'location', project, {
-										onCreated: (created) => addRegionLocation(created.basename),
-									}).open(),
-							}}
+							action={createAction(plugin, 'location', project, {
+								onCreated: (created) => addRegionLocation(created.basename),
+							})}
 							onPick={(target) => addRegionLocation(target)}
 						/>
 					</div>
-					{regionLocations.length > 0 ? (
-						<div className="loom-tag-row">
-							{regionLocations.map((l) => (
-								<EntityChip
-									key={l.path}
-									plugin={plugin}
-									record={l}
-									label={locationLabel(l, plugin)}
-									onOpen={() => view.openEntity(l.path)}
-									onRemove={() => removeRegionLocation(l)}
-									removeLabel={t('view.entity.location.removeFromRegion')}
-								/>
-							))}
-						</div>
-					) : null}
+					{chipRow(regionLocations, removeRegionLocation, t('view.entity.location.removeFromRegion'), (l) => locationLabel(l, plugin))}
 				</div>
 			) : null}
 
@@ -8884,13 +7349,9 @@ function EntityPage({ view }: { view: EntityView }) {
 									.slice()
 									.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0))
 									.map((s) => ({ value: linkTargetOf(s), label: recordLabel(s, project) }))}
-								action={{
-									label: t('project.createEntity.createNewAction', { label: entityLabel(anchorType) }),
-									onPick: () =>
-										new CreateEntityModal(plugin, anchorType, project, {
-											onCreated: (created) => setDecisionPointSession(created.basename),
-										}).open(),
-								}}
+								action={createAction(plugin, anchorType, project, {
+									onCreated: (created) => setDecisionPointSession(created.basename),
+								})}
 								onPick={(target) => setDecisionPointSession(target)}
 							/>
 						)}
@@ -8912,31 +7373,13 @@ function EntityPage({ view }: { view: EntityView }) {
 								.filter((e) => !decisionPointEvents.some((m) => m.path === e.path))
 								.sort((a, b) => recordLabel(a, project).localeCompare(recordLabel(b, project)))
 								.map((e) => ({ value: linkTargetOf(e), label: recordLabel(e, project) }))}
-							action={{
-								label: t('project.createEntity.createNewAction', { label: entityLabel('event') }),
-								onPick: () =>
-									new CreateEntityModal(plugin, 'event', project, {
-										onCreated: (created) => addDecisionPointEvent(created.basename),
-									}).open(),
-							}}
+							action={createAction(plugin, 'event', project, {
+								onCreated: (created) => addDecisionPointEvent(created.basename),
+							})}
 							onPick={(target) => addDecisionPointEvent(target)}
 						/>
 					</div>
-					{decisionPointEvents.length > 0 ? (
-						<div className="loom-tag-row">
-							{decisionPointEvents.map((e) => (
-								<EntityChip
-									key={e.path}
-									plugin={plugin}
-									record={e}
-									label={recordLabel(e, project)}
-									onOpen={() => view.openEntity(e.path)}
-									onRemove={() => removeDecisionPointEvent(e)}
-									removeLabel={t('view.entity.decisionPoint.removeFromDecisionPoint')}
-								/>
-							))}
-						</div>
-					) : null}
+					{chipRow(decisionPointEvents, removeDecisionPointEvent, t('view.entity.decisionPoint.removeFromDecisionPoint'), (e) => recordLabel(e, project))}
 				</div>
 			) : null}
 
@@ -8977,10 +7420,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					onSaveEntry={(index, text) => handleSaveCommentEntry(openComment.id, index, text)}
 					onToggleResolvedEntry={(index) => handleToggleCommentResolved(openComment.id, index)}
 					onDeleteEntry={(index) => handleDeleteCommentEntry(openComment.id, index)}
-					onAddEntry={(text) => {
-						commentsWithNewEntryRef.current.add(openComment.id);
-						handleAddCommentReply(openComment.id, text);
-					}}
+					onAddEntry={(text) => handleAddCommentReply(openComment.id, text)}
 					onClose={handleCloseComment}
 				/>
 			) : null}

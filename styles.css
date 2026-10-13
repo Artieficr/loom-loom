@@ -428,12 +428,6 @@ body.loom-text-large {
 	text-align: center;
 }
 
-.loom-home-project {
-	color: var(--text-muted);
-	font-size: 0.9em;
-	margin-bottom: var(--size-4-6);
-}
-
 /* Home wheel: the Loom button centered, satellite cards on a circle around it
    (first at 12 o'clock, clockwise). Each card carries its unit-circle position
    in --wheel-x/--wheel-y; the shared radius lives here, so the layout
@@ -1113,11 +1107,6 @@ span.loom-row-caret {
 	font-size: 0.85em;
 }
 
-.loom-bubble-date {
-	font-size: 0.8em;
-	opacity: 0.8;
-}
-
 .loom-tooltip {
 	position: fixed;
 	transform: translate(-50%, var(--size-2-2));
@@ -1291,11 +1280,6 @@ span.loom-row-caret {
 
 .loom-drawer-anim {
 	transition: height 220ms ease;
-}
-
-.loom-drawer-inner {
-	overflow: auto;
-	padding: var(--size-4-3);
 }
 
 /* Hidden trash sector: quarter circle fading in at the bottom-right corner
@@ -1882,17 +1866,6 @@ span.loom-row-caret {
 	margin-bottom: var(--size-2-2);
 }
 
-.loom-inherited-group {
-	margin-bottom: var(--size-2-3);
-}
-
-.loom-inherited-subitem {
-	display: flex;
-	align-items: center;
-	gap: var(--size-2-1);
-	padding: var(--size-2-1) 0;
-}
-
 /* Region group headers in the location list read as a heavier grouping row. */
 .loom-row-region .loom-row-name {
 	font-weight: var(--font-semibold);
@@ -1917,37 +1890,6 @@ span.loom-row-caret {
 }
 
 /* ---- settings ---- */
-
-.loom-tab-bar {
-	display: flex;
-	gap: var(--size-2-1);
-	margin-bottom: var(--size-4-4);
-	flex-wrap: wrap;
-}
-
-.loom-tab {
-	padding: var(--size-2-2) var(--size-4-3);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
-	background: transparent;
-	box-shadow: none;
-	color: var(--text-muted);
-	cursor: pointer;
-	font-size: 0.9em;
-	font-weight: var(--font-normal);
-	height: auto;
-}
-
-.loom-tab:hover:not(.loom-tab-active) {
-	background: var(--background-modifier-hover);
-	color: var(--text-normal);
-}
-
-.loom-tab-active {
-	background: var(--background-modifier-active-hover);
-	color: var(--text-normal);
-	font-weight: var(--font-semibold);
-}
 
 /* Obsidian's declarative settings API hands every `render`-based row a
    `Setting` whose `settingEl` keeps the base `.setting-item` flex-ROW layout
@@ -2126,70 +2068,7 @@ span.loom-row-caret {
 	text-align: right;
 }
 
-/* Projects settings tab — the only real `<table>` in this plugin, first one:
-   a plain read-only Title | Type list, no per-row interactivity beyond the
-   title link, so a `<table>` is simpler than the CSS-grid row primitive
-   used for interactive/draggable lists elsewhere (script-view.tsx's Outline).
-   Sits at true zero padding (`.loom-settings-block-zero-pad` on the
-   containing `.setting-item` — see that class's own doc comment) flush
-   against the box — its `border-radius` matches the box's OWN
-   (`--setting-items-radius`), not the smaller generic `--radius-s`, so the
-   two curves coincide into one continuous rounded corner instead of the
-   table's flatter corner visibly cutting across the box's tighter one. */
-.loom-settings-table {
-	width: 100%;
-	border-collapse: collapse;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--setting-items-radius);
-	overflow: hidden;
-}
-
-.loom-settings-table th,
-.loom-settings-table td {
-	text-align: left;
-	padding: var(--size-4-2) var(--size-4-3);
-	border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.loom-settings-table tbody tr:last-child td {
-	border-bottom: none;
-}
-
-.loom-settings-table thead th {
-	text-transform: uppercase;
-	font-size: 0.75em;
-	color: var(--text-faint);
-	background: var(--background-secondary);
-}
-
-.loom-settings-project-link {
-	background: none;
-	border: none;
-	box-shadow: none;
-	padding: 0;
-	font: inherit;
-	cursor: var(--cursor-link);
-	color: var(--text-accent);
-}
-
-.loom-settings-project-link:hover {
-	text-decoration: underline;
-}
-
-.loom-settings-table-type {
-	display: flex;
-	align-items: center;
-	gap: var(--size-2-2);
-}
-
-.loom-settings-table-type svg {
-	width: var(--icon-s);
-	height: var(--icon-s);
-	flex-shrink: 0;
-}
-
-/* Project-kind icon in the "Set up project" modal's Project type row —
-   mirrors the Projects settings table's own Type column icon. */
+/* Project-kind icon in the "Set up project" modal's Project type row. */
 .loom-setup-kind-icon {
 	display: inline-flex;
 	align-items: center;
@@ -2297,30 +2176,6 @@ span.loom-row-caret {
 .loom-field textarea {
 	resize: vertical;
 	font-family: inherit;
-}
-
-/* Wrap a resizable textarea so `.loom-resize-edge` can overlay its bottom
-   edge. These boxes auto-grow to fit their content, so the native corner
-   grip is disabled — its resizes couldn't be told apart from auto-grow, and
-   the edge drag is the one manual override (which also turns auto-grow off). */
-.loom-resizable {
-	position: relative;
-}
-
-.loom-resizable textarea,
-.loom-link-textarea textarea {
-	resize: none;
-	overflow-y: auto;
-}
-
-.loom-resize-edge {
-	position: absolute;
-	left: 0;
-	right: var(--size-4-3);
-	bottom: 0;
-	height: var(--size-4-2);
-	transform: translateY(50%);
-	cursor: ns-resize;
 }
 
 .loom-tag-row {
@@ -2594,8 +2449,6 @@ span.loom-row-caret {
    `.loom-scene-script` only ever wrap a Prose field in a Writer project
    (Fountain's own Scene/Act script excerpts use a completely different CM6
    field, `.loom-fountain-field`, so this can't collide with that). */
-.loom-book-writer-editor .loom-md-field .cm-line.loom-md-h1,
-.loom-book-writer-editor .loom-md-field .cm-line.loom-md-h2,
 .loom-scene-script .loom-md-field .cm-line.loom-md-h1,
 .loom-scene-script .loom-md-field .cm-line.loom-md-h2 {
 	text-align: center;
@@ -2622,8 +2475,6 @@ span.loom-row-caret {
 	cursor: var(--cursor-link);
 }
 
-.loom-book-writer-editor .loom-md-field .cm-line.loom-md-h1:hover,
-.loom-book-writer-editor .loom-md-field .cm-line.loom-md-h2:hover,
 .loom-scene-script .loom-md-field .cm-line.loom-md-h1:hover,
 .loom-scene-script .loom-md-field .cm-line.loom-md-h2:hover {
 	text-decoration: underline;
@@ -3542,30 +3393,6 @@ span.loom-row-caret {
 	min-width: 0;
 }
 
-.loom-link-textarea {
-	position: relative;
-	width: 100%;
-}
-
-.loom-link-textarea textarea {
-	width: 100%;
-}
-
-.loom-suggest {
-	position: fixed;
-	max-height: 240px;
-	overflow-y: auto;
-}
-
-.loom-caret-mirror {
-	position: absolute;
-	visibility: hidden;
-	white-space: pre-wrap;
-	word-wrap: break-word;
-	top: 0;
-	left: -9999px;
-}
-
 /* ---- list row delete ---- */
 
 .loom-row-delete {
@@ -3613,16 +3440,6 @@ span.loom-row-caret {
 	height: var(--icon-s);
 }
 
-/* Read-only session notes surfaced from sublocations/places. */
-.loom-note-inherited {
-	padding: var(--size-2-2) 0;
-}
-
-.loom-note-inherited-text {
-	color: var(--text-muted);
-	white-space: pre-wrap;
-}
-
 /* Location session notes: grouped by session, one row per place. */
 .loom-locnote-group {
 	margin-bottom: var(--size-4-2);
@@ -3633,22 +3450,6 @@ span.loom-row-caret {
 	align-items: flex-start;
 	gap: var(--size-2-2);
 	margin-top: var(--size-2-2);
-}
-
-.loom-locnote-place {
-	flex: 0 0 15%;
-	min-width: 90px;
-	text-align: left;
-	color: var(--text-muted);
-}
-
-/* New-note draft row wraps instead of cramming one line. */
-.loom-locnote-new {
-	flex-wrap: wrap;
-}
-
-.loom-locnote-new .loom-note-text {
-	flex: 1 1 100%;
 }
 
 .loom-locnote {
@@ -3671,11 +3472,6 @@ span.loom-row-caret {
 
 .loom-locnote .loom-note-text {
 	margin-left: 26px;
-}
-
-.loom-locnote-new {
-	flex-direction: row;
-	margin-left: 0;
 }
 
 .loom-locnote-group > .loom-tag-row .loom-session-chip {
@@ -3845,16 +3641,6 @@ span.loom-row-caret {
 	height: var(--icon-s);
 }
 
-/* Each add-a-note search shares the row width. */
-.loom-hub-add-col {
-	flex: 1;
-	min-width: 0;
-}
-
-.loom-hub-add-col .loom-combo {
-	width: 100%;
-}
-
 /* Section headings breathe before their first entry (Overview and all
    loom-field-sep sections alike). */
 .loom-connected > .loom-field-label,
@@ -3897,13 +3683,6 @@ span.loom-row-caret {
 	margin-top: var(--size-2-2);
 }
 
-
-/* Text boxes always auto-size (grow AND shrink) to their content, one-line
-   minimum — manual sizing and scrolling are gone. */
-.loom-resize-edge {
-	display: none;
-}
-
 .loom-view textarea {
 	resize: none;
 	overflow-y: hidden;
@@ -3943,8 +3722,6 @@ span.loom-row-caret {
 }
 
 /* Multiline boxes: a little vertical breathing room for the text. */
-.loom-resizable textarea,
-.loom-link-textarea textarea,
 .loom-note-text textarea {
 	padding-top: var(--size-4-2);
 	padding-bottom: var(--size-4-2);
@@ -4047,7 +3824,6 @@ span.loom-row-caret {
 .loom-view button.loom-search-clear:hover {
 	color: var(--text-normal);
 }
-
 
 /* The clear ✕ overlays the search bar's right edge without shifting it. */
 .loom-graph-search {
@@ -4386,8 +4162,6 @@ span.loom-row-caret {
 	margin-top: 0;
 	min-width: 0;
 }
-
-
 
 .loom-quest-card .loom-subloc-link {
 	min-width: 0;
@@ -5033,24 +4807,6 @@ span.loom-row-caret {
 	cursor: pointer;
 }
 
-/* A road's two connected locations (start → end), read-only in its menu. */
-.loom-map-road-ends {
-	gap: var(--size-2-1);
-	justify-content: flex-start;
-}
-
-.loom-map-road-ends > svg {
-	flex: none;
-	width: 14px;
-	height: 14px;
-	color: var(--text-muted);
-}
-
-.loom-map-road-missing {
-	color: var(--text-muted);
-	padding: 0 var(--size-2-2);
-}
-
 /* Region wraps (node view): auto-hull around a region's location clusters. */
 .loom-map-region {
 	cursor: pointer;
@@ -5084,13 +4840,6 @@ span.loom-row-caret {
 }
 
 /* Item pins: item markers dropped inside a zone (gem glyph). */
-.loom-map-item-dot {
-	fill: var(--background-primary);
-	stroke: var(--color-yellow, #d8b13c);
-	stroke-width: 2;
-	vector-effect: non-scaling-stroke;
-}
-
 .loom-map-item-glyph {
 	pointer-events: none;
 	/* stroke color is set inline (contrastInk over the item color) — a CSS
@@ -6081,9 +5830,6 @@ span.loom-row-caret {
 /* The raw editor: one page tall and scrolling inside itself, so the view's own
    scroll position doesn't jump around a long script. Monospace because
    screenplay formatting is column-based. */
-.loom-view .loom-writer-editor::-webkit-scrollbar,
-.loom-view .loom-writer-editor::-webkit-scrollbar-thumb,
-.loom-view .loom-writer-editor::-webkit-scrollbar-track,
 .loom-view .loom-screenplay::-webkit-scrollbar,
 .loom-view .loom-screenplay::-webkit-scrollbar-thumb,
 .loom-view .loom-screenplay::-webkit-scrollbar-track,
@@ -6092,39 +5838,6 @@ span.loom-row-caret {
 .loom-view .loom-script-nav::-webkit-scrollbar-track {
 	/* A textarea paints `cursor: text` over its whole box, scrollbar included. */
 	cursor: default;
-}
-
-.loom-view .loom-writer-editor {
-	width: 100%;
-	height: 11in;
-	max-height: 70vh;
-	overflow-y: auto;
-	resize: vertical;
-	font-family: var(--font-monospace);
-	font-size: 0.9em;
-	line-height: 1.45;
-	tab-size: 4;
-}
-
-/* BookView's own unified whole-book editor: the same "matte frame" padding/
-   background `.loom-scene-script` gives the Act/Chapter pages' own embedded
-   editor (`div.loom-scene-script` further down), so the top-level Book page
-   reads with the same margins — a SEPARATE class rather than folding these
-   properties into `.loom-writer-editor` itself, which Script's own
-   `FountainField` also uses and must stay unaffected. */
-.loom-view .loom-book-writer-editor {
-	padding: 0.6em 0.8em;
-	background: var(--background-secondary);
-	border-radius: var(--radius-s);
-}
-
-/* Same `.loom-md-field` auto-height fix `.loom-scene-script` needs further
-   down — `MarkdownField` wraps its CM6 view in a `.loom-md-field` div with
-   no height of its own, which otherwise left the field shrunk to a couple
-   of lines inside this box's own fixed/resizable height. */
-.loom-book-writer-editor .loom-md-field,
-.loom-book-writer-editor .loom-md-field .cm-editor {
-	height: 100%;
 }
 
 /* Live-preview Fountain editor (fountain-field.tsx). The wrapper
@@ -6589,13 +6302,11 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
    "sheet of paper" as Preview mode above and as Script's own
    `.loom-fountain-field .cm-editor`, not as an ordinary theme-colored
    form-field input regardless of the vault's color scheme. */
-.loom-writer-editor .loom-md-field .cm-editor,
 .loom-scene-script .loom-md-field .cm-editor {
 	background: #fff;
 	color: #000;
 }
 
-.loom-writer-editor .loom-md-field .cm-content,
 .loom-scene-script .loom-md-field .cm-content {
 	color: inherit;
 }
@@ -6608,7 +6319,6 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
    Act page's embedded one AND the Fountain Scene/Act Script sections — but
    the latter mount a completely different field, `.loom-fountain-field`, so
    there's no `.loom-md-field` inside it to match here regardless of kind). */
-.loom-book-writer-editor .loom-md-field .cm-editor,
 .loom-scene-script .loom-md-field .cm-editor {
 	padding: 2em 3em;
 }

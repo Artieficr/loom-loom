@@ -1,4 +1,4 @@
-import { TFile, normalizePath } from 'obsidian';
+import { TFile, debounce } from 'obsidian';
 import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
 import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
@@ -6,63 +6,49 @@ import { Icon, buildEntityLinkNames, buildLinkTargetLabels, openCreateLinkEntity
 import { MarkdownField, MarkdownFieldHandle } from './markdown-field';
 import { t } from '../i18n';
 import type LoomLoomPlugin from '../main';
+import { projectPath } from '../naming';
 
 /** Substitute icon for older Obsidian/Lucide bundles missing `notebook-pen`. */
 export const QUICK_NOTES_ICON = 'notebook-pen';
 
 /**
  * Tracks whatever was last focused OUTSIDE any Quick Notes UI, app-wide, so a
- * panel can hand focus back to it on close. A single `focusin` listener
- * (`focusin` bubbles, unlike `focus`, so one `document`-level handler sees
- * every focus change) rather than one per panel instance — ref-counted so it
- * installs on the first mounted panel and tears down once the last one
- * unmounts, regardless of how many project tabs are open at once.
+ * panel can hand focus back to it on close. One ref-counted document-level
+ * `focusin` listener (it bubbles), installed with the first mounted panel and
+ * removed with the last.
  *
- * Deliberately NOT a point-in-time capture taken when the trigger is clicked
- * or the toggle command fires: clicking the trigger button itself shifts DOM
- * focus to that button before any of our own code runs, so capturing "the
- * current activeElement" at that moment would just record the trigger —
- * `.loom-qn-panel-wrap`/`.loom-qn-trigger-wrap` (common.tsx) are excluded
- * from every focus event this listener sees, so `lastExternalFocus` always
- * reflects the last REAL field the user was working in, continuously kept up
- * to date rather than snapshotted at a timing-sensitive moment.
- *
- * `document.body`/`documentElement` are ALSO excluded — a real, reported bug
- * this fixes: on macOS specifically, clicking a plain `<button>` does not
- * give it focus at all (unlike Windows/Linux); the previously focused field
- * just blurs with nothing new taking its place, and the browser implicitly
- * parks focus on `<body>`. That still fires a genuine `focusin` for `<body>`,
- * arriving BEFORE React's own `onClick` runs — without this exclusion, that
- * transient "nothing is focused" moment overwrote `lastExternalFocus` the
- * instant the trigger was clicked, so close-to-restore always landed on
- * nothing (or wherever body-focus happened to point) instead of the field
- * the user was actually last working in.
+ * Kept continuously rather than captured when the trigger is clicked: by
+ * then focus has already moved. Focus landing in `.loom-qn-panel-wrap`/
+ * `.loom-qn-trigger-wrap` (common.tsx) is ignored, and so is
+ * `document.body`/`documentElement` — on macOS clicking a `<button>` doesn't
+ * focus it and focus parks on `<body>` (a real `focusin`, before React's
+ * `onClick`), which would otherwise overwrite the field the user was in.
  */
 let lastExternalFocus: HTMLElement | null = null;
-let focusTrackRefCount = 0;
-let untrackFocus: (() => void) | null = null;
+/** Mounted panels per window — each window's document gets one listener. */
+const focusTracking = new Map<Document, number>();
 
 function onFocusIn(e: FocusEvent): void {
 	const target = e.target;
 	if (!(target instanceof HTMLElement)) return;
-	if (target === document.body || target === document.documentElement) return;
+	if (target === target.doc.body || target === target.doc.documentElement) return;
 	if (target.closest('.loom-qn-panel-wrap, .loom-qn-trigger-wrap')) return;
 	lastExternalFocus = target;
 }
 
-function trackFocus(): () => void {
-	focusTrackRefCount++;
-	if (focusTrackRefCount === 1) {
-		document.addEventListener('focusin', onFocusIn);
-		untrackFocus = () => document.removeEventListener('focusin', onFocusIn);
-	}
+function trackFocus(doc: Document): () => void {
+	const count = focusTracking.get(doc) ?? 0;
+	if (count === 0) doc.addEventListener('focusin', onFocusIn);
+	focusTracking.set(doc, count + 1);
 	return () => {
-		focusTrackRefCount--;
-		if (focusTrackRefCount === 0) {
-			untrackFocus?.();
-			untrackFocus = null;
-			lastExternalFocus = null;
+		const left = (focusTracking.get(doc) ?? 1) - 1;
+		if (left > 0) {
+			focusTracking.set(doc, left);
+			return;
 		}
+		focusTracking.delete(doc);
+		doc.removeEventListener('focusin', onFocusIn);
+		if (focusTracking.size === 0) lastExternalFocus = null;
 	};
 }
 
@@ -74,8 +60,7 @@ function trackFocus(): () => void {
  * genuine markdown file, since this one is meant to hold real `[[wikilinks]]`.
  */
 export function quickNotesFilePath(project: ProjectDef): string {
-	const base = `${project.name} Quick Notes.md`;
-	return normalizePath(project.root === '' ? base : `${project.root}/${base}`);
+	return projectPath(project, `${project.name} Quick Notes.md`);
 }
 
 export function findQuickNotesFile(plugin: LoomLoomPlugin, project: ProjectDef): TFile | null {
@@ -154,7 +139,7 @@ export function QuickNotesPanel({
 	const wrapRef = useRef<HTMLDivElement>(null);
 	const wasOpenForRestoreRef = useRef(open);
 
-	useEffect(() => trackFocus(), []);
+	useEffect(() => trackFocus(wrapRef.current?.doc ?? activeDocument), []);
 
 	// Restore focus to whatever was focused before the panel opened — only on
 	// the OPEN→CLOSE transition, and only past both safety checks documented
@@ -166,11 +151,8 @@ export function QuickNotesPanel({
 		const el = lastExternalFocus;
 		if (!el || !el.isConnected) return;
 		const myView = wrapRef.current?.closest('.loom-view');
-		// `preventScroll` — a real, reported bug otherwise: the field was
-		// already fully visible before Quick Notes opened over it (an
-		// overlay, never a layout reflow), but `.focus()`'s browser default
-		// is to scroll its target into view regardless, nudging the page up
-		// by a few px for no reason on every restore.
+		// `preventScroll`: the field was already visible under the overlay, and
+		// `.focus()` would otherwise scroll it into view anyway.
 		if (myView && myView.contains(el)) el.focus({ preventScroll: true });
 	}, [open]);
 
@@ -211,16 +193,18 @@ export function QuickNotesPanel({
 		fieldRef.current?.focusEnd();
 	}, [open, value]);
 
-	const save = useMemo(() => {
-		let timer = 0;
-		return (v: string) => {
-			window.clearTimeout(timer);
-			timer = window.setTimeout(() => {
-				const file = fileRef.current;
-				if (file) void plugin.app.vault.process(file, () => v);
-			}, 600);
-		};
-	}, [plugin]);
+	const save = useMemo(
+		() =>
+			debounce(
+				(v: string) => {
+					const file = fileRef.current;
+					if (file) void plugin.app.vault.process(file, () => v);
+				},
+				600,
+				true
+			),
+		[plugin]
+	);
 
 	const names = useMemo(() => buildEntityLinkNames(plugin, project), [plugin, project]);
 	const linkLabels = useMemo(() => buildLinkTargetLabels(plugin, project), [plugin, project]);

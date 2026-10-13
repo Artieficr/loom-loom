@@ -40,7 +40,7 @@
 			"title": "Добавить «{item}» в: {plural}",
 			"pickAtLeastOne": "Выберите хотя бы одну сущность: {label}."
 		},
-		"newChapterStub": "+ Новая глава",
+		"newActStub": "+ Новый акт",
 		"createEntity": {
 			"tagLabel": "Метка",
 			"newSublocationTitle": "Новая подлокация",
@@ -78,16 +78,16 @@
 			"sceneHeadingLabel": "Заголовок сцены",
 			"sublocationOptional": "Подлокация (опционально)",
 			"timePlaceholder": "Время",
-			"chapterDesc": "{anchor}, к которой относится эта сцена.",
-			"appendToEndChapter": {
-				"name": "Добавить в конец главы",
-				"desc": "Отключите, чтобы выбрать место среди существующих сцен главы."
+			"actDesc": "{anchor}, к которому относится эта сцена.",
+			"appendToEndAct": {
+				"name": "Добавить в конец акта",
+				"desc": "Отключите, чтобы выбрать место среди существующих сцен акта."
 			},
 			"locationRequired": "Укажите локацию.",
 			"sceneWriteFailed": "Не удалось записать сцену в сценарий.",
 			"sceneCreateFailed": "Не удалось создать сцену.",
 			"untitledScene": "Сцена без названия",
-			"newChapterTitle": "Новая глава",
+			"newActTitle": "Новый акт",
 			"titleLabel": "Заголовок",
 			"displayTitle": {
 				"name": "Отображаемый заголовок",
@@ -95,14 +95,14 @@
 			},
 			"appendToEndScript": {
 				"name": "Добавить в конец сценария",
-				"desc": "Отключите, чтобы выбрать место среди существующих глав."
+				"desc": "Отключите, чтобы выбрать место среди существующих актов."
 			},
 			"appendToEndBook": {
 				"name": "Добавить в конец книги",
 				"desc": "Отключите, чтобы выбрать место среди существующих актов."
 			},
 			"titleRequired": "Укажите заголовок.",
-			"chapterWriteFailed": "Не удалось записать главу в сценарий.",
+			"actWriteFailed": "Не удалось записать акт в сценарий.",
 			"locationEllipsis": "Локация…",
 			"dateFormatDesc": "Формат: год-месяц-день.",
 			"dateFormatPlaceholder": "Год-месяц-день",
@@ -172,7 +172,7 @@
 			"addDate": "Добавить дату",
 			"addItem": "Добавить предмет",
 			"pickItem": "Выберите предмет…",
-			"deleteMessageChapter": "Заметка переместится в корзину, эта глава удалится из сценария, а заметки её сцен также попадут в корзину.",
+			"deleteMessageAct": "Заметка переместится в корзину, этот акт удалится из сценария, а заметки его сцен также попадут в корзину.",
 			"deleteMessageScene": "Заметка переместится в корзину, и эта сцена удалится из сценария.",
 			"deleteMessageGeneral": "Заметка переместится в корзину.",
 			"rename": "Переименовать",
@@ -261,7 +261,6 @@
 				"aliases": "Псевдонимы",
 				"removeAlias": "Удалить псевдоним",
 				"sessionNumber": "Сессия {n}",
-				"chapterNumber": "Глава {n}",
 				"todayLink": "@сегодня",
 				"attendance": "Посещаемость",
 				"noPcCharacters": "В этом проекте пока нет персонажей игроков.",
@@ -296,7 +295,7 @@
 				"headingLabel": "Заголовок сцены",
 				"moveToAnother": "Перенести в другую: {anchor}…",
 				"everySceneBelongsHint": "Каждая сцена принадлежит главе — там и живёт её текст в сценарии.",
-				"chapterHasNoScenesYet": "В «{name}» пока нет сцен — эта будет первой.",
+				"actHasNoScenesYet": "В «{name}» пока нет сцен — эта будет первой.",
 				"dragIntoPositionHint": "Перетащите сцену на нужное место среди сцен «{name}» и подтвердите.",
 				"moveTheScene": "Переместить сцену",
 				"entitiesInScene": "Сущности в сцене"
@@ -329,7 +328,6 @@
 				"noSession": "Без сессии"
 			},
 			"items": {
-				"descriptionSaveFailed": "Не удалось сохранить описание предмета.",
 				"copyCreateFailed": "Не удалось создать копию предмета.",
 				"replaceWithCopy": "Заменить персональной копией этого предмета",
 				"deleteThisItem": "Удалить этот предмет",
@@ -390,7 +388,7 @@
 				"browseComments": "Просмотреть комментарии",
 				"browseAlternatives": "Просмотреть неутверждённые варианты",
 				"outline": "Структура",
-				"searchThisChapter": "Поиск по этой главе…",
+				"searchThisAct": "Поиск по этому акту…",
 				"searchThisScene": "Поиск по этой сцене…",
 				"clearSearch": "Очистить поиск",
 				"previousMatch": "Предыдущее совпадение",
@@ -400,9 +398,7 @@
 				"newSceneAction": "+ Новая сцена",
 				"noScenesYetPre": "Пока нет сцен — их создаёт заголовок под этим ",
 				"noScenesYetPost": " в тексте сценария.",
-				"chapterNotInScript": "Этой главы пока нет в сценарии.",
-				"noBranchStructurePre": "В этой сцене пока нет ветвления — вложенный заголовок с меткой",
-				"noBranchStructurePost": " сразу под ним создаёт его.",
+				"actNotInScript": "Этого акта пока нет в сценарии.",
 				"sceneNotInScript": "Этой сцены пока нет в сценарии."
 			},
 			"relationships": {
@@ -437,21 +433,7 @@
 			"sessionMonths": "Месяцы сессий",
 			"previousYear": "Предыдущий год",
 			"nextYear": "Следующий год",
-			"resetFilters": "Сбросить фильтры",
-			"months": {
-				"jan": "Янв",
-				"feb": "Фев",
-				"mar": "Мар",
-				"apr": "Апр",
-				"may": "Май",
-				"jun": "Июн",
-				"jul": "Июл",
-				"aug": "Авг",
-				"sep": "Сен",
-				"oct": "Окт",
-				"nov": "Ноя",
-				"dec": "Дек"
-			}
+			"resetFilters": "Сбросить фильтры"
 		},
 		"graph": {
 			"couldNotRemoveConnection": "Не удалось удалить связь.",
@@ -630,17 +612,17 @@
 			"ofCount": "из {count}",
 			"newPageBreakAction": "+ Новый разрыв страницы",
 			"pageBreakLabel": "Разрыв страницы",
-			"outlineNoChaptersPre": "Пока нет глав — их создаёт строка ",
-			"outlineNoChaptersPost": ".",
+			"outlineNoActsPre": "Пока нет актов — их создаёт строка ",
+			"outlineNoActsPost": ".",
 			"expandScenesAria": "Развернуть сцены",
 			"collapseScenesAria": "Свернуть сцены",
 			"outlineLinksHeading": "Ссылки структуры ({count})",
 			"outlineNoScenesPre": "Пока нет сцен — начать может заголовок вроде ",
 			"outlineNoScenesPost": ".",
-			"scenesWithoutChapter": "Сцены без главы",
-			"scenesWithoutChapterHintPre": "Сцена принадлежит разделу ",
-			"scenesWithoutChapterHintMid": ", в который она входит — это её глава, и там же живёт её текст. Добавьте выше строку ",
-			"scenesWithoutChapterHintPost": ".",
+			"scenesWithoutAct": "Сцены без акта",
+			"scenesWithoutActHintPre": "Сцена принадлежит разделу ",
+			"scenesWithoutActHintMid": ", в который она входит — это её акт, и там же живёт её текст. Добавьте выше строку ",
+			"scenesWithoutActHintPost": ".",
 			"scenesNoLongerInScript": "Сцены, которых больше нет в сценарии",
 			"scenesNoLongerHint": "Их заголовки исчезли из сценария. Ничего не удаляется автоматически — откройте сцену, чтобы оставить её или удалить.",
 			"creditDefault": "Автор сценария",
@@ -673,11 +655,11 @@
 			"scenesReattached_many": "{count} заметок сцен повторно привязаны к импортированным сценам.",
 			"scenesReattached_other": "{count} заметки сцен повторно привязаны к импортированным сценам.",
 			"noScenesReattached": "Не удалось повторно привязать ни одной заметки сцены.",
-			"chaptersReattached_one": "{count} заметка главы повторно привязана к импортированным главам.",
-			"chaptersReattached_few": "{count} заметки глав повторно привязаны к импортированным главам.",
-			"chaptersReattached_many": "{count} заметок глав повторно привязаны к импортированным главам.",
-			"chaptersReattached_other": "{count} заметки глав повторно привязаны к импортированным главам.",
-			"noChaptersReattached": "Не удалось повторно привязать ни одной заметки главы.",
+			"actsReattached_one": "{count} заметка акта повторно привязана к импортированным актам.",
+			"actsReattached_few": "{count} заметки актов повторно привязаны к импортированным актам.",
+			"actsReattached_many": "{count} заметок актов повторно привязаны к импортированным актам.",
+			"actsReattached_other": "{count} заметки актов повторно привязаны к импортированным актам.",
+			"noActsReattached": "Не удалось повторно привязать ни одной заметки акта.",
 			"orphanNote": "Всё, что осталось без совпадения, остаётся сиротой — ничего не удаляется.",
 			"replaceScriptCta": "Заменить сценарий",
 			"importedNotice_one": "Импортирована {count} сцена из «{name}».",
@@ -783,6 +765,11 @@
 			"plural": "Сцены",
 			"newTitle": "Новая сцена"
 		},
+		"act": {
+			"label": "Акт",
+			"plural": "Акты",
+			"newTitle": "Новый акт"
+		},
 		"chapter": {
 			"label": "Глава",
 			"plural": "Главы",
@@ -865,9 +852,7 @@
 			"projectsLabel": "Проекты:"
 		},
 		"projects": {
-			"heading": "Проекты",
-			"colTitle": "Название",
-			"colType": "Тип"
+			"heading": "Проекты"
 		},
 		"entities": {
 			"groupLabel": "Группа",

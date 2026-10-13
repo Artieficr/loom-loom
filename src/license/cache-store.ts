@@ -19,19 +19,10 @@ import { CachedLicenseState, emptyLicenseState } from './types';
 const DEVICE_ID_KEY = 'loom-loom/license-device-id';
 const CACHE_KEY = 'loom-loom/license-cache';
 
-function readRaw(app: App, key: string): unknown {
-	return app.loadLocalStorage(key);
-}
-
-function writeRaw(app: App, key: string, value: unknown): void {
-	app.saveLocalStorage(key, value);
-}
-
 function randomId(): string {
 	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
-	// Fallback for a runtime with neither localStorage nor crypto.randomUUID —
-	// not cryptographically strong, but this id only needs to be unique enough
-	// to tell devices apart, never a security boundary.
+	// Fallback for an older mobile WebView without crypto.randomUUID — only
+	// needs to tell devices apart, never a security boundary.
 	return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
 		const r = (Math.random() * 16) | 0;
 		const v = c === 'x' ? r : (r & 0x3) | 0x8;
@@ -41,10 +32,10 @@ function randomId(): string {
 
 /** Stable id for this Obsidian installation, generated once and cached locally. */
 export function getOrCreateDeviceId(app: App): string {
-	const existing = readRaw(app, DEVICE_ID_KEY);
+	const existing: unknown = app.loadLocalStorage(DEVICE_ID_KEY);
 	if (typeof existing === 'string' && existing.length > 0) return existing;
 	const id = randomId();
-	writeRaw(app, DEVICE_ID_KEY, id);
+	app.saveLocalStorage(DEVICE_ID_KEY, id);
 	return id;
 }
 
@@ -53,11 +44,11 @@ function isCachedLicenseState(value: unknown): value is CachedLicenseState {
 }
 
 export function loadCache(app: App): CachedLicenseState {
-	const raw = readRaw(app, CACHE_KEY);
+	const raw: unknown = app.loadLocalStorage(CACHE_KEY);
 	if (isCachedLicenseState(raw)) return raw;
 	return emptyLicenseState(getOrCreateDeviceId(app));
 }
 
 export function saveCache(app: App, state: CachedLicenseState): void {
-	writeRaw(app, CACHE_KEY, state);
+	app.saveLocalStorage(CACHE_KEY, state);
 }
