@@ -10,14 +10,15 @@ import {
 	useState,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { ENTITY_META, EntityRecord, FM, TimelineDef, entityLabel, newEntityTitle } from '../types';
+import { ENTITY_META, EntityRecord, FM, TimelineDef, entityLabel, newEntityTitle, bySeq } from '../types';
 import { projectRoleType, roleOf } from '../project-kind';
 import { buildColumns } from '../columns';
 import { ProjectDef, extractLinkpath, linkTargetOf } from '../indexer';
-import { fmLoomValue, setLoomKey } from '../fm';
+import { editLoomList, newNoteEntry, setLoomKey, withoutRelationships, writeFmAt } from '../fm';
 import { ConfirmModal, CreateEntityModal, RecordSuggestModal } from '../project';
 import { LoomNavigator } from './react-view';
-import { Icon, recordDate, recordLabel } from './common';
+import { Icon } from './common';
+import { recordDate, recordLabel } from '../display';
 import { useIndexVersion } from './hooks';
 import { t } from '../i18n';
 
@@ -181,8 +182,8 @@ function Bubble({
  * right-click opens the create menu.
  */
 // Memoized: the graph re-renders on every drag/spring frame, but the timeline's
-// props (navigator, project, def, zoom) don't change then, so this whole subtree
-// is skipped — a graph node drag no longer re-renders the entire strip 60×/sec.
+// props (navigator, project, def, zoom) don't change then, so this subtree is
+// skipped.
 export const TimelineStrip = memo(function TimelineStrip({
 	navigator,
 	project,
@@ -252,8 +253,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 
 	// Manual order lives in each event's `loomSeq` frontmatter (shared with the
 	// session page); unstamped events stay chronological via their ctime.
-	const seqOf = (r: EntityRecord) => r.seq ?? r.created;
-	const applyOrder = (list: EntityRecord[]) => list.slice().sort((a, b) => seqOf(a) - seqOf(b));
+	const applyOrder = (list: EntityRecord[]) => list.slice().sort(bySeq);
 
 	const { columns, undated } = useMemo(() => {
 		const all = buildColumns(indexer, def, project.root);
@@ -283,26 +283,16 @@ export const TimelineStrip = memo(function TimelineStrip({
 			.map((c) => c.record);
 	};
 
-	/** Shared write path for both helpers below: look up the file, mutate its
-	 *  frontmatter, and surface any failure the same way. */
-	const withFrontMatter = (path: string, key: string, mutate: (fm: Record<string, unknown>) => void) => {
-		const f = plugin.app.vault.getFileByPath(path);
-		if (!f) return;
-		plugin.app.fileManager.processFrontMatter(f, mutate).catch((e) => {
+	/** Frontmatter write with the strip's own failure Notice. */
+	const writeFm = (path: string, key: string, mutate: (fm: Record<string, unknown>) => void) => {
+		writeFmAt(plugin.app, path, mutate).catch((e) => {
 			console.error(`Loom Loom: failed to update ${key}`, e);
 			new Notice(t('timeline.saveChangeFailed'));
 		});
 	};
-
 	const editList = (path: string, key: string, apply: (arr: unknown[]) => unknown[] | void) =>
-		withFrontMatter(path, key, (fm) => {
-			const cur = fmLoomValue(fm, key);
-			const arr = Array.isArray(cur) ? cur : [];
-			setLoomKey(fm, key, apply(arr) ?? arr);
-		});
-
-	const setKey = (path: string, key: string, value: unknown) =>
-		withFrontMatter(path, key, (fm) => setLoomKey(fm, key, value));
+		writeFm(path, key, (fm) => editLoomList(fm, key, apply));
+	const setKey = (path: string, key: string, value: unknown) => writeFm(path, key, (fm) => setLoomKey(fm, key, value));
 
 	/**
 	 * Rewrites every frontmatter binding between the event and its current
@@ -358,12 +348,9 @@ export const TimelineStrip = memo(function TimelineStrip({
 		}
 		for (const { session, rels } of sessionSide) {
 			editList(session.path, FM.relationships, (arr) =>
-				arr.filter((item) => {
-					if (typeof item !== 'object' || item === null) return true;
-					const target = (item as { target?: unknown }).target;
-					if (typeof target !== 'string') return true;
+				withoutRelationships(arr, (target) => {
 					const lp = extractLinkpath(target);
-					return lp === null || indexer.resolve(lp, session.path)?.path !== event.path;
+					return lp !== null && indexer.resolve(lp, session.path)?.path === event.path;
 				})
 			);
 			if (to !== null) {
@@ -377,7 +364,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 		// (e.g. dragged out of the panel): pin it with a fresh session note.
 		if (to !== null && noteHits === 0 && relHits === 0 && sessionSide.length === 0) {
 			editList(event.path, FM.sessionNotes, (arr) => {
-				arr.push({ session: toLink, text: '', seq: Date.now() });
+				arr.push(newNoteEntry(toLink));
 			});
 		}
 		// The panel means "no session, no date" — clear the date field too.
@@ -767,7 +754,7 @@ export const TimelineStrip = memo(function TimelineStrip({
 						))}
 					</div>
 					{undated.length === 0 ? (
-						<div className="loom-nodate-empty">No event with unspecified date or session</div>
+						<div className="loom-nodate-empty">{t('timeline.noDateEmpty')}</div>
 					) : null}
 				</div>
 			</div>

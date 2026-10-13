@@ -8,7 +8,6 @@ import {
 	TFile,
 	TFolder,
 	Vault,
-	debounce,
 	normalizePath,
 } from 'obsidian';
 import {
@@ -31,12 +30,12 @@ import {
 	normalizeEntityType,
 	isEventKind,
 	isSpecialConditionType,
-	legacyFmKeys,
 	formatTimestamp,
 	parseTimestamp,
 } from './types';
 import { ProjectConfig, parseLoomDate, parseProjectConfig } from './calendar';
 import { managedEntityFileName } from './naming';
+import { fmValue } from './fm';
 import { t } from './i18n';
 import type LoomLoomPlugin from './main';
 
@@ -115,8 +114,7 @@ function parseLinkList(value: unknown): string[] {
  * Frontmatter keys whose links are deliberately hidden: they never become
  * connections or graph edges (session attendance would spray edges over the
  * whole graph; sublocationOrder would duplicate the children's own
- * `sublocation` edges). Lowercase — compared case-insensitively; legacy
- * un-prefixed spellings included for not-yet-migrated notes.
+ * `sublocation` edges). Lowercase — compared case-insensitively.
  */
 const HIDDEN_LINK_KEYS = [
 	'loomattendance',
@@ -127,10 +125,6 @@ const HIDDEN_LINK_KEYS = [
 	'loomobjectives',
 	'loomscenebranch',
 	'loomdailynote',
-	'attendance',
-	'deathsession',
-	'sublocationorder',
-	'regionorder',
 ];
 
 /** The managed file path for `file` if renamed to `base` in its own folder. */
@@ -145,40 +139,15 @@ function isHiddenLinkKey(key: string): boolean {
 	return HIDDEN_LINK_KEYS.some((k) => lower === k || lower.startsWith(k + '.'));
 }
 
-/**
- * Case-insensitive frontmatter lookup. Obsidian's Properties UI treats
- * property names case-insensitively and can rewrite a key to another casing
- * (e.g. `loomTags` → `loomtags`), so our camelCase keys must be read loosely.
- */
-function fmField(fm: FrontMatterCache | Record<string, unknown>, key: string): unknown {
-	if (fm[key] !== undefined) return fm[key];
-	const lower = key.toLowerCase();
-	for (const k of Object.keys(fm)) {
-		if (k.toLowerCase() === lower) return fm[k];
-	}
-	return undefined;
-}
-
-/** Reads a loom frontmatter key, falling back to its legacy spelling(s). */
-function fmLoom(fm: FrontMatterCache | Record<string, unknown>, key: string): unknown {
-	const value = fmField(fm, key);
-	if (value !== undefined) return value;
-	for (const legacy of legacyFmKeys(key)) {
-		const v = fmField(fm, legacy);
-		if (v !== undefined) return v;
-	}
-	return undefined;
-}
-
 /** Reads a loom key as a trimmed string, or '' if absent/not a string. */
 function fmString(fm: FrontMatterCache | Record<string, unknown>, key: string): string {
-	const v = fmLoom(fm, key);
+	const v = fmValue(fm, key);
 	return typeof v === 'string' ? v.trim() : '';
 }
 
 /** Reads a loom key as a linkpath, or null if absent/not a string. */
 function fmLinkpath(fm: FrontMatterCache | Record<string, unknown>, key: string): string | null {
-	const v = fmLoom(fm, key);
+	const v = fmValue(fm, key);
 	return typeof v === 'string' ? extractLinkpath(v) : null;
 }
 
@@ -372,8 +341,7 @@ export class LoomIndexer extends Component {
 	// --- Startup migration -----------------------------------------------------
 
 	/**
-	 * One-shot pass after the initial rebuild: rewrites legacy un-prefixed
-	 * frontmatter keys to their loom spellings, seeds `loomName` (+ a native
+	 * One-shot pass after the initial rebuild: seeds `loomName` (+ a native
 	 * alias) from the file basename where missing, and renames entity files to
 	 * the managed `<Project> <Type label> <name>` convention (Obsidian updates
 	 * every link). Automatic: it runs on load, no command, since no released
@@ -496,43 +464,6 @@ export class LoomIndexer extends Component {
 				}
 			}
 		}
-		// Timeline definition files: same key rewrite (name/types/tags are
-		// plugin-owned there and move under the loom prefix).
-		for (const def of [...this.timelines.values()]) {
-			const file = this.app.vault.getFileByPath(def.path);
-			if (!file) continue;
-			const migrate = (fm: Record<string, unknown>): boolean => {
-				let changed = false;
-				for (const [legacy, key] of [
-					['name', FM.name],
-					['types', FM.timelineTypes],
-					['tags', FM.tags],
-				] as const) {
-					if (fmField(fm, key) === undefined && fmField(fm, legacy) !== undefined) {
-						fm[key] = fmField(fm, legacy);
-						changed = true;
-					}
-					for (const k of Object.keys(fm)) {
-						if (k !== key && k.toLowerCase() === legacy) {
-							delete fm[k];
-							changed = true;
-						}
-					}
-				}
-				return changed;
-			};
-			// Same dry run first: a timeline file with nothing to migrate must not
-			// be rewritten, or every load re-uploads it to the sync provider.
-			const cached = this.app.metadataCache.getFileCache(file)?.frontmatter;
-			if (!migrate({ ...(cached ?? {}) })) continue;
-			try {
-				await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-					migrate(fm);
-				});
-			} catch (e) {
-				console.error('Loom Loom: timeline migration failed for', def.path, e);
-			}
-		}
 		await this.reconcileItemCopies();
 	}
 
@@ -550,29 +481,8 @@ export class LoomIndexer extends Component {
 		stat: { ctime: number; mtime: number }
 	): boolean {
 		let changed = false;
-		for (const key of Object.values(FM)) {
-			if (key === FM.timelineTypes) continue; // timeline files only
-			const legacyNames = legacyFmKeys(key);
-			if (fmField(fm, key) === undefined) {
-				for (const legacy of legacyNames) {
-					const v = fmField(fm, legacy);
-					if (v !== undefined) {
-						fm[key] = v;
-						changed = true;
-						break;
-					}
-				}
-			}
-			for (const k of Object.keys(fm)) {
-				const lower = k.toLowerCase();
-				if (k !== key && legacyNames.some((l) => l.toLowerCase() === lower)) {
-					delete fm[k];
-					changed = true;
-				}
-			}
-		}
 		if (!isSession) {
-			const cur = fmField(fm, FM.name);
+			const cur = fmValue(fm, FM.name);
 			if (typeof cur !== 'string' || cur.trim() === '') {
 				fm[FM.name] = displayName;
 				changed = true;
@@ -593,7 +503,7 @@ export class LoomIndexer extends Component {
 		// the file's mtime (and on a synced vault, that is a fresh upload of every
 		// note on every load).
 		const stamp = (key: string, fallback: number) => {
-			const cur = fmField(fm, key);
+			const cur = fmValue(fm, key);
 			const parsed = parseTimestamp(cur);
 			if (parsed !== null && typeof cur !== 'string') return; // stored as a Date — canonical enough
 			const want = formatTimestamp(parsed ?? fallback);
@@ -727,7 +637,7 @@ export class LoomIndexer extends Component {
 			// Compare as an instant, not as raw YAML: the parser can hand the same
 			// stamp back as a string on one machine and a Date on another, and a
 			// spurious difference there would re-open the stamping loop.
-			const stamp = fm ? parseTimestamp(fmLoom(fm, FM.modified)) : null;
+			const stamp = fm ? parseTimestamp(fmValue(fm, FM.modified)) : null;
 			this.knownModified.set(file.path, stamp === null ? '' : String(stamp));
 		} else {
 			this.records.delete(file.path);
@@ -742,15 +652,15 @@ export class LoomIndexer extends Component {
 
 	private parseTimelineDef(file: TFile, project: ProjectDef, fm: FrontMatterCache | undefined): TimelineDef {
 		const types: EntityType[] = [];
-		const rawTypes = fm ? fmLoom(fm, FM.timelineTypes) : undefined;
+		const rawTypes = fm ? fmValue(fm, FM.timelineTypes) : undefined;
 		if (Array.isArray(rawTypes)) {
 			for (const t of rawTypes) {
 				const type = normalizeEntityType(t);
 				if (type !== null) types.push(type);
 			}
 		}
-		const rawName = fm ? fmLoom(fm, FM.name) : undefined;
-		const rawTags = fm ? fmLoom(fm, FM.tags) : undefined;
+		const rawName = fm ? fmValue(fm, FM.name) : undefined;
+		const rawTags = fm ? fmValue(fm, FM.tags) : undefined;
 		return {
 			path: file.path,
 			project: project.root,
@@ -761,12 +671,12 @@ export class LoomIndexer extends Component {
 	}
 
 	private parseEntity(file: TFile, project: ProjectDef, fm: FrontMatterCache): EntityRecord | null {
-		const rawType = fmLoom(fm, FM.type);
+		const rawType = fmValue(fm, FM.type);
 		const type = normalizeEntityType(rawType);
 		if (type === null) return null;
 
 		const relationships: RelationshipDecl[] = [];
-		const rawRelationships = fmLoom(fm, FM.relationships);
+		const rawRelationships = fmValue(fm, FM.relationships);
 		if (Array.isArray(rawRelationships)) {
 			for (const rel of rawRelationships) {
 				if (typeof rel !== 'object' || rel === null) continue;
@@ -783,7 +693,7 @@ export class LoomIndexer extends Component {
 		}
 
 		const sessionNotes: SessionNoteDecl[] = [];
-		const rawSessionNotes = fmLoom(fm, FM.sessionNotes);
+		const rawSessionNotes = fmValue(fm, FM.sessionNotes);
 		if (Array.isArray(rawSessionNotes)) {
 			for (const note of rawSessionNotes) {
 				if (typeof note !== 'object' || note === null) continue;
@@ -807,7 +717,7 @@ export class LoomIndexer extends Component {
 		}
 
 		const objectives: QuestObjective[] = [];
-		const rawObjectives = fmLoom(fm, FM.objectives);
+		const rawObjectives = fmValue(fm, FM.objectives);
 		if (Array.isArray(rawObjectives)) {
 			for (const obj of rawObjectives) {
 				if (typeof obj !== 'object' || obj === null) continue;
@@ -820,7 +730,7 @@ export class LoomIndexer extends Component {
 		}
 
 		const specialConditions: SpecialConditionGroup[] = [];
-		const rawGroups = fmLoom(fm, FM.specialConditions);
+		const rawGroups = fmValue(fm, FM.specialConditions);
 		if (Array.isArray(rawGroups)) {
 			for (const g of rawGroups) {
 				if (typeof g !== 'object' || g === null) continue;
@@ -841,11 +751,11 @@ export class LoomIndexer extends Component {
 		// project's calendar (a custom calendar when enabled).
 		const calendar =
 			type !== 'session' && project.config.customCalendar.enabled ? 'custom' : 'gregorian';
-		const nameValue = fmLoom(fm, FM.name);
-		const descriptionValue = fmLoom(fm, FM.description);
-		const aliveValue = fmLoom(fm, FM.alive);
-		const outcomeValue = fmLoom(fm, FM.questOutcome);
-		const rewardValue = fmLoom(fm, FM.reward);
+		const nameValue = fmValue(fm, FM.name);
+		const descriptionValue = fmValue(fm, FM.description);
+		const aliveValue = fmValue(fm, FM.alive);
+		const outcomeValue = fmValue(fm, FM.questOutcome);
+		const rewardValue = fmValue(fm, FM.reward);
 		return {
 			path: file.path,
 			// Display name = `loomName` (the user-entered name; the managed file
@@ -858,27 +768,25 @@ export class LoomIndexer extends Component {
 					: file.basename,
 			type,
 			project: project.root,
-			// `loomTags` is the current key; `pluginTags` is its pre-rename
-			// spelling, still read so existing notes keep their tags.
-			loomTags: parseTagList(fmLoom(fm, FM.tags)),
+			loomTags: parseTagList(fmValue(fm, FM.tags)),
 			description: typeof descriptionValue === 'string' ? descriptionValue : '',
 			relationships,
 			sessionNotes,
-			date: parseLoomDate(fmLoom(fm, FM.date), calendar, project.config),
-			attendance: parseLinkList(fmLoom(fm, FM.attendance)),
+			date: parseLoomDate(fmValue(fm, FM.date), calendar, project.config),
+			attendance: parseLinkList(fmValue(fm, FM.attendance)),
 			parentLocation: fmLinkpath(fm, FM.parentLocation),
-			sublocationOrder: parseLinkList(fmLoom(fm, FM.sublocationOrder)),
+			sublocationOrder: parseLinkList(fmValue(fm, FM.sublocationOrder)),
 			region: fmLinkpath(fm, FM.region),
-			regionOrder: parseLinkList(fmLoom(fm, FM.regionOrder)),
+			regionOrder: parseLinkList(fmValue(fm, FM.regionOrder)),
 			decisionPoint: fmLinkpath(fm, FM.decisionPoint),
-			decisionPointOrder: parseLinkList(fmLoom(fm, FM.decisionPointOrder)),
+			decisionPointOrder: parseLinkList(fmValue(fm, FM.decisionPointOrder)),
 			decisionPointSession: fmLinkpath(fm, FM.decisionPointSession),
-			items: parseLinkList(fmLoom(fm, FM.items)),
+			items: parseLinkList(fmValue(fm, FM.items)),
 			itemOrigin: fmLinkpath(fm, FM.itemOrigin),
 			itemOwner: fmLinkpath(fm, FM.itemOwner),
-			members: parseMemberList(fmLoom(fm, FM.members)),
+			members: parseMemberList(fmValue(fm, FM.members)),
 			alive: typeof aliveValue === 'boolean' ? aliveValue : true,
-			active: fmLoom(fm, FM.active) !== false,
+			active: fmValue(fm, FM.active) !== false,
 			deathSession: fmLinkpath(fm, FM.deathSession),
 			questReceived: fmLinkpath(fm, FM.questReceived),
 			questOutcome:
@@ -887,51 +795,50 @@ export class LoomIndexer extends Component {
 					? outcomeValue.toLowerCase()
 					: '',
 			questOutcomeSession: fmLinkpath(fm, FM.questOutcomeSession),
-			questGivers: parseLinkList(fmLoom(fm, FM.questGiver)),
+			questGivers: parseLinkList(fmValue(fm, FM.questGiver)),
 			reward: typeof rewardValue === 'string' ? rewardValue : '',
 			objectives,
 			seq: (() => {
-				const v = fmLoom(fm, FM.seq);
+				const v = fmValue(fm, FM.seq);
 				return typeof v === 'number' ? v : null;
 			})(),
 			eventKind: (() => {
-				const v = fmLoom(fm, FM.eventKind);
+				const v = fmValue(fm, FM.eventKind);
 				return typeof v === 'string' && isEventKind(v.toLowerCase()) ? (v.toLowerCase() as EventKind) : '';
 			})(),
-			improvised: fmLoom(fm, FM.improvised) === true,
+			improvised: fmValue(fm, FM.improvised) === true,
 			specialConditions,
-			eventLockReasons: parseTagList(fmLoom(fm, FM.eventLockReasons)),
-			npcLines: parseTagList(fmLoom(fm, FM.npcLines)),
+			eventLockReasons: parseTagList(fmValue(fm, FM.eventLockReasons)),
+			npcLines: parseTagList(fmValue(fm, FM.npcLines)),
 			displayTitle: fmString(fm, FM.displayTitle),
 			sceneId: fmString(fm, FM.sceneId),
 			sceneIntExt: fmString(fm, FM.sceneIntExt),
 			sceneTime: fmString(fm, FM.sceneTime),
 			sceneLocation: fmLinkpath(fm, FM.sceneLocation) ?? '',
-			sceneCast: parseLinkList(fmLoom(fm, FM.sceneCast)),
-			sceneFactions: parseLinkList(fmLoom(fm, FM.sceneFactions)),
-			sceneItems: parseLinkList(fmLoom(fm, FM.sceneItems)),
-			sceneMentionedLocations: parseLinkList(fmLoom(fm, FM.sceneMentionedLocations)),
+			sceneCast: parseLinkList(fmValue(fm, FM.sceneCast)),
+			sceneFactions: parseLinkList(fmValue(fm, FM.sceneFactions)),
+			sceneItems: parseLinkList(fmValue(fm, FM.sceneItems)),
+			sceneMentionedLocations: parseLinkList(fmValue(fm, FM.sceneMentionedLocations)),
 			sceneAct: fmLinkpath(fm, FM.sceneAct) ?? '',
 			sceneBranch: fmString(fm, FM.sceneBranch),
 			actId: fmString(fm, FM.actId),
 			chapterAct: fmLinkpath(fm, FM.chapterAct) ?? '',
 			chapterId: fmString(fm, FM.chapterId),
-			chapterCast: parseLinkList(fmLoom(fm, FM.chapterCast)),
-			chapterFactions: parseLinkList(fmLoom(fm, FM.chapterFactions)),
-			chapterItems: parseLinkList(fmLoom(fm, FM.chapterItems)),
-			chapterMentionedLocations: parseLinkList(fmLoom(fm, FM.chapterMentionedLocations)),
+			chapterCast: parseLinkList(fmValue(fm, FM.chapterCast)),
+			chapterFactions: parseLinkList(fmValue(fm, FM.chapterFactions)),
+			chapterItems: parseLinkList(fmValue(fm, FM.chapterItems)),
+			chapterMentionedLocations: parseLinkList(fmValue(fm, FM.chapterMentionedLocations)),
 			// Loom-managed timestamps win over the filesystem stats (cloud-sync can
 			// overwrite ctime/mtime with the sync time); stats are the fallback for
 			// notes not yet stamped.
-			created: parseTimestamp(fmLoom(fm, FM.created)) ?? file.stat.ctime,
-			modified: parseTimestamp(fmLoom(fm, FM.modified)) ?? file.stat.mtime,
+			created: parseTimestamp(fmValue(fm, FM.created)) ?? file.stat.ctime,
+			modified: parseTimestamp(fmValue(fm, FM.modified)) ?? file.stat.mtime,
 		};
 	}
 
 	private bump(): void {
 		this.version++;
 		this.incoming = null;
-		this.persistLater();
 		this.events.trigger('changed');
 	}
 
@@ -992,6 +899,30 @@ export class LoomIndexer extends Component {
 		);
 	}
 
+	/** The scenes (or chapters) whose own act link resolves to `act`. */
+	membersOfAct(act: EntityRecord, type: 'scene' | 'chapter'): EntityRecord[] {
+		return this.getAll(type, act.project).filter((r) => {
+			const link = type === 'scene' ? r.sceneAct : r.chapterAct;
+			return link !== '' && this.resolve(link, r.path)?.path === act.path;
+		});
+	}
+
+	/** A location's ancestors via `parentLocation`, nearest first. Stops at a
+	 *  missing or non-location parent, or on a cycle. */
+	locationAncestors(record: EntityRecord): EntityRecord[] {
+		const out: EntityRecord[] = [];
+		const seen = new Set([record.path]);
+		let cur = record;
+		while (cur.parentLocation !== null) {
+			const parent = this.resolve(cur.parentLocation, cur.path);
+			if (parent?.type !== 'location' || seen.has(parent.path)) break;
+			out.push(parent);
+			seen.add(parent.path);
+			cur = parent;
+		}
+		return out;
+	}
+
 	/** The party right now: PC-tagged characters that are alive and active —
 	 *  what the virtual "Group" faction snapshots when picked in a search.
 	 *  (Dead or away PCs stop being added; past snapshots keep them.) */
@@ -1011,6 +942,12 @@ export class LoomIndexer extends Component {
 	resolve(linkpath: string, sourcePath: string): EntityRecord | null {
 		const file = this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
 		return file ? this.records.get(file.path) ?? null : null;
+	}
+
+	/** `resolve` over a list of linkpaths, dropping the ones that don't land
+	 *  on an indexed record. */
+	resolveAll(linkpaths: readonly string[], sourcePath: string): EntityRecord[] {
+		return linkpaths.map((lp) => this.resolve(lp, sourcePath)).filter((r): r is EntityRecord => r !== null);
 	}
 
 	/**
@@ -1160,36 +1097,5 @@ export class LoomIndexer extends Component {
 			all.push(conn);
 		}
 		return all;
-	}
-
-	// --- Persistence -------------------------------------------------------
-
-	/**
-	 * Snapshot of the index written next to the plugin for debugging and fast
-	 * cold starts. The in-memory index is authoritative; this file is never
-	 * read back as a source of truth within a session.
-	 */
-	private persistLater = debounce(() => void this.persist(), 2000, true);
-
-	private async persist(): Promise<void> {
-		const dir = this.plugin.manifest.dir;
-		if (!dir) return;
-		const payload = JSON.stringify(
-			{
-				// v4: members entries became { linkpath, role } declarations.
-				schemaVersion: 4,
-				generatedAt: Date.now(),
-				projects: [...this.projects.values()],
-				records: [...this.records.values()],
-				timelines: [...this.timelines.values()],
-			},
-			null,
-			'\t'
-		);
-		try {
-			await this.app.vault.adapter.write(normalizePath(dir + '/index-cache.json'), payload);
-		} catch (e) {
-			console.error('Loom Loom: failed to write index cache', e);
-		}
 	}
 }

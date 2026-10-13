@@ -22,7 +22,7 @@
 
 /** Marks a hidden loom note: `[[loom:a1b2c3d4]]`. */
 const LOOM_ID_RE = /\[\[loom:([A-Za-z0-9]+)\]\]/;
-const LOOM_ID_RE_G = /\s*\[\[loom:[A-Za-z0-9]+\]\]/g;
+export const LOOM_ID_RE_G = /\s*\[\[loom:[A-Za-z0-9]+\]\]/g;
 
 export function newSceneId(): string {
 	// Short, url-safe, and collision-resistant enough for one script: 8 chars of
@@ -103,74 +103,43 @@ export interface AnnotationSpan {
  * for finding those instead.
  */
 export function findAnnotationSpans(text: string): AnnotationSpan[] {
-	type Token = { close: boolean; kind: 'comment' | 'alt'; id: string; from: number; to: number };
-	const tokens: Token[] = [];
-	for (const m of text.matchAll(ANNOTATION_MARKER_RE)) {
-		tokens.push({
-			close: m[1] === '/',
-			kind: m[2] as 'comment' | 'alt',
-			id: m[3],
-			from: m.index ?? 0,
-			to: (m.index ?? 0) + m[0].length,
-		});
-	}
-	const spans: AnnotationSpan[] = [];
-	const open = new Map<string, Token>();
-	for (const tok of tokens) {
-		const key = `${tok.kind}:${tok.id}`;
-		if (!tok.close) {
-			open.set(key, tok);
-			continue;
-		}
-		const opener = open.get(key);
-		if (!opener) continue; // a close with no matching open — stray, not a span
-		open.delete(key);
-		spans.push({
-			kind: tok.kind,
-			id: tok.id,
-			from: opener.from,
-			to: tok.to,
-			contentFrom: opener.to,
-			contentTo: tok.from,
-		});
-	}
-	return spans.sort((a, b) => a.from - b.from);
+	return pairAnnotationMarkers(text).spans;
 }
 
 /** Marker tokens with no matching partner — orphaned by a partial delete
  *  (only one half of a pair got removed, e.g. backspacing across just the
  *  close marker). Dead by definition: there's no content span left for them
- *  to describe, so they're pure clutter once left this way. */
+ *  to describe, so they're pure clutter once left this way. Sorted
+ *  back-to-front, so removing one doesn't shift the ones still to come. */
 export function findStrayAnnotationMarkers(text: string): { from: number; to: number }[] {
-	type Token = { close: boolean; kind: string; id: string; from: number; to: number };
-	const tokens: Token[] = [];
-	for (const m of text.matchAll(ANNOTATION_MARKER_RE)) {
-		tokens.push({ close: m[1] === '/', kind: m[2], id: m[3], from: m.index ?? 0, to: (m.index ?? 0) + m[0].length });
-	}
+	return pairAnnotationMarkers(text).strays;
+}
+
+/** One pass over every marker token: each close pairs with the latest open
+ *  of the same kind+id. An open superseded by a second open of the same id
+ *  (shouldn't happen — ids are fresh per creation), a close with no open, and
+ *  an open never closed are strays. */
+function pairAnnotationMarkers(text: string): { spans: AnnotationSpan[]; strays: { from: number; to: number }[] } {
+	type Token = { kind: 'comment' | 'alt'; id: string; from: number; to: number };
 	const open = new Map<string, Token>();
+	const spans: AnnotationSpan[] = [];
 	const strays: { from: number; to: number }[] = [];
-	for (const tok of tokens) {
+	for (const m of text.matchAll(ANNOTATION_MARKER_RE)) {
+		const tok: Token = { kind: m[2] as 'comment' | 'alt', id: m[3], from: m.index ?? 0, to: (m.index ?? 0) + m[0].length };
 		const key = `${tok.kind}:${tok.id}`;
-		if (!tok.close) {
-			// A second open of the same id with no close in between shouldn't
-			// normally happen (ids are freshly generated per creation), but
-			// treat the earlier, now-superseded one as stray defensively.
-			const prev = open.get(key);
-			if (prev) strays.push({ from: prev.from, to: prev.to });
-			open.set(key, tok);
-			continue;
-		}
 		const opener = open.get(key);
-		if (opener) {
+		if (m[1] !== '/') {
+			if (opener) strays.push({ from: opener.from, to: opener.to });
+			open.set(key, tok);
+		} else if (opener) {
 			open.delete(key);
+			spans.push({ kind: tok.kind, id: tok.id, from: opener.from, to: tok.to, contentFrom: opener.to, contentTo: tok.from });
 		} else {
 			strays.push({ from: tok.from, to: tok.to });
 		}
 	}
 	for (const opener of open.values()) strays.push({ from: opener.from, to: opener.to });
-	// Back-to-front, so removing one in `cleanAnnotationMarkers` doesn't shift
-	// the offsets of the ones still to come.
-	return strays.sort((a, b) => b.from - a.from);
+	return { spans: spans.sort((a, b) => a.from - b.from), strays: strays.sort((a, b) => b.from - a.from) };
 }
 
 /**
@@ -221,10 +190,8 @@ const ENTITY_LINK_RE = /@\[([^\]|]+)(?:\|([^\]]+))?\]/g;
 /**
  * `= branch: <group-id>` — a plugin-specific convention marking a section as
  * one branch in a narrative choice point, using Fountain's own non-exporting
- * synopsis line so it reads as a plain nested outline in any compliant tool
- * (unlike the leading-`.`-forced-heading approach tried first, which other
- * Fountain tools misread as a new top-level scene). Sits directly beneath
- * its section's heading line, no blank line between.
+ * synopsis line so it reads as a plain nested outline in any compliant tool.
+ * Sits directly beneath its section's heading line, no blank line between.
  */
 const BRANCH_TAG_RE = /^=\s*branch:\s*(.+)$/i;
 
@@ -625,19 +592,10 @@ function looksLikeTransition(line: string): boolean {
 }
 
 /** Strips Fountain's own generic inline `[[note]]` syntax and boneyard
- *  comments from displayed action/character/dialogue text. **Must NOT touch
- *  our own `[[loom:…]]`/`[[loom-comment:…]]`/`[[loom-alt:…]]` markers** — a
- *  real, confirmed bug this fix corrects: the un-excluded regex used to strip
- *  ANY `[[…]]` span unconditionally, including our own annotation markers,
- *  which meant `element.text` (and everything downstream of it —
- *  `elementText`, `PagesPreviewBody`'s `wrapAnnotationMarkersForDisplay`)
- *  never actually SAW a comment/alt-text span once parsed, even though the
- *  raw script text still had it. The live CM6 editor never hit this (it reads
- *  `view.state.doc.toString()` directly, never through this function), which
- *  is why the underline/icon always worked there but silently never appeared
- *  in Pages preview — this was pre-existing, not introduced by this session's
- *  editor-removal work, just newly visible now that Pages is the only
- *  reading surface for those views. */
+ *  comments from displayed action/character/dialogue text — but never our own
+ *  `[[loom:…]]`/`[[loom-comment:…]]`/`[[loom-alt:…]]` markers: `element.text`
+ *  keeps them so the Pages preview (`wrapAnnotationMarkersForDisplay`) can
+ *  still find comment/alt-text spans. */
 function stripAnnotations(text: string): string {
 	return text
 		.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -802,20 +760,11 @@ export function parseFountain(text: string): ParsedScript {
 		// strips ANY `[[...]]` from action/character/dialogue text regardless
 		// of position, and `parseSceneHeading` now strips markers internally.
 		const cls = line.replace(ANNOTATION_MARKER_RE, '');
-		// A second, LOOM-MARKER-PRESERVING view of the same line — for
-		// EXTRACTING `text` on element types below that slice straight from
-		// `cls` (synopsis/centered/transition/lyrics), never for
-		// classification (that stays `cls`, deliberately, so a marker
-		// sitting at a line's start still can't throw off `startsWith`
-		// checks). A real, confirmed bug this fixes: slicing `cls` itself for
-		// `text` meant `stripAnnotations`' own loom-marker exclusion (see its
-		// own doc comment) never applied to these four element types — only
-		// action/character/dialogue (which route through `stripAnnotations`
-		// on the RAW line, not `cls`) got it. A `>`-prefixed credit line
-		// wrapping part of its text in `[[loom-alt:…]]` lost the markers
-		// entirely once parsed, the same underline-never-appears symptom
-		// `stripAnnotations` already fixed for action/dialogue text, just
-		// for a different element type reaching it through a different path.
+		// A loom-marker-preserving view of the line, for EXTRACTING `text` on the
+		// element types that slice straight from it (synopsis/centered/
+		// transition/lyrics) so they keep their annotation markers too.
+		// Classification stays on `cls`, so a marker at a line's start can't
+		// throw off the `startsWith` checks.
 		const clsKeepLoom = stripAnnotations(line);
 
 		if (inBoneyard) {
@@ -983,6 +932,10 @@ export function parseFountain(text: string): ParsedScript {
 	// automatically, which is the whole point.
 	const scenes: ParsedScene[] = [];
 	const sectionStack: { level: number; text: string; loomId: string | null; branchGroup: string | null }[] = [];
+	/** Pops every open branch frame off the top of `sectionStack`. */
+	const closeBranchFrames = () => {
+		while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].branchGroup !== null) sectionStack.pop();
+	};
 	// Built once rather than `sections.find(...)` per section element below —
 	// `sections` was already fully collected in the tokenizer pass above, so
 	// re-scanning it per element would be an avoidable O(sections²).
@@ -1022,9 +975,7 @@ export function parseFountain(text: string): ParsedScript {
 			// via `branchLoomId`, below, with nothing to stop it short of a new
 			// scene heading (which already force-closes an open branch frame,
 			// same idea, just for the "a new scene started" trigger instead).
-			while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].branchGroup !== null) {
-				sectionStack.pop();
-			}
+			closeBranchFrames();
 			continue;
 		}
 		if (element.type === 'page-break') {
@@ -1040,9 +991,7 @@ export function parseFountain(text: string): ParsedScript {
 			// its own — so hitting one closes any currently open branch frame
 			// first. Without this, a scene written right after a branch (once
 			// its choice point has resolved) stayed nested inside that branch.
-			while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].branchGroup !== null) {
-				sectionStack.pop();
-			}
+			closeBranchFrames();
 			// From the raw line, so the loom id is seen — the element's own text
 			// has already had it stripped for display.
 			const parts = parseSceneHeading(lines[element.line]);
@@ -1192,6 +1141,22 @@ export function ensureSceneIds(text: string): { text: string; changed: boolean }
  * Only ever touches the centered line directly beneath a section, so nothing
  * else in the script can be disturbed.
  */
+/** The first non-blank line after a section heading — after its `= branch:`
+ *  tag line too, when `skipTag` — and whether it's a printed `>**…**<` label. */
+function labelAfter(lines: string[], sectionLine: number, skipTag: boolean): { at: number; isLabel: boolean } {
+	let at = sectionLine + 1;
+	if (skipTag && at < lines.length && BRANCH_TAG_RE.test(lines[at].trim())) at++;
+	while (at < lines.length && lines[at].trim() === '') at++;
+	return { at, isLabel: at < lines.length && /^>.*<$/.test(lines[at].trim()) };
+}
+
+/** Removes `lines[at]` and the blank line directly above it, if that blank
+ *  sits above `floor`. */
+function removeLineAndBlankAbove(lines: string[], at: number, floor = 0): void {
+	const from = at > floor && lines[at - 1]?.trim() === '' ? at - 1 : at;
+	lines.splice(from, at - from + 1);
+}
+
 export function applyDisplayTitles(
 	text: string,
 	/** Display title per top-level section loom id; '' or absent removes it. */
@@ -1206,10 +1171,9 @@ export function applyDisplayTitles(
 
 	for (const section of sections) {
 		const wanted = (titles.get(section.loomId as string) ?? '').trim();
-		// The centered line immediately below, skipping one blank.
-		let at = section.line + 1;
-		while (at < lines.length && lines[at].trim() === '') at++;
-		const existing = at < lines.length && /^>.*<$/.test(lines[at].trim()) ? at : -1;
+		// The centered line immediately below, skipping blanks.
+		const { at, isLabel } = labelAfter(lines, section.line, false);
+		const existing = isLabel ? at : -1;
 
 		if (wanted === '') {
 			if (existing !== -1) {
@@ -1244,12 +1208,10 @@ export function applyBranchLabels(text: string): string {
 	const sections = parsed.sections.filter((sec) => sec.branchGroup !== null).sort((a, b) => b.line - a.line);
 
 	for (const section of sections) {
-		let at = section.line + 1;
-		// Skip the `= branch: <id>` tag itself — it's real text in the file;
-		// the parser only leaves it out of the rendered element stream.
-		if (at < lines.length && BRANCH_TAG_RE.test(lines[at].trim())) at++;
-		while (at < lines.length && lines[at].trim() === '') at++;
-		const existing = at < lines.length && /^>.*<$/.test(lines[at].trim()) ? at : -1;
+		// Past the `= branch: <id>` tag — real text in the file; the parser
+		// only leaves it out of the rendered element stream.
+		const { at, isLabel } = labelAfter(lines, section.line, true);
+		const existing = isLabel ? at : -1;
 		const wanted = `>**${section.text}**<`;
 		if (existing !== -1) {
 			if (lines[existing].trim() !== wanted) lines[existing] = wanted;
@@ -1266,34 +1228,18 @@ export function sceneAtLine(parsed: ParsedScript, line: number): ParsedScene | n
 }
 
 /** A scene EXCERPT's body starts after its own heading line (line 0), plus
- *  however many blank lines separate the two — not a fixed "heading + 1"
- *  constant, since the excerpt's own body-derivation trims a variable amount
- *  of leading blank space. This is the shared line-numbering translation
- *  between a heading-included excerpt (what `sceneScriptText` returns, and
- *  what Pages preview/pagination render from) and the heading-stripped BODY
- *  the live editor's own text actually holds — extracted once three call
- *  sites (the Scene page's own scroll-position math, and both "Open this
- *  scene" cross-view navigation hand-offs in script-view.tsx/entity-view.tsx)
- *  turned out to have copied the identical blank-line-counting loop. */
+ *  however many blank lines separate the two. This is the line-numbering
+ *  translation between a heading-included excerpt (what `sceneScriptText`
+ *  returns, and what Pages preview/pagination render from) and the
+ *  heading-stripped BODY the live editor actually holds. */
 export function sceneBodyLineOffset(excerpt: string): number {
 	const afterHeading = excerpt.split('\n').slice(1);
 	let blanks = 0;
 	while (blanks < afterHeading.length && afterHeading[blanks].trim() === '') blanks++;
-	// An entirely-blank body (a brand-new scene, nothing typed yet) has no
-	// real "first non-blank line" for the loop above to land on — it walks
-	// every line in the excerpt and stops only because it ran out, which
-	// used to return `1 + afterHeading.length`, one line PAST the excerpt's
-	// own last line — pointing at whatever comes next in the WHOLE document
-	// (the next scene's heading, a page break, EOF) instead of anywhere
-	// still inside this scene. A real, reported bug: every caller translating
-	// an excerpt-relative line back to a whole-document one (this Scene
-	// page's own scroll-position math, "Open this scene" navigation,
-	// "Paste branch group") silently targeted the WRONG scene's content, or
-	// rejected a genuinely-blank click as "not an empty line," specifically
-	// for a scene with nothing in it yet. Clamped to the LAST line actually
-	// inside the excerpt instead — every line in an all-blank body is
-	// interchangeable, so landing on the closest-to-boundary one still
-	// inside it is the only sensible choice.
+	// An all-blank body (a brand-new scene) has no first non-blank line:
+	// clamp to the excerpt's own last line. One past it would point into
+	// whatever follows in the whole document (the next scene's heading, a
+	// page break, EOF) for every caller translating excerpt lines back.
 	if (blanks >= afterHeading.length) return 1 + Math.max(afterHeading.length - 1, 0);
 	return 1 + blanks;
 }
@@ -1307,22 +1253,13 @@ export function sceneBodyLineOffset(excerpt: string): number {
  * so the two never drift.
  */
 export function liveSceneIds(parsed: ParsedScript): Set<string> {
-	return new Set(parsed.scenes.map((s) => s.loomId).filter((id): id is string => id !== null));
+	return collectLoomIds(parsed.scenes);
 }
 
 /** Act (top-level section) loom ids currently backed by a `#` line —
  *  the Act equivalent of `liveSceneIds`. */
 export function liveActIds(parsed: ParsedScript): Set<string> {
-	return new Set(
-		parsed.sections.filter((s) => s.level === 1 && s.loomId !== null).map((s) => s.loomId as string)
-	);
-}
-
-/** `"10–23"`, or `"10"` when a scene fits on one page. */
-export function pageRangeLabel(scene: ParsedScene): string {
-	return scene.firstPage === scene.lastPage
-		? String(scene.firstPage)
-		: `${scene.firstPage}–${scene.lastPage}`;
+	return collectLoomIds(parsed.sections.filter((s) => s.level === 1));
 }
 
 // --- Rendering -------------------------------------------------------------
@@ -1369,26 +1306,37 @@ function escapeHtml(text: string): string {
  * Fountain's inline emphasis: `**bold**`, `*italic*`, `_underline_`. Applied
  * after escaping, so script text can contain `<` and `&` safely.
  *
- * A backslash-escaped `\*`, `\_` or `\\` (the standard Markdown convention for
- * "this literal character, not a delimiter" — e.g. `Colour\_DP-01` so the
- * underscore doesn't start an underline) is swapped for a placeholder BEFORE
- * the emphasis regexes run, so it can never be mistaken for a real delimiter,
- * then restored as the literal (HTML-escaped) character afterward. Without
- * this the backslash itself leaked into the rendered output instead of being
- * consumed by the escape.
+ * A backslash-escaped `\*`, `\_` or `\\` (e.g. `Colour\_DP-01`) is swapped for
+ * a placeholder before the emphasis regexes run, so it can never be mistaken
+ * for a delimiter, then restored as the literal character afterward.
  */
 export function renderInline(text: string): string {
+	return withEscapes(
+		text,
+		(t) =>
+			escapeHtml(t)
+				.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+				.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+				.replace(/\*(.+?)\*/g, '<em>$1</em>')
+				.replace(/_(.+?)_/g, '<u>$1</u>'),
+		escapeHtml
+	);
+}
+
+/** Runs `transform` with every backslash-escaped `\*`, `\_` or `\\` hidden
+ *  behind a placeholder (so it can't open or close emphasis), then puts each
+ *  escaped character back — without its backslash — through `restore`. */
+export function withEscapes(
+	text: string,
+	transform: (text: string) => string,
+	restore: (ch: string) => string = (ch) => ch
+): string {
 	const escapedChars: string[] = [];
 	const withPlaceholders = text.replace(/\\([*_\\])/g, (_, ch: string) => {
 		escapedChars.push(ch);
 		return `\uE000${escapedChars.length - 1}\uE000`;
 	});
-	const html = escapeHtml(withPlaceholders)
-		.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-		.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-		.replace(/\*(.+?)\*/g, '<em>$1</em>')
-		.replace(/_(.+?)_/g, '<u>$1</u>');
-	return html.replace(/\uE000(\d+)\uE000/g, (_, i: string) => escapeHtml(escapedChars[Number(i)]));
+	return transform(withPlaceholders).replace(/\uE000(\d+)\uE000/g, (_, i: string) => restore(escapedChars[Number(i)]));
 }
 
 // --- Orphan prevention -------------------------------------------------
@@ -1482,6 +1430,21 @@ function buildReattachQueues<T>(pool: T[], keyOf: (item: T) => string): Map<stri
 	return queues;
 }
 
+/** Appends `[[loom:<id>]]` to each target heading line whose text matches a
+ *  `pool` entry (case-insensitive, each entry used once, in script order).
+ *  Returns how many matched. */
+function stampKnownIds(lines: string[], targets: { line: number; key: string }[], pool: { id: string; key: string }[]): number {
+	const queues = buildReattachQueues(pool, (k) => k.key);
+	let matched = 0;
+	for (const t of targets) {
+		const hit = queues.get(t.key.trim().toLowerCase())?.shift();
+		if (!hit) continue;
+		matched++;
+		lines[t.line] = `${lines[t.line].trimEnd()} [[loom:${hit.id}]]`;
+	}
+	return matched;
+}
+
 /**
  * Re-attaches an incoming script's scenes to the ids they had before.
  *
@@ -1503,19 +1466,12 @@ export function reattachSceneIds(
 ): { text: string; matched: number; added: number; orphaned: number } {
 	const parsed = parseFountain(incoming);
 	const lines = incoming.split(/\r?\n/);
-	const taken = new Set(parsed.scenes.map((s) => s.loomId).filter((id): id is string => id !== null));
-	const pool = known.filter((k) => !taken.has(k.id));
-	const queues = buildReattachQueues(pool, (k) => k.heading);
-
-	let matched = 0;
-	for (const scene of parsed.scenes) {
-		if (scene.loomId !== null) continue;
-		const heading = scene.heading.trim().toLowerCase();
-		const hit = queues.get(heading)?.shift();
-		if (!hit) continue;
-		matched++;
-		lines[scene.line] = `${lines[scene.line].trimEnd()} [[loom:${hit.id}]]`;
-	}
+	const taken = liveSceneIds(parsed);
+	const matched = stampKnownIds(
+		lines,
+		parsed.scenes.filter((s) => s.loomId === null).map((s) => ({ line: s.line, key: s.heading })),
+		known.filter((k) => !taken.has(k.id)).map((k) => ({ id: k.id, key: k.heading }))
+	);
 	return {
 		text: lines.join('\n'),
 		matched,
@@ -1542,21 +1498,12 @@ export function reattachSectionIds(
 ): { text: string; matched: number } {
 	const parsed = parseFountain(incoming);
 	const lines = incoming.split(/\r?\n/);
-	const taken = new Set(
-		parsed.sections.map((s) => s.loomId).filter((id): id is string => id !== null)
+	const taken = collectLoomIds(parsed.sections);
+	const matched = stampKnownIds(
+		lines,
+		parsed.sections.filter((s) => s.level === 1 && s.loomId === null).map((s) => ({ line: s.line, key: s.text })),
+		known.filter((k) => !taken.has(k.id)).map((k) => ({ id: k.id, key: k.title }))
 	);
-	const pool = known.filter((k) => !taken.has(k.id));
-	const queues = buildReattachQueues(pool, (k) => k.title);
-
-	let matched = 0;
-	for (const section of parsed.sections) {
-		if (section.level !== 1 || section.loomId !== null) continue;
-		const title = section.text.trim().toLowerCase();
-		const hit = queues.get(title)?.shift();
-		if (!hit) continue;
-		matched++;
-		lines[section.line] = `${lines[section.line].trimEnd()} [[loom:${hit.id}]]`;
-	}
 	return { text: lines.join('\n'), matched };
 }
 
@@ -1574,16 +1521,11 @@ export function replaceSceneBody(text: string, sceneId: string, body: string): s
 	if (!scene) return null;
 	const lines = text.split(/\r?\n/);
 	const bodyLines = body.split('\n');
-	// Guarantee AT LEAST one trailing blank line — required so whatever
-	// comes next (another scene's heading, an act boundary) still parses as
-	// its own block — without stripping any EXTRA ones the caller's own
-	// body already has: a real, reported bug used to force-collapse the
-	// body to exactly one trailing blank regardless of how many the user
-	// deliberately kept. The leading blank line between the heading and the
-	// body is still unconditional, though — `body` itself never carries it
-	// (the Scene page's own editable buffer is derived via `sceneBodyOf`,
-	// which always skips past however many leading blanks exist before
-	// handing the text over), so there's nothing to preserve on that side.
+	// At least one trailing blank line, so whatever comes next (another
+	// scene's heading, an act boundary) still parses as its own block — but
+	// any extra ones the body already has are kept. The leading blank line
+	// is unconditional: `body` never carries it (`sceneBodyOf` skips leading
+	// blanks).
 	if (bodyLines[bodyLines.length - 1]?.trim() !== '') bodyLines.push('');
 	lines.splice(scene.line + 1, sceneEndLine(parsed, scene) - scene.line - 1, '', ...bodyLines);
 	return lines.join('\n');
@@ -1777,18 +1719,47 @@ export function sceneEndLine(parsed: ParsedScript, scene: ParsedScene): number {
 	return cap === null ? scene.endLine : Math.min(scene.endLine, cap);
 }
 
-/** Drops trailing blank lines off a captured block of raw lines — shared by
- *  every op below that lifts a chunk of the script out and re-splices it
- *  elsewhere (`moveSceneToSection`, `moveSceneBefore`, `reorderScenesInSection`,
- *  `reorderBranchGroup`, `rebuildTopLevel`): a captured span often ends with
- *  the blank line that used to separate it from whatever followed, and
- *  re-inserting that verbatim would double up with the blank line each call
- *  site adds back itself. Shared by prose.ts, which imports this directly
- *  rather than duplicating it — the trim itself is format-agnostic. */
+/** Drops trailing blank lines off a captured block of raw lines. A captured
+ *  span often ends with the blank line that separated it from what followed,
+ *  and re-inserting that verbatim would double up with the blank line each
+ *  re-splice adds back itself (`relocateBlock`, `spliceInOrder`, prose.ts). */
 export function trimTrailingBlankLines(block: string[]): string[] {
 	const clean = [...block];
 	while (clean.length > 0 && clean[clean.length - 1].trim() === '') clean.pop();
 	return clean;
+}
+
+/** Lifts `lines[from, to)` out and re-inserts it at `insertAt` (an index
+ *  measured before the removal), trailing blanks trimmed and one blank line
+ *  either side; blank lines just above the insertion point are absorbed so
+ *  the padding never stacks. Mutates `lines`; returns the joined text. */
+export function relocateBlock(lines: string[], from: number, to: number, insertAt: number): string {
+	const block = lines.slice(from, to);
+	lines.splice(from, to - from);
+	if (insertAt > from) insertAt -= to - from;
+	while (insertAt > 0 && lines[insertAt - 1]?.trim() === '') insertAt--;
+	lines.splice(insertAt, 0, '', ...trimTrailingBlankLines(block), '');
+	return lines.join('\n');
+}
+
+/** Replaces `lines[start, end)` with captured `blocks` in `requested` order
+ *  (ids not requested follow in `natural` order), each trimmed of trailing
+ *  blanks and passed through `pad`, then `tail`. Mutates `lines`; returns
+ *  the joined text. */
+export function spliceInOrder(
+	lines: string[],
+	start: number,
+	end: number,
+	blocks: Map<string, string[]>,
+	natural: string[],
+	requested: string[],
+	pad: (clean: string[]) => string[],
+	tail: string[] = []
+): string {
+	const order = [...requested.filter((id) => blocks.has(id)), ...natural.filter((id) => !requested.includes(id))];
+	const rebuilt = order.flatMap((id) => pad(trimTrailingBlankLines(blocks.get(id) as string[])));
+	lines.splice(start, end - start, ...rebuilt, ...tail);
+	return lines.join('\n');
 }
 
 /**
@@ -1803,17 +1774,7 @@ export function moveSceneToSection(text: string, sceneId: string, sectionId: str
 	if (!scene || !target) return null;
 
 	const lines = text.split(/\r?\n/);
-	const end = sceneEndLine(parsed, scene);
-	const block = lines.slice(scene.line, end);
-	let insertAt = nextTopSectionLine(parsed, target.line) ?? lines.length;
-
-	lines.splice(scene.line, end - scene.line);
-	// Removing the block shifts everything after it up.
-	if (insertAt > scene.line) insertAt -= end - scene.line;
-	while (insertAt > 0 && lines[insertAt - 1]?.trim() === '') insertAt--;
-	const clean = trimTrailingBlankLines(block);
-	lines.splice(insertAt, 0, '', ...clean, '');
-	return lines.join('\n');
+	return relocateBlock(lines, scene.line, sceneEndLine(parsed, scene), nextTopSectionLine(parsed, target.line) ?? lines.length);
 }
 
 /**
@@ -1872,17 +1833,7 @@ export function moveSceneBefore(text: string, sceneId: string, beforeSceneId: st
 	const target = parsed.scenes.find((sc) => sc.loomId === beforeSceneId);
 	if (!scene || !target || scene.loomId === target.loomId) return null;
 
-	const lines = text.split(/\r?\n/);
-	const end = sceneEndLine(parsed, scene);
-	const block = lines.slice(scene.line, end);
-	let insertAt = target.line;
-
-	lines.splice(scene.line, end - scene.line);
-	if (insertAt > scene.line) insertAt -= end - scene.line;
-	while (insertAt > 0 && lines[insertAt - 1]?.trim() === '') insertAt--;
-	const clean = trimTrailingBlankLines(block);
-	lines.splice(insertAt, 0, '', ...clean, '');
-	return lines.join('\n');
+	return relocateBlock(text.split(/\r?\n/), scene.line, sceneEndLine(parsed, scene), target.line);
 }
 
 /**
@@ -1917,28 +1868,19 @@ export function reorderScenesInSection(
 		.filter((sc) => sc.line > section.line && sc.line < sectionEnd)
 		.sort((a, b) => a.line - b.line);
 	if (inSection.length === 0) return null;
-	const trueEnd = (sc: ParsedScene) => Math.min(sc.endLine, sectionEnd);
-
-	const insertAt = inSection[0].line;
-	const removeEnd = trueEnd(inSection[inSection.length - 1]);
+	const trueEnd = (sc: ParsedScene) => sceneEndLine(parsed, sc);
 	const blocks = new Map<string, string[]>(
 		inSection.map((sc) => [sc.loomId as string, lines.slice(sc.line, trueEnd(sc))])
 	);
-
-	const order = [
-		...orderedSceneIds.filter((id) => blocks.has(id)),
-		...inSection.map((sc) => sc.loomId as string).filter((id) => !orderedSceneIds.includes(id)),
-	];
-	const rebuilt: string[] = [];
-	for (const id of order) {
-		const block = blocks.get(id);
-		if (!block) continue;
-		const clean = trimTrailingBlankLines(block);
-		rebuilt.push('', ...clean, '');
-	}
-
-	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
-	return lines.join('\n');
+	return spliceInOrder(
+		lines,
+		inSection[0].line,
+		trueEnd(inSection[inSection.length - 1]),
+		blocks,
+		inSection.map((sc) => sc.loomId as string),
+		orderedSceneIds,
+		(clean) => ['', ...clean, '']
+	);
 }
 
 /**
@@ -1960,11 +1902,15 @@ export function reorderScenesInSection(
  * against."
  */
 export function branchComboKey(value: string): string {
+	const parts = decomposeBranchValue(value);
+	return parts ? `${parts.identifier}-${parts.subidentifier}` : value;
+}
+
+/** The trailing bare number of a three-segment `A-B-N` branch value, or
+ *  null (a text override, or not that shape at all). */
+function branchNumber(value: string): number | null {
 	const parts = value.split('-');
-	if (parts.length === 3 && parts.every((p) => p.trim() !== '')) {
-		return `${parts[0]}-${parts[1]}`;
-	}
-	return value;
+	return parts.length === 3 && /^\d+$/.test(parts[2]) ? Number(parts[2]) : null;
 }
 
 /** `IDENTIFIER-SUBIDENTIFIER-N` decomposed into its three parts, or `null`
@@ -2003,17 +1949,11 @@ export function branchGroupBounds(parsed: ParsedScript, groupId: string): Branch
 	if (branches.length === 0) return null;
 	const last = branches[branches.length - 1];
 	const lastElement = parsed.elements[parsed.elements.length - 1];
-	// The STRUCTURAL bound — the next section at this depth, or EOF — is
-	// exactly the pre-`= gather` behavior (a lone/un-gathered group's last
-	// branch swallows everything after it, the very bug this feature exists
-	// to fix). Once a gather line exists inside that structural span, the
-	// group's real end is right AFTER it — content past a gather is no
-	// longer part of the group, structural bound or not.
-	// `+ 1`: this is an EXCLUSIVE upper bound, so using the last element's
-	// own line unmodified would exclude that very element from the gather
-	// search below whenever `= gather` itself is the last thing in the
-	// document (no trailing scene text after it) — a real off-by-one caught
-	// by testing, not a hypothetical.
+	// The STRUCTURAL bound is the next section at this depth, or EOF. Once a
+	// gather line exists inside that span, the group's real end is right
+	// AFTER it — content past a gather isn't part of the group.
+	// `+ 1`: an EXCLUSIVE upper bound, so a `= gather` that is the document's
+	// last element is still inside the search below.
 	const structuralEnd = nextSectionAtLevel(parsed, last.line, last.level) ?? (lastElement?.line ?? last.line) + 1;
 	const gather = parsed.elements.find(
 		(el): el is FountainElement & { type: 'synopsis' } =>
@@ -2039,8 +1979,8 @@ export function nextComboNumber(parsed: ParsedScript, comboKey: string): number 
 		if (sec.branchGroup === null || branchComboKey(sec.branchGroup) !== comboKey) continue;
 		if (seen.has(sec.branchGroup)) continue;
 		seen.add(sec.branchGroup);
-		const parts = sec.branchGroup.split('-');
-		if (parts.length === 3 && /^\d+$/.test(parts[2])) max = Math.max(max, Number(parts[2]));
+		const n = branchNumber(sec.branchGroup);
+		if (n !== null) max = Math.max(max, n);
 	}
 	return max + 1;
 }
@@ -2085,8 +2025,8 @@ export function renumberBranchGroups(text: string): string {
 		points.sort((a, b) => a.firstLine - b.firstLine);
 		let n = 0;
 		for (const point of points) {
-			const parts = point.value.split('-');
-			if (parts.length !== 3 || !/^\d+$/.test(parts[2])) continue;
+			const current = branchNumber(point.value);
+			if (current === null) continue;
 			n += 1;
 			// Numeric comparison, not string comparison — a hand-typed
 			// zero-padded number ("01") that's already in the right SEQUENCE
@@ -2096,7 +2036,7 @@ export function renumberBranchGroups(text: string): string {
 			// style decision point in the vault would get silently stripped
 			// to "1"/"2"/... the very first time this ran, on content
 			// nobody asked to have reformatted.
-			if (Number(parts[2]) === n) continue;
+			if (current === n) continue;
 			const wanted = `${key}-${n}`;
 			for (const secLine of point.sectionLines) {
 				const tagLine = secLine + 1;
@@ -2148,29 +2088,11 @@ export function removeBranchFromGroup(text: string, sectionId: string): string |
 	}
 
 	if (remaining.length === 0) {
-		// The group's only/last branch is gone — there's no surviving
-		// section carrying this `groupId` left for `branchGroupBounds`
-		// (which requires at least one matching branch to find anything at
-		// all, gather included) to locate it by, unlike the `=== 1` path
-		// below. A real, reported bug: an orphaned `= gather` was left
-		// behind forever, unreachable by any later cleanup, once this case
-		// went unhandled — increasingly common since `insertBranch` now
-		// gives every lone branch a gather from the moment it's created
-		// (own doc comment), not just once a real second branch arrives.
-		// Fixed directly from what's already known, no re-parse needed:
-		// when this branch WAS the group's last one and a gather existed,
-		// `removeEnd` above was deliberately set to stop BEFORE it (see
-		// that assignment's own comment) so the gather survives the
-		// splice — which means it now sits at exactly `section.line` in
-		// `lines`: everything from `section.line` up to the old gather
-		// line was just removed, so the gather shifts down to fill that
-		// exact spot. Strip it (and the blank line directly above it, if
-		// any) the same way the `>= 1`-remaining cleanup below does.
-		if (bounds.gatherLine !== null) {
-			let removeFrom = section.line;
-			if (removeFrom > 0 && lines[removeFrom - 1]?.trim() === '') removeFrom--;
-			lines.splice(removeFrom, section.line - removeFrom + 1);
-		}
+		// The group's last branch is gone, so `branchGroupBounds` can't locate
+		// the group any more. If it had a gather, `removeEnd` above stopped
+		// just before it, so the gather now sits exactly at `section.line` —
+		// strip it (and the blank line above it) like the cleanup below.
+		if (bounds.gatherLine !== null) removeLineAndBlankAbove(lines, section.line);
 		return lines.join('\n');
 	}
 
@@ -2183,9 +2105,7 @@ export function removeBranchFromGroup(text: string, sectionId: string): string |
 	const stillBounds = branchGroupBounds(afterRemoval, groupId);
 	if (stillBounds?.gatherLine !== null && stillBounds?.gatherLine !== undefined) {
 		const l2 = result.split(/\r?\n/);
-		let removeFrom = stillBounds.gatherLine;
-		if (removeFrom > 0 && l2[removeFrom - 1]?.trim() === '') removeFrom--;
-		l2.splice(removeFrom, stillBounds.gatherLine - removeFrom + 1);
+		removeLineAndBlankAbove(l2, stillBounds.gatherLine);
 		result = l2.join('\n');
 	}
 	if (remaining.length === 1) {
@@ -2198,13 +2118,8 @@ export function removeBranchFromGroup(text: string, sectionId: string): string |
 			if (BRANCH_TAG_RE.test(l3[tagLine]?.trim() ?? '')) l3.splice(tagLine, 1);
 			// The printed `>**Title**<` label, and any blank line directly
 			// above it, sit right beneath where the tag was.
-			let at = survivor.line + 1;
-			while (at < l3.length && l3[at].trim() === '') at++;
-			if (at < l3.length && /^>.*<$/.test(l3[at].trim())) {
-				let removeFrom = at;
-				if (removeFrom > survivor.line + 1 && l3[removeFrom - 1]?.trim() === '') removeFrom--;
-				l3.splice(removeFrom, at - removeFrom + 1);
-			}
+			const { at, isLabel } = labelAfter(l3, survivor.line, false);
+			if (isLabel) removeLineAndBlankAbove(l3, at, survivor.line + 1);
 			result = l3.join('\n');
 		}
 	}
@@ -2250,31 +2165,21 @@ export function reorderBranchGroup(text: string, groupId: string, orderedSection
 	const trueEnd = (sec: ParsedSection & { loomId: string }) =>
 		sec.loomId === lastId ? bounds.end : (nextSectionAtLevel(parsed, sec.line, sec.level) ?? lines.length);
 
-	const insertAt = branches[0].line;
-	const removeEnd = bounds.end;
 	const blocks = new Map<string, string[]>(branches.map((sec) => [sec.loomId, lines.slice(sec.line, trueEnd(sec))]));
-
-	const order = [
-		...orderedSectionIds.filter((id) => blocks.has(id)),
-		...branches.map((sec) => sec.loomId).filter((id) => !orderedSectionIds.includes(id)),
-	];
-	const hadGather = bounds.gatherLine !== null;
-	const rebuilt: string[] = [];
-	for (const id of order) {
-		const block = blocks.get(id);
-		if (!block) continue;
-		let clean = trimTrailingBlankLines(block);
-		const gatherIdx = clean.findIndex((l) => l.trim() === '= gather');
-		if (gatherIdx !== -1) {
-			const from = gatherIdx > 0 && clean[gatherIdx - 1].trim() === '' ? gatherIdx - 1 : gatherIdx;
-			clean = trimTrailingBlankLines([...clean.slice(0, from), ...clean.slice(gatherIdx + 1)]);
-		}
-		rebuilt.push(...clean, '');
-	}
-	if (hadGather) rebuilt.push('= gather', '');
-
-	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
-	return lines.join('\n');
+	return spliceInOrder(
+		lines,
+		branches[0].line,
+		bounds.end,
+		blocks,
+		branches.map((sec) => sec.loomId),
+		orderedSectionIds,
+		(clean) => {
+			const gatherIdx = clean.findIndex((l) => l.trim() === '= gather');
+			if (gatherIdx !== -1) removeLineAndBlankAbove(clean, gatherIdx);
+			return [...trimTrailingBlankLines(clean), ''];
+		},
+		bounds.gatherLine !== null ? ['= gather', ''] : []
+	);
 }
 
 /**
@@ -2328,28 +2233,6 @@ export function setBranchTagValue(text: string, oldValue: string, newValue: stri
 }
 
 /**
- * Rewrites just the identifier+subidentifier portion of a decision point's
- * value, leaving its own trailing number/override segment untouched — what
- * editing branch 1's Identifier/Subidentifier fields writes through, once
- * the value already parses as the composer's own 3-segment shape
- * (`IDENTIFIER-SUBIDENTIFIER-N`). A legacy free-text value (anything else)
- * has no decomposed fields to edit in the first place — callers only reach
- * this once they've already confirmed the 3-segment shape themselves (the
- * same check `branchComboKey` makes), so a value that doesn't parse that way
- * here is a caller bug, not a normal case, and returns `null`.
- */
-export function rewriteComboPrefix(
-	text: string,
-	oldValue: string,
-	newIdentifier: string,
-	newSubidentifier: string
-): string | null {
-	const parts = oldValue.split('-');
-	if (parts.length !== 3 || parts.some((p) => p.trim() === '')) return null;
-	return setBranchTagValue(text, oldValue, `${newIdentifier}-${newSubidentifier}-${parts[2]}`);
-}
-
-/**
  * Inserts a brand-new branch section — heading, `= branch:` tag, and its own
  * printed `>**Title**<` label — either as a fresh decision point of its own,
  * or as a new sibling joining an EXISTING one. The label is written directly
@@ -2393,20 +2276,11 @@ export function insertBranch(
 	fields: {
 		title: string;
 		branchValue: string;
-		/** A caller-supplied id, used verbatim instead of rolling a fresh one
-		 *  here — for a caller that needs to know the new section's id
-		 *  SYNCHRONOUSLY, before this (necessarily async, disk-round-tripping)
-		 *  call ever resolves. `entity-view.tsx`'s `handleAddBranch` is the
-		 *  one caller: it needs the id immediately to mark that branch's
-		 *  Title field as "pending focus" in the SAME tick "+" is clicked, or
-		 *  the field can already have mounted (seeding its masked-blank
-		 *  display from a still-`null` pending id) by the time a
-		 *  post-write re-parse would otherwise have discovered it — a real,
-		 *  reported bug ("Untitled" showing as literal text instead of
-		 *  masking blank). Still re-checked against the actual `parsed` set
-		 *  below rather than trusted blindly, so a caller that got it
-		 *  slightly stale (unlikely — `newSceneId()`'s own space is huge)
-		 *  still can't produce a genuine collision. */
+		/** A caller-supplied id, used instead of rolling a fresh one — for a
+		 *  caller that needs the new section's id synchronously, before the
+		 *  write resolves (`handleAddBranch` marks the branch's Title field as
+		 *  pending-focus in the same tick "+" is clicked). Still re-checked
+		 *  against `parsed` below, so a stale id can't collide. */
 		id?: string;
 	}
 ): string | null {
@@ -2419,29 +2293,13 @@ export function insertBranch(
 	if ('line' in anchor) {
 		const lines = text.split(/\r?\n/);
 		if (anchor.line < 0 || anchor.line > lines.length) return null;
-		// A `= gather` right away, even though a single branch isn't really a
-		// choice point yet — a real, reported bug fixed here: with no gather
-		// (or any other heading-level marker) to terminate it, this new `###`
-		// section has nothing bounding its own span short of the next
-		// same/higher-level heading or EOF, so it silently swallowed whatever
-		// scene prose happened to already sit below the cursor's own blank
-		// line, folding it into the branch's own body instead of leaving it
-		// as ordinary scene text after the branch. This is the exact bug
-		// `= gather` exists to fix (see `reorderBranchGroup`'s own comment on
-		// this same failure mode for the identical reasoning) — it's just
-		// never been applied at CREATION time before, only once a real second
-		// branch arrives via `afterGroupId` below. `removeBranchFromGroup`
-		// still strips a group's gather back out once it's down to 0 or 1
-		// branch again, so a lone branch that never gets a sibling ends up
-		// exactly where it always has — this only changes what exists
-		// TRANSIENTLY between creation and either a second branch or a
-		// deletion, never the steady state.
-		// No blank line between the tag and the label — the two are meant to
-		// sit adjacent (`branchLabelEndLine` already treats any number of
-		// blank lines there as equivalent, so this is a pure formatting
-		// choice, not a parsing requirement); `collapseBranchBlankLines`
-		// normalizes an OLDER script that still has one back to this same
-		// shape on its next commit.
+		// A `= gather` right away, even though a single branch isn't a choice
+		// point yet: without it the new `###` section's span runs to the next
+		// same-or-higher heading or EOF and swallows whatever scene prose sits
+		// below the cursor. `removeBranchFromGroup` strips the gather again
+		// once a group is down to 0 or 1 branch.
+		// No blank line between the tag and the label — they sit adjacent
+		// (`collapseBranchBlankLines` normalizes a script that has one).
 		const block = [`### ${title} [[loom:${id}]]`, `= branch: ${fields.branchValue}`, label, '', '= gather', ''];
 		lines.splice(anchor.line + 1, 0, ...block);
 		return lines.join('\n');
@@ -2526,7 +2384,7 @@ export function promoteTypedBranch(
 	const lines = text.split(/\r?\n/);
 	if (headingLine0 < 0 || headingLine0 + 1 >= lines.length) return null;
 	const parsed = parseFountain(text);
-	const seen = collectLoomIds(parsed.scenes, parsed.sections, parsed.pageBreaks);
+	const seen = allLoomIds(parsed);
 	const id = freshLoomId(seen);
 	const trimmedTitle = title.trim();
 	const label = `>**${trimmedTitle}**<`;
@@ -2544,17 +2402,11 @@ export function promoteTypedBranch(
 /**
  * Collapses to ZERO the blank-line run (if any) between a branch's own
  * `= branch: <value>` tag line and its `>**Title**<` preview line
- * (`applyBranchLabels`'s own output) — the two are meant to sit adjacent
- * (see `insertBranch`'s own current template); a blank line there was only
- * ever leftover padding from an earlier version of that template. Idempotent
- * (a branch that already has no gap there is untouched) and safe to run on
- * every commit, same as `renumberBranchGroups`/`cleanAnnotationMarkers` —
- * this is what lets an OLDER script (or one hand-typed before this
- * convention existed) self-heal on its next edit rather than needing a
- * one-time migration. The blank line between the PRESERVED preview and
- * where the body starts is deliberately left alone — that one's real,
- * intentional breathing room before the prose begins, same as
- * `branchLabelEndLine`'s own body-start convention.
+ * (`applyBranchLabels`'s output) — the two sit adjacent. Idempotent and safe
+ * to run on every commit, same as `renumberBranchGroups`/
+ * `cleanAnnotationMarkers`. The blank line between the preview and where the
+ * body starts is deliberate breathing room and is left alone (same as
+ * `branchLabelEndLine`'s body-start convention).
  */
 export function collapseBranchBlankLines(text: string): string {
 	const parsed = parseFountain(text);
@@ -2565,11 +2417,8 @@ export function collapseBranchBlankLines(text: string): string {
 	for (const sec of branchSections) {
 		const tagLine = sec.line + 1;
 		if (tagLine >= lines.length || !BRANCH_TAG_RE.test(lines[tagLine]?.trim() ?? '')) continue;
-		let scan = tagLine + 1;
-		while (scan < lines.length && lines[scan].trim() === '') scan++;
-		if (scan > tagLine + 1 && scan < lines.length && /^>.*<$/.test(lines[scan].trim())) {
-			lines.splice(tagLine + 1, scan - (tagLine + 1));
-		}
+		const { at, isLabel } = labelAfter(lines, sec.line, true);
+		if (isLabel && at > tagLine + 1) lines.splice(tagLine + 1, at - (tagLine + 1));
 	}
 	return lines.join('\n');
 }
@@ -2615,46 +2464,25 @@ export function copyBranchGroup(text: string, groupId: string): string | null {
 /**
  * Splices a previously cut-or-copied decision point block back in right
  * after `line`. Returns `null` when `line` no longer points at an empty
- * line by the time this actually runs (a concurrent edit landed between the
- * right-click and the paste) — the caller Notices this rather than silently
- * doing nothing, matching the annotation-overlap rejection pattern
- * elsewhere in this codebase.
+ * line by the time this runs (a concurrent edit landed between the
+ * right-click and the paste) — the caller Notices this.
  *
- * **Collision handling — what makes "Copy" safe, not just "Cut"**: a CUT
- * already removed the source before paste ever runs, so the block's own
- * `= branch:` value and section ids are guaranteed unique and travel
- * verbatim, unchanged, exactly as before this function grew this check. A
- * COPY leaves the source in place, so pasting the identical value/ids
- * elsewhere would make two physically separate stretches of the script
- * claim to be the SAME decision point (`branchGroupBounds` groups by exact
- * `= branch:` value equality — it has no other way to tell them apart) and
- * hand out duplicate loom ids, which several other things key off (a
- * Scene's own `sceneBranch`, the branch overlay's own per-card React key).
- * Detected here by checking whether the block's OWN value still exists
- * anywhere in the CURRENT document — true only for a copy-still-present
- * paste, never a genuine cut-then-move. When it collides: a numbered value
- * (`IDENTIFIER-SUBIDENTIFIER-<N>`) gets bumped to the next free number in
- * its combo (`nextComboNumber` — the identical mechanism a brand-new
- * decision point already uses), matching every branch's own duplicate
- * `= branch:` tag line; a hand-typed text-override value collision is left
- * untouched (there's no "next" to compute — `renumberBranchGroups` already
- * tolerates this same gap for the identical reason). Every branch section's
- * own `[[loom:<id>]]` gets a fresh id regardless of whether the value was
- * numbered, since the id-uniqueness problem exists either way.
+ * **Collision handling (what makes "Copy" safe)**: a CUT already removed the
+ * source, so its `= branch:` value and section ids are unique and travel
+ * verbatim. A COPY leaves the source in place, and two stretches claiming
+ * the same `= branch:` value would merge into one decision point
+ * (`branchGroupBounds` groups by exact value) with duplicate loom ids. So
+ * when the block's own value still exists in the document: a numbered value
+ * (`IDENTIFIER-SUBIDENTIFIER-<N>`) is bumped to the next free number
+ * (`nextComboNumber`); a hand-typed text value is left as is (there's no
+ * "next" — `renumberBranchGroups` tolerates the same gap). Every branch
+ * section gets a fresh `[[loom:<id>]]` either way.
  *
- * **Two trailing blank lines, not one, and a reported cursor target**: the
- * pasted group's own card (`branch-overlay.tsx`) is an opaque, real-pixel
- * panel whose rendered height depends on a live measurement pass
- * (header/body/footer) that only converges a render or two AFTER the paste
- * actually lands — a real, reported bug: right after pasting, the ONE blank
- * line this used to leave behind could still sit visually UNDER the card
- * while that measurement was still catching up, leaving nowhere to click to
- * keep writing without risking a click landing on the covered text instead.
- * A second blank line is cheap insurance against that same class of timing
- * gap; `cursorLine` (0-based, whole-document) points at the FARTHER of the
- * two, for the caller to select the cursor onto directly once the write
- * lands — sidestepping the "where do I click" question entirely rather than
- * trying to make the click safe.
+ * **Two trailing blank lines + `cursorLine`**: the pasted group's card
+ * (`branch-overlay.tsx`) settles its height a render or two after the paste,
+ * so a single blank line could sit under it with nowhere to click.
+ * `cursorLine` (0-based, whole-document) is the farther blank line, for the
+ * caller to put the cursor on once the write lands.
  */
 export function pasteBranchGroup(
 	text: string,
@@ -2673,8 +2501,7 @@ export function pasteBranchGroup(
 	if (value !== null && parsed.sections.some((s) => s.branchGroup === value)) {
 		const blockLines = block.split(/\r?\n/);
 		const comboKey = branchComboKey(value);
-		const parts = value.split('-');
-		if (parts.length === 3 && /^\d+$/.test(parts[2])) {
+		if (branchNumber(value) !== null) {
 			const newValue = `${comboKey}-${nextComboNumber(parsed, comboKey)}`;
 			for (const sec of branches) {
 				const tagLine = sec.line + 1;
@@ -2683,7 +2510,7 @@ export function pasteBranchGroup(
 				}
 			}
 		}
-		const seen = new Set(collectLoomIds(parsed.scenes, parsed.sections, parsed.pageBreaks));
+		const seen = allLoomIds(parsed);
 		for (const sec of branches) {
 			if (sec.loomId === null) continue;
 			const fresh = freshLoomId(seen);
@@ -2718,11 +2545,8 @@ export function pasteBranchGroup(
  *  always inserts its own canonical single blank, and the READ side just
  *  skips past however many blanks happen to be there right now. */
 export function branchLabelEndLine(lines: string[], sectionLine: number): number {
-	let at = sectionLine + 1;
-	if (at < lines.length && BRANCH_TAG_RE.test(lines[at].trim())) at++;
-	while (at < lines.length && lines[at].trim() === '') at++;
-	if (at < lines.length && /^>.*<$/.test(lines[at].trim())) at++;
-	return at;
+	const { at, isLabel } = labelAfter(lines, sectionLine, true);
+	return isLabel ? at + 1 : at;
 }
 
 /** A branch's own content span end (exclusive) — the next sibling's own
@@ -2770,11 +2594,9 @@ export function branchBodyText(text: string, sectionId: string): string | null {
 /**
  * Replaces one branch's own BODY text in place, leaving its heading,
  * `= branch:` tag, and printed label untouched — the write half of
- * `branchBodyText`, mirroring `replaceSceneBody`'s own heading-preserving
- * contract exactly: splice starts right after the label (`branchLabelEndLine`,
- * never trying to detect/reuse whatever blank spacing currently sits there —
- * see that function's own doc comment for the bug this avoids) and always
- * inserts a fresh canonical blank both before and after the new body.
+ * `branchBodyText`, mirroring `replaceSceneBody`: the splice starts right
+ * after the label (`branchLabelEndLine`, never reusing whatever blank spacing
+ * sits there) and always inserts a fresh canonical blank before and after.
  */
 export function replaceBranchBody(text: string, sectionId: string, body: string): string | null {
 	const parsed = parseFountain(text);
@@ -2803,13 +2625,49 @@ export interface TopLevelEntry {
 /** The current top-level sequence — acts and act-boundary page
  *  breaks — in document order. */
 export function topLevelEntries(parsed: ParsedScript): TopLevelEntry[] {
-	const acts = parsed.sections
-		.filter((sec): sec is ParsedSection & { loomId: string } => sec.level === 1 && sec.loomId !== null)
-		.map((sec) => ({ kind: 'act' as const, id: sec.loomId, line: sec.line }));
-	const breaks = parsed.pageBreaks
-		.filter((pb): pb is ParsedPageBreak & { loomId: string } => pb.loomId !== null)
-		.map((pb) => ({ kind: 'page-break' as const, id: pb.loomId, line: pb.line }));
-	return [...acts, ...breaks].sort((a, b) => a.line - b.line).map(({ kind, id }) => ({ kind, id }));
+	return mergeTopLevel(
+		parsed.sections.filter((sec) => sec.level === 1),
+		parsed.pageBreaks
+	);
+}
+
+/** Id-carrying acts and page breaks merged into one list in document order —
+ *  shared with prose.ts's `bookTopLevelEntries`. */
+export function mergeTopLevel(
+	acts: { loomId: string | null; line: number }[],
+	breaks: { loomId: string | null; line: number }[]
+): TopLevelEntry[] {
+	const tag = (kind: TopLevelEntry['kind'], items: { loomId: string | null; line: number }[]) =>
+		items.flatMap((i) => (i.loomId !== null ? [{ kind, id: i.loomId, line: i.line }] : []));
+	return [...tag('act', acts), ...tag('page-break', breaks)]
+		.sort((a, b) => a.line - b.line)
+		.map(({ kind, id }) => ({ kind, id }));
+}
+
+/** The full top-level order for an acts-only reorder: acts follow
+ *  `orderedActIds` (unlisted ones after, in document order), and each page
+ *  break stays in front of the act it preceded — a trailing one stays at
+ *  the end. Null when there are no acts. Shared with prose.ts. */
+export function actOrderKeepingBreaks(entries: TopLevelEntry[], orderedActIds: string[]): string[] | null {
+	const actIds = entries.filter((e) => e.kind === 'act').map((e) => e.id);
+	if (actIds.length === 0) return null;
+	const attachedBefore = new Map<string, string[]>();
+	let pending: string[] = [];
+	for (const e of entries) {
+		if (e.kind === 'page-break') {
+			pending.push(e.id);
+			continue;
+		}
+		if (pending.length > 0) {
+			attachedBefore.set(e.id, [...(attachedBefore.get(e.id) ?? []), ...pending]);
+			pending = [];
+		}
+	}
+	const actOrder = [
+		...orderedActIds.filter((id) => actIds.includes(id)),
+		...actIds.filter((id) => !orderedActIds.includes(id)),
+	];
+	return [...actOrder.flatMap((id) => [...(attachedBefore.get(id) ?? []), id]), ...pending];
 }
 
 /**
@@ -2836,26 +2694,18 @@ function rebuildTopLevel(text: string, parsed: ParsedScript, order: string[]): s
 	};
 
 	const sorted = entries.slice().sort((a, b) => (lineOf.get(a.id) as number) - (lineOf.get(b.id) as number));
-	const insertAt = lineOf.get(sorted[0].id) as number;
-	const removeEnd = blockEnd(sorted[sorted.length - 1].id);
 	const blocks = new Map<string, string[]>(
 		sorted.map((e) => [e.id, lines.slice(lineOf.get(e.id) as number, blockEnd(e.id))])
 	);
-
-	const finalOrder = [
-		...order.filter((id) => blocks.has(id)),
-		...sorted.map((e) => e.id).filter((id) => !order.includes(id)),
-	];
-	const rebuilt: string[] = [];
-	for (const id of finalOrder) {
-		const block = blocks.get(id);
-		if (!block) continue;
-		const clean = trimTrailingBlankLines(block);
-		rebuilt.push(...clean, '');
-	}
-
-	lines.splice(insertAt, removeEnd - insertAt, ...rebuilt);
-	return lines.join('\n');
+	return spliceInOrder(
+		lines,
+		lineOf.get(sorted[0].id) as number,
+		blockEnd(sorted[sorted.length - 1].id),
+		blocks,
+		sorted.map((e) => e.id),
+		order,
+		(clean) => [...clean, '']
+	);
 }
 
 /**
@@ -2892,34 +2742,8 @@ export function reorderTopLevelEntries(text: string, order: string[]): string | 
  */
 export function reorderTopSections(text: string, orderedSectionIds: string[]): string | null {
 	const parsed = parseFountain(text);
-	const entries = topLevelEntries(parsed);
-	const actIds = entries.filter((e) => e.kind === 'act').map((e) => e.id);
-	if (actIds.length === 0) return null;
-
-	// Which page breaks immediately precede which act, in the CURRENT
-	// (pre-reorder) document — one with nothing after it attaches to `null`,
-	// the very end.
-	const attachedBefore = new Map<string, string[]>();
-	let pending: string[] = [];
-	for (const e of entries) {
-		if (e.kind === 'page-break') {
-			pending.push(e.id);
-			continue;
-		}
-		if (pending.length > 0) {
-			attachedBefore.set(e.id, [...(attachedBefore.get(e.id) ?? []), ...pending]);
-			pending = [];
-		}
-	}
-	const trailing = pending;
-
-	const actOrder = [
-		...orderedSectionIds.filter((id) => actIds.includes(id)),
-		...actIds.filter((id) => !orderedSectionIds.includes(id)),
-	];
-	const fullOrder = [...actOrder.flatMap((id) => [...(attachedBefore.get(id) ?? []), id]), ...trailing];
-
-	return rebuildTopLevel(text, parsed, fullOrder);
+	const fullOrder = actOrderKeepingBreaks(topLevelEntries(parsed), orderedSectionIds);
+	return fullOrder ? rebuildTopLevel(text, parsed, fullOrder) : null;
 }
 
 /**
@@ -2988,10 +2812,14 @@ export function renameSectionTitle(text: string, sectionId: string, newTitle: st
  * typed by hand takes.
  */
 export function appendAct(text: string, title: string): string {
-	const parsed = parseFountain(text);
-	const id = freshLoomId(allLoomIds(parsed));
-	const trimmed = text.replace(/\s+$/, '');
-	return `${trimmed}\n\n# ${title.trim()} [[loom:${id}]]\n`;
+	return appendWithFreshId(text, allLoomIds(parseFountain(text)), (id) => `# ${title.trim()} [[loom:${id}]]`);
+}
+
+/** Appends `line(freshId)` as the document's new last line, one blank line
+ *  after the existing (trailing-whitespace-trimmed) text. Shared by every
+ *  append op here and in prose.ts. */
+export function appendWithFreshId(text: string, usedIds: Set<string>, line: (id: string) => string): string {
+	return `${text.replace(/\s+$/, '')}\n\n${line(freshLoomId(usedIds))}\n`;
 }
 
 /**
@@ -3004,10 +2832,7 @@ export function appendAct(text: string, title: string): string {
  * right away, draggable to wherever it's actually meant to sit.
  */
 export function appendPageBreak(text: string): string {
-	const parsed = parseFountain(text);
-	const id = freshLoomId(allLoomIds(parsed));
-	const trimmed = text.replace(/\s+$/, '');
-	return `${trimmed}\n\n=== [[loom:${id}]]\n`;
+	return appendWithFreshId(text, allLoomIds(parseFountain(text)), (id) => `=== [[loom:${id}]]`);
 }
 
 /**
@@ -3022,9 +2847,6 @@ export function appendPageBreak(text: string): string {
  * by hand.
  */
 export function appendScene(text: string, location: string): string {
-	const parsed = parseFountain(text);
-	const id = freshLoomId(allLoomIds(parsed));
-	const trimmed = text.replace(/\s+$/, '');
 	const heading = location.trim() === '' ? 'NEW LOCATION' : location.trim().toUpperCase();
-	return `${trimmed}\n\nINT. ${heading} - DAY [[loom:${id}]]\n`;
+	return appendWithFreshId(text, allLoomIds(parseFountain(text)), (id) => `INT. ${heading} - DAY [[loom:${id}]]`);
 }

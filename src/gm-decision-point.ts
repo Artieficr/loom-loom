@@ -1,5 +1,5 @@
 import { App } from 'obsidian';
-import { clearFmKeys, fmLoomValue, setLoomKey } from './fm';
+import { clearFmKeys, fmValue, newNoteEntry, setLoomKey } from './fm';
 import { LoomIndexer, linkTargetOf } from './indexer';
 import { EntityRecord, FM } from './types';
 
@@ -43,12 +43,12 @@ export async function setEventSession(app: App, event: EntityRecord, sessionTarg
 	if (!f) return false;
 	try {
 		await app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) => {
-			const cur = fmLoomValue(fm, FM.sessionNotes);
+			const cur = fmValue(fm, FM.sessionNotes);
 			const arr = Array.isArray(cur) ? [...(cur as unknown[])] : [];
 			const sessionValue = sessionTarget === null ? '' : `[[${sessionTarget}]]`;
 			if (arr.length === 0) {
 				if (sessionTarget === null) return;
-				arr.push({ session: sessionValue, text: '', seq: Date.now() });
+				arr.push(newNoteEntry(sessionValue));
 			} else {
 				arr[0] = { ...(arr[0] as Record<string, unknown>), session: sessionValue };
 			}

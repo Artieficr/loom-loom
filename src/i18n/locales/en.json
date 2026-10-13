@@ -120,6 +120,7 @@
 			"memberPlaceholder": "Member",
 			"memberDefault": "Member",
 			"ofLabel": "of",
+			"isLabel": "is",
 			"atLabel": "at",
 			"factionEllipsis": "Faction…",
 			"addFactionButton": "Add faction",
@@ -298,7 +299,6 @@
 				"removeAlias": "Remove alias",
 				"sessionNumber": "Session {n}",
 				"actNumber": "Act {n}",
-				"chapterNumber": "Chapter {n}",
 				"todayLink": "@today",
 				"attendance": "Attendance",
 				"noPcCharacters": "No PC characters in this project yet.",
@@ -369,7 +369,6 @@
 				"addConditionAction": "+ Add a condition",
 				"addAlternativeSetAction": "+ Add an alternative set (OR)",
 				"orDivider": "OR",
-				"removeConditionSet": "Remove this set",
 				"removeCondition": "Remove this condition",
 				"conditionCharacterAlive": "Character is alive",
 				"conditionGroupCarriesItem": "Group carries an item",
@@ -402,7 +401,6 @@
 				"noSession": "No session"
 			},
 			"items": {
-				"descriptionSaveFailed": "Could not save the item description.",
 				"copyCreateFailed": "Could not create the item copy.",
 				"replaceWithCopy": "Replace with a character specific copy of this item",
 				"deleteThisItem": "Delete this item",
@@ -463,6 +461,7 @@
 				"browseComments": "Browse comments",
 				"browseAlternatives": "Browse undecided alternatives",
 				"outline": "Outline",
+				"preview": "Preview",
 				"searchThisAct": "Search this act…",
 				"searchThisScene": "Search this scene…",
 				"clearSearch": "Clear search",
@@ -512,21 +511,7 @@
 			"sessionMonths": "Session months",
 			"previousYear": "Previous year",
 			"nextYear": "Next year",
-			"resetFilters": "Reset filters",
-			"months": {
-				"jan": "Jan",
-				"feb": "Feb",
-				"mar": "Mar",
-				"apr": "Apr",
-				"may": "May",
-				"jun": "Jun",
-				"jul": "Jul",
-				"aug": "Aug",
-				"sep": "Sep",
-				"oct": "Oct",
-				"nov": "Nov",
-				"dec": "Dec"
-			}
+			"resetFilters": "Reset filters"
 		},
 		"graph": {
 			"couldNotRemoveConnection": "Could not remove the connection.",
@@ -618,6 +603,7 @@
 				"removeFromMap": "Remove from map"
 			},
 			"pinMenu": {
+				"openMap": "Open map",
 				"openSublocation": "Open sublocation",
 				"openItem": "Open item"
 			},
@@ -783,7 +769,9 @@
 				"deleteBranchConfirmTitle": "Delete this branch?",
 				"deleteBranchConfirmDetail": "Its title, identifier, and body text are permanently removed from the script. This can't be undone.",
 				"deleteBranchConfirmButton": "Delete",
-				"untitled": "Untitled branch"
+				"discardDraftTitle": "Discard this branch?",
+				"discardDraftDetail": "What you've entered so far will be reset.",
+				"discardDraftButton": "Discard"
 			},
 			"overlapNotice": {
 				"resize": "Can't resize a comment span to partially overlap another one.",
@@ -803,8 +791,6 @@
 			"title": "Loom Loom",
 			"newProject": "New project",
 			"empty": "No projects",
-			"collapse": "Collapse",
-			"expand": "Expand",
 			"snapshots": "Snapshots…"
 		}
 	},
@@ -814,6 +800,7 @@
 		"saveChangeFailed": "Could not save the change.",
 		"sessionLinkedInNote": "\"{name}\" is linked to its session inside note text — edit the note to detach it.",
 		"noDate": "No date",
+		"noDateEmpty": "No event with unspecified date or session",
 		"moveEventTitle": "Move event?",
 		"moveEventMessage": "Moves \"{name}\" from {from} to {to}.",
 		"moveButton": "Move",
@@ -993,6 +980,9 @@
 			"deactivated": "Device deactivated.",
 			"deactivateFailed": "Could not deactivate this device.",
 			"unreachable": "Can't reach the server.",
+			"invalid": "This license is no longer valid.",
+			"noActivationId": "Activated, but the response had no recognizable activation id.",
+			"requestFailed": "Request failed (HTTP {status}).",
 			"currentTier": "Current tier:",
 			"tierPaid": "Paid — unlimited projects.",
 			"tierFree": "Free — one project of each kind.",
@@ -1000,8 +990,6 @@
 		},
 		"projects": {
 			"heading": "Projects",
-			"colTitle": "Title",
-			"colType": "Type",
 			"root": {
 				"name": "Loom Loom folder",
 				"desc": "The vault folder every project lives in, sorted into one subfolder per project type. Changing it moves all projects there.",

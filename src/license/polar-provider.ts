@@ -1,41 +1,31 @@
 import { requestUrl } from 'obsidian';
+import { t } from '../i18n';
 import { ActivateResult, DeactivateResult, LicenseProvider, ValidateResult } from './provider';
 
 /**
- * Real Polar.sh license-key backend — the active provider as of 2026-08-06, once
- * a real Polar organization/product existed to point it at. The wire format
- * below is cross-checked against Polar's published API docs (not just the SDK
- * README — see below), but still wants one real smoke test (activate/validate/
- * deactivate against a live key — there is no Polar sandbox environment for
- * this product, so that first test happens against production with a
- * 100%-off discount code) before being fully trusted.
+ * Polar.sh license-key backend — the active provider. The wire format is
+ * cross-checked against Polar's published API docs but still wants one real
+ * smoke test (activate/validate/deactivate against a live key; there is no
+ * Polar sandbox for this product, so that runs against production with a
+ * 100%-off discount code).
  *
- * Uses Obsidian's `requestUrl`, never `fetch` — required for mobile (no CORS
- * layer) and it's what Obsidian's own plugin review checks for.
+ * Uses Obsidian's `requestUrl`, never `fetch` — required on mobile (no CORS
+ * layer) and checked by Obsidian's plugin review.
  *
- * **API versioning**: every request pins `Polar-Version: 2026-04` (date-based,
- * `YYYY-MM`, per Polar's own announcement of this scheme). Polar keeps three
- * versions live at a time — Current, Deprecated, Next — and rotates them
- * quarterly (Jan/Apr/Jul/Oct); omitting the header falls back to whatever is
- * Current *at request time*, which is exactly the silently-shifting contract
- * pinning exists to avoid. 2026-10 becomes Current on 2026-10-01, at which
- * point 2026-04 (this pin) becomes Deprecated but stays on the SAME stable
- * contract until it's removed at the 2027-01 release — so this pin keeps
- * working unattended through then, but `POLAR_API_VERSION` must move to a
- * newer version (after testing against it) before the 2027-01 cutover.
+ * **API versioning**: every request pins `Polar-Version: 2026-04`. Polar keeps
+ * three versions live (Current, Deprecated, Next) and rotates quarterly
+ * (Jan/Apr/Jul/Oct); without the header a request gets whatever is Current
+ * at that moment. 2026-04 stays on a stable contract until it's removed at
+ * the 2027-01 release — `POLAR_API_VERSION` must move to a newer, tested
+ * version before then.
  *
- * **Wire format**: the raw REST body is snake_case (`organization_id`,
- * `activation_id`) even though Polar's own JS SDK exposes camelCase — the SDK
- * translates at its own boundary, we're calling the HTTP API directly. `POST
- * .../activate` requires only `key`/`organization_id`/`label` (no device-id
- * field exists on Polar's side — `label` IS the human-readable device
- * identifier Polar stores against the activation) and its response body IS the
- * activation object itself (`id` at the top level, not nested under an
- * `activation` key) — confirmed against Polar's docs, not just the SDK types,
- * so the old `res.body.activation?.id ?? res.body.id` fallback is gone. Both
- * `activate` and `validate`/`deactivate` are unauthenticated by design (Polar's
- * docs: "doesn't require authentication ... safe on a public client"), which is
- * what lets this run straight from the plugin with no secret to protect.
+ * **Wire format**: the REST body is snake_case (`organization_id`,
+ * `activation_id`); the JS SDK's camelCase is its own translation. `POST
+ * .../activate` takes only `key`/`organization_id`/`label` (`label` is the
+ * device identifier Polar stores; there's no device-id field) and responds
+ * with the activation object itself (`id` at the top level). activate,
+ * validate and deactivate need no authentication ("safe on a public client"),
+ * so there's no secret in the plugin.
  */
 
 const BASE_URL = 'https://api.polar.sh/v1/customer-portal/license-keys';
@@ -61,7 +51,7 @@ export class PolarLicenseProvider implements LicenseProvider {
 		if (res.ok) {
 			const activationId = res.body.id;
 			if (typeof activationId === 'string') return { ok: true, activationId };
-			return { ok: false, reason: 'Activated, but the response had no recognizable activation id.' };
+			return { ok: false, reason: t('settings.license.noActivationId') };
 		}
 		return { ok: false, reason: res.reason };
 	}
@@ -124,13 +114,13 @@ export class PolarLicenseProvider implements LicenseProvider {
 			const reason =
 				(typeof errBody?.detail === 'string' && errBody.detail) ||
 				(typeof errBody?.message === 'string' && errBody.message) ||
-				`Request failed (HTTP ${response.status}).`;
+				t('settings.license.requestFailed', { status: response.status });
 			return { ok: false, reason, status: response.status };
 		} catch (e) {
 			// requestUrl threw — couldn't reach the server at all (offline/DNS/
 			// timeout). Rethrow so LicenseManager treats this as "unreachable",
 			// not a definite rejection — see provider.ts.
-			throw e instanceof Error ? e : new Error('Could not reach the license server.');
+			throw e instanceof Error ? e : new Error(t('settings.license.unreachable'));
 		}
 	}
 }

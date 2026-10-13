@@ -1,3 +1,4 @@
+import { normalizePath } from 'obsidian';
 import { ENTITY_META, EntityType } from './types';
 
 /**
@@ -36,4 +37,9 @@ export function managedEntityFileName(
 		return sanitizeFileName(`${projectName} Item ${name} — ${ownerName}`.trim()) || fallback;
 	}
 	return sanitizeFileName(`${projectName} ${ENTITY_META[type].label} ${name}`.trim()) || fallback;
+}
+
+/** A vault path inside a project's folder (`''` root = the vault root). */
+export function projectPath(project: { root: string }, sub: string): string {
+	return normalizePath(project.root === '' ? sub : `${project.root}/${sub}`);
 }

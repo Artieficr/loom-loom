@@ -3,73 +3,38 @@ import { createPortal } from 'react-dom';
 import { branchComboKey, nextComboNumber, parseFountain } from '../fountain';
 import { FountainFieldHandle } from './fountain-field';
 import { t } from '../i18n';
+import type { App } from 'obsidian';
+import { ConfirmModal } from '../project';
 
 /**
- * The modular branch editor's DRAFT overlay: `position: fixed` OPAQUE panels
- * drawn on top of the live Fountain editor for a still-open, not-yet-written
- * `BranchDraft` — a brand-new decision point/branch being staged before it
- * becomes real document text. Sourced from the SAME `EditorView`
- * `FountainField` already owns, never a second copy of the document.
+ * The modular branch editor's DRAFT overlay: `position: fixed` opaque panels
+ * drawn over the live Fountain editor for a still-open, not-yet-written
+ * `BranchDraft`, sourced from the same `EditorView` `FountainField` owns.
+ * Committed branch groups render as embedded CM6 decorations instead
+ * (`fountain-field.tsx`, "Embedded branch cards"); a draft has no real text
+ * span to decorate yet, which is all this file is for.
  *
- * **A REAL, already-committed branch group does NOT render here any more.**
- * It used to (the same opaque-card shape, for every group in the document
- * unconditionally) — that path was replaced by embedded CM6 decorations
- * rendered directly over the group's own real text (`fountain-field.tsx`'s
- * "Embedded branch cards" doc comment, `buildBranchGroupDecorations`), which
- * is what let Cut/Copy/paste and text-selection safety work against the
- * actual document instead of an opaque duplicate floating over it. This file
- * keeps exactly what a draft still needs: a way to show and edit a group
- * that has no real span to decorate yet. Once a draft is committed
- * (`onCreateDraft`), it's written straight to the document and immediately
- * renders through the embedded path instead — this overlay never draws it
- * again.
+ * Scheduling mirrors `AnnotationHandlesOverlay`: every expensive trigger
+ * (doc/geometry change, resize, mutation, drafts changing) funnels through one
+ * `setTimeout`-coalesced `sync()` (never rAF — CM6 measures in rAF too), and
+ * `coordsAtPos` is only called inside that deferred `sync()`, in a try/catch.
  *
- * Faithfully mirrors `AnnotationHandlesOverlay`'s (fountain-field.tsx)
- * scheduling: every EXPENSIVE trigger (doc/geometry change, resize,
- * mutation, drafts changing) funnels through one `setTimeout`-coalesced
- * `sync()` (never `requestAnimationFrame` — CM6 schedules its own internal
- * measure work via rAF too, a same-frame collision risk documented on that
- * overlay's own history), and `view.coordsAtPos` is only ever called from
- * inside that deferred `sync()`, wrapped in a `try/catch` backstop, exactly
- * like the annotation handles do — never synchronously from a CM6-invoked
- * callback.
+ * **Scrolling is not an expensive trigger**: `sync()` stores each card's
+ * DOCUMENT-relative `top` (screen top + scrollTop), every card sits in one
+ * `trackRef` div, and a plain `scroll` listener writes
+ * `translateY(-scrollTop)` onto it directly — one cheap DOM write per tick.
  *
- * **Scrolling is deliberately NOT one of those expensive triggers**: `sync()`
- * computes each draft's anchor position as a DOCUMENT-relative `top` (`screen
- * top at sync time` + `the scrollTop at that moment`, i.e. "where this card
- * would sit if `scrollTop` were 0") rather than a viewport-relative one, and
- * every card renders inside one shared `trackRef` div that gets `transform:
- * translateY(-scrollTop)` applied DIRECTLY (bypassing React entirely) by a
- * plain, un-debounced `scroll` listener on `view.scrollDOM`. That single
- * `transform` write is the only thing that has to track a fast scroll
- * gesture in real time, and it's cheap enough (one DOM write, no layout
- * read) to do so with zero perceptible lag; `sync()` itself only runs on
- * genuine content/geometry changes, occasionally re-confirming (and
- * correcting any drift in) the values the transform is built from.
+ * **Clipping is a real CSS `overflow: hidden`**: the fixed "window" div,
+ * sized to `visibleClipRect(view.scrollDOM)`, trims cards the way a normal
+ * scroll region clips its content.
  *
- * **Clipping is a real CSS `overflow: hidden`, not manual clamp math**: the
- * fixed "window" div — sized to `visibleClipRect(view.scrollDOM)`,
- * `overflow: hidden` — does the actual visual trimming, exactly like a
- * normal scrollable region clips its content, so a draft's card scrolls out
- * from under that edge the way ordinary document text does.
+ * **Portalled to `document.body`**: Obsidian's workspace-leaf DOM applies
+ * CSS `contain`, which re-bases `position: fixed` to the leaf, while
+ * `coordsAtPos` returns true viewport coordinates.
  *
- * **Portalled to `document.body`** (`createPortal`, same reasoning as
- * `CommentPopover`/`timeline-strip.tsx`'s own tooltip): Obsidian's
- * workspace-leaf DOM applies CSS `contain`, which re-bases `position: fixed`
- * to the leaf instead of the true viewport — `coordsAtPos` returns TRUE
- * viewport coordinates, so rendering these cards as ordinary nested React
- * children (inside that contained leaf) put them at the wrong screen
- * position entirely.
- *
- * Unlike `AnnotationHandlesOverlay` (a CM6 `ViewPlugin` imperatively managing
- * plain DOM spans), this is an ordinary React component: it needs real
- * `<input>`/button elements with ordinary React event handling, which
- * doesn't fit that imperative-DOM-node style. Rendered DOM is React-owned
- * (cleaned up by React's own unmount, not manual `.remove()` calls), so the
- * specific leak `AnnotationHandlesOverlay`'s own `destroyed`/`isConnected`
- * guards exist for doesn't apply the same way here — the `destroyed` ref
- * below only guards against a stale `setState` call landing after unmount, a
- * much smaller concern.
+ * A React component rather than a `ViewPlugin`, since it needs real
+ * `<input>`/button elements; React owns the DOM, so the `destroyed` ref only
+ * guards against a `setState` landing after unmount.
  */
 
 /** A brand-new decision point not yet written to the document —
@@ -80,18 +45,9 @@ import { t } from '../i18n';
  *  CM6 draft-anchor tracking key (`FountainFieldHandle.createDraftAnchor`/
  *  `getDraftAnchorLine`) — the anchor survives concurrent edits elsewhere in
  *  the document while the draft sits open. No body field — a real insertion
- *  always starts with an empty body, edited afterward through the now-real
- *  card's own body field.
- *
- *  **This is now the ONLY way a branch is ever staged before being real** —
- *  joining an EXISTING decision point (the group's own "+") used to go
- *  through an identical draft shape (`kind: 'new-branch'`), but that path is
- *  gone: `entity-view.tsx`'s `handleAddBranch` now writes the new branch
- *  straight to the document (title `'Untitled'`) the instant "+" is clicked,
- *  with no draft/staging state at all — see that function's own doc comment
- *  for why (committing immediately, then masking the placeholder title as a
- *  blank field until the user actually types something, reads far less
- *  jarring than a draft that silently becomes real mid-keystroke). */
+ *  always starts with an empty body. This is the only staged branch: joining
+ *  an existing decision point ("+") writes straight to the document
+ *  (`handleAddBranch`). */
 export interface BranchDraft {
 	id: string;
 	title: string;
@@ -151,13 +107,14 @@ interface ClipWindow {
  * general, established fix for this class of problem.
  */
 function visibleClipRect(el: HTMLElement): { top: number; bottom: number; left: number; right: number } {
+	const win = el.win;
 	let top = 0;
 	let left = 0;
-	let bottom = window.innerHeight;
-	let right = window.innerWidth;
+	let bottom = win.innerHeight;
+	let right = win.innerWidth;
 	let node: HTMLElement | null = el;
-	while (node && node !== document.body && node !== document.documentElement) {
-		const style = window.getComputedStyle(node);
+	while (node && node !== el.doc.body && node !== el.doc.documentElement) {
+		const style = win.getComputedStyle(node);
 		const clipsY = /(auto|scroll|hidden|clip)/.test(style.overflowY);
 		const clipsX = /(auto|scroll|hidden|clip)/.test(style.overflowX);
 		if (clipsX || clipsY) {
@@ -177,6 +134,8 @@ function visibleClipRect(el: HTMLElement): { top: number; bottom: number; left: 
 }
 
 export interface BranchOverlayProps {
+	/** For the "Discard this branch?" confirmation. */
+	app: App;
 	/** The Scene page's own `FountainFieldHandle` ref — read fresh on every
 	 *  sync via `getView()`, never cached, matching every other consumer of
 	 *  this handle in this codebase. */
@@ -189,31 +148,20 @@ export interface BranchOverlayProps {
 	 *  stripped) — branch line numbers/content are re-derived from this on
 	 *  every sync, never stored, same as everything else in this feature. */
 	text: string;
-	/** Bumped by the caller on every `FountainField.onGeometryChange` firing
-	 *  (`update.viewportChanged || update.geometryChanged`) — the one signal
-	 *  this component has no other way to see, since it's plain React with
-	 *  no access to CM6's own update stream. A real, reported bug (cards a
-	 *  few pixels off on first mount, self-correcting only on the next
-	 *  scroll) traced to exactly this gap: DOM-level scroll/resize events
-	 *  alone don't fire for every moment CM6's OWN internal layout settles
-	 *  (most commonly, right after mount, before web fonts fully resolve). */
+	/** Bumped by the caller on every `FountainField.onGeometryChange`
+	 *  (`viewportChanged || geometryChanged`) — this plain React component has
+	 *  no other view of CM6's layout settling (e.g. right after mount, before
+	 *  web fonts resolve), which DOM scroll/resize events don't report. */
 	geometryVersion?: number;
 	/** Still-open drafts (state owned by the caller) — the only thing this
 	 *  component renders, each at its own tracked/derived anchor position. */
 	drafts: BranchDraft[];
 	/** A draft's field changed — the caller applies the patch to its own
-	 *  state, nothing more; committing is a SEPARATE, explicit step
-	 *  (`onCreateDraft`, below) — it used to happen automatically the
-	 *  instant every required field held something, which meant the branch
-	 *  got written mid-keystroke, before the user had finished typing
-	 *  whichever field happened to fill in last (a real, reported
-	 *  complaint). */
+	 *  state, nothing more; committing is the separate `onCreateDraft`. */
 	onDraftField: (id: string, patch: Partial<BranchDraft>) => void;
-	/** The draft's own "Create" button — the ONLY thing that turns a draft
-	 *  into a real branch (`insertBranch`, fountain.ts) now, removing it
-	 *  from `drafts`. Disabled in the JSX below unless title/identifier/
-	 *  subidentifier are all filled; the caller re-checks the same
-	 *  condition regardless (belt-and-suspenders against a stale click). */
+	/** The draft's own "Create" button — the only thing that turns a draft
+	 *  into a real branch (`insertBranch`, fountain.ts). Disabled unless
+	 *  title/identifier/subidentifier are all filled; the caller re-checks. */
 	onCreateDraft: (id: string) => void;
 	/** The draft was explicitly dismissed (its own ✕, Esc, or a click
 	 *  outside its own card) — the caller drops it from `drafts` and clears
@@ -222,6 +170,7 @@ export interface BranchOverlayProps {
 }
 
 export function BranchOverlay({
+	app,
 	fieldRef,
 	wrapRef,
 	text,
@@ -257,29 +206,48 @@ export function BranchOverlay({
 	 *  right below. Plain callback-ref map, not React state: nothing here
 	 *  needs to trigger a re-render on its own. */
 	const draftElsRef = useRef(new Map<string, HTMLDivElement>());
-	// Clicking anywhere outside a still-open draft panel cancels it, same
-	// as its own explicit ✕ (a real, reported request — a draft used to
-	// just sit there forever until dismissed by hand). A plain
-	// document-level, CAPTURE-phase `pointerdown` listener — same technique
-	// `common.tsx`'s `useCloseOnOutsideClick` uses, but not reused directly:
-	// that hook is built around ONE boolean open/close flag, not an
-	// arbitrary list of simultaneously-open items keyed by id, which is
-	// what `drafts: BranchDraft[]` genuinely allows (more than one
-	// "Create new branch" can be in flight at once). Never calls
-	// `preventDefault`/`stopPropagation` — dismissing a draft here must
-	// never swallow whatever the click was ACTUALLY for (e.g. clicking a
-	// DIFFERENT group's own "+" both cancels this draft and still opens a
-	// new one, in that order, since `pointerdown` fires before `click`).
+	/** Set while the "Discard this branch?" confirmation is up, so clicks
+	 *  inside that dialog aren't themselves read as outside clicks. */
+	const confirmingRef = useRef(false);
+	// Clicking anywhere outside a still-open draft panel cancels it, same as
+	// its ✕ — after a short confirmation once something has been typed into
+	// it (an untouched draft just closes). A document-level capture
+	// `pointerdown` like `useCloseOnOutsideClick`, but over a LIST of open
+	// drafts keyed by id. Never calls `preventDefault`/`stopPropagation`, so
+	// the click still does whatever it was for (e.g. another group's "+").
 	useEffect(() => {
 		const onPointerDown = (e: PointerEvent) => {
+			if (confirmingRef.current) return;
 			for (const draft of drafts) {
 				const el = draftElsRef.current.get(draft.id);
-				if (el && !el.contains(e.target as Node)) onDismissDraft(draft.id);
+				if (!el || el.contains(e.target as Node)) continue;
+				const typed = [draft.title, draft.identifier, draft.subidentifier, draft.numberOverride].some(
+					(v) => v.trim() !== ''
+				);
+				if (!typed) {
+					onDismissDraft(draft.id);
+					continue;
+				}
+				confirmingRef.current = true;
+				const modal = new ConfirmModal(
+					app,
+					t('view.script.branch.discardDraftTitle'),
+					t('view.script.branch.discardDraftDetail'),
+					() => onDismissDraft(draft.id),
+					t('view.script.branch.discardDraftButton')
+				);
+				const onClose = modal.onClose.bind(modal);
+				modal.onClose = () => {
+					onClose();
+					confirmingRef.current = false;
+				};
+				modal.open();
 			}
 		};
-		document.addEventListener('pointerdown', onPointerDown, true);
-		return () => document.removeEventListener('pointerdown', onPointerDown, true);
-	}, [drafts, onDismissDraft]);
+		const ownerDoc = wrapRef.current?.doc ?? activeDocument;
+		ownerDoc.addEventListener('pointerdown', onPointerDown, true);
+		return () => ownerDoc.removeEventListener('pointerdown', onPointerDown, true);
+	}, [drafts, onDismissDraft, app]);
 	/** The shared scroll-tracking div every card/draft renders inside — see
 	 *  this file's own top doc comment for why its `transform` is the thing
 	 *  that actually tracks a live scroll gesture, not `sync()`/React. */
@@ -297,62 +265,24 @@ export function BranchOverlay({
 	 *  same convention as every other live-interaction ref in this file. */
 	const passThroughActiveRef = useRef(false);
 	const passThroughIdleTimerRef = useRef<number | null>(null);
-	/** How long wheel input has to stay quiet, anywhere near this branch
-	 *  panel, before a card goes back to capturing clicks/typing itself — see
-	 *  `enablePassThrough`'s own doc comment. Long enough that consecutive
-	 *  trackpad "flicks" (a real gesture almost never fires perfectly
-	 *  continuously; there are always small gaps between flicks) don't keep
-	 *  flipping a card's `pointer-events` back and forth mid-scroll, short
-	 *  enough that a click right after scrolling stops doesn't land on a
-	 *  still-pass-through card and silently miss it. */
+	/** How long wheel input has to stay quiet near this panel before cards
+	 *  capture clicks/typing again (`enablePassThrough`) — long enough to span
+	 *  the gaps between trackpad flicks, short enough that a click right
+	 *  after scrolling isn't lost. */
 	const PASSTHROUGH_IDLE_MS = 150;
-	/** Lets wheel input over a branch card fall straight through to the
-	 *  real, natively-scrollable CM6 editor sitting directly underneath it on
-	 *  screen (a card visually covers the exact document span it represents
-	 *  — see this file's own top doc comment), instead of this file catching
-	 *  the event and manually replaying it via `onWindowWheelRef`'s own
-	 *  `scrollTop` write.
+	/** Lets wheel input over a card fall through to the real CM6 scroller
+	 *  underneath instead of being replayed by `onWindowWheelRef`.
 	 *
-	 *  **Why this exists at all**: a card is a portalled `position: fixed`
-	 *  element in a completely separate DOM subtree from the real editor, so
-	 *  a wheel event over it has no bubbling path to the real scrollable
-	 *  element — `onWindowWheelRef` (below) is what makes scrolling work AT
-	 *  ALL while hovering a card, replaying the delta onto `view.scrollDOM`
-	 *  every animation frame. But a manually-replayed `scrollTop` write runs
-	 *  on the main thread and lands in discrete per-frame steps; it can
-	 *  never fully match the browser's own COMPOSITOR-driven native scroll
-	 *  (jank-proof, sub-frame-accurate, carries the OS's own momentum/
-	 *  inertia curve) — confirmed as a real, reported mismatch: scrolling
-	 *  that STARTS over the real editor stays glued and smooth even once a
-	 *  card slides under a stationary cursor mid-gesture (browsers lock a
-	 *  continuous wheel/scroll sequence to whichever element it began on,
-	 *  regardless of what's later found at that same screen point), but a
-	 *  gesture that STARTS while hovering a card is stuck on the JS-forwarded
-	 *  path for its entire duration, visibly steppier.
-	 *
-	 *  **The fix**: once wheel input is detected anywhere over this panel
-	 *  (the document-level capture listener registered in this file's main
-	 *  effect, below), every mounted card gets `pointer-events: none` via a
-	 *  modifier class on `trackRef` — cheap, since `pointer-events` cascades
-	 *  to every `.loom-branch-card` descendant through ONE class toggle,
-	 *  no per-card bookkeeping needed. With cards no longer hit-testable,
-	 *  the NEXT wheel tick's target resolution skips straight past this
-	 *  whole overlay to whatever's genuinely rendered underneath — the real
-	 *  CM6 scroller — giving that tick (and, per the gesture-locking behavior
-	 *  above, the rest of whatever gesture it belongs to) fully native,
-	 *  compositor-smooth scrolling with zero JS involvement. The very FIRST
-	 *  tick of a cold-start gesture (pointer-events still `auto`, nothing has
-	 *  scrolled recently) still has to land on the card and go through the
-	 *  manual-forward fallback — there's no way to avoid that one tick
-	 *  without losing the ability to click/type into a card at all — but
-	 *  every gesture after that, as long as the idle window hasn't lapsed,
-	 *  starts pass-through from its very first tick.
-	 *
-	 *  A card left permanently `pointer-events: none` would of course also
-	 *  stop capturing clicks/typing — this only STAYS active while wheel
-	 *  input keeps arriving (`schedulePassThroughIdle`, re-armed on every
-	 *  tick from the document-level listener), reverting to normal
-	 *  interactive cards `PASSTHROUGH_IDLE_MS` after the last one. */
+	 *  A portalled card has no bubbling path to the editor, so
+	 *  `onWindowWheelRef` replays the delta onto `view.scrollDOM` per frame —
+	 *  steppier than native compositor scrolling, and browsers lock a wheel
+	 *  gesture to the element it started on. So once wheel input is seen near
+	 *  this panel, every card gets `pointer-events: none` (one class toggle on
+	 *  `trackRef`): the next tick hit-tests straight through to the scroller
+	 *  and that gesture scrolls natively. The first tick of a cold gesture
+	 *  still lands on the card and is replayed. Pass-through only lasts while
+	 *  wheel input keeps arriving (`schedulePassThroughIdle`), reverting
+	 *  `PASSTHROUGH_IDLE_MS` after the last tick. */
 	const enablePassThrough = () => {
 		if (passThroughActiveRef.current) return;
 		passThroughActiveRef.current = true;
@@ -429,22 +359,12 @@ export function BranchOverlay({
 			pending.y = 0;
 		});
 	});
-	/** The overlay's window div is `position: fixed` and portalled to
-	 *  `document.body` — a completely separate DOM subtree from the real
-	 *  editor, so a native wheel event over a card (or its nested body
-	 *  field) has no bubbling path to the real scrollable element at all; the
-	 *  browser either does nothing (reading as "scroll is blocked" the
-	 *  moment the cursor is anywhere over a card) or, worse, scrolls
-	 *  whatever accidentally-scrollable ancestor `document.body` itself has.
-	 *  A real native listener attached directly to the window div — reached
-	 *  via bubbling from any card inside it, `pointer-events: none` on the
-	 *  window itself only blocks it from being an event TARGET, not from
-	 *  receiving bubbled events from its own auto-pointer-events children —
-	 *  manually applies the delta to `view.scrollDOM` instead. A plain
-	 *  callback ref rather than a `useEffect`, since the window div mounts
-	 *  and unmounts freely (`clipWindow` going null/non-null) and a callback
-	 *  ref is exactly React's own tool for "do something the instant this
-	 *  specific node exists." */
+	/** The window div is portalled and `position: fixed`, so a wheel event
+	 *  over a card has no bubbling path to the real scroller. A native
+	 *  listener on the window div (bubbled to from its cards — its own
+	 *  `pointer-events: none` only stops it being a target) applies the delta
+	 *  to `view.scrollDOM`. A callback ref, since the window div mounts and
+	 *  unmounts with `clipWindow`. */
 	const setWindowRef = useCallback((el: HTMLDivElement | null) => {
 		if (windowElRef.current) windowElRef.current.removeEventListener('wheel', onWindowWheelRef.current);
 		windowElRef.current = el;
@@ -459,6 +379,9 @@ export function BranchOverlay({
 	}, []);
 
 	useEffect(() => {
+		// Nothing to position without an open draft — skip every observer and
+		// listener below, which would otherwise rebuild on each keystroke.
+		if (drafts.length === 0) return;
 		const sync = () => {
 			if (destroyedRef.current) return;
 			const view = fieldRef.current?.getView();
@@ -469,19 +392,10 @@ export function BranchOverlay({
 				setObscureRect(null);
 				return;
 			}
-			// A hidden background tab (`offsetParent` goes `null`) clears the
-			// overlay entirely rather than just skipping the recompute:
-			// `AnnotationHandlesOverlay` (fountain-field.tsx) can leave its own
-			// stale spans in place when its editor is hidden, since those spans
-			// scroll away with the (hidden) editor's own DOM — but this overlay
-			// is `position: fixed` and portalled to `document.body`, entirely
-			// independent of the source tab's own visibility, so stale cards
-			// would otherwise keep floating at their last screen coordinates
-			// over whatever OTHER file/tab is now active. Switching back
-			// re-triggers a real `ResizeObserver` firing (the tab's own DOM goes
-			// from a 0-size `display: none` box back to its real size), which
-			// schedules a fresh `sync()` that recomputes and shows the cards
-			// again.
+			// A hidden background tab (`offsetParent === null`) clears the
+			// overlay: it's portalled and fixed, so stale cards would otherwise
+			// float over whatever tab is now active. Switching back fires the
+			// ResizeObserver, which schedules a fresh `sync()`.
 			if (view.dom.offsetParent === null) {
 				setDraftRects([]);
 				setClipWindow(null);
@@ -515,21 +429,11 @@ export function BranchOverlay({
 				setObscureRect(null);
 				return;
 			}
-			// `view.lineBlockAt(pos).top` reads CM6's own persistent internal
-			// height map — unlike `coordsAtPos`, it never depends on whether
-			// `pos` currently falls inside CM6's actually-rendered viewport
-			// window (a real, reported bug: a branch group far from the current
-			// scroll position sat in CM6's own unrendered "gap," where
-			// `coordsAtPos` returns `null` outright, so it had NO card at all
-			// until the user scrolled close enough for CM6 to render/measure
-			// that stretch — real underlying text visible, uncovered, until a
-			// late, misaligned "snap"). Its own coordinate space is
-			// document-relative (as if `scrollTop` were 0), which is already
-			// the target space `r.top` needs — EXCEPT `clipRect` can be
-			// narrower than `view.scrollDOM`'s own true bounding box (ancestor
-			// clipping, see `clipRect`'s own doc comment above), so a fixed
-			// per-sync correction re-aligns the two coordinate spaces once,
-			// rather than re-deriving it per branch.
+			// `view.lineBlockAt(pos).top` reads CM6's internal height map, so it
+			// works for a group outside the rendered viewport (where
+			// `coordsAtPos` returns `null`). It's document-relative already;
+			// `docCorrection` re-aligns it once per sync when `clipRect` is
+			// narrower than `view.scrollDOM`'s box (ancestor clipping).
 			const docCorrection = view.scrollDOM.getBoundingClientRect().top - clipRect.top;
 
 			// Whichever of the nav/comments/alt-text side panels is currently
@@ -640,48 +544,26 @@ export function BranchOverlay({
 
 		scheduleSync();
 		const wrap = wrapRef.current;
+		const ownerDoc = wrap?.doc ?? activeDocument;
 		const ro = new ResizeObserver(scheduleSync);
-		// Observing `wrap` alone only catches `wrap`'s OWN border-box size
-		// changing — it says nothing about `wrap` MOVING because something
-		// ABOVE it in normal document flow (the Scene heading fields, Notes,
-		// the Act section, "Entities in the scene") changed height after its
-		// own async content settled. Walking every ancestor up to
-		// `document.body` (mirroring `visibleClipRect`'s own "don't assume a
-		// single known container" pattern just above in this file) was tried
-		// first and is KEPT here as cheap defensive coverage, but it cannot
-		// be the real fix: `.loom-entity` (styles.css) — the actual
-		// scrolling container every one of these fields lives inside — is
-		// `flex: 1` in a fixed-height flex row with `overflow-y: auto`. Its
-		// own border-box size is fixed by the flex layout regardless of how
-		// much content it holds; a field growing taller inside it only grows
-		// its `scrollHeight`, which `ResizeObserver` does not report at all —
-		// no ancestor's box ever changes size, so no amount of walking
-		// higher up the tree was ever going to catch this specific,
-		// confirmed cause (a real, reported first-load bug: boxes rendered
-		// correctly for an instant, then the Notes field above finished
-		// laying out past its first line and silently pushed everything
-		// below — Script included — down by exactly that much, with no
-		// scroll, no ancestor resize, and no CM6-internal geometry change
-		// for `geometryVersion` to catch either).
+		// Observing `wrap` and its ancestors catches size changes, but not
+		// `wrap` MOVING when content above it (heading fields, Notes, Entities)
+		// grows: `.loom-entity` is a fixed-size `overflow-y: auto` flex child,
+		// so that growth only changes its `scrollHeight`, which ResizeObserver
+		// doesn't report. The MutationObserver below covers that case; the
+		// ancestor chain stays as cheap extra coverage.
 		if (wrap) {
 			let el: HTMLElement | null = wrap;
-			while (el && el !== document.body) {
+			while (el && el !== ownerDoc.body) {
 				ro.observe(el);
 				el = el.parentElement;
 			}
 		}
-		// The actual fix: a `MutationObserver` on `.loom-entity` itself
-		// (found via `closest`, falling back to `document.body` if the
-		// class ever changes) reacts to the DOM change directly — Notes
-		// gaining a second line means its own field inserts a new line
-		// element into that subtree, a `childList` mutation, regardless of
-		// whether any element's measured SIZE changed as a result. Scoped to
-		// `.loom-entity` rather than `document.body` so this doesn't fire on
-		// every unrelated DOM mutation elsewhere in the Obsidian window —
-		// still cheap even if it did (`scheduleSync` coalesces to at most
-		// one resync per macrotask), but there's no reason to cast wider
-		// than the one scrollable region that can actually move `wrap`.
-		const mutationRoot = wrap?.closest<HTMLElement>('.loom-entity') ?? document.body;
+		// A `MutationObserver` on `.loom-entity` (falling back to
+		// `document.body`) reacts to content above `wrap` changing — a field
+		// gaining a line is a `childList` mutation even when no box resizes.
+		// Scoped to that one scroll region; `scheduleSync` coalesces anyway.
+		const mutationRoot = wrap?.closest<HTMLElement>('.loom-entity') ?? ownerDoc.body;
 		const mo = new MutationObserver(scheduleSync);
 		mo.observe(mutationRoot, { childList: true, subtree: true });
 		// `FountainField` is rendered before this component in the Scene
@@ -708,7 +590,7 @@ export function BranchOverlay({
 		view?.scrollDOM.addEventListener('scroll', scheduleSync);
 		// Obsidian's own outer page scroll, same capture-phase listener
 		// `AnnotationHandlesOverlay`'s `onAnyScroll` already uses.
-		document.addEventListener('scroll', scheduleSync, true);
+		ownerDoc.addEventListener('scroll', scheduleSync, true);
 		// The pass-through activation trigger (`enablePassThrough`'s own doc
 		// comment) — CAPTURE phase specifically, so this sees every wheel
 		// event within the panel's own screen area regardless of what its
@@ -733,12 +615,10 @@ export function BranchOverlay({
 			enablePassThrough();
 			schedulePassThroughIdle();
 		};
-		document.addEventListener('wheel', onDocumentWheel, { capture: true, passive: true });
-		// Kept as cheap, harmless defensive redundancy on top of the
-		// ancestor-chain ResizeObserver above (each `scheduleSync()` call is
-		// idempotent — coalesced, and a no-op re-measure if nothing actually
-		// changed) — not the primary fix for the first-load offset any more.
-		void document.fonts?.ready?.then(() => {
+		ownerDoc.addEventListener('wheel', onDocumentWheel, { capture: true, passive: true });
+		// Extra coverage on top of the observers above (`scheduleSync()` is
+		// coalesced and a no-op re-measure when nothing changed).
+		void ownerDoc.fonts?.ready?.then(() => {
 			if (!destroyedRef.current) scheduleSync();
 		});
 		const retryTimers = [100, 500].map((ms) => window.setTimeout(scheduleSync, ms));
@@ -747,15 +627,15 @@ export function BranchOverlay({
 			mo.disconnect();
 			view?.scrollDOM.removeEventListener('scroll', applyTrackTransform);
 			view?.scrollDOM.removeEventListener('scroll', scheduleSync);
-			document.removeEventListener('scroll', scheduleSync, true);
-			document.removeEventListener('wheel', onDocumentWheel, true);
+			ownerDoc.removeEventListener('scroll', scheduleSync, true);
+			ownerDoc.removeEventListener('wheel', onDocumentWheel, true);
 			if (passThroughIdleTimerRef.current !== null) window.clearTimeout(passThroughIdleTimerRef.current);
 			disablePassThrough();
 			retryTimers.forEach((id) => window.clearTimeout(id));
 		};
 	}, [text, fieldRef, wrapRef, geometryVersion, drafts]);
 
-	if (!clipWindow || draftRects.length === 0) return null;
+	if (drafts.length === 0 || !clipWindow || draftRects.length === 0) return null;
 
 	return createPortal(
 		// The fixed "window": `overflow: hidden` sized to `clipWindow`
@@ -883,6 +763,6 @@ export function BranchOverlay({
 			})}
 			</div>
 		</div>,
-		document.body
+		wrapRef.current?.doc.body ?? activeDocument.body
 	);
 }

@@ -6,7 +6,6 @@ import {
 	ViewPlugin,
 	ViewUpdate,
 	WidgetType,
-	gutter,
 	keymap,
 	tooltips,
 } from '@codemirror/view';
@@ -31,7 +30,6 @@ import {
 	findAnnotationSpans,
 	findEntityLinks,
 	findOrphanPairs,
-	newSceneId,
 	parseFountain,
 	promoteTypedBranch,
 	readLoomId,
@@ -39,12 +37,14 @@ import {
 import { AltTextEntry, CommentEntry } from './script-notes';
 import { CLICK_TO_OPEN_ATTRS, EntityType, entityLabel } from '../types';
 import {
-	AnnotationGutterItem,
-	AnnotationGutterMarker,
-	isUnresolvedComment,
+	annotationSpanDecorations,
+	insertMarkerPair,
+	makeAnnotationGutter,
+	makeAnnotationHandlesOverlay,
 	partiallyOverlaps,
 	refreshAnnotations,
 	scrollWithinEditor,
+	syncHandlesOnPageScroll,
 } from './annotation-cm6';
 import { LinkSuggestEntry, buildLinkSuggestExtension } from './link-suggest-cm6';
 
@@ -63,15 +63,6 @@ import { LinkSuggestEntry, buildLinkSuggestExtension } from './link-suggest-cm6'
  * scene/act identity marker — it's not user content, and showing it
  * would just be noise on every heading.
  */
-
-/** True when `[from, to)` partially overlaps `[sFrom, sTo)` — neither
- *  disjoint, nested inside it, nor fully surrounding it. Nesting/surrounding
- *  is fine (spans stay well-nested either way); only a true partial cross is
- *  a conflict. Shared by the two places that must reject one: creating a new
- *  comment/alt-text span over a selection (`openContextMenu`) and dragging an
- *  existing comment span's edge handle onto a new position
- *  (`startAnnotationHandleDrag`). Imported from `annotation-cm6.ts` — shared
- *  with `markdown-field.tsx` rather than duplicated. */
 
 const LOOM_ID_RE = /\s*\[\[loom:[A-Za-z0-9]+\]\]/;
 /** Mirrors `SCENE_PREFIXES` in fountain.ts (not exported — this only needs
@@ -246,21 +237,12 @@ export interface FountainFieldHandle {
 	 *  longer resolves to a live span. */
 	removeAnnotationMarkers: (id: string) => void;
 	/** Replaces the ENTIRE document with `newValue` and places the cursor at
-	 *  `cursorLine` (0-based) — unconditionally, bypassing the normal
-	 *  `value`-prop-diffing "sync external value only while unfocused"
-	 *  effect entirely (never gated on focus, never tagged
-	 *  `loom.externalSync`, so this genuinely counts as a real edit and
-	 *  fires `onChange` like any other). The one case that needs this: a
-	 *  caller (Scene's own "Paste branch group") that just computed EXACTLY
-	 *  what this field's body should show, in memory, from a write it's
-	 *  about to make. Going through the normal reactive path instead would
-	 *  mean round-tripping through disk first — and the Scene page's own
-	 *  `sceneScriptText` unconditionally strips ALL trailing whitespace from
-	 *  a scene's excerpt, which erases any trailing blank line meant as a
-	 *  landing spot the moment that content becomes the scene's own last
-	 *  line, before the user ever gets a chance to type into it and make it
-	 *  non-blank. Dispatching the exact in-memory text directly, before any
-	 *  such round trip, sidesteps that erasure completely. */
+	 *  `cursorLine` (0-based) — unconditionally, bypassing the focus-gated
+	 *  external-value sync (not tagged `loom.externalSync`, so it fires
+	 *  `onChange` like a real edit). For a caller that already knows exactly
+	 *  what the body should show (Scene's "Paste branch group"): a disk round
+	 *  trip would go through `sceneScriptText`, which strips trailing
+	 *  whitespace and so erases the blank landing line before it can be used. */
 	replaceBody: (newValue: string, cursorLine: number) => void;
 	/** The live `EditorView`, or `null` before the field has mounted — the
 	 *  narrow escape hatch `BranchOverlay` (branch-overlay.tsx) needs to
@@ -329,33 +311,22 @@ const draftAnchors = StateField.define<Map<string, number>>({
 });
 
 /**
- * Embedded branch cards: every branch group in the document renders its own
- * chrome DIRECTLY over its own real text — no second copy, no
- * `position: fixed` overlay (replacing `branch-overlay.tsx`). Every sibling
- * in a group renders SIMULTANEOUSLY, stacked in document order — no
- * tab-switching, no folding, nothing hidden that isn't ALWAYS meant to stay
- * hidden (the raw `###`/`= branch:`/`>**Title**<`/`= gather` syntax, which
- * becomes display-only chrome per the design; a branch's own PROSE BODY is
- * left completely untouched, real, always-editable document text, so native
- * cut/copy/paste on it just works with no special handling). Only single-
- * line, non-block decorations are used here (`Decoration.replace`/`.widget`
- * with NO `block: true`, same trick `markdown-field.tsx`'s `HrWidget`/
- * `BulletWidget` already use to render a full-width custom element in place
- * of one line's raw text) — a real CM6 constraint hit building the earlier
- * tab-based version of this feature: block decorations may only be supplied
- * through a `StateField`, never a `ViewPlugin`, and since nothing folds away
- * any more there's no reason to need one.
+ * Embedded branch cards: every branch group renders its own chrome DIRECTLY
+ * over its own real text — no second copy, no overlay. Every sibling in a
+ * group renders simultaneously, stacked in document order. Only the raw
+ * `###`/`= branch:`/`>**Title**<`/`= gather` syntax becomes display-only
+ * chrome; a branch's PROSE BODY stays real, always-editable text, so native
+ * cut/copy/paste on it just works. Only single-line, non-block decorations
+ * are used (`Decoration.replace`/`.widget` without `block: true`, the trick
+ * `markdown-field.tsx`'s `HrWidget`/`BulletWidget` use) — CM6 only accepts
+ * block decorations from a `StateField`, never a `ViewPlugin`.
  *
- * Every widget class below is constructed fresh inside `pushBranchGroupDecorations`
- * (defined inside the component body, closing over the SAME refs every other
- * decoration pass here reads), so a widget's own constructor already carries
- * whichever callback it needs — no per-instance ref lookups inside the widget
- * itself. `eq()` on each one compares only the COMMITTED values (never
- * anything from an in-progress, uncommitted keystroke), which is what lets a
- * decoration rebuild triggered by something unrelated (typing elsewhere in
- * the document, an annotation search match) reuse the SAME `<input>` DOM
- * node rather than tearing it down mid-edit — the input's own uncommitted
- * text simply survives, no extra buffering needed on this side.
+ * Every widget class below is constructed inside `pushBranchGroupDecorations`
+ * (in the component body, closing over the same refs every other decoration
+ * pass reads), so each widget's constructor already carries its callback.
+ * `eq()` compares only COMMITTED values, so a rebuild triggered by something
+ * unrelated (typing elsewhere, a search match) reuses the same `<input>` DOM
+ * node and its uncommitted text survives.
  */
 class BranchHeaderRowWidget extends WidgetType {
 	constructor(
@@ -651,34 +622,16 @@ function pushBoxLines(
 }
 
 /**
- * Every branch-card widget's own ROOT element needs this — a real,
- * confirmed bug (not a guess: reproduced live in a headless browser
- * mounting the actual component, per this feature's own investigation)
- * found in every one of the widget classes above: CM6 inserts an invisible
- * `cm-widgetBuffer` placeholder element on each side of a non-block
- * `Decoration.replace` widget (for cursor-positioning purposes), which puts
- * the widget's own root element inside what the BROWSER treats as an
- * inline formatting context. A `display: block`/`flex` root there (the
- * default for a plain `<div>`, and what `.loom-branch-label-row`'s own
- * `display: flex` gives these rows) is a BLOCK-level box sitting inside
- * that inline context — the browser's own anonymous-block-box generation
- * rules then split the line's content around it, and the resulting phantom
- * spacing was measured, live, at MORE than double the widget's own real
- * rendered height (a 29px-tall row inside a 67px-tall `.cm-line`) — this
- * was the actual cause of the reported "big gap between rows," not
- * anything in the surrounding document TEXT. `inline-flex`/`inline-block`
- * (inline-outside, same internal layout otherwise) fixes it outright, no
- * phantom spacing at all; `width: 100%` is required alongside it since an
- * inline-level box shrink-wraps its own content by default, unlike the
- * block-level default this replaces. Applied as a CSS class carrying
- * `!important` on each property (styles.css `.loom-fountain-branch-row-
- * inline-flex`/`-inline-block`) rather than an inline style — these values
- * are static, never computed at runtime, and this codebase's own ESLint
- * rule (`obsidianmd/no-static-styles-assignment`) reserves `setCssProps`
- * for genuinely dynamic ones; `!important` is what guarantees this wins
- * regardless of which REUSED class (`.loom-branch-label-row`, `.loom-
- * branch-title-preview`, …) a given row also carries, or which order they
- * happen to appear in the stylesheet.
+ * Every branch-card widget's ROOT element needs this. CM6 puts an invisible
+ * `cm-widgetBuffer` on each side of a non-block `Decoration.replace` widget,
+ * which makes the widget root sit in an inline formatting context; a
+ * block/flex root there makes the browser split the line around it and adds
+ * phantom spacing (measured at over double the row's own height).
+ * `inline-flex`/`inline-block` + `width: 100%` avoids it. Applied as a class
+ * with `!important` (styles.css `.loom-fountain-branch-row-inline-flex`/
+ * `-inline-block`) — the values are static (the lint rule reserves
+ * `setCssProps` for dynamic ones), and `!important` wins over whichever
+ * reused row class the element also carries.
  */
 function fixWidgetRowDisplay(row: HTMLElement, display: 'inline-flex' | 'inline-block'): void {
 	row.addClass(display === 'inline-flex' ? 'loom-fountain-branch-row-inline-flex' : 'loom-fountain-branch-row-inline-block');
@@ -723,18 +676,12 @@ export const FountainField = forwardRef(function FountainField(
 		escapeOverflowForTooltips = false,
 	}: {
 		value: string;
-		/** `urgent` is `true` only for a transaction CM6's own `history()`
-		 *  tags `userEvent: 'undo'`/`'redo'` (confirmed against the real
-		 *  `@codemirror/commands` source, not guessed) — a real, reported
-		 *  bug: a caller that only debounces its own disk write (the Scene
-		 *  page's own idle-autosave, entity-view.tsx) could lose an undo/redo
-		 *  entirely if the user acted again (e.g. pasted a SECOND time)
-		 *  before that debounce fired — the second paste reads fresh from
-		 *  DISK, which still held the pre-undo state, silently reviving what
-		 *  had just been undone in the visible editor. `urgent` tells the
-		 *  caller to flush THIS change to disk immediately instead of
-		 *  waiting out its own debounce, closing that race. Every other
-		 *  change (plain typing) still gets `urgent: false`. */
+		/** `urgent` is `true` only for a transaction CM6's `history()` tags
+		 *  `userEvent: 'undo'`/`'redo'`. A caller that debounces its disk write
+		 *  (the Scene page's idle autosave) flushes those immediately: if the
+		 *  user acted again before the debounce fired, that next action would
+		 *  read the pre-undo state back from disk and revive what was undone.
+		 *  Plain typing gets `urgent: false`. */
 		onChange: (value: string, urgent: boolean) => void;
 		/** Fires once, on losing focus — mirrors the old textarea's onBlur,
 		 *  which is where `ensureSceneIds`/`syncScenes` actually run. */
@@ -796,15 +743,9 @@ export const FountainField = forwardRef(function FountainField(
 		 *  the main Script view (no single "current entity") leaves it unset. */
 		ambientExcludeEntityName?: string;
 		/** Fires on every CM6 update where `viewportChanged || geometryChanged`
-		 *  — i.e. exactly the signal `AnnotationHandlesOverlay`'s own
-		 *  `update()` (below) already uses to know it needs to resync.
-		 *  `BranchOverlay` (branch-overlay.tsx) is the one consumer: as a
-		 *  plain React component with no access to CM6's update stream, DOM
-		 *  events alone (scroll/resize) weren't enough to catch every moment
-		 *  CM6's own internal layout genuinely changes — a real, reported bug
-		 *  where cards rendered a few pixels off on first mount and only
-		 *  self-corrected on the next scroll (which happens to force CM6 to
-		 *  reprocess its own viewport) is exactly this gap. */
+		 *  — for a plain React consumer (`BranchOverlay`, branch-overlay.tsx)
+		 *  that has no access to CM6's update stream and would otherwise
+		 *  render off by a few pixels until the next scroll. */
 		onGeometryChange?: () => void;
 		/** A right-click landed on an EMPTY line, not inside any existing
 		 *  branch group — offers "Create new branch" (the modular branch
@@ -838,23 +779,12 @@ export const FountainField = forwardRef(function FountainField(
 		 *  (`pasteBranchGroup`, fountain.ts) — pasting a cut (whose source is
 		 *  already gone) always travels verbatim instead. */
 		onCopyBranchGroup?: (groupId: string) => void;
-		/** **Embedded branch cards.** When `true`, every branch group in the
-		 *  document renders its own chrome (`###`/`= branch:`/`>**Title**<`/
-		 *  `= gather` — all display-only, per the design: the real syntax is
-		 *  replaced by input widgets/labels, never left as raw text to edit
-		 *  directly) laid DIRECTLY over its own real document range — no
-		 *  second copy of the text, unlike `branch-overlay.tsx`'s old
-		 *  `position: fixed` real cards (replaced entirely by this). Every
-		 *  sibling branch in a group renders simultaneously, stacked in
-		 *  document order (no tab-switching, no folding) — a branch's own
-		 *  PROSE BODY is left completely untouched, real, always-visible
-		 *  document text, which is what makes native cut/copy/paste on it
-		 *  just work. Only the metadata lines around each body (heading/tag/
-		 *  preview/gather) become widgets; see `buildDecorations`'s own
-		 *  "Embedded branch cards" section for the full mechanism, and each
-		 *  widget class's own doc comment for its write path. Default
-		 *  `false` — the Scene page's own Script section is the only caller
-		 *  that turns this on today. */
+		/** **Embedded branch cards.** When `true`, every branch group renders
+		 *  its own chrome (`###`/`= branch:`/`>**Title**<`/`= gather`, all
+		 *  display-only) directly over its own document range; a branch's prose
+		 *  body stays real, editable text. See `buildDecorations`' "Embedded
+		 *  branch cards" section and each widget's own doc for the write paths.
+		 *  Default `false` — only the Scene page's Script section turns it on. */
 		embeddedBranchCards?: boolean;
 		/** A branch's own Title field committed a new value (blur, non-empty,
 		 *  changed) — `renameSectionTitle` (fountain.ts) through
@@ -904,22 +834,12 @@ export const FountainField = forwardRef(function FountainField(
 		 *  sits on (`side: 'after'`, i.e. the right) relative to a field
 		 *  with no gutter at all. */
 		showAnnotationGutter?: boolean;
-		/** Mounts CM6's own `tooltips({ parent: document.body })` extension —
-		 *  default `false`. Originally assumed CM6's own default tooltip
-		 *  container was fine for any field not nested inside a clipped
-		 *  ancestor (Obsidian's own workspace-leaf DOM applies CSS `contain`,
-		 *  the same thing that re-bases a bare `position: fixed` to the leaf
-		 *  instead of the true viewport) — WRONG, a real, reported bug: even
-		 *  the Scene page's own main (non-nested) field showed the
-		 *  character-cue autocomplete popup extending the SCROLLABLE
-		 *  CONTAINER's own layout downward near the bottom of a long scene,
-		 *  rather than floating over existing content as a true overlay,
-		 *  since CM6's default tooltip host isn't positioned independently of
-		 *  that container's own normal document flow. `document.body` fixes
-		 *  both this and the originally-documented clipped-ancestor case: CM6
-		 *  measures real viewport space once tooltips live there, which is
-		 *  also what lets it auto-flip a popup upward on its own when there's
-		 *  no room below, no separate flip logic needed here. */
+		/** Mounts CM6's `tooltips({ parent: hostRef.current.doc.body })` — default `false`.
+		 *  With CM6's default tooltip host, the character-cue autocomplete near
+		 *  the bottom of a long scene extended the scroll container instead of
+		 *  floating over it (Obsidian's leaf DOM applies CSS `contain`). Hosted
+		 *  on `document.body`, CM6 measures real viewport space and flips a
+		 *  popup upward on its own when there's no room below. */
 		escapeOverflowForTooltips?: boolean;
 	},
 	ref: ForwardedRef<FountainFieldHandle>
@@ -974,13 +894,10 @@ export const FountainField = forwardRef(function FountainField(
 	 *  right now), so there's no React round-trip to plumb a prop through in
 	 *  the first place. */
 	const pendingComboFocusIdRef = useRef<string | null>(null);
-	/** An external `value` change that arrived while this field was FOCUSED —
-	 *  stashed here instead of silently dropped (a real, confirmed gap: the
-	 *  value-sync effect below only ever applies while unfocused, and only
-	 *  re-checks when `value` itself changes again, so a blur alone never
-	 *  revisited a change it had skipped). Applied once focus is actually
-	 *  lost, from the update listener's own blur branch below. `null` = no
-	 *  pending change. */
+	/** An external `value` change that arrived while this field was FOCUSED,
+	 *  stashed until blur (the value-sync effect only applies while unfocused
+	 *  and only re-runs when `value` changes again). Applied from the update
+	 *  listener's blur branch. `null` = nothing pending. */
 	const pendingExternalValueRef = useRef<string | null>(null);
 	onGeometryChangeRef.current = onGeometryChange;
 	onCreateBranchRef.current = onCreateBranch;
@@ -1093,258 +1010,7 @@ export const FountainField = forwardRef(function FountainField(
 	useEffect(() => {
 		if (!hostRef.current) return;
 
-		/** Drags a COMMENT span's start or end boundary to wherever the pointer
-		 *  ends up — the marker TOKEN itself relocates (a real document edit:
-		 *  delete it from its old spot, insert it at the new one), never the
-		 *  surrounding prose. Alt-text spans never get a handle at all (see
-		 *  `buildDecorations` below) — an alt-text span's coverage is fixed to
-		 *  whatever was selected when it was created, since its whole point is
-		 *  "this exact stretch of text has alternatives," not a movable range.
-		 *  Pointer capture is set on the handle element itself (same idiom as
-		 *  `entity-view.tsx`'s own `seqGrip`), so every subsequent pointer
-		 *  event keeps arriving here regardless of where the cursor physically
-		 *  is.
-		 *
-		 *  A live preview (a thin fixed-position bar, plain DOM — no React, no
-		 *  CM6 dispatch) tracks the pointer during the drag; the actual
-		 *  document change only happens once, on drop. Dropping back on the
-		 *  boundary's own starting position, or somewhere that would make this
-		 *  span partially overlap a DIFFERENT one (nesting fully inside or
-		 *  surrounding one is fine — the same invariant `openContextMenu`
-		 *  enforces at creation time), is a no-op with a `Notice` in the
-		 *  overlap case. */
-		function startAnnotationHandleDrag(view: EditorView, id: string, edge: 'start' | 'end', handleEl: HTMLElement) {
-			const preview = view.dom.doc.body.createDiv({ cls: 'loom-fountain-annotation-drag-preview' });
-			let lastTarget: number | null = null;
-
-			// The span's own position can't change mid-drag — nothing else
-			// dispatches a document edit while this gesture is in progress, only
-			// `finish` does and only once, on drop — so finding it here ONCE
-			// (rather than re-parsing the whole document on every `pointermove`)
-			// is exact, not an approximation.
-			const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'comment' && s.id === id);
-			if (!span) return;
-
-			const clampTarget = (raw: number) =>
-				edge === 'start'
-					? Math.max(0, Math.min(raw, span.contentTo - 1))
-					: Math.max(span.contentFrom + 1, Math.min(raw, view.state.doc.length));
-
-			const onMove = (e: PointerEvent) => {
-				const raw = view.posAtCoords({ x: e.clientX, y: e.clientY });
-				if (raw == null) return;
-				const target = clampTarget(raw);
-				lastTarget = target;
-				const coords = view.coordsAtPos(target);
-				if (!coords) {
-					preview.setCssProps({ display: 'none' });
-					return;
-				}
-				preview.setCssProps({ display: 'block' });
-				preview.style.left = `${coords.left}px`;
-				preview.style.top = `${coords.top}px`;
-				preview.style.height = `${coords.bottom - coords.top}px`;
-			};
-
-			const finish = (commit: boolean) => {
-				handleEl.removeEventListener('pointermove', onMove);
-				handleEl.removeEventListener('pointerup', onUp);
-				handleEl.removeEventListener('pointercancel', onCancel);
-				preview.remove();
-				if (!commit || lastTarget == null) return;
-				const target = lastTarget;
-				const markerFrom = edge === 'start' ? span.from : span.contentTo;
-				const markerTo = edge === 'start' ? span.contentFrom : span.to;
-				if (target === markerFrom) return; // dropped back where it started
-				const text = view.state.doc.toString();
-				const markerText = text.slice(markerFrom, markerTo);
-				const newContentFrom = edge === 'start' ? target : span.contentFrom;
-				const newContentTo = edge === 'end' ? target : span.contentTo;
-				const overlaps = findAnnotationSpans(text).some((s) => {
-					if (s.kind === 'comment' && s.id === id) return false;
-					return partiallyOverlaps(newContentFrom, newContentTo, s.contentFrom, s.contentTo);
-				});
-				if (overlaps) {
-					new Notice(t('view.script.overlapNotice.resize'));
-					return;
-				}
-				view.dispatch({
-					changes: [
-						{ from: markerFrom, to: markerTo, insert: '' },
-						{ from: target, insert: markerText },
-					],
-				});
-			};
-			const onUp = () => finish(true);
-			const onCancel = () => finish(false);
-			handleEl.addEventListener('pointermove', onMove);
-			handleEl.addEventListener('pointerup', onUp);
-			handleEl.addEventListener('pointercancel', onCancel);
-		}
-
-		/**
-		 * Comment-span drag handles as a `position: fixed` overlay — plain DOM,
-		 * NOT `Decoration.widget`. A widget was tried first and reverted: even a
-		 * zero-DOCUMENT-width inline widget still occupies real rendered space
-		 * inside CM6's own content flow, and having one sitting exactly at a
-		 * span's `contentTo` (frequently right at a wrapped line's own end)
-		 * corrupted CM6's line-layout measurement badly enough that clicking
-		 * anywhere on that paragraph's SECOND wrapped visual line stopped
-		 * placing a cursor at all — only the first line was still clickable.
-		 * Keeping the handles entirely OUTSIDE CM6's content (positioned by
-		 * reading `coordsAtPos`, the same technique the drag-preview bar
-		 * already uses) sidesteps that class of bug outright, regardless of
-		 * its exact internal mechanism.
-		 */
-		class AnnotationHandlesOverlay {
-			private els = new Map<string, HTMLElement>();
-			private destroyed = false;
-			private syncQueued = false;
-
-			constructor(private view: EditorView) {
-				this.scheduleSync();
-			}
-
-			update(update: ViewUpdate) {
-				if (
-					update.docChanged ||
-					update.viewportChanged ||
-					update.geometryChanged ||
-					update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations)))
-				) {
-					this.scheduleSync();
-				}
-			}
-
-			/** `sync()` reads layout via `coordsAtPos`, and CM6 forbids that
-			 *  synchronously in more places than just "the constructor" — a
-			 *  regular `update()` call CAN also land inside a forbidden window
-			 *  (confirmed live: this exact `update()` → `sync()` path crashed
-			 *  with "Reading the editor layout isn't allowed during an update"
-			 *  when a transaction dispatched very early, e.g. during a
-			 *  scroll/selection restore right on file open, before CM6's view
-			 *  had finished its own bootstrap). Routing EVERY trigger
-			 *  (constructor and update() alike) through one coalesced scheduler
-			 *  — never calling `sync()` synchronously from ANY CM6-invoked
-			 *  callback — is what closes off the whole class of bug, rather
-			 *  than chasing individual call sites one at a time. **`setTimeout`,
-			 *  not `requestAnimationFrame`**: a first attempt at this used rAF
-			 *  and STILL crashed live — CM6 schedules its own internal measure
-			 *  work via `requestAnimationFrame` too (confirmed in its own stack
-			 *  trace), so our rAF callback and CM6's can land in the exact same
-			 *  animation frame, still inside the same forbidden window; a
-			 *  `setTimeout` runs in a genuinely separate macrotask, after the
-			 *  browser has fully drained the current frame's rAF queue. */
-			private scheduleSync() {
-				if (this.syncQueued) return;
-				this.syncQueued = true;
-				this.view.dom.win.setTimeout(() => {
-					this.syncQueued = false;
-					if (!this.destroyed) this.sync();
-				}, 0);
-			}
-
-			sync() {
-				// Guards `onAnyScroll`'s own deferred `view.plugin(...)?.sync()` call
-				// below (a `document`-level capture listener outliving THIS specific
-				// view, unlike every other trigger which already funnels through
-				// `scheduleSync`'s own `destroyed` check): a real, reported leak — a
-				// scroll event queued right as the field tears down still fired its
-				// `setTimeout` callback AFTER `destroy()` had already run, and this
-				// method had no guard of its own, so it went ahead and re-created
-				// fresh handle spans on `document.body` that nothing was left to ever
-				// remove (`destroy()` doesn't run twice) — two small accent bars stuck
-				// at a fixed screen position for the rest of the session, visible on
-				// every subsequent page regardless of which view was open.
-				if (this.destroyed) return;
-				const view = this.view;
-				// This view's DOM was permanently removed without `destroy()` ever
-				// firing on it — `destroyed` alone can't catch that. Clean up for
-				// good rather than positioning handles for a view nobody can ever
-				// see again.
-				if (!view.dom.isConnected) {
-					this.destroy();
-					return;
-				}
-				// A DIFFERENT, real leak vector with the SAME symptom: Obsidian
-				// keeps a background tab's DOM around, just hidden (`offsetParent`
-				// goes `null` — the standard "is this actually rendered right now"
-				// check) — not detached, so the check above doesn't catch it. These
-				// handles are `position: fixed` on `document.body`, which a hidden
-				// ANCESTOR doesn't clip at all, so leaving them at their last-
-				// computed screen coordinates showed them floating over WHATEVER
-				// tab the user actually switched to. Hide rather than destroy —
-				// this tab isn't gone, just not the active one right now, and
-				// `sync()` repositions them normally the next time it runs while
-				// visible again.
-				if (view.dom.offsetParent === null) {
-					for (const el of this.els.values()) el.setCssProps({ display: 'none' });
-					return;
-				}
-				const text = view.state.doc.toString();
-				const spans = findAnnotationSpans(text).filter((s) => s.kind === 'comment' && s.contentFrom < s.contentTo);
-				const wanted = new Set<string>();
-				for (const span of spans) {
-					for (const edge of ['start', 'end'] as const) {
-						const key = `${span.id}:${edge}`;
-						wanted.add(key);
-						let el = this.els.get(key);
-						if (!el) {
-							el = view.dom.doc.body.createSpan({
-								cls: `loom-fountain-annotation-handle loom-fountain-annotation-handle-${edge}`,
-							});
-							el.dataset.loomAnnotationHandleId = span.id;
-							el.dataset.loomAnnotationHandleEdge = edge;
-							const { id } = span;
-							const handleEl = el;
-							handleEl.addEventListener('pointerdown', (e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								handleEl.setPointerCapture(e.pointerId);
-								startAnnotationHandleDrag(view, id, edge, handleEl);
-							});
-							this.els.set(key, handleEl);
-						}
-						const pos = edge === 'start' ? span.contentFrom : span.contentTo;
-						// Belt-and-suspenders on top of `scheduleSync()` deferring
-						// every CALLER of `sync()` — if `coordsAtPos` still somehow
-						// throws (confirmed live to be reachable from more than one
-						// call site; see `scheduleSync`'s own doc comment), catching
-						// it here keeps this ONE frame's positioning a no-op instead
-						// of crashing the whole plugin, and the very next trigger
-						// (the next real update, or the editor's own viewport/
-						// geometry change) gets another chance to position correctly.
-						let coords: { left: number; top: number; bottom: number } | null = null;
-						try {
-							coords = view.coordsAtPos(pos, edge === 'start' ? 1 : -1);
-						} catch (e) {
-							console.error('Loom Loom: annotation handle could not read layout this frame', e);
-						}
-						if (coords) {
-							el.setCssProps({ display: 'block' });
-							el.style.left = `${coords.left}px`;
-							el.style.top = `${coords.top}px`;
-							el.style.height = `${coords.bottom - coords.top}px`;
-						} else {
-							el.setCssProps({ display: 'none' });
-						}
-					}
-				}
-				for (const [key, el] of this.els) {
-					if (!wanted.has(key)) {
-						el.remove();
-						this.els.delete(key);
-					}
-				}
-			}
-
-			destroy() {
-				this.destroyed = true;
-				for (const el of this.els.values()) el.remove();
-				this.els.clear();
-			}
-		}
-		const annotationHandlesOverlay = ViewPlugin.fromClass(AnnotationHandlesOverlay);
+		const annotationHandlesOverlay = makeAnnotationHandlesOverlay('fountain');
 
 		/** Builds every branch group's chrome for the CURRENT parse — see this
 		 *  file's own "Embedded branch cards" doc comment (above
@@ -1591,47 +1257,9 @@ export const FountainField = forwardRef(function FountainField(
 				entries.push(span);
 			}
 
-			// Comment/alt-text markers — hidden UNCONDITIONALLY, unlike
-			// `scanEntityLinks`'s raw-at-cursor toggle: there's no reason to
-			// ever want to see the literal `[[loom-comment:…]]` text, so this
-			// doesn't need to react to selection. The wrapped (= currently
-			// displayed) text is left completely alone here — only the two
-			// marker tokens themselves are replaced away. The CONTENT itself
-			// gets a dashed-border mark instead — a persistent visual "this is
-			// what's commented/alt-texted" boundary, like a selection that
-			// never clears, mirroring the same box the Pages preview draws via
-			// `wrapAnnotationMarkersForDisplay` (fountain.ts).
-			for (const span of findAnnotationSpans(text)) {
-				entries.push({ from: span.from, to: span.contentFrom, deco: Decoration.replace({}) });
-				entries.push({ from: span.contentTo, to: span.to, deco: Decoration.replace({}) });
-				if (span.contentFrom < span.contentTo) {
-					const highlighted = span.id === highlightedAnnotationIdRef.current;
-					// A comment span with anything still unresolved (no entries yet,
-					// or at least one entry not resolved) gets the SAME tinted-
-					// background treatment `-highlight` uses, but PERSISTENTLY —
-					// it's the "this needs attention" state, distinct from
-					// `-highlight`'s transient "a search match currently points
-					// here." A fully-resolved thread drops back to a plain dashed
-					// underline, no tint. Alt-text spans have no resolved concept —
-					// unaffected.
-					const commentEntries = span.kind === 'comment' ? (commentsRef.current[span.id] ?? []) : [];
-					const unresolved = isUnresolvedComment(span.kind, commentEntries);
-					const cls =
-						`loom-fountain-annotation-span loom-fountain-annotation-span-${span.kind}` +
-						(unresolved ? ' loom-fountain-annotation-span-unresolved' : '') +
-						(highlighted ? ' loom-fountain-annotation-span-highlight' : '');
-					entries.push({
-						from: span.contentFrom,
-						to: span.contentTo,
-						deco: Decoration.mark({ class: cls, attributes: { 'data-loom-annotation-content': span.id } }),
-					});
-					// Draggable start/end handles — COMMENTS only (see
-					// `startAnnotationHandleDrag`'s own doc comment for why
-					// alt-text spans never get one) — are handled by the
-					// `annotationHandlesOverlay` ViewPlugin below, NOT a decoration
-					// here; see `AnnotationHandlesOverlay`'s own doc comment for why.
-				}
-			}
+			entries.push(
+				...annotationSpanDecorations(text, 'loom-fountain', commentsRef.current, highlightedAnnotationIdRef.current, false)
+			);
 
 			// Orphan prevention (fountain.ts `ORPHAN_WORDS`/`findOrphanPairs`,
 			// shared with the Pages-preview renderer): glues a short word to
@@ -1654,28 +1282,12 @@ export const FountainField = forwardRef(function FountainField(
 			let finalEntries = entries;
 			if (embeddedBranchCards) {
 				const { decos: branchDecos, replaced } = buildBranchGroupDecorations(view, parsed);
-				// A REAL bug this used to have: a zero-width `Decoration.line`
-				// entry (the ordinary per-element `ELEMENT_CLASS` line-class
-				// pass, above — e.g. `loom-fountain-synopsis` on a `=`-prefixed
-				// line) sits at `from === to === docLine.from`, exactly the
-				// STARTING edge of a replaced range `[r.from, r.to)` — the old
-				// overlap test (`e.from < r.to && e.to > r.from`) fails for
-				// that exact case (`e.to > r.from` is false when `e.to ===
-				// r.from`), so this used to wave every line-class entry through
-				// UNCONDITIONALLY, on the theory that a line CLASS can't
-				// "contain" a content replace the way a mark/replace decoration
-				// can (true — nothing crashes) but wrong about styling: that
-				// original element class kept fighting my own widget's classes
-				// for CSS specificity on the exact same `.cm-line`, and
-				// sometimes won (`.loom-fountain-field .cm-line.loom-fountain-
-				// synopsis`'s 3-class selector beating my own 2-class scoped
-				// override — confirmed live via DevTools). Fixed with a proper
-				// half-open-interval containment check that treats a
-				// zero-width point as "inside" `[r.from, r.to)` when
-				// `r.from <= e.from < r.to`, and drops EVERY entry (line-class
-				// included) on a line this pass fully replaces — nothing from
-				// the original per-element pass belongs there any more, the
-				// widget is now that line's entire visual representation.
+				// Drop EVERY entry on a line this pass fully replaces, zero-width
+				// `Decoration.line` classes included: the widget is that line's
+				// whole visual representation, and a leftover element class (e.g.
+				// `loom-fountain-synopsis`) would fight the widget's own classes
+				// for specificity. A zero-width point counts as inside
+				// `[r.from, r.to)` when `r.from <= e.from < r.to`.
 				const overlapsReplaced = (e: { from: number; to: number }) =>
 					replaced.some((r) => (e.to === e.from ? e.from >= r.from && e.from < r.to : e.from < r.to && e.to > r.from));
 				finalEntries = entries.filter((e) => !overlapsReplaced(e));
@@ -1847,24 +1459,8 @@ export const FountainField = forwardRef(function FountainField(
 			return false;
 		};
 
-		/** Wraps `range` in a fresh comment/alt-text marker pair — the same
-		 *  two-part `changes` shape `toggleWrap` uses in markdown-field.tsx,
-		 *  just parameterized on a freshly-generated id instead of a fixed
-		 *  `**`/`_` pair. Fires `onCreateComment`/`onCreateAlt` afterward so
-		 *  the caller persists the new sidecar entry — this component never
-		 *  touches the sidecar itself, only the document. */
-		const insertMarkerPair = (view: EditorView, kind: 'comment' | 'alt', from: number, to: number) => {
-			const id = newSceneId();
-			const open = `[[loom-${kind}:${id}]]`;
-			const close = `[[/loom-${kind}:${id}]]`;
-			const selectedText = view.state.sliceDoc(from, to);
-			view.dispatch({
-				changes: [
-					{ from, insert: open },
-					{ from: to, insert: close },
-				],
-				selection: { anchor: from + open.length, head: to + open.length },
-			});
+		const insertAnnotation = (view: EditorView, kind: 'comment' | 'alt', from: number, to: number) => {
+			const { id, selectedText } = insertMarkerPair(view, kind, from, to);
 			if (kind === 'comment') onCreateCommentRef.current?.(id, selectedText);
 			else onCreateAltRef.current?.(id, selectedText);
 		};
@@ -1899,29 +1495,6 @@ export const FountainField = forwardRef(function FountainField(
 			}
 		};
 
-		/** The ONE contextmenu handler for this editor, replacing Electron's
-		 *  own native menu entirely — Cut/Copy/Paste, Comment/Alternative
-		 *  text, Create branch/Paste branch group, always in that section
-		 *  order. Every item is always PRESENT, enabled or disabled by
-		 *  context (never conditionally shown), so the menu never changes
-		 *  shape depending on where the click landed — a disabled item just
-		 *  explains why in its own title.
-		 *
-		 *  Resolving the clicked position with `precise: false` is what
-		 *  actually fixes a real, previously unexplained bug: right-clicking
-		 *  the first/last VISIBLE line fell through to the native menu.
-		 *  CM6's `posAtCoords` returns `null` when the clicked point maps to
-		 *  a line outside its OWN currently-rendered viewport window (CM6
-		 *  virtualizes — only a margin around the visible area is real DOM
-		 *  at any moment), and the previous version of this handler treated
-		 *  a `null` as "nothing to do here" and returned `false` — which,
-		 *  for a CM6 `domEventHandlers` callback, means CM6 never calls
-		 *  `preventDefault()`, so the native menu shows through underneath.
-		 *  `precise: false` (the same flag CM6's own internal mouse/drag
-		 *  handling always passes for this exact reason) falls back to a
-		 *  best-effort estimate instead of `null`, so this handler always
-		 *  has a position to reason from and always ends up calling
-		 *  `preventDefault()` itself. */
 		/** Shared eligibility check behind "Create branch"/"Paste branch
 		 *  group" — a bare caret on a blank line not already inside a
 		 *  decision point. Used by both `openContextMenu` (below) and the
@@ -1937,6 +1510,14 @@ export const FountainField = forwardRef(function FountainField(
 			return branchGroupAtLine(parsed, line0) === null;
 		};
 
+		/** The ONE contextmenu handler for this editor, replacing Electron's
+		 *  native menu — Cut/Copy/Paste, Comment/Alternative text, Create
+		 *  branch/Paste branch group, in that order. Every item is always
+		 *  present, enabled or disabled by context, so the menu never changes
+		 *  shape. The click is resolved with `posAtCoords(…, false)`: a precise
+		 *  lookup returns `null` for a line outside CM6's rendered viewport
+		 *  (the first/last visible line), and returning `false` there would let
+		 *  the native menu show through. */
 		const openContextMenu = (view: EditorView, event: MouseEvent): boolean => {
 			event.preventDefault();
 			event.stopPropagation();
@@ -2042,17 +1623,10 @@ export const FountainField = forwardRef(function FountainField(
 				title: t('view.script.contextMenu.pasteBranchGroup') + branchSlotSuffix,
 				icon: 'clipboard-paste',
 				disabled: !branchSlotEligible || !branchClipboardAvailableRef.current || !onPasteBranchGroupRef.current,
-				// Obsidian's `Menu` items are plain non-focusable divs, so
-				// clicking one never blurs whatever had focus before the
-				// right-click — but that's no longer this field's problem to
-				// solve: the caller (`handlePasteBranchGroupInScene`,
-				// entity-view.tsx) resyncs this field directly via
-				// `replaceBody` once its own write lands, bypassing the
-				// normal focus-gated sync entirely. See that method's own
-				// doc comment for the fuller history (a real, reported
-				// geometry-overlap bug that a blur-before-write fix here
-				// used to paper over, and why that approach still wasn't
-				// enough on its own).
+				// The caller (`handlePasteBranchGroupInScene`, entity-view.tsx)
+				// resyncs this field via `replaceBody` once its write lands,
+				// bypassing the focus-gated sync — Obsidian's menu items never
+				// blur the editor.
 				onClick: () => onPasteBranchGroupRef.current?.(line0),
 			});
 
@@ -2062,13 +1636,13 @@ export const FountainField = forwardRef(function FountainField(
 				title: t('view.script.contextMenu.comment'),
 				icon: 'message-square',
 				disabled: !hasSelection || overlapsSpan,
-				onClick: () => insertMarkerPair(view, 'comment', sel.from, sel.to),
+				onClick: () => insertAnnotation(view, 'comment', sel.from, sel.to),
 			});
 			addMenuItem(menu, {
 				title: t('view.script.contextMenu.altText'),
 				icon: 'arrow-right-left',
 				disabled: !hasSelection || overlapsSpan,
-				onClick: () => insertMarkerPair(view, 'alt', sel.from, sel.to),
+				onClick: () => insertAnnotation(view, 'alt', sel.from, sel.to),
 			});
 
 			menu.addSeparator();
@@ -2107,74 +1681,12 @@ export const FountainField = forwardRef(function FountainField(
 			return true;
 		};
 
-		/** The right-side gutter for comment/alt-text icons — `side: 'after'`
-		 *  puts it past the content instead of CM6's default before-content
-		 *  placement (no CSS reordering trick needed). One marker per LINE
-		 *  that a span STARTS on (not every line it covers) — a multi-line
-		 *  comment shows its icon beside its first line only. */
-		// `lineMarker` is called once per VISIBLE line every time the gutter
-		// recomputes, so re-parsing the whole document's annotation spans
-		// inside it would redo that parse once per line on screen. CM6's `Text`
-		// is immutable and shared by reference when the document hasn't
-		// changed, so caching on that reference (not the stringified text)
-		// also skips the `.toString()` itself across calls within one pass.
-		let annotationSpansCache: { doc: EditorState['doc']; spans: ReturnType<typeof findAnnotationSpans> } | null = null;
-		const annotationSpansFor = (view: EditorView) => {
-			if (annotationSpansCache?.doc !== view.state.doc) {
-				annotationSpansCache = { doc: view.state.doc, spans: findAnnotationSpans(view.state.doc.toString()) };
-			}
-			return annotationSpansCache.spans;
-		};
-
-		const annotationGutter = gutter({
-			class: 'loom-fountain-annotation-gutter',
-			side: 'after',
-			lineMarker: (gutterView, line) => {
-				const spans = annotationSpansFor(gutterView);
-				const lineNo = gutterView.state.doc.lineAt(line.from).number;
-				const onThisLine = spans.filter((s) => gutterView.state.doc.lineAt(s.from).number === lineNo);
-				if (onThisLine.length === 0) return null;
-				const items: AnnotationGutterItem[] = onThisLine.map((s) => {
-					const commentEntries = s.kind === 'comment' ? (commentsRef.current[s.id] ?? []) : [];
-					return {
-						kind: s.kind,
-						id: s.id,
-						unresolved: isUnresolvedComment(s.kind, commentEntries),
-						highlighted: s.id === highlightedAnnotationIdRef.current,
-					};
-				});
-				return new AnnotationGutterMarker('loom-fountain', items);
-			},
-			lineMarkerChange: (update) =>
-				update.docChanged || update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations))),
-			initialSpacer: () => new AnnotationGutterMarker('loom-fountain', []),
-			domEventHandlers: {
-				click: (gutterView, line, event) => {
-					// The icon glyph itself is an inline `<svg>` (Obsidian's
-					// `setIcon`), and `SVGElement` doesn't extend `HTMLElement` —
-					// gating the initial target on `HTMLElement` meant a click
-					// landing on the glyph (most of the icon's clickable area)
-					// silently missed `.closest()` entirely. `Element` covers both.
-					const target = event.target instanceof Element ? event.target : null;
-					const el = target?.closest('[data-loom-annotation-id]');
-					if (!(el instanceof HTMLElement) || !el.dataset.loomAnnotationId) return false;
-					const id = el.dataset.loomAnnotationId;
-					if (el.dataset.loomAnnotationKind === 'comment') {
-						onOpenCommentRef.current?.(id, el.getBoundingClientRect());
-					} else {
-						onCycleAltRef.current?.(id);
-					}
-					return true;
-				},
-				contextmenu: (gutterView, line, event) => {
-					const target = event.target instanceof Element ? event.target : null;
-					const el = target?.closest('[data-loom-annotation-id][data-loom-annotation-kind="alt"]');
-					if (!(el instanceof HTMLElement) || !el.dataset.loomAnnotationId) return false;
-					event.preventDefault();
-					onOpenAltMenuRef.current?.(el.dataset.loomAnnotationId);
-					return true;
-				},
-			},
+		const annotationGutter = makeAnnotationGutter('loom-fountain', {
+			comments: () => commentsRef.current,
+			highlightedId: () => highlightedAnnotationIdRef.current,
+			onOpenComment: (id, rect) => onOpenCommentRef.current?.(id, rect),
+			onAltClick: (_view, id) => onCycleAltRef.current?.(id),
+			onOpenAltMenu: (id) => onOpenAltMenuRef.current?.(id),
 		});
 
 		// Typing `@` opens the pair immediately (like `[[` does for wikilinks
@@ -2288,7 +1800,7 @@ export const FountainField = forwardRef(function FountainField(
 					scrollWithinEditor,
 					fountainDecorations,
 					...(showAnnotationGutter ? [annotationGutter] : []),
-					...(escapeOverflowForTooltips ? [tooltips({ parent: document.body })] : []),
+					...(escapeOverflowForTooltips ? [tooltips({ parent: hostRef.current.doc.body })] : []),
 					annotationHandlesOverlay,
 					linkSuggestExt,
 					entityBracketPairing,
@@ -2297,25 +1809,15 @@ export const FountainField = forwardRef(function FountainField(
 					autocompletion({
 						override: [characterCompletion, entityLinkCompletion],
 						icons: false,
-						// A real, reported bug: the FIRST option was pre-selected the
-						// instant the popup opened (CM6's own default), so pressing
-						// Enter on an empty cue-eligible line — meant to just start a
-						// new blank line — silently pasted that option instead
-						// (`acceptCompletion`, bound to Enter by `completionKeymap`
-						// below, confirms whatever's currently selected). With nothing
-						// selected on open, `acceptCompletion` has nothing to confirm
-						// and returns `false`, falling through to `defaultKeymap`'s own
-						// Enter handling — a plain newline — exactly as if no popup
-						// were open at all; Enter only pastes an option once the user
-						// has explicitly moved to one (click, or Down/Up-arrow).
+						// Nothing selected on open: Enter on an empty cue-eligible line
+						// then falls through `acceptCompletion` to a plain newline;
+						// it only accepts an option the user has moved to.
 						selectOnOpen: false,
 					}),
 					keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
 					EditorView.updateListener.of((update) => {
-						// Excludes the external-value-sync effect's own dispatch
-						// (`userEvent: 'loom.externalSync'`, this file's own
-						// value-sync `useEffect`) — see that dispatch's own doc
-						// comment for the real, severe bug this guard fixes.
+						// Excludes the external-value-sync's own dispatch
+						// (`userEvent: 'loom.externalSync'`) — it isn't an edit.
 						if (update.docChanged && !update.transactions.some((tr) => tr.isUserEvent('loom.externalSync'))) {
 							const urgent = update.transactions.some((tr) => tr.isUserEvent('undo') || tr.isUserEvent('redo'));
 							onChangeRef.current(update.state.doc.toString(), urgent);
@@ -2349,16 +1851,10 @@ export const FountainField = forwardRef(function FountainField(
 							}
 						}
 						if (update.viewportChanged || update.geometryChanged) onGeometryChangeRef.current?.();
-						// A bare `selectionSet` also fires for plain Up/Down-arrow
-						// cursor motion (CM6 annotates keyboard cursor movement as
-						// user event "select", vs. a real click's "select.pointer") —
-						// popping the completion list open on every arrow-key landing
-						// on an empty cue-eligible line meant the NEXT arrow press got
-						// eaten navigating the popup instead of moving the cursor,
-						// which read as arrow keys randomly skipping lines near
-						// act/scene boundaries (where a doubled blank line is
-						// common). Only an actual click should pop it open
-						// unprompted; typing (`docChanged`) still does too.
+						// A bare `selectionSet` also fires for Up/Down-arrow motion
+						// ("select", vs. a click's "select.pointer"); opening the list
+						// there would make the next arrow press navigate the popup
+						// instead of the cursor. Only a click or typing opens it.
 						if (
 							update.view.hasFocus &&
 							emptyCueLine(update.state) &&
@@ -2376,64 +1872,22 @@ export const FountainField = forwardRef(function FountainField(
 			}),
 		});
 		viewRef.current = view;
-		// The overlay's own `update()` re-syncs handle positions on every CM6
-		// update, which covers the editor's OWN internal scroll (CM6 fires an
-		// update to re-render its viewport as you scroll) — but not the OUTER
-		// page scrolling the whole editor box around on screen, which CM6 has
-		// no reason to know or care about. Same capture-phase "any scroll,
-		// anywhere" listener the comment popover's own scroll-tracking uses.
-		// NOT a direct `sync()` call — a native 'scroll' event can fire
-		// SYNCHRONOUSLY from inside CM6's own internal scroll-into-view
-		// machinery (`scrollToLine`/`selectRange`/a search jump all trigger
-		// one), and this is a CAPTURE-phase listener, so it runs nested
-		// inside that same call stack — squarely inside the same "reading
-		// layout isn't allowed during an update" window `scheduleSync`
-		// (`AnnotationHandlesOverlay`, above) exists to dodge, confirmed by
-		// a live crash. `setTimeout`, not `requestAnimationFrame` — CM6
-		// schedules its own internal measure work via rAF too, so an rAF
-		// callback here can still land in the SAME animation frame as CM6's,
-		// still inside the forbidden window (also confirmed live, see
-		// `scheduleSync`'s own doc comment); `setTimeout` is a genuinely
-		// separate macrotask. The `queued` guard coalesces a scroll
-		// GESTURE's many rapid events into one sync rather than one per
-		// event.
-		let scrollSyncQueued = false;
-		const onAnyScroll = () => {
-			if (scrollSyncQueued) return;
-			scrollSyncQueued = true;
-			view.dom.win.setTimeout(() => {
-				scrollSyncQueued = false;
-				view.plugin(annotationHandlesOverlay)?.sync();
-			}, 0);
-		};
-		document.addEventListener('scroll', onAnyScroll, true);
+		const stopScrollSync = syncHandlesOnPageScroll(view, annotationHandlesOverlay);
 		return () => {
-			document.removeEventListener('scroll', onAnyScroll, true);
-			// Explicit, not relying solely on `destroy()` triggering CM6's own
-			// `focusChanged` update via the native DOM blur a detached
-			// contentEditable normally fires — mirrors the identical fix in
-			// `markdown-field.tsx` (see that file's own doc comment on this same
-			// spot for the reported bug it closes): a caller that commits only on
-			// blur could otherwise unmount without ever flushing what's pending.
+			stopScrollSync();
+			// Explicit, rather than relying on `destroy()`'s native blur: a
+			// caller that commits only on blur must still flush on unmount.
 			if (view.hasFocus) onBlurRef.current?.();
 			view.destroy();
 			viewRef.current = null;
 		};
 	}, []);
 
-	// External value changes (loaded from disk, or `ensureSceneIds`/
-	// `syncScenes` rewriting the text after a blur, or now — with the shared
-	// script buffer — a DIFFERENT open pane's own edit to this exact scene)
-	// — applied only while unfocused, same as markdown-field.tsx, so a live
-	// edit's cursor is never disturbed by our own echo of what it just
-	// produced. While focused, a genuinely different `value` is stashed in
-	// `pendingExternalValueRef` instead of silently dropped — a real,
-	// confirmed gap this closes: this effect only re-checks when `value`
-	// itself changes AGAIN, so without the stash, an external change that
-	// arrived mid-edit was gone for good the instant this ran once and saw
-	// `hasFocus`; blur alone never revisited it. The update listener's own
-	// blur branch (above) is what applies a stashed value once it's actually
-	// safe to.
+	// External value changes (loaded from disk, `ensureSceneIds`/`syncScenes`
+	// rewrites, another open pane's edit to this scene via the shared script
+	// buffer) apply only while unfocused, so a live edit's cursor is never
+	// disturbed by our own echo. While focused, a different `value` is stashed
+	// in `pendingExternalValueRef` and applied on blur (update listener).
 	useEffect(() => {
 		const view = viewRef.current;
 		if (!view) return;
@@ -2466,21 +1920,10 @@ export const FountainField = forwardRef(function FountainField(
 			const valueLines = value.split('\n');
 			const clampedIdx = Math.min(Math.max(topLine - 1, 0), valueLines.length - 1);
 			const targetPos = valueLines.slice(0, clampedIdx).join('\n').length + (clampedIdx > 0 ? 1 : 0);
-			// Tagged so the update listener's `onChange` firing below can tell
-			// this dispatch apart from a real keystroke — a REAL, severe bug
-			// found chasing an "intermittent, only-works-after-several-tries"
-			// report: without this, `onChangeRef.current(...)` fired for this
-			// programmatic resync exactly like it does for real typing, which
-			// for the Scene page's own caller means writing this exact same
-			// text straight back into the shared script buffer as if the user
-			// had just typed it — a harmless no-op most of the time (the text
-			// already matches what the buffer holds), but not guaranteed to
-			// stay one forever, and not the honest story of what happened
-			// either. This one external-sync path is the only dispatch in
-			// this file that should ever carry this tag — every other
-			// `view.dispatch` here (Cut/Copy/Paste, alt-text swaps, …)
-			// represents a real content change the caller's own `onChange`
-			// SHOULD pick up.
+			// Tagged so the update listener doesn't fire `onChange` for this
+			// programmatic resync — it isn't the user's edit, and echoing it back
+			// would write the same text into the shared script buffer as if
+			// typed. The only dispatch in this file that carries this tag.
 			view.dispatch({
 				changes: { from: 0, to: current.length, insert: value },
 				effects: EditorView.scrollIntoView(targetPos, { y: 'start' }),

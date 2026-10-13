@@ -11,44 +11,20 @@
 import { Platform } from 'obsidian';
 import { LocaleKey, t } from './i18n';
 
-/** The Ctrl/Cmd+click-to-open hint shown on script/prose CM6 decorations
- *  (`fountain-field.tsx`'s scene/act/character/entity links,
- *  `markdown-field.tsx`'s Book Act/Chapter heading links) — one shared
- *  string rather than a different sentence per entity kind, and `Platform.
- *  isMacOS` (the API's own documented use case: "detect whether to use
- *  command-based hotkeys vs ctrl-based hotkeys") picks the modifier name
- *  that's actually on the user's keyboard instead of always spelling out
- *  both. Lives here rather than common.tsx specifically to avoid a real
- *  import cycle: common.tsx already imports script-view.tsx/book-view.tsx,
- *  which import fountain-field.tsx/markdown-field.tsx — a constant those
- *  two fields needed would have closed the loop back through common.tsx.
- *
- *  These land as a plain HTML attribute on a CM6 `Decoration.mark`, not a
- *  real DOM element `setTooltip` could be called on directly — but
- *  Obsidian's `setTooltip`/`Component.setTooltip` don't do anything magic
- *  per element either: confirmed against the real `app.js`, they just set
- *  `aria-label` (+ optional `data-tooltip-*` position/delay attributes),
- *  and a single delegated `pointerover`/`pointerout` listener registered on
- *  `document.body` at startup (matching `[aria-label]`) shows the styled
- *  tooltip for ANY element carrying that attribute, application-wide. So
- *  each call site just sets `'aria-label': CLICK_TO_OPEN_TOOLTIP` directly
- *  in its own decoration attributes — instead of the browser-native
- *  `title`, which renders its own unstyled tooltip that bypasses this
- *  mechanism entirely — and picks up the plugin's normal tooltip styling
- *  for free, no imperative DOM-walking needed. */
-export const CLICK_TO_OPEN_TOOLTIP = t('common.clickToOpen', { key: Platform.isMacOS ? 'Cmd' : 'Ctrl' });
+/** The Ctrl/Cmd+click-to-open hint on script/prose CM6 link decorations
+ *  (`fountain-field.tsx` scene/act/character/entity links, `markdown-field.tsx`
+ *  Book heading links), naming the modifier on the user's own keyboard
+ *  (`Platform.isMacOS`). Lives here, not common.tsx, to avoid an import cycle
+ *  through the two fields. It's set as `aria-label` on a `Decoration.mark`:
+ *  Obsidian's tooltips come from one delegated `[aria-label]` listener on
+ *  `document.body` (what `setTooltip` sets up too), so the attribute alone
+ *  gets the styled tooltip — unlike a native `title`. */
+const CLICK_TO_OPEN_TOOLTIP = t('common.clickToOpen', { key: Platform.isMacOS ? 'Cmd' : 'Ctrl' });
 
-/** Every call site above spreads this instead of writing `'aria-label':
- *  CLICK_TO_OPEN_TOOLTIP` alone — `data-tooltip-delay` is the OTHER half of
- *  the same real `app.js` mechanism (`Ev`/`bv`, see the doc comment on
- *  `CLICK_TO_OPEN_TOOLTIP`): Obsidian's own default hover delay is a flat
- *  `1e3` (1000ms, confirmed against `app.js`'s own `lv` constant) — fine
- *  for a rarely-needed tooltip, but this ONE fires on every scene/act/
- *  character/entity link a script or book is full of, so half the wait
- *  (500ms) reads as noticeably snappier without going so low it flickers
- *  open on an incidental pass-through. Value is a STRING — it lands as a
- *  literal HTML attribute, and `Ev`'s own read does `parseInt(...)` on
- *  whatever's there. */
+/** Spread at every call site: `aria-label` plus `data-tooltip-delay`, which
+ *  Obsidian's tooltip handler reads with `parseInt` (hence a string). Its
+ *  default delay is 1000ms; this hint sits on every link in a script, so
+ *  500ms reads snappier without flickering on a pass-through. */
 export const CLICK_TO_OPEN_ATTRS = { 'aria-label': CLICK_TO_OPEN_TOOLTIP, 'data-tooltip-delay': '500' };
 
 export const ENTITY_TYPES = [
@@ -72,16 +48,9 @@ export function isEntityType(value: unknown): value is EntityType {
 	return typeof value === 'string' && (ENTITY_TYPES as readonly string[]).includes(value);
 }
 
-/** Case-insensitive lookup back to the canonically-cased `EntityType` —
- *  every OTHER type is a single lowercase word, so a bare `.toLowerCase()`
- *  before an `isEntityType` check was always safe until `decisionPoint`
- *  became the first camelCase one: lowercasing `'decisionPoint'` produces
- *  `'decisionpoint'`, which doesn't match anything in `ENTITY_TYPES` and
- *  silently fails `isEntityType` — a real bug this fixes (a frontmatter
- *  `loomType: decisionPoint` read back through the old `.toLowerCase()` +
- *  `isEntityType` pair was rejected outright, never indexed at all). Reads
- *  a value however it's cased (a hand-typed `DecisionPoint`/`decisionpoint`
- *  both resolve too) and returns the type's real casing. */
+/** Case-insensitive lookup back to the canonically-cased `EntityType` — a
+ *  bare `.toLowerCase()` before `isEntityType` would reject camelCase types
+ *  (`decisionPoint`). Accepts any casing and returns the type's real one. */
 const ENTITY_TYPE_BY_LOWER: Record<string, EntityType> = Object.fromEntries(
 	ENTITY_TYPES.map((t) => [t.toLowerCase(), t])
 );
@@ -92,7 +61,6 @@ export function normalizeEntityType(value: unknown): EntityType | null {
 
 export interface EntityTypeMeta {
 	label: string;
-	plural: string;
 	/** Folder relative to the project root. */
 	folder: string;
 	/** Lucide icon name. */
@@ -100,24 +68,24 @@ export interface EntityTypeMeta {
 }
 
 export const ENTITY_META: Record<EntityType, EntityTypeMeta> = {
-	character: { label: 'Character', plural: 'Characters', folder: 'Entities/Characters', icon: 'user' },
-	location: { label: 'Location', plural: 'Locations', folder: 'Entities/Locations', icon: 'map-pin' },
-	region: { label: 'Region', plural: 'Regions', folder: 'Entities/Regions', icon: 'hexagon' },
-	faction: { label: 'Faction', plural: 'Factions', folder: 'Entities/Factions', icon: 'flag' },
-	item: { label: 'Item', plural: 'Items', folder: 'Entities/Items', icon: 'gem' },
-	quest: { label: 'Quest', plural: 'Quests', folder: 'Entities/Quests', icon: 'scroll' },
-	event: { label: 'Event', plural: 'Events', folder: 'Entities/Events', icon: 'calendar-days' },
-	session: { label: 'Session', plural: 'Sessions', folder: 'Entities/Sessions', icon: 'book-open' },
-	scene: { label: 'Scene', plural: 'Scenes', folder: 'Entities/Scenes', icon: 'clapperboard' },
-	act: { label: 'Act', plural: 'Acts', folder: 'Entities/Acts', icon: 'book-open' },
-	chapter: { label: 'Chapter', plural: 'Chapters', folder: 'Entities/Chapters', icon: 'book-text' },
+	character: { label: 'Character', folder: 'Entities/Characters', icon: 'user' },
+	location: { label: 'Location', folder: 'Entities/Locations', icon: 'map-pin' },
+	region: { label: 'Region', folder: 'Entities/Regions', icon: 'hexagon' },
+	faction: { label: 'Faction', folder: 'Entities/Factions', icon: 'flag' },
+	item: { label: 'Item', folder: 'Entities/Items', icon: 'gem' },
+	quest: { label: 'Quest', folder: 'Entities/Quests', icon: 'scroll' },
+	event: { label: 'Event', folder: 'Entities/Events', icon: 'calendar-days' },
+	session: { label: 'Session', folder: 'Entities/Sessions', icon: 'book-open' },
+	scene: { label: 'Scene', folder: 'Entities/Scenes', icon: 'clapperboard' },
+	act: { label: 'Act', folder: 'Entities/Acts', icon: 'book-open' },
+	chapter: { label: 'Chapter', folder: 'Entities/Chapters', icon: 'book-text' },
 	/** GM projects only: a grouping layer above Events, mirroring Region-over-
 	 *  Location — see project-kind.ts's GM type list and ROADMAP.md's "Game
 	 *  Master" entry. */
-	decisionPoint: { label: 'Decision Point', plural: 'Decision Points', folder: 'Entities/Decision Points', icon: 'split' },
+	decisionPoint: { label: 'Decision Point', folder: 'Entities/Decision Points', icon: 'split' },
 };
 
-/** `ENTITY_META[type].label`/`.plural` are the English source strings — folder
+/** `ENTITY_META[type].label` is the English source string — folder
  *  names and other structural uses read those fields directly, but every
  *  DISPLAY read of the type's noun should go through these instead, so the
  *  whole plugin's entity-type vocabulary localizes from one place. */
@@ -175,12 +143,6 @@ export const PC_GROUP_VALUE = 'loom:pc-group';
 export const PC_GROUP_ICON = 'circle-star';
 
 
-/** Entity types that live on the timeline layers of the graph, across all
- *  kinds. A project only ever holds one pair (see `ANCHOR_TYPES`/`BEAT_TYPES`
- *  in project-kind.ts for the role split) — Chapter (Writer/Prose) is the one
- *  anchor with no beat counterpart; see `roleType`'s `EntityType | null`
- *  return for the `'beat'` role. */
-export const TIMELINE_TYPES: readonly EntityType[] = ['session', 'event', 'act', 'scene', 'chapter'];
 /** Entity types that live on the fixed lower axis of the graph. */
 export const GLOBAL_TYPES: readonly EntityType[] = [
 	'character',
@@ -199,8 +161,7 @@ export const LOOM_EXTENSION = 'loom';
 /**
  * Frontmatter keys owned by the plugin — every key is loom-prefixed so
  * plugin-managed properties are recognizable at a glance in any note.
- * Reads fall back to the legacy un-prefixed spellings (see `legacyFmKeys`);
- * the startup migration rewrites old files to these keys. Nested keys inside
+ * Nested keys inside
  * list entries (session/text/involved…, type/target, character/role) stay
  * unprefixed — they only exist inside a loom-prefixed parent. `aliases` is
  * deliberately Obsidian's native key, written so the core [[link]]
@@ -344,11 +305,9 @@ export const FM = {
 	 *  matching the section text would not. */
 	actId: 'loomActId',
 	/** Chapters only: link to the Act this chapter belongs to — the
-	 *  Writer/Prose analogue of `sceneAct`. Visible, so a chapter stacks
-	 *  under its act in the graph and timeline, same mechanism. Currently
-	 *  stamped directly at creation (no Book file to derive it from yet —
-	 *  see ROADMAP's Prose-support entry); once the Book parser exists this
-	 *  becomes derived the same way `sceneAct` is. */
+	 *  Writer/Prose analogue of `sceneAct`, derived from the Book file by
+	 *  `syncActsChapters`. Visible, so a chapter stacks under its act in the
+	 *  graph and timeline. */
 	chapterAct: 'loomChapterAct',
 	/** Chapters only: the `[[loom:<id>]]` marker on the Book file's `##`
 	 *  section line — the Writer/Prose analogue of `sceneId`. Ties this note
@@ -388,17 +347,6 @@ export const FM = {
 	 *  indexer.ts) — this is for Obsidian's native graph specifically. */
 	dailyNote: 'loomDailyNote',
 } as const;
-
-/** Legacy spelling(s) of a loom frontmatter key, still read and migrated. */
-export function legacyFmKeys(key: string): string[] {
-	if (key === FM.tags) return ['pluginTags'];
-	if (key === FM.name) return []; // never existed un-prefixed
-	// Timestamps are loom-owned only — never adopt/delete a bare `created`/
-	// `modified` some other plugin (e.g. Linter) may already maintain.
-	if (key === FM.created || key === FM.modified) return [];
-	const stripped = key.replace(/^loom/, '');
-	return [stripped[0].toLowerCase() + stripped.slice(1)];
-}
 
 /** Parses a loom timestamp frontmatter value (ISO string or epoch-ms number)
  *  to epoch milliseconds, or null when absent/unparseable. */
@@ -759,17 +707,23 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 	};
 }
 
+/** Manual-order key: the `loomSeq` stamp, falling back to creation time so
+ *  unstamped entries stay chronological. */
+export function seqKey(r: { seq: number | null; created: number }): number {
+	return r.seq ?? r.created;
+}
+
+/** Ascending comparator over `seqKey`. */
+export function bySeq(a: { seq: number | null; created: number }, b: { seq: number | null; created: number }): number {
+	return seqKey(a) - seqKey(b);
+}
+
 /** How a quest can end; '' in `questOutcome` means it's still active. */
 export const QUEST_OUTCOMES = ['completed', 'abandoned', 'failed'] as const;
 
-/** Display text for a `questOutcome` value — every render site used to build this
- *  by capitalizing the raw English word (`o[0].toUpperCase() + o.slice(1)`), which
- *  reads correctly in English but never localizes; one shared function instead of
- *  six independent copies of the same capitalize hack. Takes a plain `string`
- *  (matching `EntityRecord.questOutcome`'s own storage type) rather than the
- *  narrower `QUEST_OUTCOMES` union — every call site already branches on `''`
- *  (still active) before reaching this, so it's only ever called with one of
- *  `QUEST_OUTCOMES`' real values in practice. */
+/** Display text for a `questOutcome` value, localized. Takes a plain `string`
+ *  (`EntityRecord.questOutcome`'s storage type); callers branch on `''`
+ *  (still active) first, so it only sees `QUEST_OUTCOMES` values. */
 export function questOutcomeLabel(outcome: string): string {
 	return t(`entityType.quest.outcomes.${outcome}` as LocaleKey);
 }
@@ -872,7 +826,7 @@ export const SCRIPT_ICON = 'file-text';
  * that would otherwise pollute Obsidian's wikilink index if this were a
  * plain `.md` note. Acts and Chapters are parsed out of it into their own
  * entity notes — see `src/prose.ts` for the parser and
- * `src/views/book-view.tsx`/`prose-field.tsx` for the editor. Takes the same
+ * `src/views/book-view.tsx` (on `markdown-field.tsx`) for the editor. Takes the same
  * 12 o'clock home-wheel slot the Script satellite takes in Writer/Script —
  * the two sub-modes are mutually exclusive per project, so only one is ever
  * offered.

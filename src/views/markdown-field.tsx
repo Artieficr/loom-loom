@@ -6,7 +6,6 @@ import {
 	ViewPlugin,
 	ViewUpdate,
 	WidgetType,
-	gutter,
 	keymap,
 	placeholder as cmPlaceholder,
 } from '@codemirror/view';
@@ -20,19 +19,27 @@ import {
 import { App, Menu, Notice, Scope } from 'obsidian';
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { t } from '../i18n';
-import { findAnnotationSpans, newSceneId } from '../fountain';
+import { LOOM_ID_RE_G, findAnnotationSpans } from '../fountain';
 import { CLICK_TO_OPEN_ATTRS } from '../types';
 import type { AltTextEntry, CommentEntry } from './script-notes';
-import type { LinkOption } from './link-textarea';
 import {
-	AnnotationGutterItem,
-	AnnotationGutterMarker,
-	isUnresolvedComment,
+	annotationSpanDecorations,
+	insertMarkerPair,
+	makeAnnotationGutter,
+	makeAnnotationHandlesOverlay,
 	partiallyOverlaps,
 	refreshAnnotations,
 	scrollWithinEditor,
+	syncHandlesOnPageScroll,
 } from './annotation-cm6';
 import { LinkSuggestEntry, buildLinkSuggestExtension } from './link-suggest-cm6';
+
+/** One [[link]] completion: matched/shown by `label`, `insert` goes between
+ *  the brackets (a full `target|display` pair when they differ). */
+export interface LinkOption {
+	label: string;
+	insert: string;
+}
 
 /**
  * Obsidian-flavored live-preview field for the Notes/Description boxes: a
@@ -131,46 +138,21 @@ function overlapsClosedWikilink(line: string, from: number, to: number): boolean
 const plainLinksFacet = Facet.define<boolean, boolean>({ combine: (values) => values.some(Boolean) });
 
 /** Clean display names for wikilink TARGETS that resolve to a Loom entity
- *  (`buildLinkTargetLabels`, common.tsx — `linkTargetOf(record) ->
- *  recordLabel(record, project)`), keyed by the raw target string. This
- *  field is intentionally pure regex/no-`plugin` — resolving a target to a
- *  record happens in the CALLER, once per relevant render, and is handed
- *  down as plain data via the `linkLabels` prop, same decoupling `onOpenLink`
- *  already keeps. Set once per `EditorView` at mount (like `plainLinksFacet`
- *  above) rather than kept live via a `Compartment` reconfigure — this
- *  codebase has no existing Compartment precedent, and the gap it would
- *  close (an entity renamed while another already-open field still shows
- *  its OLD clean name until that field is reopened) is a rare, low-stakes
- *  edge case not worth the added CM6 machinery. A target missing from this
- *  map (a non-Loom note, or a broken link) renders exactly as before this
- *  feature existed — no attempted cleanup. */
+ *  (`buildLinkTargetLabels`, common.tsx), keyed by the raw target string. The
+ *  caller resolves targets and hands them down as plain data (`linkLabels`),
+ *  so this stays pure. Set once per `EditorView` at mount, not reconfigured
+ *  live: an entity renamed while another field is open shows its old clean
+ *  name until that field reopens. A target missing from the map renders raw. */
 const linkLabelsFacet = Facet.define<Map<string, string>, Map<string, string>>({
 	combine: (values) => values[0] ?? new Map(),
 });
 
-/** Prose/Book's hidden Act/Chapter identity marker (`prose.ts`/`fountain.ts`'s
- *  `[[loom:<id>]]` convention) — never a real wikilink, so it's excluded from
- *  `lineTokens` below and hidden outright by `buildDecorations`'s own pass,
- *  same non-exporting-note treatment `fountain-field.tsx` gives it. Leading
- *  `\s*` consumes the single space `ensureBookIds` (prose.ts) always inserts
- *  before the marker too — mirrors that file's own `LOOM_ID_RE_G` exactly;
- *  without it, hiding only the bracket pair left a trailing space genuinely
- *  present (and, once heading hover-underline was added, visibly stretching
- *  the underline a character past the title text). */
-const LOOM_ID_RE = /\s*\[\[loom:[A-Za-z0-9]+\]\]/g;
 
 /** Matches a `[[loom:<id>]]` identity marker OR a `[[loom-comment:<id>]]`/
  *  `[[loom-alt:<id>]]`/`[[/loom-comment:<id>]]`/`[[/loom-alt:<id>]]`
- *  annotation marker's TARGET (the part between `[[` and `]]`, no alias) —
- *  shared by the WIKILINK_RE skip below (none of these are ever a real
- *  wikilink) and any future check needing the same test. The annotation half
- *  matters here specifically because `buildAnnotationDecorations` (this
- *  field's own per-instance plugin, further down) already hides these
- *  markers and marks their wrapped content — without this exclusion,
- *  WIKILINK_RE independently matched the SAME token as an ordinary link
- *  (hiding only `[[`/`]]`, leaving `loom-comment:<id>` itself rendered as
- *  clickable link text), a second, conflicting decoration over the exact
- *  span the annotation pass was already hiding/styling. */
+ *  annotation marker's TARGET (between `[[` and `]]`, no alias). WIKILINK_RE
+ *  skips these — none is a real wikilink, and the annotation pass already
+ *  hides/styles the annotation markers. */
 const LOOM_MARKER_TARGET_RE = /^\/?loom(-comment|-alt)?:[A-Za-z0-9]+$/;
 
 /** Inline tokens of one line, non-overlapping (first match wins). */
@@ -296,9 +278,9 @@ function buildDecorations(view: EditorView): DecorationSet {
 			const lineActive = touches(line.from, line.to);
 
 			// Always hidden, never revealed at the cursor — a Prose Book's Act/
-			// Chapter identity marker (see `LOOM_ID_RE` above), not user content.
-			LOOM_ID_RE.lastIndex = 0;
-			for (let m = LOOM_ID_RE.exec(text); m; m = LOOM_ID_RE.exec(text)) {
+			// Chapter identity marker (`LOOM_ID_RE_G`, fountain.ts), not user content.
+			LOOM_ID_RE_G.lastIndex = 0;
+			for (let m = LOOM_ID_RE_G.exec(text); m; m = LOOM_ID_RE_G.exec(text)) {
 				entries.push({
 					from: line.from + m.index,
 					to: line.from + m.index + m[0].length,
@@ -481,7 +463,7 @@ function displayTextOf(text: string): string {
 				.replace(/^#{1,6}\s/, '')
 				.replace(/^((?:\s*>\s?)+)/, '')
 				.replace(/^(\s*)([-*+])\s/, '$1• ')
-				.replace(LOOM_ID_RE, '');
+				.replace(LOOM_ID_RE_G, '');
 			out = out.replace(WIKILINK_RE, (_m, target: string, alias?: string) =>
 				alias !== undefined && alias !== '' ? alias : target
 			);
@@ -677,7 +659,7 @@ function insertLink(view: EditorView, from: number, to: number, insert: string) 
 	});
 }
 
-/** Inline `[[…` completion over the same options the LinkTextarea offered,
+/** Inline `[[…` completion over the `names` link options,
  *  plus a "+ Create …" entry that spawns a new entity from the typed short
  *  name and links it once created. */
 function linkCompletion(
@@ -745,11 +727,8 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	onBlur?: () => void;
 	names: LinkOption[];
 	/** Clean display names for wikilink targets that resolve to a Loom
-	 *  entity — `buildLinkTargetLabels(plugin, project)` (common.tsx). A
-	 *  target missing from this map (a non-Loom note, or a broken link)
-	 *  renders exactly as it always has, raw target included. Omit entirely
-	 *  for a caller with no project context — every wikilink then renders
-	 *  as before this feature existed. */
+	 *  entity — `buildLinkTargetLabels(plugin, project)` (common.tsx). Targets
+	 *  missing from the map, or every target when omitted, render raw. */
 	linkLabels?: Map<string, string>;
 	/** Ambient link suggester (see link-suggest-cm6.ts) — always on; never
 	 *  mounted at all in a `readOnly` field. */
@@ -802,9 +781,8 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	 *  has no imperative handle a caller could otherwise use to read it back
 	 *  before the swap discards it; only differs from the sidecar's own
 	 *  stored text for that option when such a hand-edit hasn't been
-	 *  persisted yet, mirroring `script-view.tsx`'s own
-	 *  `syncOutgoingAltOption`/`liveAltSpanText` pair for the same reason. */
-	onCycleAlt?: (id: string, outgoingLiveText: string) => void;
+	 *  persisted yet. Absent when this field swapped nothing. */
+	onCycleAlt?: (id: string, outgoingLiveText?: string) => void;
 	/** An alt-text span was right-clicked — open its option picker
 	 *  (`AltTextModal`, project.ts). Also called in `readOnly` mode — the
 	 *  modal's own callbacks are what write the change, not this field. */
@@ -813,7 +791,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 	 *  highlight class without touching the document. */
 	highlightedAnnotationId?: string | null;
 	/** Ctrl/Cmd+click on a `#`/`##` heading line carrying a `[[loom:<id>]]`
-	 *  marker (Prose's Act/Chapter identity marker — see `LOOM_ID_RE` above)
+	 *  marker (Prose's Act/Chapter identity marker — `LOOM_ID_RE_G`, fountain.ts)
 	 *  — the caller resolves the id to an entity and opens it. Ctrl/Cmd-gated
 	 *  rather than a plain click, mirroring `fountain-field.tsx`'s own
 	 *  scene/act heading links: the heading LINE is real editable text (its
@@ -985,25 +963,14 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 					return;
 				}
 			}
-			// Nothing to cycle (one option, or no live span found) — the
-			// caller's own handler already no-ops on this same condition, so
-			// the text passed through here is never actually read.
-			onCycleAltRef.current?.(id, '');
+			// Nothing swapped here (one option, or no live span in this field):
+			// no outgoing text, so the caller reads and writes the span itself.
+			onCycleAltRef.current?.(id);
 		};
 		// Rendered wikilink click, then Ctrl/Cmd+click on a heading — middle
-		// opens a link in a new tab. **Deliberately NOT a click target for
-		// comment/alt-text spans** — this used to open a comment/cycle an
-		// alt-text option on a plain content click, which `fountain-field.tsx`
-		// has NEVER done: confirmed directly against that file, its own
-		// content click handling is Ctrl/Cmd-gated char/scene/act/entity links
-		// ONLY, nothing about `[data-loom-annotation-content]` at all —
-		// comments/alt-text are GUTTER-ICON-ONLY there, on purpose, so a plain
-		// click or the START of a drag-select landing on/inside an already-
-		// annotated span (e.g. extending a selection past it, or just
-		// clicking to place a cursor to edit the wrapped text) never gets
-		// hijacked into opening a popover. The dashed-underline/tint mark on
-		// the content stays purely visual now — `annotationGutter`'s own icon
-		// is the sole interactive entry point, matching Script exactly.
+		// opens a link in a new tab. Comment/alt-text content is NOT a click
+		// target (gutter icon only, like Script), so placing a cursor or
+		// starting a selection inside an annotated span never opens a popover.
 		const openLinkOnMousedown = (event: MouseEvent, view: EditorView): boolean => {
 			if (event.button !== 0 && event.button !== 1) return false;
 			// Ctrl/Cmd+click on a `#`/`##` heading line carrying a `[[loom:<id>]]`
@@ -1032,8 +999,8 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 			}
 			return false;
 		};
-		/** Wraps `range` in a fresh comment/alt-text marker pair — mirrors
-		 *  `fountain-field.tsx`'s `insertMarkerPair`. A freshly created COMMENT
+		/** Wraps `range` in a fresh comment/alt-text marker pair — via
+		 *  `insertMarkerPair` (annotation-cm6.ts). A freshly created COMMENT
 		 *  immediately opens its own popover so there's somewhere to actually
 		 *  type into (mirrors `script-view.tsx`'s own `handleCreateComment`,
 		 *  which does the identical "find the just-rendered icon, open its
@@ -1044,18 +1011,8 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 		 *  field). Alt-text creation has no equivalent single "open this" step
 		 *  here (the CALLER, `useBookAnnotations`'s `handleCreateAlt`, prompts
 		 *  for a second wording itself, mirroring Script's own flow). */
-		const insertMarkerPair = (view: EditorView, kind: 'comment' | 'alt', from: number, to: number) => {
-			const id = newSceneId();
-			const open = `[[loom-${kind}:${id}]]`;
-			const close = `[[/loom-${kind}:${id}]]`;
-			const selectedText = view.state.sliceDoc(from, to);
-			view.dispatch({
-				changes: [
-					{ from, insert: open },
-					{ from: to, insert: close },
-				],
-				selection: { anchor: from + open.length, head: to + open.length },
-			});
+		const insertAnnotation = (view: EditorView, kind: 'comment' | 'alt', from: number, to: number) => {
+			const { id, selectedText } = insertMarkerPair(view, kind, from, to);
 			if (kind === 'comment') {
 				onCreateCommentRef.current?.(id, selectedText);
 				window.requestAnimationFrame(() => {
@@ -1094,7 +1051,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 						.setTitle(t('view.script.contextMenu.comment'))
 						.setIcon('message-square')
 						.setDisabled(overlaps)
-						.onClick(() => insertMarkerPair(view, 'comment', range.from, range.to))
+						.onClick(() => insertAnnotation(view, 'comment', range.from, range.to))
 				);
 			}
 			if (onCreateAltRef.current) {
@@ -1103,7 +1060,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 						.setTitle(t('view.script.contextMenu.altText'))
 						.setIcon('arrow-right-left')
 						.setDisabled(overlaps)
-						.onClick(() => insertMarkerPair(view, 'alt', range.from, range.to))
+						.onClick(() => insertAnnotation(view, 'alt', range.from, range.to))
 				);
 			}
 			menu.showAtMouseEvent(event);
@@ -1119,28 +1076,13 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 		 *  read per-instance props). */
 		function buildAnnotationDecorations(view: EditorView): DecorationSet {
 			const text = view.state.doc.toString();
-			const entries: { from: number; to: number; deco: Decoration }[] = [];
-			for (const span of findAnnotationSpans(text)) {
-				entries.push({ from: span.from, to: span.contentFrom, deco: Decoration.replace({}) });
-				entries.push({ from: span.contentTo, to: span.to, deco: Decoration.replace({}) });
-				if (span.contentFrom < span.contentTo) {
-					const commentEntries = span.kind === 'comment' ? (commentsRef.current[span.id] ?? []) : [];
-					const unresolved = isUnresolvedComment(span.kind, commentEntries);
-					const highlighted = span.id === highlightedAnnotationIdRef.current;
-					const cls =
-						`loom-md-annotation-span loom-md-annotation-span-${span.kind}` +
-						(unresolved ? ' loom-md-annotation-span-unresolved' : '') +
-						(highlighted ? ' loom-md-annotation-span-highlight' : '');
-					entries.push({
-						from: span.contentFrom,
-						to: span.contentTo,
-						deco: Decoration.mark({
-							class: cls,
-							attributes: { 'data-loom-annotation-content': span.id, 'data-loom-annotation-kind': span.kind },
-						}),
-					});
-				}
-			}
+			const entries = annotationSpanDecorations(
+				text,
+				'loom-md',
+				commentsRef.current,
+				highlightedAnnotationIdRef.current,
+				true
+			);
 			entries.sort((a, b) => a.from - b.from);
 			return Decoration.set(
 				entries.map((e) => e.deco.range(e.from, e.to)),
@@ -1162,269 +1104,18 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 			{ decorations: (v) => v.decorations }
 		);
 
-		/** The right-side gutter itself — `side: 'after'` puts it past the
-		 *  content (no CSS reordering needed), one marker per line a span
-		 *  STARTS on. Mirrors `fountain-field.tsx`'s own `annotationGutter`
-		 *  build, including the doc-identity cache (`lineMarker` runs once per
-		 *  visible line per recompute; re-parsing the whole document inside it
-		 *  would redo that parse once per line on screen). `null` when the
-		 *  prop is off — spread into the extensions arrays below only then. */
-		let annotationSpansCache: { doc: EditorState['doc']; spans: ReturnType<typeof findAnnotationSpans> } | null = null;
-		const annotationSpansFor = (v: EditorView) => {
-			if (annotationSpansCache?.doc !== v.state.doc) {
-				annotationSpansCache = { doc: v.state.doc, spans: findAnnotationSpans(v.state.doc.toString()) };
-			}
-			return annotationSpansCache.spans;
-		};
+		/** `null` when the prop is off — spread into the extensions arrays below only then. */
 		const annotationGutterExt = showAnnotationGutter
-			? gutter({
-					class: 'loom-md-annotation-gutter',
-					side: 'after',
-					lineMarker: (gutterView, line) => {
-						const spans = annotationSpansFor(gutterView);
-						const lineNo = gutterView.state.doc.lineAt(line.from).number;
-						const onThisLine = spans.filter((s) => gutterView.state.doc.lineAt(s.from).number === lineNo);
-						if (onThisLine.length === 0) return null;
-						const items: AnnotationGutterItem[] = onThisLine.map((s) => {
-							const commentEntries = s.kind === 'comment' ? (commentsRef.current[s.id] ?? []) : [];
-							return {
-								kind: s.kind,
-								id: s.id,
-								unresolved: isUnresolvedComment(s.kind, commentEntries),
-								highlighted: s.id === highlightedAnnotationIdRef.current,
-							};
-						});
-						return new AnnotationGutterMarker('loom-md', items);
-					},
-					lineMarkerChange: (update) =>
-						update.docChanged || update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations))),
-					initialSpacer: () => new AnnotationGutterMarker('loom-md', []),
-					domEventHandlers: {
-						click: (gutterView, line, event) => {
-							const target = event.target instanceof Element ? event.target : null;
-							const el = target?.closest('[data-loom-annotation-id]');
-							if (!(el instanceof HTMLElement) || !el.dataset.loomAnnotationId) return false;
-							const id = el.dataset.loomAnnotationId;
-							if (el.dataset.loomAnnotationKind === 'comment') {
-								onOpenCommentRef.current?.(id, el.getBoundingClientRect());
-							} else {
-								cycleAltInPlace(gutterView, id);
-							}
-							return true;
-						},
-						contextmenu: (gutterView, line, event) => {
-							const target = event.target instanceof Element ? event.target : null;
-							const el = target?.closest('[data-loom-annotation-id][data-loom-annotation-kind="alt"]');
-							if (!(el instanceof HTMLElement) || !el.dataset.loomAnnotationId) return false;
-							event.preventDefault();
-							onOpenAltMenuRef.current?.(el.dataset.loomAnnotationId);
-							return true;
-						},
-					},
+			? makeAnnotationGutter('loom-md', {
+					comments: () => commentsRef.current,
+					highlightedId: () => highlightedAnnotationIdRef.current,
+					onOpenComment: (id, rect) => onOpenCommentRef.current?.(id, rect),
+					onAltClick: (view, id) => cycleAltInPlace(view, id),
+					onOpenAltMenu: (id) => onOpenAltMenuRef.current?.(id),
 				})
 			: null;
 
-		/** Drags one edge of an EXISTING comment span to relocate it — ported
-		 *  directly from `fountain-field.tsx`'s own `startAnnotationHandleDrag`
-		 *  (see that function's doc comment for the full design rationale: a
-		 *  live fixed-position preview bar tracks the pointer, the actual
-		 *  document edit happens once on drop, dropping back on the start
-		 *  position or somewhere that would partially overlap a DIFFERENT span
-		 *  is a no-op with a `Notice` in the overlap case). Alt-text spans
-		 *  never get a handle (see `AnnotationHandlesOverlay` below) — this
-		 *  only ever runs for `kind === 'comment'`. */
-		function startAnnotationHandleDrag(view: EditorView, id: string, edge: 'start' | 'end', handleEl: HTMLElement) {
-			const preview = view.dom.doc.body.createDiv({ cls: 'loom-md-annotation-drag-preview' });
-			let lastTarget: number | null = null;
-
-			const span = findAnnotationSpans(view.state.doc.toString()).find((s) => s.kind === 'comment' && s.id === id);
-			if (!span) return;
-
-			const clampTarget = (raw: number) =>
-				edge === 'start'
-					? Math.max(0, Math.min(raw, span.contentTo - 1))
-					: Math.max(span.contentFrom + 1, Math.min(raw, view.state.doc.length));
-
-			const onMove = (e: PointerEvent) => {
-				const raw = view.posAtCoords({ x: e.clientX, y: e.clientY });
-				if (raw == null) return;
-				const target = clampTarget(raw);
-				lastTarget = target;
-				const coords = view.coordsAtPos(target);
-				if (!coords) {
-					preview.setCssProps({ display: 'none' });
-					return;
-				}
-				preview.setCssProps({ display: 'block' });
-				preview.style.left = `${coords.left}px`;
-				preview.style.top = `${coords.top}px`;
-				preview.style.height = `${coords.bottom - coords.top}px`;
-			};
-
-			const finish = (commit: boolean) => {
-				handleEl.removeEventListener('pointermove', onMove);
-				handleEl.removeEventListener('pointerup', onUp);
-				handleEl.removeEventListener('pointercancel', onCancel);
-				preview.remove();
-				if (!commit || lastTarget == null) return;
-				const target = lastTarget;
-				const markerFrom = edge === 'start' ? span.from : span.contentTo;
-				const markerTo = edge === 'start' ? span.contentFrom : span.to;
-				if (target === markerFrom) return; // dropped back where it started
-				const text = view.state.doc.toString();
-				const markerText = text.slice(markerFrom, markerTo);
-				const newContentFrom = edge === 'start' ? target : span.contentFrom;
-				const newContentTo = edge === 'end' ? target : span.contentTo;
-				const overlaps = findAnnotationSpans(text).some((s) => {
-					if (s.kind === 'comment' && s.id === id) return false;
-					return partiallyOverlaps(newContentFrom, newContentTo, s.contentFrom, s.contentTo);
-				});
-				if (overlaps) {
-					new Notice(t('view.script.overlapNotice.resize'));
-					return;
-				}
-				view.dispatch({
-					changes: [
-						{ from: markerFrom, to: markerTo, insert: '' },
-						{ from: target, insert: markerText },
-					],
-				});
-			};
-			const onUp = () => finish(true);
-			const onCancel = () => finish(false);
-			handleEl.addEventListener('pointermove', onMove);
-			handleEl.addEventListener('pointerup', onUp);
-			handleEl.addEventListener('pointercancel', onCancel);
-		}
-
-		/** Comment-span drag handles, ported directly from `fountain-field.tsx`'s
-		 *  own `AnnotationHandlesOverlay` (see that class's doc comment for why
-		 *  it's a `position: fixed` plain-DOM overlay — positioned via
-		 *  `coordsAtPos` — rather than a `Decoration.widget`: even a zero-width
-		 *  inline widget occupies real space in CM6's content flow, and one
-		 *  sitting exactly at a span's edge corrupted CM6's own line-layout
-		 *  measurement badly enough to break click-to-caret on that paragraph's
-		 *  later wrapped lines). **`scheduleSync`'s `setTimeout` (never
-		 *  `requestAnimationFrame`) and the `try/catch` around `coordsAtPos`
-		 *  are load-bearing, not stylistic** — `fountain-field.tsx`'s own doc
-		 *  comment on this documents a REAL crash ("Reading the editor layout
-		 *  isn't allowed during an update") that `requestAnimationFrame` alone
-		 *  did not fix, because CM6 schedules its own internal measure work via
-		 *  rAF too; only a genuinely separate macrotask (`setTimeout`) reliably
-		 *  lands outside CM6's own forbidden-to-read-layout window. Do not
-		 *  "simplify" this back to rAF or a synchronous call. */
-		class AnnotationHandlesOverlay {
-			private els = new Map<string, HTMLElement>();
-			private destroyed = false;
-			private syncQueued = false;
-
-			constructor(private view: EditorView) {
-				this.scheduleSync();
-			}
-
-			update(update: ViewUpdate) {
-				if (
-					update.docChanged ||
-					update.viewportChanged ||
-					update.geometryChanged ||
-					update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshAnnotations)))
-				) {
-					this.scheduleSync();
-				}
-			}
-
-			private scheduleSync() {
-				if (this.syncQueued) return;
-				this.syncQueued = true;
-				this.view.dom.win.setTimeout(() => {
-					this.syncQueued = false;
-					if (!this.destroyed) this.sync();
-				}, 0);
-			}
-
-			sync() {
-				// Mirrors the guard `fountain-field.tsx`'s own `sync()` needed for a
-				// real, reported leak: `scheduleSync`'s callback already checks
-				// `destroyed`, but this is ALSO called directly from the outer
-				// `document`-level scroll listener registered alongside view
-				// creation below, which could still fire after `destroy()` had
-				// already run and re-create handle spans nothing would ever clean
-				// up again.
-				if (this.destroyed) return;
-				const view = this.view;
-				// Mirrors `fountain-field.tsx`'s own two extra `sync()` guards (see
-				// that file's doc comment on this same spot for the full
-				// reasoning): a view whose DOM was permanently removed without
-				// `destroy()` firing gets cleaned up now; a view that's merely in a
-				// currently-BACKGROUND tab (Obsidian keeps it in the DOM, just
-				// hidden — `offsetParent` goes `null`) gets its handles hidden
-				// rather than left positioned at stale coordinates, since these
-				// `position: fixed` elements sit on `document.body` and aren't
-				// clipped by a hidden ancestor at all.
-				if (!view.dom.isConnected) {
-					this.destroy();
-					return;
-				}
-				if (view.dom.offsetParent === null) {
-					for (const el of this.els.values()) el.setCssProps({ display: 'none' });
-					return;
-				}
-				const text = view.state.doc.toString();
-				const spans = findAnnotationSpans(text).filter((s) => s.kind === 'comment' && s.contentFrom < s.contentTo);
-				const wanted = new Set<string>();
-				for (const span of spans) {
-					for (const edge of ['start', 'end'] as const) {
-						const key = `${span.id}:${edge}`;
-						wanted.add(key);
-						let el = this.els.get(key);
-						if (!el) {
-							el = view.dom.doc.body.createSpan({
-								cls: `loom-md-annotation-handle loom-md-annotation-handle-${edge}`,
-							});
-							el.dataset.loomAnnotationHandleId = span.id;
-							el.dataset.loomAnnotationHandleEdge = edge;
-							const { id } = span;
-							const handleEl = el;
-							handleEl.addEventListener('pointerdown', (e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								handleEl.setPointerCapture(e.pointerId);
-								startAnnotationHandleDrag(view, id, edge, handleEl);
-							});
-							this.els.set(key, handleEl);
-						}
-						const pos = edge === 'start' ? span.contentFrom : span.contentTo;
-						let coords: { left: number; top: number; bottom: number } | null = null;
-						try {
-							coords = view.coordsAtPos(pos, edge === 'start' ? 1 : -1);
-						} catch (e) {
-							console.error('Loom Loom: annotation handle could not read layout this frame', e);
-						}
-						if (coords) {
-							el.setCssProps({ display: 'block' });
-							el.style.left = `${coords.left}px`;
-							el.style.top = `${coords.top}px`;
-							el.style.height = `${coords.bottom - coords.top}px`;
-						} else {
-							el.setCssProps({ display: 'none' });
-						}
-					}
-				}
-				for (const [key, el] of this.els) {
-					if (!wanted.has(key)) {
-						el.remove();
-						this.els.delete(key);
-					}
-				}
-			}
-
-			destroy() {
-				this.destroyed = true;
-				for (const el of this.els.values()) el.remove();
-				this.els.clear();
-			}
-		}
-		const annotationHandlesOverlay = ViewPlugin.fromClass(AnnotationHandlesOverlay);
+		const annotationHandlesOverlay = makeAnnotationHandlesOverlay('md');
 
 		// Ambient link suggester (link-suggest-cm6.ts) — only ever mounted into
 		// the editable extensions branch below (see there). Corpus cached keyed
@@ -1442,15 +1133,10 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 					for (const n of source) {
 						if (exclude !== undefined && (n.insert === exclude || n.insert.startsWith(`${exclude}|`))) continue;
 						const key = n.label.toLowerCase();
-						// `n.insert` alone (`target|label`, or bare `label` when they're
-						// equal) is NOT a link — it's what the EXISTING `[[` completion
-						// splices between brackets that are already there. The ambient
-						// suggester has no such context, so it has to supply the
-						// brackets itself — a real, reported bug otherwise (the
-						// "suggestion" landed as inert plain text, not a link at all).
-						// `displayLabel` is what the pill actually shows: never the raw
-						// `target|label` (the entity's ugly managed filename), always
-						// the clean label that was actually typed/matched.
+						// `n.insert` (`target|label`) is what the `[[` completion
+						// splices between existing brackets; the ambient suggester has
+						// none, so it supplies them. `displayLabel` is the clean label
+						// the pill shows, never the raw managed filename.
 						if (!map.has(key)) map.set(key, { insert: `[[${n.insert}]]`, displayLabel: n.label });
 					}
 					ambientCorpusCache = { source, map };
@@ -1469,42 +1155,19 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 			parent: hostRef.current,
 			state: EditorState.create({
 				doc: value,
-				// A real, reported bug in the ORIGINAL version of this comment's
-				// own reasoning: `EditorState.readOnly` (blocks EDITS/transactions)
-				// and `EditorView.editable` (controls whether the DOM itself is
-				// `contenteditable`) are two SEPARATE CM6 facets — this used to set
-				// only the former, leaving the content DOM genuinely
-				// `contenteditable="true"`, which is what drew a blinking
-				// text-input caret and let one be PLACED by clicking, even though
-				// typing into it did nothing (`readOnly` silently ate the
-				// transaction). Preview is meant to read like Script's own Pages
-				// preview — plain text you can select and copy, never something
-				// that visually invites typing. `EditorView.editable.of(false)`
-				// closes that gap; CM6 documents this exact split ("not editable,
-				// but the content will still be selectable"), so the native
-				// selection/`copy`-event handling below is UNAFFECTED — neither
-				// depends on `contenteditable`, only on the browser's ordinary
-				// text-selection machinery, which works the same on any DOM text.
+				// Read-only needs both facets: `EditorState.readOnly` blocks edits,
+				// `EditorView.editable.of(false)` drops `contenteditable` so there's
+				// no caret to place. Text stays selectable and copyable — neither
+				// depends on `contenteditable`.
 				extensions: readOnly
 					? [
 							EditorState.readOnly.of(true),
 							EditorView.editable.of(false),
-							// A real, found bug: `contentEditable="false"` (what
-							// `editable.of(false)` sets) does NOT make an element
-							// focusable via `.focus()` on its own — it needs an
-							// explicit `tabindex`, which this field never set. CM6's
-							// own internal mouse-selection start (`handlers.mousedown`
-							// in @codemirror/view) calls `focusPreventScroll(contentDOM)`
-							// to focus it before rendering a drag-selection into the
-							// DOM; without a tabindex that call silently no-ops, so
-							// `view.hasFocus` never becomes true during the drag and
-							// `DocView.updateSelection`'s own `focused` gate (its
-							// `fromPointer` bypass is dead code in this CM6 version —
-							// nothing ever passes it `true`) never lets the native
-							// selection actually render — text in a readOnly field
-							// looked completely unselectable by mouse. `tabindex="-1"`
-							// makes the element PROGRAMMATICALLY focusable (never added
-							// to the tab order) without changing anything else.
+							// `contenteditable="false"` isn't focusable without a
+							// tabindex, and CM6's mouse-selection start focuses
+							// `contentDOM` before rendering a drag-selection — without
+							// focus the selection never renders. `-1` makes it
+							// programmatically focusable, out of the tab order.
 							EditorView.contentAttributes.of({ tabindex: '-1' }),
 							plainLinksFacet.of(plainLinks ?? false),
 							linkLabelsFacet.of(linkLabels ?? new Map<string, string>()),
@@ -1572,9 +1235,8 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 							// lowest precedence so an open completion still accepts on Tab.
 							keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
 							EditorView.updateListener.of((update) => {
-								// Excludes the external-value-sync effect's own dispatch —
-								// see that dispatch's own doc comment for the bug this
-								// guard fixes (mirrors the identical fix in fountain-field.tsx).
+								// Excludes the external-value-sync's own dispatch
+								// (`userEvent: 'loom.externalSync'`) — it isn't an edit.
 								if (update.docChanged && !update.transactions.some((tr) => tr.isUserEvent('loom.externalSync'))) {
 									onChangeRef.current(update.state.doc.toString());
 								}
@@ -1604,50 +1266,14 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 			}),
 		});
 		viewRef.current = view;
-		// Mirrors `fountain-field.tsx`'s own outer-page-scroll tracking — a real,
-		// previously-missing gap: `AnnotationHandlesOverlay`'s own `update()`
-		// only re-syncs handle positions on CM6-internal viewport/geometry
-		// changes (the editor's OWN scroll), never the OUTER page scrolling the
-		// whole editor box around on screen, which CM6 has no reason to know or
-		// care about — without this, a comment span's drag handles could sit at
-		// stale screen coordinates whenever something outside the editor itself
-		// scrolled. Only wired when the field is actually editable —
-		// `annotationHandlesOverlay` is only mounted into the extensions array
-		// in that branch above, so `view.plugin(...)` would always return
-		// `undefined` here otherwise. Same capture-phase "any scroll, anywhere"
-		// listener the comment popover's own scroll-tracking uses, and the same
-		// `setTimeout`-not-`requestAnimationFrame` deferral `scheduleSync`
-		// needs: a native 'scroll' event can fire SYNCHRONOUSLY from inside
-		// CM6's own scroll-into-view machinery, and a capture-phase listener
-		// runs nested inside that same call stack — squarely inside the same
-		// "reading layout isn't allowed during an update" window `scheduleSync`
-		// exists to dodge (confirmed by a live crash in `fountain-field.tsx`'s
-		// own history); `requestAnimationFrame` doesn't reliably escape it,
-		// since CM6 schedules its own internal measure work via rAF too.
-		let scrollSyncQueued = false;
-		const onAnyScroll = () => {
-			if (scrollSyncQueued) return;
-			scrollSyncQueued = true;
-			view.dom.win.setTimeout(() => {
-				scrollSyncQueued = false;
-				view.plugin(annotationHandlesOverlay)?.sync();
-			}, 0);
-		};
-		if (!readOnly) document.addEventListener('scroll', onAnyScroll, true);
+		// The handle overlay is only mounted when editable.
+		const stopScrollSync = readOnly ? null : syncHandlesOnPageScroll(view, annotationHandlesOverlay);
 		return () => {
-			if (!readOnly) document.removeEventListener('scroll', onAnyScroll, true);
+			stopScrollSync?.();
 			popScope();
-			// Explicit, not relying solely on `destroy()` triggering CM6's own
-			// `focusChanged` update via the native DOM blur a detached
-			// contentEditable normally fires — a real, reported bug: a caller
-			// that buffers locally and commits only on blur (Book/Act's unified
-			// editor, via `onBlur`) could unmount WITHOUT that teardown blur ever
-			// reaching `onBlurRef`, silently losing whatever was still buffered
-			// (e.g. an in-progress Act/Chapter title edit) the moment the field
-			// went away — reopening then showed the pre-edit text again, since
-			// nothing had ever actually written it. Guaranteeing the flush here,
-			// independent of CM6's own event plumbing, closes that gap; a no-op
-			// when nothing is pending (every ordinary Notes/Description field).
+			// Explicit, rather than relying on `destroy()`'s native blur: a caller
+			// that commits only on blur must still flush what it buffered on
+			// unmount. A no-op when nothing is pending.
 			if (view.hasFocus) onBlurRef.current?.();
 			view.destroy();
 			viewRef.current = null;

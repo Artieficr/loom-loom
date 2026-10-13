@@ -13,8 +13,6 @@ React home view as a `FileView`), it **names the project** (its basename), and i
 **stores per-project config** as JSON (date format, custom calendar). Multiple projects
 coexist per vault; every list/timeline/graph view carries its project root in view
 state, and commands resolve a project via single-project fallback or a fuzzy picker.
-Pre-.loom installs are migrated on load: the legacy `projectRoot` setting gets a .loom
-file scaffolded into it once, then the setting is cleared.
 
 New projects are always created under one **Loom root** folder (`settings.loomRoot`,
 default `loom-loom`), in a subfolder per kind (`<root>/Writer/<name>` — the English kind
@@ -55,9 +53,9 @@ own unsaved text and write that text back.
         │  Obsidian metadataCache (parses YAML)            │ cachedRead + JSON.parse
         ▼                                                  ▼
 LoomIndexer (src/indexer.ts) — Map<path, EntityRecord> + Map<loomPath, ProjectDef>
-        │  'changed' event + version counter        │ debounced JSON snapshot
-        ▼                                           ▼
-React views (useIndexVersion hook)         <plugin dir>/index-cache.json
+        │  'changed' event + version counter
+        ▼
+React views (useIndexVersion hook)
 ```
 
 - **Build**: on `workspace.onLayoutReady`, the indexer finds all .loom files, then walks
@@ -70,10 +68,8 @@ React views (useIndexVersion hook)         <plugin dir>/index-cache.json
 - **Separation rule**: indexing code has zero rendering concerns; views query the indexer
   and subscribe via `useIndexVersion` (a `useSyncExternalStore` over the indexer's
   `changed` event). Views never re-derive relationships by scanning files.
-- **Persistence**: the JSON snapshot exists for debugging and potential fast cold starts.
-  It is *never* read back as a source of truth within a session — the in-memory index is
-  authoritative and always freshly derivable. It's written with `vault.adapter` because
-  the Vault API can't write into the plugin's config directory.
+- **No persistence**: the index lives in memory only and is rebuilt from the vault on
+  load — it is always freshly derivable, so nothing is written to disk.
 
 ## Relationship model
 
@@ -202,10 +198,9 @@ autocomplete inserts `[[basename|display]]` so raw markdown stays readable. A mi
 ## Frontmatter conventions
 
 Every plugin-owned key is loom-prefixed (`FM` registry in `src/types.ts`) so a
-note's properties make obvious what belongs to the plugin. Reads fall back to legacy
-un-prefixed spellings (`fmLoom`/`fmLoomValue`); writes go through `src/fm.ts` and
-clean legacy spellings up. `LoomIndexer.migrateFiles` runs once per load
-(idempotent) and rewrites old notes: legacy keys → loom keys, seeds `loomName` +
+note's properties make obvious what belongs to the plugin. Reads are
+case-insensitive (`fmValue`); writes go through `src/fm.ts` (`setLoomKey`).
+`LoomIndexer.migrateFiles` runs once per load (idempotent): it seeds `loomName` +
 alias from the basename, renames files to the managed convention. Nested keys inside
 list entries (`session`/`text`/`involved`, `type`/`target`, `character`/`role`) stay
 unprefixed — they only exist inside a loom-prefixed parent. `aliases` is

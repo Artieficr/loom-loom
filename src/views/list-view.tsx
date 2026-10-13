@@ -3,7 +3,6 @@ import {
 	Fragment,
 	MouseEvent as ReactMouseEvent,
 	ReactElement,
-	useEffect,
 	useMemo,
 	useRef,
 	useState,
@@ -26,6 +25,7 @@ import {
 	isEntityType,
 	mapsLabel,
 	pcGroupStub,
+	seqKey,
 } from '../types';
 import { features, projectRoleType, roleOf } from '../project-kind';
 import {
@@ -37,16 +37,15 @@ import {
 	SessionConflictModal,
 	TextInputModal,
 	copyEntityRecord,
-	purgeEntityReferences,
 	recordPickLabel,
 	renameEntityRecord,
-	sessionFileName,
 } from '../project';
+import { managedSessionFileName } from '../naming';
 import { reconcileSessionBeforeLink } from '../gm-decision-point';
 import { recomputeEventLocks, waitForMetadataSync } from '../gm-lock';
-import { LocaleKey, t } from '../i18n';
+import { LocaleKey, article, t } from '../i18n';
 import { linkTargetOf } from '../indexer';
-import { fmLoomValue, setLoomKey } from '../fm';
+import { appendLoomList, involveInFirstNote, newNoteEntry, setLoomKey, writeFmAt } from '../fm';
 import { LoomReactView } from './react-view';
 import {
 	EntityChip,
@@ -56,15 +55,13 @@ import {
 	SearchableSelect,
 	Truncated,
 	ViewShell,
-	locationLabel,
 	noProjectMessage,
-	recordDate,
-	recordLabel,
+	useCloseOnOutsideClick,
 } from './common';
+import { locationLabel, recordDate, recordLabel } from '../display';
 import { resolveProject, useIndexVersion } from './hooks';
-import { deleteScriptEntity } from './script-view';
+import { deleteEntity, deleteEntityMessage } from './script-view';
 import { useScriptBuffer } from './script-buffer';
-import { deleteBookEntity } from './book-view';
 import { liveActIds, liveSceneIds, parseFountain } from '../fountain';
 
 type SortMode = 'name' | 'created' | 'modified' | 'date' | 'order' | 'appearance';
@@ -130,8 +127,8 @@ function compare(
 		case 'order': {
 			// Script order for acts and scenes: `loomSeq` is stamped from the
 			// script itself, so this reads the story front to back.
-			const ka = a.seq ?? a.created;
-			const kb = b.seq ?? b.created;
+			const ka = seqKey(a);
+			const kb = seqKey(b);
 			return ka === kb ? a.name.localeCompare(b.name) : ka - kb;
 		}
 		case 'appearance': {
@@ -223,14 +220,7 @@ function EntityList({
 	 *  panel that pushes the list down. */
 	const [filterPanelOpen, setFilterPanelOpen] = useState(false);
 	const filterPanelRef = useRef<HTMLDivElement>(null);
-	useEffect(() => {
-		if (!filterPanelOpen) return;
-		const onDown = (e: PointerEvent) => {
-			if (!filterPanelRef.current?.contains(e.target as Node)) setFilterPanelOpen(false);
-		};
-		document.addEventListener('pointerdown', onDown, true);
-		return () => document.removeEventListener('pointerdown', onDown, true);
-	}, [filterPanelOpen]);
+	useCloseOnOutsideClick(filterPanelRef, filterPanelOpen, () => setFilterPanelOpen(false));
 	/** Locations only: explicit per-parent collapse choices; parents absent
 	 *  here auto-collapse once they hold more than 5 sublocations. */
 	const [collapseOverride, setCollapseOverride] = useState<ReadonlyMap<string, boolean>>(new Map());
@@ -394,22 +384,15 @@ function EntityList({
 	const anchorLabel = entityLabel(anchorType).toLowerCase();
 	const beatLabel = entityLabel(beatType).toLowerCase();
 	const addBeatTitle = t('view.list.addBeatTitle', {
-		article: /^[aeiou]/.test(beatLabel) ? 'an' : 'a',
+		article: article(beatLabel),
 		beat: beatLabel,
 	});
 
 	// --- Event filter matching (involved incl. group snapshots; a location
 	// matches its own events and every descendant's, like location pages). ---
-	const locDescendsFrom = (place: EntityRecord, ancestorPath: string): boolean => {
-		const seen = new Set<string>();
-		let cur: EntityRecord | null = place;
-		while (cur && cur.type === 'location' && !seen.has(cur.path)) {
-			if (cur.path === ancestorPath) return true;
-			seen.add(cur.path);
-			cur = cur.parentLocation !== null ? plugin.indexer.resolve(cur.parentLocation, cur.path) : null;
-		}
-		return false;
-	};
+	const locDescendsFrom = (place: EntityRecord, ancestorPath: string): boolean =>
+		place.type === 'location' &&
+		[place, ...plugin.indexer.locationAncestors(place)].some((p) => p.path === ancestorPath);
 	// Events read their manual `sessionNotes.involved`/`.places`; Scenes have
 	// no such field — "who/where is in it" is entirely script-derived
 	// (`sceneCast`/`sceneFactions`/`sceneItems`/`sceneMentionedLocations`,
@@ -423,14 +406,7 @@ function EntityList({
 			);
 		}
 		if (r.type === 'act') {
-			return plugin.indexer
-				.getAll('scene', r.project)
-				.some(
-					(sc) =>
-						sc.sceneAct !== '' &&
-						plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === r.path &&
-						eventHasInvolved(sc, path)
-				);
+			return plugin.indexer.membersOfAct(r, 'scene').some((sc) => eventHasInvolved(sc, path));
 		}
 		return r.sessionNotes.some((n) =>
 			[...n.involved, ...n.group].some((lp) => plugin.indexer.resolve(lp, r.path)?.path === path)
@@ -443,14 +419,7 @@ function EntityList({
 			return loc?.type === 'location' && locDescendsFrom(loc, path);
 		}
 		if (r.type === 'act') {
-			return plugin.indexer
-				.getAll('scene', r.project)
-				.some(
-					(sc) =>
-						sc.sceneAct !== '' &&
-						plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === r.path &&
-						eventAtLocation(sc, path)
-				);
+			return plugin.indexer.membersOfAct(r, 'scene').some((sc) => eventAtLocation(sc, path));
 		}
 		return r.sessionNotes.some((n) =>
 			n.places.some((lp) => {
@@ -508,19 +477,12 @@ function EntityList({
 		characterAppearance,
 	]);
 
-	/** Scene/Act counter: each one's position in canonical SCRIPT order
-	 *  (ascending, ignoring whatever sort/direction is currently on screen) —
-	 *  a fixed property of the entity, not "which row happens to be drawn
-	 *  first". Without this, reversing the sort direction just recounted
-	 *  1..N from the new top instead of flipping which number lands on which
-	 *  row, so the last scene read "1" while ascending. Built from `records`
-	 *  (the current search/filter set), so numbering stays dense under a
-	 *  filter rather than showing gappy global positions. **Orphans excluded
-	 *  entirely** (not just skipped in the sequence) — this is a SCRIPT
-	 *  position, and a note no longer backed by a heading/section has none;
-	 *  counting it would both hand it a number that means nothing and inflate
-	 *  every number after it past what the script itself actually contains.
-	 *  An orphan's row simply shows no number (`scriptOrder.get` misses). */
+	/** Scene/Act counter: each one's position in canonical SCRIPT order,
+	 *  independent of the on-screen sort/direction, so reversing the sort
+	 *  flips which number lands on which row. Built from `records` (the
+	 *  current search/filter set), so numbering stays dense under a filter.
+	 *  Orphans (no heading/section in the script) have no script position:
+	 *  they're left out and their rows show no number. */
 	const scriptOrder = useMemo(() => {
 		if (type !== 'scene' && type !== 'act') return new Map<string, number>();
 		const canonical = [...records]
@@ -674,17 +636,10 @@ function EntityList({
 	}
 
 	// --- Context-menu write helpers (all through the record's frontmatter). ---
-	const writeFmOf = (r: EntityRecord, fn: (fm: Record<string, unknown>) => void) => {
-		const file = plugin.app.vault.getFileByPath(r.path);
-		if (file) void plugin.app.fileManager.processFrontMatter(file, fn);
-	};
+	const writeFmOf = (r: EntityRecord, fn: (fm: Record<string, unknown>) => void) =>
+		void writeFmAt(plugin.app, r.path, fn);
 	const appendFmList = (r: EntityRecord, key: string, value: unknown) =>
-		writeFmOf(r, (fm) => {
-			const cur = fmLoomValue(fm, key);
-			const list = Array.isArray(cur) ? [...(cur as unknown[])] : [];
-			list.push(value);
-			setLoomKey(fm, key, list);
-		});
+		writeFmOf(r, (fm) => appendLoomList(fm, key, value));
 	const toggleTagOf = (r: EntityRecord, tag: string) =>
 		writeFmOf(r, (fm) => {
 			const next = r.loomTags.includes(tag)
@@ -697,25 +652,7 @@ function EntityList({
 	 *  the list counterpart of the pages' "Add an event…". */
 	const involveInEvent = (event: EntityRecord, r: EntityRecord) => {
 		const key = r.type === 'location' ? 'places' : 'involved';
-		const link = `[[${linkTargetOf(r)}]]`;
-		writeFmOf(event, (fm) => {
-			const cur = fmLoomValue(fm, FM.sessionNotes);
-			const arr = Array.isArray(cur) ? [...(cur as unknown[])] : [];
-			if (arr.length === 0) {
-				arr.push({ session: '', text: '', seq: Date.now(), [key]: [link] });
-			} else {
-				const first = arr[0];
-				const note: Record<string, unknown> =
-					typeof first === 'object' && first !== null
-						? { ...(first as Record<string, unknown>) }
-						: { session: '', text: typeof first === 'string' ? first : '' };
-				const list = Array.isArray(note[key]) ? [...(note[key] as unknown[])] : [];
-				list.push(link);
-				note[key] = list;
-				arr[0] = note;
-			}
-			setLoomKey(fm, FM.sessionNotes, arr);
-		});
+		writeFmOf(event, (fm) => involveInFirstNote(fm, key, `[[${linkTargetOf(r)}]]`));
 	};
 	const pickEventFor = (r: EntityRecord) => {
 		const already = (ev: EntityRecord) =>
@@ -737,11 +674,7 @@ function EntityList({
 				.getAll(anchorType, project.root)
 				.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)),
 			(ses) =>
-				appendFmList(r, FM.sessionNotes, {
-					session: `[[${linkTargetOf(ses)}]]`,
-					text: '',
-					seq: Date.now(),
-				}),
+				appendFmList(r, FM.sessionNotes, newNoteEntry(`[[${linkTargetOf(ses)}]]`)),
 			t('view.list.pickAnchor', { anchor: anchorLabel }),
 			pickLabel
 		).open();
@@ -755,7 +688,7 @@ function EntityList({
 				writeFmOf(r, (fm) => setLoomKey(fm, FM.date, value));
 				const file = plugin.app.vault.getFileByPath(r.path);
 				if (!file || !project) return;
-				const base = sessionFileName(project, value);
+				const base = managedSessionFileName(project.name, value);
 				const parent = file.parent?.path ?? '';
 				const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
 				if (newPath !== file.path && !plugin.app.vault.getAbstractFileByPath(newPath)) {
@@ -813,49 +746,14 @@ function EntityList({
 	const addBeatMenuItem = (menu: Menu, r: EntityRecord) =>
 		menu.addItem((i) => i.setTitle(addBeatTitle).setIcon(ENTITY_META[beatType].icon).onClick(() => pickEventFor(r)));
 
-	// A scene/act IS its stretch of the script — deleting the note while
-	// leaving the writing behind would just resurrect it on the next parse, so
-	// the two go together; deleting an act also takes its scenes' notes
-	// with it (`deleteScriptEntity`, script-view.tsx). An Act/Chapter in a
-	// Prose project is the identical story one level over, against the Book
-	// instead of the script (`deleteBookEntity`, book-view.tsx). Both gated on
-	// the PROJECT's own kind, not just the record's own `actId`/`sceneId`/
-	// `chapterId` — an Act record always carries an `actId` regardless of
-	// which sub-mode the project is in, so checking that alone would route a
-	// Prose project's Act through the Fountain-only `deleteScriptEntity`
-	// (which no-ops against a script that doesn't exist there) instead of
-	// `deleteBookEntity`.
-	const scriptBacked = (r: EntityRecord): boolean =>
-		features(project?.config).script &&
-		((r.type === 'act' && r.actId !== '') || (r.type === 'scene' && r.sceneId !== ''));
-	const bookBacked = (r: EntityRecord): boolean =>
-		features(project?.config).book &&
-		((r.type === 'act' && r.actId !== '') || (r.type === 'chapter' && r.chapterId !== ''));
-	const deleteMessage = (r: EntityRecord): string =>
-		scriptBacked(r)
-			? r.type === 'act'
-				? t('view.list.deleteMessageAct')
-				: t('view.list.deleteMessageScene')
-			: bookBacked(r)
-				? r.type === 'act'
-					? t('view.list.deleteMessageBookAct')
-					: t('view.list.deleteMessageBookChapter')
-				: t('view.list.deleteMessageGeneral');
-	const deleteRow = (r: EntityRecord): void => {
-		if (scriptBacked(r)) {
-			void deleteScriptEntity(plugin, project, r);
-			return;
-		}
-		if (bookBacked(r)) {
-			void deleteBookEntity(plugin, project, r);
-			return;
-		}
-		const file = plugin.app.vault.getFileByPath(r.path);
-		if (!file) return;
-		void purgeEntityReferences(plugin, r.path, r.project).finally(() =>
-			plugin.app.fileManager.trashFile(file)
-		);
-	};
+	const confirmDeleteRow = (r: EntityRecord) =>
+		new ConfirmModal(
+			plugin.app,
+			t('view.list.deleteConfirmTitle', { name: recordLabel(r, project) }),
+			deleteEntityMessage(project, r),
+			() => void deleteEntity(plugin, project, r),
+			t('project.common.delete')
+		).open();
 
 	const onRowMenu = (e: ReactMouseEvent, r: EntityRecord) => {
 		e.preventDefault();
@@ -1018,13 +916,9 @@ function EntityList({
 								.getAll('event', project.root)
 								.filter((ev) => plugin.indexer.resolve(ev.decisionPoint ?? '', ev.path)?.path !== r.path)
 								.sort((a, b) => a.name.localeCompare(b.name)),
-							// Mirrors `addDecisionPointEvent` (entity-view.tsx) rather than a
-							// bare `writeFmOf` — this is the SAME action from a second entry
-							// point, and it needs the same guarantees: a real session
-							// conflict must be resolved (not silently picked a side), and
-							// the lock state has to be recomputed once the link lands, or a
-							// newly-cascaded event never shows as Locked until an unrelated
-							// edit elsewhere happens to trigger a recompute.
+							// Same as `addDecisionPointEvent` (entity-view.tsx): resolve a
+							// real session conflict, and recompute the lock state once the
+							// link lands.
 							(ev) => {
 								void (async () => {
 									const conflict = await reconcileSessionBeforeLink(plugin.app, plugin.indexer, r, ev);
@@ -1248,15 +1142,7 @@ function EntityList({
 				.setTitle(t('project.common.delete'))
 				.setIcon('trash-2')
 				.setWarning(true)
-				.onClick(() =>
-					new ConfirmModal(
-						plugin.app,
-						t('view.list.deleteConfirmTitle', { name: recordLabel(r, project) }),
-						deleteMessage(r),
-						() => deleteRow(r),
-						t('project.common.delete')
-					).open()
-				)
+				.onClick(() => confirmDeleteRow(r))
 		);
 		menu.showAtMouseEvent(e.nativeEvent);
 	};
@@ -1430,7 +1316,6 @@ function EntityList({
 				>
 					<Icon
 						name={allCollapsed ? 'list-chevrons-up-down' : 'list-chevrons-down-up'}
-						fallback={allCollapsed ? 'chevrons-up-down' : 'chevrons-down-up'}
 					/>
 				</button>
 			) : null}
@@ -1462,16 +1347,13 @@ function EntityList({
 
 	/** A scene's own recognized cast, resolved from `sceneCast`. */
 	const sceneCastOf = (r: EntityRecord): EntityRecord[] =>
-		r.sceneCast
-			.map((lp) => plugin.indexer.resolve(lp, r.path))
-			.filter((c): c is EntityRecord => c != null);
+		plugin.indexer.resolveAll(r.sceneCast, r.path);
 	/** An act's cast: the union of every scene's cast under it, in
 	 *  first-seen order — acts don't carry their own cast field, this
 	 *  reads it straight off the scenes that point at them via `sceneAct`. */
 	const actCastOf = (r: EntityRecord): EntityRecord[] => {
 		const seen = new Map<string, EntityRecord>();
-		for (const sc of plugin.indexer.getAll('scene', r.project)) {
-			if (sc.sceneAct === '' || plugin.indexer.resolve(sc.sceneAct, sc.path)?.path !== r.path) continue;
+		for (const sc of plugin.indexer.membersOfAct(r, 'scene')) {
 			for (const c of sceneCastOf(sc)) seen.set(c.path, c);
 		}
 		return [...seen.values()];
@@ -1565,13 +1447,7 @@ function EntityList({
 					aria-label={t('project.common.delete')}
 					onClick={(e) => {
 						e.stopPropagation();
-						new ConfirmModal(
-							plugin.app,
-							t('view.list.deleteConfirmTitle', { name: recordLabel(r, project) }),
-							deleteMessage(r),
-							() => deleteRow(r),
-							t('project.common.delete')
-						).open();
+						confirmDeleteRow(r);
 					}}
 				>
 					<Icon name="trash-2" />

@@ -6,8 +6,7 @@ import { CachedLicenseState, LicenseStatus, LicenseTier } from './types';
 import { t } from '../i18n';
 
 /** Floor between automatic re-checks, so app launches / the periodic timer in
- *  main.ts can't hammer the provider — a manual "Re-check now" click bypasses
- *  this (see `revalidateNow`'s `force` param). */
+ *  main.ts can't hammer the provider (`revalidateNow`'s `force` bypasses it). */
 const MIN_RECHECK_GAP_MS = 12 * 60 * 60 * 1000;
 
 /**
@@ -76,7 +75,7 @@ export class LicenseManager {
 				this.cache.lastError = null;
 			} else {
 				this.cache.lastCheckOk = false;
-				this.cache.lastError = result.reason ?? 'Could not activate this license key.';
+				this.cache.lastError = result.reason ?? t('settings.license.activateFailed');
 			}
 			saveCache(this.app, this.cache);
 			return result;
@@ -90,18 +89,12 @@ export class LicenseManager {
 		}
 	}
 
-	/** Frees this device's slot server-side. A thrown "unreachable" error is
-	 *  reported back as `{ok:false, unreachable:true}` rather than retried or
-	 *  worked around locally — the settings UI just surfaces that and leaves
-	 *  the cached activation alone, so the user can try again once back
-	 *  online. A definite 404 (`notFound` — the server has no record of this
-	 *  activation) is the opposite case: there is nothing left to free, so
-	 *  this reconciles the local cache to match and reports success rather
-	 *  than leaving the device stuck looking activated with no way back to
-	 *  the free tier — the one path that can produce this (a stale/wrong
-	 *  cached activation id from an earlier bug, or the activation having
-	 *  already been removed some other way) has no other recovery route
-	 *  since there's no local-only "forget" control any more. */
+	/** Frees this device's slot server-side. An unreachable server is reported
+	 *  as `{ok:false, unreachable:true}` and the cached activation is left
+	 *  alone, so the user can retry once online. A definite 404 (`notFound` —
+	 *  the server has no record of this activation) means there's nothing left
+	 *  to free: the local cache is reconciled and this reports success, so the
+	 *  device can't get stuck looking activated. */
 	async deactivateThisDevice(key: string): Promise<DeactivateResult> {
 		const activation = this.cache.activation;
 		if (!activation) return { ok: true };
@@ -113,7 +106,7 @@ export class LicenseManager {
 				saveCache(this.app, this.cache);
 				return { ok: true };
 			}
-			this.cache.lastError = result.reason ?? 'Could not deactivate this device.';
+			this.cache.lastError = result.reason ?? t('settings.license.deactivateFailed');
 			saveCache(this.app, this.cache);
 			return result;
 		} catch (e) {
@@ -126,8 +119,8 @@ export class LicenseManager {
 
 	/**
 	 * Re-confirms the current activation is still good, throttled to at most
-	 * once per `MIN_RECHECK_GAP_MS` (bypass with `force`, e.g. a manual "Re-check
-	 * now" button). No-ops entirely — no network call at all — when there is no
+	 * once per `MIN_RECHECK_GAP_MS` (bypass with `force`, e.g. coming back
+	 * online). No-ops entirely — no network call at all — when there is no
 	 * local activation to check, so a free-tier user with no key never causes
 	 * one. A definite rejection revokes immediately; a thrown error (offline)
 	 * leaves the cached verdict untouched so the grace period keeps counting
@@ -160,14 +153,14 @@ export class LicenseManager {
 				// out the grace period on a refunded/revoked license.
 				this.cache.activation = null;
 				this.cache.lastCheckOk = false;
-				this.cache.lastError = result.reason ?? 'This license is no longer valid.';
+				this.cache.lastError = result.reason ?? t('settings.license.invalid');
 			}
 		} catch (e) {
 			// Couldn't reach the provider at all: leave the cached activation as-is
 			// so grace.ts keeps counting down from its last successful check.
 			this.cache.lastCheckAt = Date.now();
 			this.cache.lastCheckOk = null;
-			this.cache.lastError = e instanceof Error ? e.message : 'Could not reach the license server.';
+			this.cache.lastError = e instanceof Error ? e.message : t('settings.license.unreachable');
 		}
 		saveCache(this.app, this.cache);
 	}

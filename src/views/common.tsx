@@ -1,7 +1,7 @@
 import { setIcon, setTooltip } from 'obsidian';
 import {
+	CSSProperties,
 	KeyboardEvent as ReactKeyboardEvent,
-	MouseEvent as ReactMouseEvent,
 	ReactNode,
 	RefObject,
 	useEffect,
@@ -25,78 +25,202 @@ import {
 	mapsLabel,
 	scriptLabel,
 } from '../types';
-import { formatLoomDate, groupNameOf } from '../calendar';
-import { features, projectRoleType, projectTypes, roleOf } from '../project-kind';
-import { createScriptFile, scriptFilePath as scriptPathOf } from './script-buffer';
-import { createBookFile, findBookFile } from './book-view';
+import { groupNameOf } from '../calendar';
+import { features, projectRoleType, projectTypes } from '../project-kind';
+import { createScriptFile } from './script-buffer';
+import { createBookFile } from './book-view';
 import { QUICK_NOTES_ICON, QuickNotesPanel, useQuickNotesToggle } from './quick-notes';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { LoomNavigator } from './react-view';
-import { LinkOption } from './link-textarea';
+import type { LinkOption } from './markdown-field';
 import { CreateEntityModal, EntityTypeSuggestModal } from '../project';
+import { recordLabel } from '../display';
 import { LocaleKey, t } from '../i18n';
 import type LoomLoomPlugin from '../main';
 
-/** Matches a note's leading frontmatter block (used to split it from the body). */
-export const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
 
-/**
- * Lets a textarea be resized by dragging its bottom edge. Pairs with the
- * `.loom-resizable` / `.loom-resize-edge` CSS. Dragging is the manual act
- * that turns auto-grow off for the element (see `autoGrowTextarea`) — only a
- * manually squeezed box can end up smaller than its content and scroll.
- * The smallest manual size is one line of text.
- */
-export function startTextareaResize(el: HTMLTextAreaElement | null, e: ReactMouseEvent): void {
-	if (!el) return;
-	e.preventDefault();
-	const startY = e.clientY;
-	const startHeight = el.getBoundingClientRect().height;
-	const win = el.win;
-	const style = win.getComputedStyle(el);
-	const minHeight =
-		(parseFloat(style.lineHeight) || 24) +
-		(parseFloat(style.paddingTop) || 0) +
-		(parseFloat(style.paddingBottom) || 0) +
-		(el.offsetHeight - el.clientHeight);
-	el.dataset.loomManualHeight = '1';
-	const onMove = (ev: MouseEvent) => {
-		el.style.height = `${Math.max(minHeight, startHeight + (ev.clientY - startY))}px`;
-	};
-	const onUp = () => {
-		win.removeEventListener('mousemove', onMove);
-		win.removeEventListener('mouseup', onUp);
-	};
-	win.addEventListener('mousemove', onMove);
-	win.addEventListener('mouseup', onUp);
-}
-
-/**
- * Auto-grows a textarea to fit its content so scrolling never occurs
- * naturally: height tracks the content, with the `rows` attribute as the
- * floor. Once the box has been resized manually (drag on the resize edge, or
- * a remembered height from an earlier session), auto-grow stays off for it.
- */
-export function autoGrowTextarea(el: HTMLTextAreaElement | null): void {
-	if (!el) return;
-	// Collapse to the natural (rows-attribute) height to measure the content,
-	// then grow to it; the offset/client difference re-adds the borders.
-	el.setCssProps({ height: 'auto' });
-	el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
-}
 
 /** Renders a Lucide icon by name. */
-export function Icon({ name, fallback }: { name: string; fallback?: string }) {
+/**
+ * Pointer-driven drag-reorder for a vertical list. Rows are siblings under one
+ * parent, each carrying `rowAttr`; every row's center is snapshotted at grab
+ * time and the target index is the count of centers the cursor has passed, so
+ * rows of varying height work. Neighbours slide by the grabbed row's own height
+ * + the 8px inter-card gap. `group` keys independent lists sharing one hook.
+ */
+export function useSeqDrag(rowAttr = 'data-seq-row') {
+	const [drag, setDrag] = useState<{ group: string; from: number; over: number; dy: number } | null>(null);
+	const dragRef = useRef<{ startY: number; slot: number; mids: number[] } | null>(null);
+	const rowStyle = (group: string, i: number): CSSProperties | undefined => {
+		if (!drag || drag.group !== group) return undefined;
+		if (drag.from === i) return { transform: `translateY(${drag.dy}px)`, position: 'relative', zIndex: 2 };
+		const slot = dragRef.current?.slot ?? 40;
+		const { from, over } = drag;
+		const sh = from < i && i <= over ? -1 : over <= i && i < from ? 1 : 0;
+		return sh !== 0 ? { transform: `translateY(${sh * slot}px)` } : undefined;
+	};
+	const end = (group: string, commit: boolean, onDrop: (from: number, over: number) => void) => {
+		dragRef.current = null;
+		const d = drag;
+		setDrag(null);
+		if (commit && d && d.group === group && d.from !== d.over) onDrop(d.from, d.over);
+	};
+	/** The 6-dot grab handle; `fallbackHeight` sizes the slide if the row
+	 *  element can't be found. */
+	const grip = (
+		group: string,
+		i: number,
+		length: number,
+		onDrop: (from: number, over: number) => void,
+		fallbackHeight = 40
+	) => (
+		<span
+			className="loom-subloc-grip"
+			onPointerDown={(e) => {
+				e.preventDefault();
+				e.currentTarget.setPointerCapture(e.pointerId);
+				const rowEl = e.currentTarget.closest(`[${rowAttr}]`);
+				const row = rowEl instanceof HTMLElement ? rowEl : null;
+				const rows = row?.parentElement ? [...row.parentElement.querySelectorAll(`:scope > [${rowAttr}]`)] : [];
+				const mids = rows.map((r) => {
+					const b = r.getBoundingClientRect();
+					return b.top + b.height / 2;
+				});
+				dragRef.current = { startY: e.clientY, slot: (row?.offsetHeight ?? fallbackHeight) + 8, mids };
+				setDrag({ group, from: i, over: i, dy: 0 });
+			}}
+			onPointerMove={(e) => {
+				const start = dragRef.current;
+				if (!start) return;
+				const dy = e.clientY - start.startY;
+				const over = Math.max(0, Math.min(length - 1, start.mids.filter((m) => m < e.clientY).length));
+				setDrag((cur) => (cur && cur.group === group && (cur.over !== over || cur.dy !== dy) ? { ...cur, over, dy } : cur));
+			}}
+			onPointerUp={() => end(group, true, onDrop)}
+			onPointerCancel={() => end(group, false, onDrop)}
+		>
+			<Icon name="grip-vertical" />
+		</span>
+	);
+	return { drag, rowStyle, grip };
+}
+
+/** `list` with the item at `from` moved to `to`. */
+export function moveItem<T>(list: T[], from: number, to: number): T[] {
+	const next = [...list];
+	const [moved] = next.splice(from, 1);
+	next.splice(to, 0, moved);
+	return next;
+}
+
+/** The writer views' search box (✕ clears) + previous/next match buttons.
+ *  `onQuery` also gets '' on clear; `onEnter` runs on Enter. */
+export function SearchNav({
+	placeholder,
+	query,
+	onQuery,
+	onEnter,
+	matchCount,
+	onPrev,
+	onNext,
+}: {
+	placeholder: string;
+	query: string;
+	onQuery: (q: string) => void;
+	onEnter: (e: ReactKeyboardEvent<HTMLInputElement>) => void;
+	matchCount: number;
+	onPrev: () => void;
+	onNext: () => void;
+}) {
+	return (
+		<>
+			<div className="loom-search-wrap">
+				<input
+					className="loom-writer-search"
+					type="search"
+					placeholder={placeholder}
+					value={query}
+					onChange={(e) => onQuery(e.target.value)}
+					onKeyDown={(e) => {
+						if (e.key === 'Enter') onEnter(e);
+					}}
+				/>
+				{query !== '' ? (
+					<button
+						className="loom-chip-remove loom-search-clear"
+						aria-label={t('view.entity.script.clearSearch')}
+						onClick={() => onQuery('')}
+					>
+						✕
+					</button>
+				) : null}
+			</div>
+			<button
+				className="loom-rel-filter"
+				aria-label={t('view.entity.script.previousMatch')}
+				disabled={matchCount === 0}
+				onClick={onPrev}
+			>
+				<Icon name="chevron-up" />
+			</button>
+			<button
+				className="loom-rel-filter"
+				aria-label={t('view.entity.script.nextMatch')}
+				disabled={matchCount === 0}
+				onClick={onNext}
+			>
+				<Icon name="chevron-down" />
+			</button>
+		</>
+	);
+}
+
+/** "3 of 7" / "No matches" beside a `SearchNav`; empty while there's no query. */
+export function MatchStat({ query, count, index }: { query: string; count: number; index: number }) {
+	return (
+		<span className="loom-writer-stat">
+			{query.trim() === ''
+				? ''
+				: count === 0
+					? t('view.entity.script.noMatches')
+					: t('view.entity.script.matchCount', { current: (index % count) + 1, total: count })}
+		</span>
+	);
+}
+
+/** The Comments / Alternatives browse-panel toggle pair. */
+export function AnnotationPanelToggles({
+	open,
+	onToggle,
+}: {
+	open: 'comments' | 'alt' | null;
+	onToggle: (next: 'comments' | 'alt' | null) => void;
+}) {
+	return (
+		<div className="loom-script-side-toggles">
+			<button
+				className={open === 'comments' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+				aria-label={open === 'comments' ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
+				onClick={() => onToggle(open === 'comments' ? null : 'comments')}
+			>
+				<Icon name="message-square" />
+			</button>
+			<button
+				className={open === 'alt' ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+				aria-label={open === 'alt' ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
+				onClick={() => onToggle(open === 'alt' ? null : 'alt')}
+			>
+				<Icon name="repeat" />
+			</button>
+		</div>
+	);
+}
+
+export function Icon({ name }: { name: string }) {
 	const ref = useRef<HTMLSpanElement>(null);
 	useEffect(() => {
-		const el = ref.current;
-		if (!el) return;
-		setIcon(el, name);
-		// Lucide renames icons across versions (e.g. shield-question ->
-		// shield-question-mark); if the primary name isn't registered, setIcon
-		// inserts nothing — fall back to a name the running version does have.
-		if (fallback && !el.firstChild) setIcon(el, fallback);
-	}, [name, fallback]);
+		if (ref.current) setIcon(ref.current, name);
+	}, [name]);
 	return <span className="loom-icon" ref={ref} />;
 }
 
@@ -114,16 +238,9 @@ export function InfoIcon({ text }: { text: string }) {
 		const el = ref.current;
 		if (!el) return;
 		setIcon(el, 'info');
-		// `delay: 1`, NOT `0` — a real bug in Obsidian's own `setTooltip`
-		// (confirmed against the actual 1.13.4 `app.js`): its internal option
-		// storage does `delay && el.setAttribute('data-tooltip-delay', …)`,
-		// and `0` is falsy, so the attribute never gets written at all —
-		// `delay: 0` silently falls back to Obsidian's own DEFAULT delay
-		// (reading the missing attribute back finds nothing and substitutes
-		// the standard constant), the opposite of what's intended. `1`
-		// survives that truthy check (the attribute DOES get set) while
-		// still being a single millisecond — imperceptible, functionally
-		// instant, without hitting the bug.
+		// `delay: 1`, NOT `0`: Obsidian's `setTooltip` only writes
+		// `data-tooltip-delay` when `delay` is truthy, so `0` falls back to the
+		// default delay. 1ms is effectively instant.
 		setTooltip(el, text, { delay: 1 });
 	}, [text]);
 	return <span className="loom-info-icon" ref={ref} />;
@@ -148,21 +265,53 @@ export function Truncated({ text, className }: { text: string; className: string
 	);
 }
 
-/** Closes an open dropdown on any pointer press outside `wrapRef` — shared by
- *  `SuggestInput` and `SearchableSelect`. */
-function useCloseOnOutsideClick<T extends HTMLElement>(
-	wrapRef: RefObject<T | null>,
+/** Calls `close` on any press outside `inside` while `open` — a ref'd
+ *  wrapper element, or a CSS selector any of the "inside" elements match.
+ *  Defaults to a capture-phase `pointerdown`. */
+export function useCloseOnOutsideClick(
+	inside: RefObject<HTMLElement | null> | string,
 	open: boolean,
-	setOpen: (open: boolean) => void
+	close: () => void,
+	{ event = 'pointerdown', capture = true }: { event?: 'pointerdown' | 'mousedown'; capture?: boolean } = {}
 ): void {
+	const closeRef = useRef(close);
+	closeRef.current = close;
 	useEffect(() => {
 		if (!open) return;
-		const onDown = (e: PointerEvent) => {
-			if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+		const onDown = (e: Event) => {
+			const target = e.target as Node | null;
+			const isInside =
+				typeof inside === 'string'
+					? (target as HTMLElement | null)?.closest?.(inside) != null
+					: inside.current?.contains(target) === true;
+			if (!isInside) closeRef.current();
 		};
-		document.addEventListener('pointerdown', onDown, true);
-		return () => document.removeEventListener('pointerdown', onDown, true);
-	}, [open, wrapRef, setOpen]);
+		// The window the guarded element lives in (a popout has its own document).
+		const ownerDoc = (typeof inside === 'string' ? null : inside.current?.doc) ?? activeDocument;
+		ownerDoc.addEventListener(event, onDown, capture);
+		return () => ownerDoc.removeEventListener(event, onDown, capture);
+	}, [open, inside, event, capture]);
+}
+
+/** The ▸ caret + label (+ count) button heading a collapsible section. */
+export function SectionHeader({
+	open,
+	onToggle,
+	label,
+	count,
+}: {
+	open: boolean;
+	onToggle: () => void;
+	label: ReactNode;
+	count?: ReactNode;
+}) {
+	return (
+		<button className="loom-section-header" onClick={onToggle}>
+			<span className={open ? 'loom-caret loom-caret-open' : 'loom-caret'}>▸</span>
+			{label}
+			{count !== undefined ? <span className="loom-section-count">{count}</span> : null}
+		</button>
+	);
 }
 
 /**
@@ -197,7 +346,7 @@ export function SuggestInput({
 	// takes whichever entry is highlighted (defaults to the top match).
 	const [active, setActive] = useState(0);
 	const wrapRef = useRef<HTMLDivElement>(null);
-	useCloseOnOutsideClick(wrapRef, open, setOpen);
+	useCloseOnOutsideClick(wrapRef, open, () => setOpen(false));
 
 	const query = value.trim().toLowerCase();
 	const filtered = options.filter((o) => o.toLowerCase().includes(query));
@@ -303,7 +452,7 @@ export function SearchableSelect({
 		}
 	}, [autoFocus]);
 
-	useCloseOnOutsideClick(wrapRef, open, setOpen);
+	useCloseOnOutsideClick(wrapRef, open, () => setOpen(false));
 
 	const filtered = options.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()));
 
@@ -361,17 +510,6 @@ export function SearchableSelect({
 	);
 }
 
-/**
- * User-facing label of a record. Dated anchors (Sessions) display their date —
- * their file name is managed and never exposed inside the plugin. Acts are
- * named, so they fall through to the name like everything else.
- */
-export function recordLabel(record: EntityRecord, project: ProjectDef | null): string {
-	if (roleOf(record.type) === 'anchor' && record.date && project) {
-		return formatLoomDate(record.date, project.config);
-	}
-	return record.name;
-}
 
 /**
  * `[[` autocomplete vocabulary for a markdown-field-style editor: every entity
@@ -463,38 +601,8 @@ export function openCreateLinkEntity(
 	).open();
 }
 
-/** Search/display label for a location: a sublocation reads "Secret room,
- *  Tavern, City" (its full ancestry, so same-named places stay distinct). The
- *  `subChipFullAncestry` setting can trim it to just the sublocation's own name. */
-export function locationLabel(record: EntityRecord, plugin: LoomLoomPlugin): string {
-	if (record.type !== 'location' || record.parentLocation === null) return record.name;
-	if (!plugin.settings.subChipFullAncestry) return record.name;
-	const parts = [record.name];
-	let cur: EntityRecord | null = record;
-	const seen = new Set<string>([record.path]);
-	for (let guard = 0; guard < 20 && cur?.parentLocation != null; guard++) {
-		const parent = plugin.indexer.resolve(cur.parentLocation, cur.path);
-		if (parent?.type !== 'location' || seen.has(parent.path)) break;
-		parts.push(parent.name);
-		seen.add(parent.path);
-		cur = parent;
-	}
-	return parts.join(', ');
-}
 
-/** Location picker order: top-level locations before sublocations (so searching
- *  "City" lists City above "Tavern, City"), then alphabetically within each. */
-export function mainLocationFirst(a: EntityRecord, b: EntityRecord): number {
-	const da = a.parentLocation === null ? 0 : 1;
-	const db = b.parentLocation === null ? 0 : 1;
-	return da - db || a.name.localeCompare(b.name);
-}
 
-/** Formatted date of a record, or empty string. */
-export function recordDate(record: EntityRecord, project: ProjectDef | null): string {
-	if (!record.date || !project) return record.date?.raw ?? '';
-	return formatLoomDate(record.date, project.config);
-}
 
 /**
  * THE entity tag. Every entity reference rendered as a tag — involved
@@ -543,7 +651,7 @@ export function EntityChip({
 						// Middle click opens the linked entity in a new tab.
 						if (e.button === 1) {
 							e.preventDefault();
-							plugin.openEntityInTab(record.path);
+							plugin.openEntityFile(record.path);
 						}
 					}}
 				>
@@ -596,14 +704,12 @@ export function QuestTagChip({ plugin, tag }: { plugin: LoomLoomPlugin; tag: str
 
 export function RailButton({
 	icon,
-	iconFallback,
 	label,
 	active,
 	onClick,
 }: {
 	icon: string;
 	/** Substitute icon for older Obsidian bundles missing `icon` (see Icon). */
-	iconFallback?: string;
 	label: string;
 	active?: boolean;
 	onClick: () => void;
@@ -619,27 +725,20 @@ export function RailButton({
 			aria-label={label}
 			onClick={onClick}
 		>
-			<Icon name={icon} fallback={iconFallback} />
+			<Icon name={icon} />
 		</button>
 	);
 }
 
 /**
  * Icon-only navigation rail on the left of every page except home: home
- * first, then the entity lists, then the graph — the home page's whole
- * navigation. Sits in normal flow, so it never overlaps content — the one
- * exception is the Quick Notes panel it hosts, a SIBLING of the `<nav>`
- * itself (see `.loom-qn-panel-wrap`'s own CSS comment), never a child of it,
- * so the rail's own box and buttons are never implicated in the panel's
- * open/close animation. `active` marks the current page ('graph' or an
- * entity type). `minimal` still renders the FULL normal button set — Home's
- * own stand-in rail (home-view.tsx) needs the exact same DOM/layout a normal
- * rail has so the Quick Notes trigger computes to the exact same position;
- * only `.loom-rail-minimal`'s CSS (`visibility: hidden` on the button list,
- * transparent border/background) hides everything but the trigger, rather
- * than omitting the buttons from the tree, which is what let their layout
- * (and therefore the trigger's own position) drift out of sync with a real
- * rail's in the first place. */
+ * first, then the entity lists, then the graph. Sits in normal flow, so it
+ * never overlaps content; the Quick Notes panel it hosts is a SIBLING of the
+ * `<nav>` (see `.loom-qn-panel-wrap`), so the rail's box isn't part of the
+ * panel's open/close animation. `active` marks the current page ('graph' or
+ * an entity type). `minimal` (Home's stand-in rail) still renders the full
+ * button set — `.loom-rail-minimal` hides it with CSS — so the Quick Notes
+ * trigger sits in exactly the same position as on a real rail. */
 export function NavRail({
 	navigator,
 	project,
@@ -669,17 +768,11 @@ export function NavRail({
 							icon={SCRIPT_ICON}
 							label={scriptLabel()}
 							active={active === 'script'}
-							onClick={() => {
-								// Created on demand: a project switched to Writer after
-								// setup has no script file yet.
-								const path = scriptPathOf(project);
-								if (navigator.plugin.app.vault.getFileByPath(path)) navigator.openLoomFile(path);
-								else {
-									void createScriptFile(navigator.plugin, project).then((f) =>
-										navigator.openLoomFile(f.path)
-									);
-								}
-							}}
+							// Created on demand: a project switched to Writer after
+							// setup has no script file yet.
+							onClick={() =>
+								void createScriptFile(navigator.plugin, project).then((f) => navigator.openLoomFile(f.path))
+							}
 						/>
 					) : null}
 					{/* Writer/Prose's own rail entry, mirroring Script's above (mutually
@@ -690,16 +783,9 @@ export function NavRail({
 							icon={BOOK_ICON}
 							label={bookLabel()}
 							active={active === 'book'}
-							onClick={() => {
-								// Created on demand: a project switched to Writer/Prose after
-								// setup has no Book file yet — mirrors the Script button above.
-								const bookFile = findBookFile(navigator.plugin, project);
-								if (bookFile) navigator.openLoomFile(bookFile.path);
-								else
-									void createBookFile(navigator.plugin, project).then((f) =>
-										navigator.openLoomFile(f.path)
-									);
-							}}
+							onClick={() =>
+								void createBookFile(navigator.plugin, project).then((f) => navigator.openLoomFile(f.path))
+							}
 						/>
 					) : null}
 					{/* Writer's own anchor/beat pair (Act, then Scene/Chapter) sits right
@@ -723,7 +809,6 @@ export function NavRail({
 					{features(project.config).group ? (
 						<RailButton
 							icon={PC_GROUP_ICON}
-							iconFallback="star"
 							label={groupNameOf(project.config)}
 							active={active === 'group'}
 							onClick={() => {
@@ -791,7 +876,6 @@ export function NavRail({
 				<span className="loom-qn-trigger-wrap">
 					<RailButton
 						icon={QUICK_NOTES_ICON}
-						iconFallback="sticky-note"
 						label={t('common.quickNotes')}
 						active={quickNotesOpen}
 						onClick={() => setQuickNotesOpen((o) => !o)}
@@ -841,7 +925,7 @@ export function ViewShell({
 	);
 }
 
-/** Formats a record label for missing projects/dates. */
+/** The empty-state shown when a view has no project to render. */
 export function noProjectMessage(): ReactNode {
 	return <div className="loom-empty">{t('common.noProjectFound')}</div>;
 }
@@ -856,9 +940,15 @@ export function noProjectMessage(): ReactNode {
  * could scroll the whole page far enough to carry the surrounding UI (tabs,
  * toolbar) off-screen along with it.
  */
-export function scrollIntoContainer(container: HTMLElement, target: HTMLElement, behavior: ScrollBehavior): void {
+export function scrollIntoContainer(
+	container: HTMLElement,
+	target: Element,
+	behavior: ScrollBehavior,
+	align: 'start' | 'center' = 'start'
+): void {
 	const containerRect = container.getBoundingClientRect();
 	const targetRect = target.getBoundingClientRect();
-	const top = container.scrollTop + (targetRect.top - containerRect.top);
+	let top = container.scrollTop + (targetRect.top - containerRect.top);
+	if (align === 'center') top += targetRect.height / 2 - container.clientHeight / 2;
 	container.scrollTo({ top: Math.max(0, top), behavior });
 }

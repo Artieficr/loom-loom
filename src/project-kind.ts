@@ -124,6 +124,12 @@ export function roleOf(type: EntityType): TypeRole | null {
 	return TYPE_ROLES[type] ?? null;
 }
 
+/** Types an event's session note can involve: every non-chronology type
+ *  except the Decision Point grouping layer. */
+export function isInvolvableType(type: EntityType): boolean {
+	return roleOf(type) === null && type !== 'decisionPoint';
+}
+
 /** Every type playing `role` across all kinds — for code that must accept a
  *  record from any project without knowing its kind (e.g. link resolution). */
 export const ANCHOR_TYPES: readonly EntityType[] = ENTITY_TYPES.filter((t) => TYPE_ROLES[t] === 'anchor');
@@ -145,11 +151,6 @@ const WRITER_PROSE_TYPES: readonly EntityType[] = ['character', 'location', 'reg
 export function typesFor(kind: ProjectKind, writerMode: WriterMode = DEFAULT_WRITER_MODE): readonly EntityType[] {
 	if (kind === 'writer' && writerMode === 'prose') return WRITER_PROSE_TYPES;
 	return KIND_TYPES[kind];
-}
-
-/** Whether `type` is part of this kind of project at all. */
-export function hasType(kind: ProjectKind, type: EntityType, writerMode: WriterMode = DEFAULT_WRITER_MODE): boolean {
-	return typesFor(kind, writerMode).includes(type);
 }
 
 /**
@@ -260,10 +261,6 @@ function writerModeOf(config: KindHolder): WriterMode {
 
 export function projectTypes(config: KindHolder): readonly EntityType[] {
 	return typesFor(kindOf(config), writerModeOf(config));
-}
-
-export function projectHasType(config: KindHolder, type: EntityType): boolean {
-	return hasType(kindOf(config), type, writerModeOf(config));
 }
 
 export function projectRoleType(config: KindHolder, role: TypeRole): EntityType {

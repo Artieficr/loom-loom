@@ -25,7 +25,6 @@ import {
 	findAnnotationSpans,
 	findEntityLinks,
 	hasTitlePage,
-	liveAnnotationIds,
 	liveSceneIds,
 	moveSceneToSection,
 	nextTopSectionLine,
@@ -52,13 +51,15 @@ import {
 } from '../fountain';
 import {
 	AltTextEntry,
+	ScriptNotesFile,
+	AnnotationIO,
 	CommentEntry,
-	mutateScriptNotes,
+	useAnnotationHandlers,
 	undecidedAltRows,
 	unresolvedCommentRows,
-	useScriptNotes,
+	pruneScriptNotes,
 } from './script-notes';
-import { pdfPages, renderScreenplayPdf } from '../pdf';
+import { pageOfLine as pageOfLineIn, pageRange, pdfPages, renderScreenplayPdf } from '../pdf';
 import { ProjectDef, linkTargetOf } from '../indexer';
 import { setLoomKey } from '../fm';
 import {
@@ -68,22 +69,34 @@ import {
 	mutateScriptBuffer,
 	mutateScriptBufferAndFlush,
 	prepareScriptText,
+	readScriptBuffer,
 	registerPostFlushHook,
 	scheduleFlush,
 	useScriptBuffer,
 } from './script-buffer';
 import {
-	AltTextModal,
 	ConfirmModal,
 	CreateEntityModal,
 	createEntity,
-	entityFileName,
-	purgeEntityReferences,
+	deleteEntityNote,
+	findOrCreateSublocation,
 } from '../project';
+import { managedEntityFileName } from '../naming';
+import { features } from '../project-kind';
+import { deleteBookEntity } from './book-view';
 import { LoomFileReactView } from './react-view';
-import { Icon, ViewShell, noProjectMessage, scrollIntoContainer } from './common';
+import {
+	AnnotationPanelToggles,
+	Icon,
+	MatchStat,
+	SearchNav,
+	ViewShell,
+	noProjectMessage,
+	scrollIntoContainer,
+} from './common';
 import { AlternativesBrowserPanel, CommentPopover, CommentsBrowserPanel } from './annotation-popover';
-import { useIndexVersion } from './hooks';
+import { isUnresolvedComment } from './annotation-cm6';
+import { useIndexVersion, usePersistedChoice } from './hooks';
 import type LoomLoomPlugin from '../main';
 
 export class ScriptView extends LoomFileReactView {
@@ -194,30 +207,7 @@ export async function syncScenes(
 		const mainRecord = mainLocations.get(main.toLowerCase());
 		if (!mainRecord) return undefined;
 		if (sub === '') return mainRecord;
-		const key = sub.toLowerCase();
-		const existingSub = plugin.indexer
-			.getAll('location', project.root)
-			.find(
-				(r) =>
-					r.name.trim().toLowerCase() === key &&
-					r.parentLocation !== null &&
-					plugin.indexer.resolve(r.parentLocation, r.path)?.path === mainRecord.path
-			);
-		if (existingSub) return existingSub;
-		const created = await createEntity(plugin, project, 'location', {
-			name: sub,
-			tag: '',
-			date: '',
-			description: '',
-			parentLocation: linkTargetOf(mainRecord),
-		});
-		return {
-			...pcGroupStub(project.root),
-			path: created.path,
-			name: sub,
-			type: 'location',
-			parentLocation: linkTargetOf(mainRecord),
-		};
+		return findOrCreateSublocation(plugin, project, mainRecord, sub);
 	};
 
 	// Acts come from the script's `#` sections — the TOP level of a scene's
@@ -273,7 +263,7 @@ export async function syncScenes(
 					// the moment the title is edited (from the script OR from the
 					// Act page's own Title field).
 					if (renamed) {
-						const base = entityFileName(project, 'act', section.title);
+						const base = managedEntityFileName(project.name, 'act', section.title);
 						const dir = actFile.parent?.path ?? '';
 						let newPath = normalizePath(dir === '' ? `${base}.md` : `${dir}/${base}.md`);
 						for (let i = 2; plugin.app.vault.getAbstractFileByPath(newPath) !== null; i++) {
@@ -435,10 +425,62 @@ export type ScriptSearchMatch =
 	| { kind: 'comment'; id: string }
 	| { kind: 'altOption'; id: string; optionIndex: number };
 
+/** Every match for `query`: plain hits in `text`, plus comment bodies and
+ *  alt-text options from the sidecar — sorted into document order, a
+ *  comment/alt-text match by its marker's position in `spans`. */
+export function scriptSearchMatches(
+	text: string,
+	spans: AnnotationSpan[],
+	notes: ScriptNotesFile,
+	query: string
+): ScriptSearchMatch[] {
+	const matches: ScriptSearchMatch[] = [];
+	if (query.trim() === '') return matches;
+	const needle = query.toLowerCase();
+	const hay = text.toLowerCase();
+	for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + needle.length)) {
+		matches.push({ kind: 'text', offset: at });
+	}
+	for (const [id, entries] of Object.entries(notes.comments)) {
+		if (entries.some((e) => e.text.toLowerCase().includes(needle))) matches.push({ kind: 'comment', id });
+	}
+	for (const [id, entry] of Object.entries(notes.altText)) {
+		entry.options.forEach((opt, optionIndex) => {
+			if (opt.toLowerCase().includes(needle)) matches.push({ kind: 'altOption', id, optionIndex });
+		});
+	}
+	const posOf = (m: ScriptSearchMatch) =>
+		m.kind === 'text' ? m.offset : (spans.find((sp) => sp.id === m.id)?.from ?? Infinity);
+	return matches.sort((a, b) => posOf(a) - posOf(b));
+}
+
 /** A scene's display name: the heading without its INT./EXT. prefix. */
 function sceneName(scene: ParsedScene): string {
 	const place = scene.location.trim() === '' ? t('project.createEntity.untitledScene') : scene.location.trim();
 	return scene.timeOfDay.trim() === '' ? place : `${place} — ${scene.timeOfDay.trim()}`;
+}
+
+/** Pages preview's right-click "Open this scene": resolves an absolute script
+ *  line to its owning scene and opens that Scene page, seeding the
+ *  `loom-scene-script-line:<path>` key its mount-time restore already reads
+ *  (`pendingSceneScrollLineRef`, entity-view.tsx) so its editor lands there. */
+export function openSceneAtLine(
+	plugin: LoomLoomPlugin,
+	view: { openEntity: (path: string) => void },
+	projectRoot: string,
+	parsed: ParsedScript,
+	text: string | null,
+	line: number
+): void {
+	const scene = sceneAtLine(parsed, line);
+	if (!scene || scene.loomId === null) return;
+	const note = plugin.indexer.getAll('scene', projectRoot).find((r) => r.sceneId === scene.loomId);
+	if (!note) return;
+	const excerpt = sceneScriptText(text, scene.loomId);
+	if (excerpt === null) return;
+	const bodyLine = Math.max(0, line - scene.line - sceneBodyLineOffset(excerpt));
+	window.localStorage.setItem(`loom-scene-script-line:${note.path}`, String(bodyLine));
+	view.openEntity(note.path);
 }
 
 function Script({ view }: { view: ScriptView }) {
@@ -449,8 +491,7 @@ function Script({ view }: { view: ScriptView }) {
 
 	/** The project's canonical, live in-memory script text — `script-buffer.ts`'s
 	 *  shared buffer, not a local copy. Every mutation below goes through
-	 *  `mutateScriptBuffer`/`write` rather than `setText`; this view has no
-	 *  state of its own to keep in sync any more. */
+	 *  `mutateScriptBuffer`/`write`. */
 	const text = useScriptBuffer(plugin, project ?? null);
 	/** Which pane the main area shows: the read-only Pages preview, or
 	 *  Outline (a separate button on the far right of the row) which swaps
@@ -458,10 +499,11 @@ function Script({ view }: { view: ScriptView }) {
 	 *  `localStorage` — a UI preference, not vault data — so reopening a
 	 *  script comes back to whichever pane was last open rather than always
 	 *  resetting to Pages. */
-	const [mode, setMode] = useState<'pages' | 'outline'>(() => {
-		const saved = file ? window.localStorage.getItem(`loom-script-mode:${file.path}`) : null;
-		return saved === 'outline' ? saved : 'pages';
-	});
+	const [mode, setMode] = usePersistedChoice(
+		file ? `loom-script-mode:${file.path}` : null,
+		['pages', 'outline'] as const,
+		'pages'
+	);
 	/** Outline drag-reorder — same pointer-drag shape as the Act page's
 	 *  own scene reorder, generalized with a `group` key so it serves BOTH
 	 *  the top-level act list ('acts') and each act's own nested
@@ -539,8 +581,9 @@ function Script({ view }: { view: ScriptView }) {
 		const onDocMouseDown = (e: MouseEvent) => {
 			if (sidePanelRef.current && !sidePanelRef.current.contains(e.target as Node)) openSidePanel(null);
 		};
-		document.addEventListener('mousedown', onDocMouseDown, true);
-		return () => document.removeEventListener('mousedown', onDocMouseDown, true);
+		const ownerDoc = sidePanelRef.current?.doc ?? activeDocument;
+		ownerDoc.addEventListener('mousedown', onDocMouseDown, true);
+		return () => ownerDoc.removeEventListener('mousedown', onDocMouseDown, true);
 	}, [navOpen, commentsPanelOpen, altPanelOpen]);
 	/** The Title page `<details>` — a plain native element (its open/closed
 	 *  state isn't otherwise tracked in React), so jumping to it means
@@ -557,20 +600,21 @@ function Script({ view }: { view: ScriptView }) {
 	 *  effect below. */
 	const committedFor = useRef<string | null>(null);
 	const pagesRef = useRef<HTMLDivElement | null>(null);
-	/** Comment bodies + alt-text option lists, project-level (Entities/Script
-	 *  Notes/<Project> Script Notes.json) — kept live via `useScriptNotes`
-	 *  the same way `text` itself is kept live against the .fountain file. */
-	const scriptNotes = useScriptNotes(plugin, project ?? null);
-	/** Which comment's popover is open, and where to anchor it — `null` when
-	 *  none. Only ONE at a time, closed by the popover's own outside-click. */
-	const [openComment, setOpenComment] = useState<{ id: string; rect: DOMRect } | null>(null);
-	/** Marker ids that have had a reply added THIS session, checked by
-	 *  `handleCloseComment` instead of `scriptNotes.comments` directly —
-	 *  `scriptNotes` only catches up once the sidecar's own `vault.modify` +
-	 *  file-watch round trip completes, so trusting it at close time would
-	 *  misjudge a comment added and then immediately closed away from
-	 *  (within that round trip's window) as never having been written. */
-	const commentsWithNewEntryRef = useRef<Set<string>>(new Set());
+	/** Comment threads + alt-text options (the project's script-notes sidecar)
+	 *  and their handlers, written through the shared script buffer. */
+	const {
+		scriptNotes,
+		openComment,
+		setOpenComment,
+		handleOpenComment,
+		handleCloseComment,
+		handleSaveCommentEntry,
+		handleToggleCommentResolved,
+		handleDeleteCommentEntry,
+		handleAddCommentReply,
+		handleCycleAlt,
+		handleOpenAltMenu,
+	} = useAnnotationHandlers(plugin, project ?? null, scriptAnnotationIO(plugin, project ?? null));
 	/** `openComment.rect` is a one-time snapshot — without this, scrolling
 	 *  the editor/pages content left the popover floating in the same screen
 	 *  spot while the commented text scrolled out from under it. While a
@@ -605,8 +649,10 @@ function Script({ view }: { view: ScriptView }) {
 			}
 			setOpenComment((prev) => (prev && prev.id === id ? { id, rect } : prev));
 		};
-		document.addEventListener('scroll', track, true);
-		return () => document.removeEventListener('scroll', track, true);
+		// The popover was just opened by a click, so the active window is its own.
+		const ownerDoc = activeDocument;
+		ownerDoc.addEventListener('scroll', track, true);
+		return () => ownerDoc.removeEventListener('scroll', track, true);
 	}, [openComment?.id]);
 	/** The Outline panel's own root — scoped lookups for every act's
 	 *  on-screen block (`[data-act-id]`) during a scene drag read from
@@ -618,34 +664,13 @@ function Script({ view }: { view: ScriptView }) {
 	 *  (bringing a page element into view drags every scrollable ancestor,
 	 *  the outer shell body included). Script and Outline had no such effect
 	 *  of their own, so this makes it deliberate and uniform across all
-	 *  three — including a re-click on the pane that's already active, which
-	 *  `switchMode`'s own same-mode early return would otherwise skip. */
+	 *  three — including a re-click on the pane that's already active. */
 	const tabsRef = useRef<HTMLDivElement | null>(null);
 
 	// The read side is entirely `useScriptBuffer`'s job now (above) — its own
 	// `vault.on('modify'|'create')` listener keeps `text` current for as long
 	// as ANY view/component subscribes to this project's buffer, this one
 	// included, so there is no separate per-view read effect left here.
-
-	// A floating panel that only closes from its own button feels stuck.
-	useEffect(() => {
-		if (!navOpen) return;
-		const onDown = (e: MouseEvent) => {
-			const el = e.target as HTMLElement | null;
-			if (el?.closest('.loom-script-nav, .loom-script-nav-toggle')) return;
-			setNavOpen(false);
-		};
-		document.addEventListener('mousedown', onDown);
-		return () => document.removeEventListener('mousedown', onDown);
-	}, [navOpen]);
-
-	// Persists the mode-per-file memory above — separate from the read, which
-	// only needs to happen once (the lazy `useState` initializer), while this
-	// needs to re-fire on every later switch.
-	useEffect(() => {
-		if (!file) return;
-		window.localStorage.setItem(`loom-script-mode:${file.path}`, mode);
-	}, [file?.path, mode]);
 
 	// Persists the Pages-mode page number the same way — `page` changes both
 	// on explicit navigation and on the scroll-tracking effect below, so
@@ -659,8 +684,7 @@ function Script({ view }: { view: ScriptView }) {
 	// has something rendered to scroll to — covers reopening a file that was
 	// left on Pages mode (mode/page both come back from localStorage via their
 	// lazy initializers above, but nothing has actually scrolled the container
-	// yet). Guarded so it never re-fires on a later, ordinary mode switch —
-	// `switchMode` already handles restoring position for that case itself.
+	// yet). Guarded so it never re-fires on a later, ordinary mode switch.
 	const restoredInitialPage = useRef(false);
 	useEffect(() => {
 		if (restoredInitialPage.current || mode !== 'pages') return;
@@ -704,14 +728,10 @@ function Script({ view }: { view: ScriptView }) {
 	const bodyPages = useMemo(() => (parsed === null ? [] : pdfPages(parsed)), [parsed]);
 
 	// Load, then one ensure-ids/sync pass so a script dropped in from elsewhere
-	// gets its ids and its Scene notes without anyone having to touch it — the
-	// same job `runCommit` used to do on every load, now split between the
-	// buffer's own flush pipeline (renumber/label/clean, `prepareScriptText`)
-	// and this effect's own two extra steps: `ensureSceneIds` (the buffer's
-	// flush never assigns fresh ids on its own — every OTHER mutation already
-	// hands it text with ids already present) and `pushActTitles` (the act
-	// display-title→script pass, which needs `syncScenes` to have already run
-	// so a brand-new/renamed act's record exists to read a title from).
+	// gets its ids and Scene notes without anyone touching it. The buffer's
+	// flush already renumbers/labels/cleans (`prepareScriptText`); this adds
+	// `ensureSceneIds` (flushes never assign fresh ids) and `pushActTitles`
+	// (needs `syncScenes` to have run so a new/renamed act's record exists).
 	useEffect(() => {
 		if (!file || !project || text === null) return;
 		if (committedFor.current === file.path) return;
@@ -756,282 +776,6 @@ function Script({ view }: { view: ScriptView }) {
 		scheduleFlush(plugin, project);
 	};
 
-	const handleOpenComment = (id: string, rect: DOMRect) => setOpenComment({ id, rect });
-
-	/** Closing the popover with nothing ever added to the thread abandons the
-	 *  whole comment creation — a freshly inserted marker pair backed by no
-	 *  `comments[id]` entry (only `handleAddCommentReply` ever creates one)
-	 *  would otherwise sit in the document forever as a permanently-empty
-	 *  gutter icon with no thread behind it. Checks BOTH `scriptNotes` (an
-	 *  existing comment, reopened) and `commentsWithNewEntryRef` (a reply
-	 *  just added this session, ahead of the sidecar's own async round trip)
-	 *  — only when neither shows a reply does the span get torn back out. */
-	const handleCloseComment = () => {
-		if (
-			project &&
-			openComment &&
-			!commentsWithNewEntryRef.current.has(openComment.id) &&
-			!scriptNotes.comments[openComment.id]
-		) {
-			void stripAnnotationMarkerInScript(plugin, project, openComment.id);
-		}
-		setOpenComment(null);
-	};
-
-	/** Saves an EDIT to one reply's text (the popover's per-row Edit action) —
-	 *  never touches `resolved`/`resolvedAt`, which the check icon owns. */
-	const handleSaveCommentEntry = (id: string, index: number, text: string) => {
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const list = notes.comments[id];
-			if (!list || index < 0 || index >= list.length) return notes;
-			const next = list.slice();
-			next[index] = { ...next[index], text, updatedAt: Date.now() };
-			return { ...notes, comments: { ...notes.comments, [id]: next } };
-		});
-	};
-
-	/** Toggles ONE reply's resolved state — stamps/clears `resolvedAt`
-	 *  separately from `updatedAt`, since editing an already-resolved
-	 *  comment's text later shouldn't change when it was resolved. */
-	const handleToggleCommentResolved = (id: string, index: number) => {
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const list = notes.comments[id];
-			if (!list || index < 0 || index >= list.length) return notes;
-			const existing = list[index];
-			const resolved = !existing.resolved;
-			const next = list.slice();
-			next[index] = { ...existing, resolved, resolvedAt: resolved ? Date.now() : null };
-			return { ...notes, comments: { ...notes.comments, [id]: next } };
-		});
-	};
-
-	/** Removes ONE reply from the thread — if that empties it, the whole
-	 *  `comments[id]` key goes too (an empty thread is the same as none), AND
-	 *  the marker pair itself has to come out of the document — otherwise an
-	 *  orphaned marker with no sidecar data behind it keeps rendering as a
-	 *  live (permanently "unresolved," since there's nothing to check "all
-	 *  resolved" against) span with no way to open it back up. */
-	const handleDeleteCommentEntry = (id: string, index: number) => {
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const list = notes.comments[id];
-			if (!list || index < 0 || index >= list.length) return notes;
-			const next = list.filter((_, i) => i !== index);
-			if (next.length === 0) {
-				const { [id]: _dropped, ...rest } = notes.comments;
-				return { ...notes, comments: rest };
-			}
-			return { ...notes, comments: { ...notes.comments, [id]: next } };
-		}).then((next) => {
-			if (!next.comments[id]) {
-				if (project) void stripAnnotationMarkerInScript(plugin, project, id);
-				// The marker pair (and so the whole span) is gone — a reply typed
-				// into the now-empty popover's box would have nothing left in the
-				// document to attach to, so close it rather than leave a dead end.
-				setOpenComment((prev) => (prev && prev.id === id ? null : prev));
-			}
-		});
-	};
-
-	/** The popover's always-available reply box — appends a new entry to the
-	 *  thread without touching any existing one. */
-	const handleAddCommentReply = (id: string, text: string) => {
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const list = notes.comments[id] ?? [];
-			const entry: CommentEntry = {
-				id,
-				text,
-				resolved: false,
-				createdAt: Date.now(),
-				updatedAt: Date.now(),
-				resolvedAt: null,
-			};
-			return { ...notes, comments: { ...notes.comments, [id]: [...list, entry] } };
-		});
-	};
-
-	/** The CURRENT live text between an alt-text span's markers, straight from
-	 *  the document — removed as part of the modular-only editing change
-	 *  (2026-08-25): this view has no live editable field of its own any
-	 *  more (Script mode is gone), so `text` is always just a downstream
-	 *  mirror of disk, refreshed asynchronously after a write — never a live
-	 *  typing buffer to reconcile a "hand-edit" against. Comparing an option's
-	 *  stored text against `text` here was actively harmful post-refactor: a
-	 *  second click landing before the previous swap's disk write had fully
-	 *  round-tripped back into `text` read the STALE pre-swap wording as if
-	 *  it were a hand-edit worth preserving, silently overwriting a different
-	 *  option's real text with it — the exact bug reported as "cycling turns
-	 *  every option into the same one." Scene's own editable field genuinely
-	 *  needs this reconciliation (entity-view.tsx's own `liveAltSpanText`/
-	 *  `syncOutgoingAltOption`, scoped to `sceneDraft` only) since typing
-	 *  directly into it IS live, unsaved-until-blur text; this view has
-	 *  nothing analogous to protect. */
-
-	/** Left-click cycle: computes the next option, persists it, then writes
-	 *  the swap into the document via `replaceAltContentInScript`. The next
-	 *  index is computed INSIDE `mutateScriptNotes`'s mutate callback, against its own
-	 *  over at click time — that state only catches up after a real vault
-	 *  read round-trip, so a click landing before it caught up (a fast
-	 *  double-click, or just a slow filesystem) would otherwise recompute the
-	 *  SAME "next" index every time and the cycle would stall after one step. */
-	const handleCycleAlt = (id: string) => {
-		if (!project) {
-			console.error('Loom Loom: handleCycleAlt called with no project', id);
-			return;
-		}
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur) {
-				console.error('Loom Loom: handleCycleAlt found no sidecar entry for', id);
-				return notes;
-			}
-			if (cur.options.length < 2) {
-				console.error('Loom Loom: handleCycleAlt found < 2 options for', id, cur.options);
-				return notes;
-			}
-			const nextIndex = (cur.activeIndex + 1) % cur.options.length;
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: nextIndex } } };
-		}).then((next) => {
-			const cur = next.altText[id];
-			if (cur) void replaceAltContentInScript(plugin, project, id, cur.options[cur.activeIndex]);
-		});
-	};
-
-	/** Right-click: opens `AltTextModal` (project.ts) — a real closeable
-	 *  window, scrollable, every option in its own EDITABLE textarea — rather
-	 *  than the old `Menu`-based picker, which truncated each option to 60
-	 *  chars, couldn't be scrolled, and only ever let you PICK an option, not
-	 *  rewrite one. The modal owns its own local copy of `options`/
-	 *  `activeIndex` and re-renders itself after every action, so it needs no
-	 *  React state here to track "is it open." */
-	const handleOpenAltMenu = (id: string) => {
-		const entry = scriptNotes.altText[id];
-		if (!entry) return;
-		new AltTextModal(plugin.app, {
-			options: entry.options,
-			activeIndex: entry.activeIndex,
-			acceptedIndex: entry.acceptedIndex,
-			onDraft: (index) => handleDraftAlt(id, index),
-			onAccept: (index) => handleAcceptAlt(id, index),
-			onEditOption: (index, newText) => handleEditAltOption(id, index, newText),
-			onAddOption: (text) => handleAddAltOption(id, text),
-			onDeleteOption: (index) => handleDeleteAltOption(id, index),
-		}).open();
-	};
-
-	/** A row was picked as the DRAFT — same "compute the next state INSIDE
-	 *  the fresh re-read" shape as `handleCycleAlt` above, so a pick right
-	 *  after another script-notes write can't act on stale data. Clears
-	 *  `acceptedIndex`: choosing a different draft means the span is back to
-	 *  "still deciding," even if it had a finalized choice before. */
-	const handleDraftAlt = (id: string, index: number) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || index < 0 || index >= cur.options.length) return notes;
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: null } } };
-		}).then((next) => {
-			const cur = next.altText[id];
-			if (cur) void replaceAltContentInScript(plugin, project, id, cur.options[cur.activeIndex]);
-		});
-	};
-
-	/** A row was picked as the ACCEPTED, final option — same as Draft but
-	 *  also stamps `acceptedIndex`, marking this span as no longer "in doubt"
-	 *  (see the Alternatives browser panel, which surfaces spans where this
-	 *  is still `null`). */
-	const handleAcceptAlt = (id: string, index: number) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || index < 0 || index >= cur.options.length) return notes;
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, activeIndex: index, acceptedIndex: index } } };
-		}).then((next) => {
-			const cur = next.altText[id];
-			if (cur) void replaceAltContentInScript(plugin, project, id, cur.options[cur.activeIndex]);
-		});
-	};
-
-	/** An existing option's wording was edited in place inside the modal — if
-	 *  it's the currently ACTIVE option, the live document has to follow the
-	 *  edit too: the active option's stored text is supposed to always mirror
-	 *  what's actually on the page. */
-	const handleEditAltOption = (id: string, index: number, newText: string) => {
-		if (!project) return;
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || index < 0 || index >= cur.options.length) return notes;
-			const options = cur.options.slice();
-			options[index] = newText;
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options } } };
-		}).then((next) => {
-			const cur = next.altText[id];
-			if (cur && cur.activeIndex === index) void replaceAltContentInScript(plugin, project, id, newText);
-		});
-	};
-
-	/** "Add" in the open `AltTextModal` — appends a new option without
-	 *  activating it (add and swap stay distinct actions). */
-	const handleAddAltOption = (id: string, text: string) => {
-		void mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur) return notes;
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options: [...cur.options, text] } } };
-		});
-	};
-
-	/** Deletes ONE option outright (the modal's trash icon, after its own
-	 *  confirm). Refused ONLY when just one option is left already (nothing
-	 *  left to delete down TO) — the modal's own trash button disables at
-	 *  that point. Deleting down to exactly one remaining, though, is a real
-	 *  action: an alt-text span with a single option has nothing left to
-	 *  alternate BETWEEN, so — mirroring a comment thread's own "delete the
-	 *  last one strips the markers" behavior — the whole `[[loom-alt:<id>]]`
-	 *  wrapper comes OUT of the document, leaving the survivor's wording as
-	 *  ordinary text, and the sidecar entry is dropped entirely rather than
-	 *  left describing a single-option span. Otherwise shifts `activeIndex`/
-	 *  `acceptedIndex` down past the removed slot, falls the active index
-	 *  back to the nearest remaining option if the deleted one WAS active,
-	 *  and clears `acceptedIndex` if the deleted one was the accepted choice
-	 *  — then hands the fresh `AltTextEntry` back to the modal so it can
-	 *  re-render without duplicating this renumbering itself. */
-	const handleDeleteAltOption = (id: string, index: number) => {
-		if (!project) return Promise.resolve(undefined);
-		let strippedTo: string | null = null;
-		return mutateScriptNotes(plugin.app, project, (notes) => {
-			const cur = notes.altText[id];
-			if (!cur || cur.options.length <= 1 || index < 0 || index >= cur.options.length) return notes;
-			const options = cur.options.slice();
-			options.splice(index, 1);
-			if (options.length <= 1) {
-				strippedTo = options[0] ?? '';
-				const { [id]: _dropped, ...rest } = notes.altText;
-				return { ...notes, altText: rest };
-			}
-			let activeIndex = cur.activeIndex;
-			if (index === activeIndex) activeIndex = Math.min(index, options.length - 1);
-			else if (index < activeIndex) activeIndex -= 1;
-			let acceptedIndex = cur.acceptedIndex;
-			if (acceptedIndex !== null) {
-				if (index === acceptedIndex) acceptedIndex = null;
-				else if (index < acceptedIndex) acceptedIndex -= 1;
-			}
-			return { ...notes, altText: { ...notes.altText, [id]: { ...cur, options, activeIndex, acceptedIndex } } };
-		}).then(async (next) => {
-			if (strippedTo !== null) {
-				// The surviving option's text has to actually BE the live
-				// document content before the wrapper markers come out, or
-				// stripping would leave whichever text happened to be active
-				// (possibly the just-deleted option's) instead of the survivor.
-				await replaceAltContentInScript(plugin, project, id, strippedTo);
-				await stripAnnotationMarkerInScript(plugin, project, id);
-				return undefined;
-			}
-			const cur = next.altText[id];
-			if (cur) await replaceAltContentInScript(plugin, project, id, cur.options[cur.activeIndex]);
-			return cur;
-		});
-	};
-
 	/** Rewrites only the title page, leaving the body byte-identical. */
 	const writeTitlePage = (title: TitlePage) => {
 		const lines = text.split(/\r?\n/);
@@ -1061,24 +805,7 @@ function Script({ view }: { view: ScriptView }) {
 	const sceneNote = (scene: ParsedScene): EntityRecord | undefined =>
 		sceneNotes.find((r) => r.sceneId === scene.loomId);
 
-	/** Pages preview's right-click "Open this scene" — resolves an absolute
-	 *  script line to its owning scene, works out where that scene's own
-	 *  editor should scroll to, and hands it off through the exact
-	 *  `localStorage` key the Scene page's own mount-time restore already
-	 *  reads (`pendingSceneScrollLineRef`, entity-view.tsx) — no new
-	 *  cross-view state channel needed, just seeding the same one a normal
-	 *  reopen already uses. */
-	const openThisScene = (line: number) => {
-		const scene = sceneAtLine(parsed, line);
-		if (!scene || scene.loomId === null) return;
-		const note = sceneNote(scene);
-		if (!note) return;
-		const excerpt = sceneScriptText(text, scene.loomId);
-		if (excerpt === null) return;
-		const bodyLine = Math.max(0, line - scene.line - sceneBodyLineOffset(excerpt));
-		window.localStorage.setItem(`loom-scene-script-line:${note.path}`, String(bodyLine));
-		view.openEntity(note.path);
-	};
+	const openThisScene = (line: number) => openSceneAtLine(plugin, view, project.root, parsed, text, line);
 
 	// --- Outline panel ----------------------------------------------------
 	// Every top-level section already carrying its stable id — `ensureSceneIds`
@@ -1269,20 +996,8 @@ function Script({ view }: { view: ScriptView }) {
 	const pageCount = Math.max(1, pages.length);
 	const currentPage = Math.min(Math.max(1, page), pageCount);
 	/** Real page range of a scene, from the same layout as the PDF. */
-	const scenePages = (scene: ParsedScene): string => {
-		if (!parsed) return '—';
-		const end = sceneEndLine(parsed, scene);
-		const hits: number[] = [];
-		bodyPages.forEach((elements, i) => {
-			if (elements.some((el) => el.line >= scene.line && el.line < end)) {
-				hits.push(i + 1 + (titleFirst ? 1 : 0));
-			}
-		});
-		if (hits.length === 0) return '—';
-		const first = hits[0];
-		const last = hits[hits.length - 1];
-		return first === last ? String(first) : `${first}–${last}`;
-	};
+	const scenePages = (scene: ParsedScene): string =>
+		parsed ? pageRange(bodyPages, scene.line, sceneEndLine(parsed, scene), titleFirst ? 1 : 0) : '—';
 	/** The page an act-boundary break shows against — `layoutPages` (pdf.ts)
 	 *  drops the break itself from every page's own element list (it only
 	 *  ever forces the NEXT one to start fresh), so unlike `scenePages` this
@@ -1309,59 +1024,12 @@ function Script({ view }: { view: ScriptView }) {
 
 	// --- Search -------------------------------------------------------------
 	const annotationSpans = findAnnotationSpans(text);
-	const matches: ScriptSearchMatch[] = [];
-	if (query.trim() !== '') {
-		const needle = query.toLowerCase();
-		const hay = text.toLowerCase();
-		for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + needle.length)) {
-			matches.push({ kind: 'text', offset: at });
-		}
-		for (const [id, entries] of Object.entries(scriptNotes.comments)) {
-			if (entries.some((e) => e.text.toLowerCase().includes(needle))) matches.push({ kind: 'comment', id });
-		}
-		for (const [id, entry] of Object.entries(scriptNotes.altText)) {
-			entry.options.forEach((opt, optionIndex) => {
-				if (opt.toLowerCase().includes(needle)) matches.push({ kind: 'altOption', id, optionIndex });
-			});
-		}
-		// Document order, not "all text hits then all annotations" — a
-		// comment/alt-text match sorts by its marker's own position.
-		const posOf = (m: ScriptSearchMatch) =>
-			m.kind === 'text' ? m.offset : (annotationSpans.find((s) => s.id === m.id)?.from ?? Infinity);
-		matches.sort((a, b) => posOf(a) - posOf(b));
-	}
+	const matches = scriptSearchMatches(text, annotationSpans, scriptNotes, query);
 	/** Line index a character offset falls on. */
 	const lineAt = (offset: number) => text.slice(0, offset).split('\n').length - 1;
 
-	/** How many physical lines an element's OWN `.line` covers — only
-	 *  `dialogue` ever merges consecutive source lines into one element
-	 *  (`\n`-joined), so it's the one type whose span can be more than 1;
-	 *  matches the identical check in `fountain-field.tsx`'s decorations. */
-	const elementSpan = (el: ParsedScript['elements'][number]) =>
-		el.type === 'dialogue' ? el.text.split('\n').length : 1;
-
-	/** The 1-based typeset page a line renders on. Checks the element's WHOLE
-	 *  span, not just its start line — a line landing mid-dialogue (a
-	 *  multi-line merged element) has no element starting exactly there, so
-	 *  an exact-match-only check fell through to the "after this line"
-	 *  fallback below and could land a page later than the one actually
-	 *  showing that line. */
-	const pageOfLine = (line: number) => {
-		const offset = titleFirst ? 2 : 1;
-		for (let i = 0; i < bodyPages.length; i++) {
-			if (bodyPages[i].some((el) => line >= el.line && line < el.line + elementSpan(el))) return i + offset;
-		}
-		// Nothing rendered sits exactly on this line — a section (`#` act)
-		// heading never reaches the page itself. Land on whichever page holds
-		// the first thing that comes AFTER it, so an act that starts fresh
-		// on a new page jumps to that page rather than the one before it (the
-		// last page whose first element preceded the target would always be
-		// one page too early in exactly that case).
-		for (let i = 0; i < bodyPages.length; i++) {
-			if (bodyPages[i].some((el) => el.line > line)) return i + offset;
-		}
-		return Math.max(offset, bodyPages.length - 1 + offset);
-	};
+	/** The 1-based typeset page a line renders on. */
+	const pageOfLine = (line: number) => pageOfLineIn(bodyPages, line, titleFirst ? 1 : 0);
 
 	const gotoMatch = (index: number) => {
 		if (matches.length === 0) return;
@@ -1422,19 +1090,13 @@ function Script({ view }: { view: ScriptView }) {
 		el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	};
 
-	/** Outline is a plain swap either direction — it's a management list, not
-	 *  a reading position to preserve. */
-	const switchMode = (next: 'pages' | 'outline') => {
-		if (next !== mode) setMode(next);
-	};
-
 	/** Scrolls the outer view so the tabs row lands at the top — called on
 	 *  every tab click, independent of whether the mode actually changes
 	 *  (a re-click on the already-active tab still scrolls). */
 	const scrollTabsIntoView = () => tabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	const clickTab = (next: 'pages' | 'outline') => {
 		scrollTabsIntoView();
-		switchMode(next);
+		setMode(next);
 	};
 
 	// --- Menus --------------------------------------------------------------
@@ -1729,7 +1391,7 @@ function Script({ view }: { view: ScriptView }) {
 	 *  for alt-text, only the right-click picker. */
 	const jumpToAnnotation = (span: AnnotationSpan) => {
 		openSidePanel(null);
-		switchMode('pages');
+		setMode('pages');
 		scrollToPage(pageOfLine(lineAt(span.from)));
 		if (span.kind === 'comment') {
 			setHighlightedAnnotationId(null);
@@ -1755,7 +1417,7 @@ function Script({ view }: { view: ScriptView }) {
 					aria-label={navOpen ? t('view.entity.script.hideNavigation') : t('view.entity.script.showNavigation')}
 					onClick={() => openSidePanel(navOpen ? null : 'nav')}
 				>
-					<Icon name={navOpen ? 'panel-left-close' : 'panel-left-open'} fallback="list" />
+					<Icon name={navOpen ? 'panel-left-close' : 'panel-left-open'} />
 				</button>
 				{navOpen ? (
 					<aside className="loom-script-nav">
@@ -1817,7 +1479,7 @@ function Script({ view }: { view: ScriptView }) {
 						{tn('view.script.sceneCount', parsed.scenes.length)} · {tn('view.script.pageCountLabel', pageCount)}
 					</span>
 					<button className="loom-rel-filter" aria-label={t('view.script.scriptActionsAria')} onClick={actionMenu}>
-						<Icon name="menu" fallback="more-horizontal" />
+						<Icon name="menu" />
 					</button>
 				</div>
 			}
@@ -1845,87 +1507,38 @@ function Script({ view }: { view: ScriptView }) {
 					<div className="loom-writer-tabs" ref={tabsRef}>
 						{mode !== 'outline' ? (
 							<>
-								<div className="loom-search-wrap">
-									<input
-										className="loom-writer-search"
-										type="search"
-										placeholder={t('view.script.searchPlaceholder')}
-										value={query}
-										onChange={(e) => {
-											setQuery(e.target.value);
-											setMatchIndex(0);
-										}}
-										onKeyDown={(e) => {
-											if (e.key !== 'Enter') return;
-											e.preventDefault();
-											gotoMatch(e.shiftKey ? matchIndex - 1 : matchIndex + 1);
-										}}
-									/>
-									{query !== '' ? (
-										<button
-											className="loom-chip-remove loom-search-clear"
-											aria-label={t('view.entity.script.clearSearch')}
-											onClick={() => {
-												setQuery('');
-												setMatchIndex(0);
-											}}
-										>
-											✕
-										</button>
-									) : null}
-								</div>
-								<button
-									className="loom-rel-filter"
-									aria-label={t('view.entity.script.previousMatch')}
-									disabled={matches.length === 0}
-									onClick={() => gotoMatch(matchIndex - 1)}
-								>
-									<Icon name="chevron-up" />
-								</button>
-								<button
-									className="loom-rel-filter"
-									aria-label={t('view.entity.script.nextMatch')}
-									disabled={matches.length === 0}
-									onClick={() => gotoMatch(matchIndex + 1)}
-								>
-									<Icon name="chevron-down" />
-								</button>
+								<SearchNav
+									placeholder={t('view.script.searchPlaceholder')}
+									query={query}
+									onQuery={(q) => {
+										setQuery(q);
+										setMatchIndex(0);
+									}}
+									onEnter={(e) => {
+										e.preventDefault();
+										gotoMatch(e.shiftKey ? matchIndex - 1 : matchIndex + 1);
+									}}
+									matchCount={matches.length}
+									onPrev={() => gotoMatch(matchIndex - 1)}
+									onNext={() => gotoMatch(matchIndex + 1)}
+								/>
+								{/* Comments/Alternatives browser panels — standalone icon
+								    toggles opening the same overlaid side-panel slot the nav
+								    toggle uses; mutually exclusive via `openSidePanel`. Not in
+								    Outline, which has no annotations to browse. */}
+								<AnnotationPanelToggles open={commentsPanelOpen ? 'comments' : altPanelOpen ? 'alt' : null} onToggle={openSidePanel} />
 							</>
-						) : null}
-						{/* Comments/Alternatives browser panels — standalone icon toggles
-						    (this doesn't change what document is shown, just opens the
-						    same overlaid side-panel slot the nav toggle uses). Mutually
-						    exclusive with each other and the nav panel via `openSidePanel`. */}
-						<div className="loom-script-side-toggles">
-							<button
-								className={commentsPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-								aria-label={commentsPanelOpen ? t('view.entity.script.hideComments') : t('view.entity.script.browseComments')}
-								onClick={() => openSidePanel(commentsPanelOpen ? null : 'comments')}
-							>
-								<Icon name="message-square" />
+						) : (
+							// Outline's way back: Preview on the left, Outline on the right.
+							<button className="loom-writer-outline-btn" onClick={() => clickTab('pages')}>
+								{t('view.entity.script.preview')}
 							</button>
-							<button
-								className={altPanelOpen ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-								aria-label={altPanelOpen ? t('view.entity.script.hideAlternatives') : t('view.entity.script.browseAlternatives')}
-								onClick={() => openSidePanel(altPanelOpen ? null : 'alt')}
-							>
-								<Icon name="repeat" fallback="arrow-right-left" />
-							</button>
-						</div>
+						)}
 						{mode !== 'outline' ? (
 							// After the icons, not before the search box — so the icons'
 							// position doesn't shift when this text appears/disappears/
 							// changes length.
-							<span className="loom-writer-stat">
-								{query.trim() === ''
-									? ''
-									: matches.length === 0
-										? t('view.entity.script.noMatches')
-										: t('view.entity.script.matchCount', {
-												current: (matchIndex % matches.length) + 1,
-												total: matches.length,
-											})}
-							</span>
+							<MatchStat query={query} count={matches.length} index={matchIndex} />
 						) : null}
 						<div className="loom-shell-spacer" />
 						{/* Pages is the sole read-only reading view now — this is the one
@@ -2028,7 +1641,6 @@ function Script({ view }: { view: ScriptView }) {
 								>
 									<Icon
 										name={allActsCollapsed ? 'list-chevrons-up-down' : 'list-chevrons-down-up'}
-										fallback={allActsCollapsed ? 'chevrons-up-down' : 'chevrons-down-up'}
 									/>
 								</button>
 								<span className="loom-writer-row-num">#</span>
@@ -2104,7 +1716,7 @@ function Script({ view }: { view: ScriptView }) {
 														<span className="loom-row-caret" aria-hidden="true" />
 														<span className="loom-writer-row-num" aria-hidden="true" />
 														<span className="loom-writer-outline-pagebreak-label">
-															<Icon name="separator-horizontal" fallback="minus" /> {t('view.script.pageBreakLabel')}
+															<Icon name="separator-horizontal" /> {t('view.script.pageBreakLabel')}
 														</span>
 														<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
 														<span className="loom-writer-row-count">
@@ -2163,9 +1775,8 @@ function Script({ view }: { view: ScriptView }) {
 													    between the title and the count, adapting to title
 													    length automatically instead of leaving a ragged gap. */}
 													<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
-													{/* Its own fixed-width column, not sized to its own text —
-													    a two-digit count previously nudged this whole cell
-													    (and thus its left edge) sideways row to row. */}
+													{/* Its own fixed-width column, not sized to its text, so
+													    the cell's left edge doesn't shift row to row. */}
 													<span className="loom-writer-row-count">
 														{tn('view.script.sceneCount', scenes.length)}
 													</span>
@@ -2272,10 +1883,7 @@ function Script({ view }: { view: ScriptView }) {
 							onSaveEntry={(index, text) => handleSaveCommentEntry(openComment.id, index, text)}
 							onToggleResolvedEntry={(index) => handleToggleCommentResolved(openComment.id, index)}
 							onDeleteEntry={(index) => handleDeleteCommentEntry(openComment.id, index)}
-							onAddEntry={(text) => {
-								commentsWithNewEntryRef.current.add(openComment.id);
-								handleAddCommentReply(openComment.id, text);
-							}}
+							onAddEntry={(text) => handleAddCommentReply(openComment.id, text)}
 							onClose={handleCloseComment}
 						/>
 					) : null}
@@ -2382,19 +1990,14 @@ export function highlight(html: string, query: string): string {
 }
 
 /**
- * The Pages-preview page-rendering loop — byte-for-byte identical across the
- * three places it used to be copy-pasted (the main Script view here, and the
- * Act/Scene pages' own Script sections in entity-view.tsx), now a single
- * shared component all three call. Owns `data-line` on every element (the
- * main Script view never had it before this extraction — needed here for
- * margin-icon placement, and it's what entity-view.tsx's exact-line
- * search-scroll already relied on) and the comment/alt-text margin icons
- * themselves, in the page's own unused 1in right margin
- * (`.loom-sp-annotation-icons`, styles.css) — a sibling of each `<p>`, not a
- * child (that would collide with `dangerouslySetInnerHTML`), so both live
- * inside one `.loom-sp-line-wrap` per element; the wrapper carries no
- * margin/padding of its own, so the `<p>`'s normal margins still collapse
- * through it exactly as if it weren't there.
+ * The Pages-preview page-rendering loop, shared by the main Script view and
+ * the Act/Scene pages' Script sections (entity-view.tsx). Owns `data-line` on
+ * every element (margin-icon placement and exact-line search scrolling use
+ * it) and the comment/alt-text margin icons in the page's unused 1in right
+ * margin (`.loom-sp-annotation-icons`) — a sibling of each `<p>`, not a child
+ * (that would collide with `dangerouslySetInnerHTML`), both inside one
+ * `.loom-sp-line-wrap`, which has no margin/padding so the `<p>` margins
+ * still collapse through it.
  */
 export function PagesPreviewBody({
 	pages,
@@ -2450,7 +2053,7 @@ export function PagesPreviewBody({
 	// so its span-box class matches the live editor's own persistent tint.
 	const unresolvedCommentIds = new Set(
 		Object.entries(comments)
-			.filter(([, entries]) => !(entries.length > 0 && entries.every((e) => e.resolved)))
+			.filter(([, entries]) => isUnresolvedComment('comment', entries))
 			.map(([id]) => id)
 	);
 	return (
@@ -2503,8 +2106,7 @@ export function PagesPreviewBody({
 										<span className="loom-sp-annotation-icons">
 											{lineSpans.map((s) => {
 												const entries = comments[s.id] ?? [];
-												const unresolved =
-													s.kind === 'comment' ? !(entries.length > 0 && entries.every((e) => e.resolved)) : false;
+												const unresolved = isUnresolvedComment(s.kind, entries);
 												return (
 													<span
 														key={s.id}
@@ -2516,13 +2118,9 @@ export function PagesPreviewBody({
 																: 'loom-sp-annotation-icon'
 														}
 														onClick={(e) => {
-															// Real reported bug: without this, the click also
-															// bubbled up to `.loom-sp-line-wrap`'s own
-															// `onContextMenu` for "Open this scene" — right-clicking
-															// this icon showed THAT menu instead of the alt-text
-															// one, since `e.preventDefault()` alone (below) stops
-															// the browser's native menu but never stops React event
-															// BUBBLING to a parent handler.
+															// Keep the right-click from also bubbling to
+															// `.loom-sp-line-wrap`'s "Open this scene" menu —
+															// `preventDefault` only stops the native menu.
 															e.stopPropagation();
 															if (s.kind === 'comment') onOpenComment(s.id, e.currentTarget.getBoundingClientRect());
 															else onCycleAlt(s.id);
@@ -2542,7 +2140,6 @@ export function PagesPreviewBody({
 																		: 'message-square'
 																	: 'arrow-right-left'
 															}
-															fallback={s.kind === 'comment' ? 'message-square' : undefined}
 														/>
 													</span>
 												);
@@ -2753,24 +2350,11 @@ export function renderNavTreeNode(
 	);
 }
 
-/** The lines of the script belonging to one scene, by its loom id.
- *  Deliberately does NOT strip trailing whitespace off the slice — it used
- *  to (`.replace(/\s+$/, '')`), a leftover from before the modular-only
- *  editing change removed the whole-document Script editor: with every
- *  scene now edited exclusively through its own Scene page, there's no
- *  longer any reason this function's own slice needs to look "clean" for a
- *  SEPARATE surface splicing several excerpts together — the Scene page is
- *  the only consumer that cares about the excerpt's own trailing content at
- *  all, and it wants exactly what's really there. The strip was a real,
- *  reported bug: it silently erased any blank line(s) the user deliberately
- *  left at the end of their own scene (including the one `insertBranch`,
- *  fountain.ts, always writes after a group's `= gather`) the instant that
- *  content became the scene's own trailing content, forcing awkward
- *  arrow-key navigation just to get a line back to type on. `sceneEndLine`
- *  already finds the correct structural boundary (the next scene/act
- *  heading's own line, or EOF) regardless of how many blank lines separate
- *  scenes, so nothing here relied on the strip for correctness — only for a
- *  "tidiness" that this function's own callers never actually needed. */
+/** The lines of the script belonging to one scene, by its loom id. Trailing
+ *  whitespace is kept: blank lines the user left at the end of a scene
+ *  (including the one `insertBranch` writes after a `= gather`) are real
+ *  landing lines for the Scene page, and `sceneEndLine` already finds the
+ *  structural boundary however many blank lines separate scenes. */
 export function sceneScriptText(script: string | null, sceneId: string): string | null {
 	if (script === null || sceneId === '') return null;
 	const parsed = parseFountain(script);
@@ -2829,25 +2413,7 @@ export async function pushActTitles(plugin: LoomLoomPlugin, project: ProjectDef)
  */
 export async function pruneOrphanedAnnotations(plugin: LoomLoomPlugin, project: ProjectDef, raw: string): Promise<void> {
 	await syncScenes(plugin, project, parseFountain(raw), raw);
-	const liveIds = liveAnnotationIds(raw);
-	void mutateScriptNotes(plugin.app, project, (notes) => {
-		let touched = false;
-		const comments = { ...notes.comments };
-		for (const id of Object.keys(comments)) {
-			if (!liveIds.has(id)) {
-				delete comments[id];
-				touched = true;
-			}
-		}
-		const altText = { ...notes.altText };
-		for (const id of Object.keys(altText)) {
-			if (!liveIds.has(id)) {
-				delete altText[id];
-				touched = true;
-			}
-		}
-		return touched ? { ...notes, comments, altText } : notes;
-	});
+	pruneScriptNotes(plugin.app, project, raw);
 }
 
 // Registered once at module load so `script-buffer.ts` can run this same
@@ -2889,11 +2455,8 @@ export async function editScriptAndSync(
 
 /** Replaces an alt-text span's wrapped content, wherever in the script it
  *  lives — used by every alt-text mutation handler above (cycling/drafting/
- *  accepting/editing an option), none of which have a live `FountainField`
- *  to dispatch a CM6 transaction through now that Script mode no longer
- *  exists: finding the span across the whole buffer text and writing it back
- *  via `mutateScriptBufferAndFlush` works regardless of where the field
- *  would have been, mirroring `book-view.tsx`'s own
+ *  accepting/editing an option): find the span in the whole buffer text and
+ *  write it back via `mutateScriptBufferAndFlush`, like book-view.tsx's
  *  `replaceAltContentInBook`. */
 export async function replaceAltContentInScript(
 	plugin: LoomLoomPlugin,
@@ -2906,13 +2469,27 @@ export async function replaceAltContentInScript(
 		if (!span) return null;
 		return raw.slice(0, span.contentFrom) + text + raw.slice(span.contentTo);
 	});
-	// Diagnostic: this should always find a live span for an id the sidecar
-	// just cycled — if it doesn't, `mutateScriptBuffer` silently no-ops (by
-	// design, for genuinely-absent targets elsewhere) and the swap never
-	// reaches disk, with nothing else to signal why. Surfacing it here
-	// rather than leaving it silent while tracking down a reported "cycling
-	// does nothing" bug.
+	// Should always find a live span for an id the sidecar just cycled;
+	// `mutateScriptBuffer` no-ops silently otherwise, so say so.
 	if (!changed) console.error('Loom Loom: replaceAltContentInScript found no live span for', id);
+}
+
+/** An alt-text span's current text in the shared script buffer — what every
+ *  Fountain surface's `AnnotationIO.liveAltText` reads (the buffer takes
+ *  every keystroke synchronously, so it's never behind the document). */
+export function liveAltTextInScript(project: ProjectDef, id: string): string | null {
+	const raw = readScriptBuffer(project);
+	const span = raw === null ? undefined : findAnnotationSpans(raw).find((s) => s.kind === 'alt' && s.id === id);
+	return raw !== null && span ? raw.slice(span.contentFrom, span.contentTo) : null;
+}
+
+/** Returns the `AnnotationIO` for the whole-script raw-text path. */
+function scriptAnnotationIO(plugin: LoomLoomPlugin, project: ProjectDef | null): AnnotationIO {
+	return {
+		liveAltText: (id) => (project ? liveAltTextInScript(project, id) : null),
+		replaceAlt: (id, text) => (project ? replaceAltContentInScript(plugin, project, id, text) : undefined),
+		stripMarkers: (id) => (project ? stripAnnotationMarkerInScript(plugin, project, id) : undefined),
+	};
 }
 
 /** Strips ONE marker pair by id, leaving its wrapped content untouched — the
@@ -2932,6 +2509,51 @@ export async function stripAnnotationMarkerInScript(
 		if (!span) return null;
 		return raw.slice(0, span.from) + raw.slice(span.contentFrom, span.contentTo) + raw.slice(span.to);
 	});
+}
+
+/** The confirmation detail for deleting `record` — Scene/Act/Chapter notes
+ *  warn that their script or book text goes with them. */
+export function deleteEntityMessage(project: ProjectDef, record: EntityRecord): string {
+	switch (entityBacking(project, record)) {
+		case 'script':
+			return record.type === 'act' ? t('view.list.deleteMessageAct') : t('view.list.deleteMessageScene');
+		case 'book':
+			return record.type === 'act' ? t('view.list.deleteMessageBookAct') : t('view.list.deleteMessageBookChapter');
+		default:
+			return t('view.list.deleteMessageGeneral');
+	}
+}
+
+/** Deletes an entity note — a script- or book-backed Scene/Act/Chapter takes
+ *  its stretch of text (and, for an Act, its member notes) along with it. */
+export async function deleteEntity(plugin: LoomLoomPlugin, project: ProjectDef, record: EntityRecord): Promise<void> {
+	switch (entityBacking(project, record)) {
+		case 'script':
+			return deleteScriptEntity(plugin, project, record);
+		case 'book':
+			return deleteBookEntity(plugin, project, record);
+		default:
+			return deleteEntityNote(plugin, record);
+	}
+}
+
+/** Which file backs a Scene/Act/Chapter note in this project, if any. Gated
+ *  on the project's own kind, not just the record's ids — an Act carries an
+ *  `actId` in both Writer sub-modes. */
+function entityBacking(project: ProjectDef, record: EntityRecord): 'script' | 'book' | null {
+	if (
+		features(project.config).script &&
+		((record.type === 'act' && record.actId !== '') || (record.type === 'scene' && record.sceneId !== ''))
+	) {
+		return 'script';
+	}
+	if (
+		features(project.config).book &&
+		((record.type === 'act' && record.actId !== '') || (record.type === 'chapter' && record.chapterId !== ''))
+	) {
+		return 'book';
+	}
+	return null;
 }
 
 /**
@@ -2962,23 +2584,9 @@ export async function deleteScriptEntity(
 		await editScript(plugin, project, (raw) => removeScene(raw, sceneId));
 	} else if (record.type === 'act' && record.actId !== '') {
 		const actId = record.actId;
-		const scenes = plugin.indexer
-			.getAll('scene', record.project)
-			.filter(
-				(sc) =>
-					sc.sceneAct !== '' &&
-					plugin.indexer.resolve(sc.sceneAct, sc.path)?.path === record.path
-			);
+		const scenes = plugin.indexer.membersOfAct(record, 'scene');
 		await editScript(plugin, project, (raw) => removeAct(raw, actId));
-		for (const sc of scenes) {
-			const f = plugin.app.vault.getFileByPath(sc.path);
-			if (!f) continue;
-			await purgeEntityReferences(plugin, sc.path, sc.project);
-			await plugin.app.fileManager.trashFile(f);
-		}
+		for (const sc of scenes) await deleteEntityNote(plugin, sc);
 	}
-	const file = plugin.app.vault.getFileByPath(record.path);
-	if (!file) return;
-	await purgeEntityReferences(plugin, record.path, record.project);
-	await plugin.app.fileManager.trashFile(file);
+	await deleteEntityNote(plugin, record);
 }

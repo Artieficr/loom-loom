@@ -1,8 +1,8 @@
-import { EntityRecord, EntityType } from '../types';
-import { formatLoomDate } from '../calendar';
+import { EntityRecord, EntityType, bySeq } from '../types';
+import { recordLabel } from '../display';
 import { TimelineColumn, buildColumns } from '../columns';
 import { LoomIndexer } from '../indexer';
-import { EdgeRoute, LANE_EPSILON, RoutedEdge } from './routing';
+import { EdgeRoute, LANE_EPSILON, RoutedEdge, packLanes } from './routing';
 import { roleOf } from '../project-kind';
 
 /** Which row a node sits in. `anchor` = the column-owning row (Sessions /
@@ -165,9 +165,6 @@ export function computeGraphLayout(
 	/** Node-label font size (px) under the current text-size setting — label
 	 *  overlap estimates (the checker pass) scale with it. */
 	labelFontPx: number = 12.8,
-	/** Node being live-dragged, if any: excluded from the checker pass so its
-	 *  transient label position can't toggle neighbors' stagger every frame. */
-	liveDragId?: string,
 	/** Drag-dropped y positions — honored for fully-unconnected nodes only,
 	 *  so they can sit anywhere within their layer's space. */
 	manualY?: ReadonlyMap<string, number>,
@@ -175,23 +172,16 @@ export function computeGraphLayout(
 	 *  "separate graph" mode) — the rest are dropped entirely. */
 	restrictTo?: ReadonlySet<string>,
 	/** GM projects only (`features(config).eventPlanning`) — whether an
-	 *  Event's status (`eventKind`) should drive its edge line style
-	 *  (dashed/locked). A real, confirmed bug fixed 2026-08-25: this used to
-	 *  apply unconditionally to ANY project — `eventKind === ''` (the value
-	 *  every Player-project Event reads as, since that UI never writes the
-	 *  field at all) fell into the SAME branch as an explicit `'planned'`,
-	 *  so every Player-project event connection rendered dashed too, even
-	 *  though Player events have no status concept to visualize. Callers
-	 *  must pass this explicitly; it defaults to `false` (plain solid
-	 *  edges, the pre-GM-kind behavior) rather than inferring it from the
-	 *  record data itself. */
+	 *  Event's status (`eventKind`) drives its edge line style
+	 *  (dashed/locked). Player events have no status (`eventKind === ''`) and
+	 *  must stay solid, so callers pass this explicitly; default `false`. */
 	gmEventStyling: boolean = false
 ): GraphLayout {
 	const { raw, neighbors } = collectEdges(indexer, projectRoot, restrictTo);
 
 	// Round 1: provisional placement with default corridors, only to learn how
 	// many trunk lanes each corridor must fit.
-	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors, manualX, liveDragId, 0, restrictTo);
+	const prelim = placeNodes(indexer, projectRoot, layerOrder, null, neighbors, manualX, 0, restrictTo);
 	const demand = corridorDemand(classifyEdges(raw, prelim), trunkGap);
 
 	// Leading pad: how far the widest global row overhangs the timeline span,
@@ -207,7 +197,7 @@ export function computeGraphLayout(
 	const leftPad = Math.max(0, (widestRow - timelineSpan) / 2);
 
 	// Round 2: final placement with widened corridors, then full routing.
-	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX, liveDragId, leftPad, restrictTo);
+	const placed = placeNodes(indexer, projectRoot, layerOrder, demand, neighbors, manualX, leftPad, restrictTo);
 	const classified = classifyEdges(raw, placed);
 	const bottom = routeEdges(classified, placed, lineGap, trunkGap);
 
@@ -249,16 +239,8 @@ export function computeGraphLayout(
 	// Checker pass (after routing, so row membership and bands were computed
 	// from the flat rows): row neighbors whose labels would overlap alternate
 	// slightly above/below their row; nodes with enough room stay put.
-	const projectDef = indexer.getProjectByRoot(projectRoot);
-	const labelOf = (r: EntityRecord) =>
-		roleOf(r.type) === 'anchor' && r.date && projectDef
-			? formatLoomDate(r.date, projectDef.config)
-			: r.name;
-	applyLabelChecker(
-		[...placed.nodes.values()].filter((n) => n.id !== liveDragId),
-		labelOf,
-		labelFontPx
-	);
+	const projectDef = indexer.getProjectByRoot(projectRoot) ?? null;
+	applyLabelChecker([...placed.nodes.values()], (r) => recordLabel(r, projectDef), labelFontPx);
 	// Exit diagonals follow their node onto its staggered y.
 	for (const e of classified) {
 		if (e.kind === 'fan') e.departY = e.upper.y + DEPART_DROP;
@@ -348,21 +330,12 @@ function collectEdges(
 			neighbors.get(b)?.add(a);
 		}
 	}
-	// GM projects: an event under a Decision Point routes its own session
-	// connection THROUGH the decision point instead of drawing a second,
-	// redundant line straight to the session — the decision point already
-	// carries a real edge to that same session via its own
-	// `decisionPointSession` field (collected above like any other
-	// connection, so no synthesizing needed here), only reachable when the
-	// decision point actually HAS a session linked — an event whose Decision
-	// Point has no session yet keeps its own direct edge, since that's the
-	// only path to the session at all in that case. Keyed by the event's own
-	// path -> the DP's session's resolved PATH (not the DP's own path) — an
-	// event can independently carry a SECOND, unrelated session note of its
-	// own (a second `sessionNotes` entry), and only the edge to THIS SAME
-	// session is actually redundant; a real bug once compared just "is either
-	// endpoint a Decision-Pointed event" and deleted every session-note edge
-	// off it, silently dropping an unrelated session connection too.
+	// GM projects: an event under a Decision Point routes its session
+	// connection THROUGH the decision point (which has its own edge to that
+	// session via `decisionPointSession`) instead of a second, redundant line —
+	// only when the DP actually has a session. Keyed event path -> the DP's
+	// session PATH: the event may also carry an unrelated session note of its
+	// own, and only the edge to THIS session is redundant.
 	const eventDpSessionPath = new Map<string, string>();
 	for (const r of records) {
 		if (r.type !== 'event' || r.decisionPoint === null) continue;
@@ -393,7 +366,6 @@ function placeNodes(
 	corridorWidths: Map<number, number> | null,
 	neighbors: Map<string, Set<string>>,
 	manualX?: ReadonlyMap<string, number>,
-	liveDragId?: string,
 	/** Leading space before the first timeline column: pushes the whole timeline
 	 *  right so wide global rows (which stay clamped to the real left margin) can
 	 *  center under it instead of left-aligning. */
@@ -417,17 +389,11 @@ function placeNodes(
 	const freeEvents = allColumns.filter(isFreeEvent).map((c) => c.anchor);
 	const columns = allColumns.filter((c) => !isFreeEvent(c));
 
-	// GM projects: a session's own Decision Points (fanned left-to-right,
-	// centered on it — see the placement loop below) can extend well past
-	// COL_WIDTH's own half, so the fixed inter-session distance has to be
-	// measured against the OUTERMOST Decision Point on each side, not the
-	// session nodes themselves, or a wide fan crowds straight into its
-	// neighbor's own fan (a real, reported bug: two adjacent sessions each
-	// carrying several Decision Points overlapped once there were enough of
-	// them). Computed here, before `colX` itself, purely from column ORDER
-	// (`colIndexOf`, not `colOf` — that only gets filled in once `colX`
-	// already exists, further down) — `dpsBySessionCol` built here is reused
-	// there for the actual placement rather than recomputed a second time.
+	// GM projects: a session's Decision Points fan out centered on it and can
+	// extend past COL_WIDTH's half, so inter-session spacing is measured from
+	// the OUTERMOST Decision Point on each side, or adjacent fans overlap.
+	// Computed from column ORDER (`colIndexOf`; `colOf` only exists once `colX`
+	// does); `dpsBySessionCol` is reused for the placement below.
 	const colIndexOf = new Map<string, number>();
 	columns.forEach((col, i) => colIndexOf.set(col.anchor.path, i));
 	const dpsBySessionCol = new Map<number, EntityRecord[]>();
@@ -473,10 +439,9 @@ function placeNodes(
 	// in ANY session's ordered list. A session with fewer events above a shared
 	// event just leaves a gap in that column, so the shared event (one node,
 	// centered between its sessions) lines up across every session it's in.
-	const seqKey = (e: EntityRecord) => e.seq ?? e.created;
 	const orderedCols = columns.map((col) => ({
 		col,
-		events: [...col.events].sort((a, b) => seqKey(a) - seqKey(b)),
+		events: [...col.events].sort(bySeq),
 	}));
 	// Column indices each event stacks under (a multi-session event has several).
 	const eventCols = new Map<string, number[]>();
@@ -493,7 +458,7 @@ function placeNodes(
 	// Longest predecessor chain = the row. Processed in global seq order, so an
 	// event's predecessors (always smaller seq) are resolved before it.
 	const rowOf = new Map<string, number>();
-	const orderedEvents = [...subEvents.values()].sort((a, b) => seqKey(a) - seqKey(b));
+	const orderedEvents = [...subEvents.values()].sort(bySeq);
 	for (const ev of orderedEvents) {
 		const ps = preds.get(ev.path) ?? [];
 		rowOf.set(ev.path, ps.length > 0 ? Math.max(...ps.map((p) => (rowOf.get(p) ?? 0) + 1)) : 0);
@@ -740,10 +705,9 @@ function placeNodes(
 		}
 		if (anchored) anchoredComps.add(id);
 	}
-	// Manual x only ever positions fully-unconnected nodes: a node with real
-	// neighbors follows its connections (stale drag spots used to act as
-	// permanent pseudo-edges and kept connected clusters from pulling
-	// together — chars sharing a location stayed stretched across the row).
+	// Manual x only positions fully-unconnected nodes: a node with real
+	// neighbors follows its connections (a stale drag spot would otherwise
+	// act as a permanent pseudo-edge).
 	const manualPull = (path: string): number | undefined =>
 		manualX !== undefined && !anchoredComps.has(compOf.get(path) ?? -1) && !isConnected(path)
 			? manualX.get(path)
@@ -762,16 +726,6 @@ function placeNodes(
 	}
 	for (let pass = 0; pass < 40; pass++) {
 		for (const g of allGlobals) {
-			// The live-dragged node's home is the cursor, absolutely — averaging
-			// it with connection forces made its estimate lag behind, so the row
-			// order never flipped and a connected neighbor could never be passed.
-			if (g.path === liveDragId) {
-				const manual = manualX?.get(g.path);
-				if (manual !== undefined) {
-					est.set(g.path, manual);
-					continue;
-				}
-			}
 			const anchor = questAnchor.get(g.path);
 			if (anchor !== undefined) {
 				est.set(g.path, anchor);
@@ -1193,24 +1147,32 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number, trunkGap
 	const approachesOf = (layer: number) =>
 		edges.filter((e) => e.kind === 'fan' && e.lower.zone === layer + 1);
 
+	// Lanes are packed: lines whose horizontal extents don't overlap share one
+	// (`packLanes`), so a band is only as tall as its most crowded stretch.
+	// LANE_PAD keeps two lines on one lane from meeting end to end.
+	const LANE_PAD = 16;
+	const uSpan = (e: CEdge): [number, number] => [
+		Math.min(e.upper.x, e.lower.x) - LANE_PAD,
+		Math.max(e.upper.x, e.lower.x) + LANE_PAD,
+	];
+	const uLanes = (us: CEdge[]) =>
+		packLanes(
+			us.sort((p, q) => Math.min(p.upper.x, p.lower.x) - Math.min(q.upper.x, q.lower.x)),
+			uSpan
+		);
+	const laneCount = (lanes: Map<CEdge, number>) => Math.max(0, ...[...lanes.values()].map((l) => l + 1));
+
 	// Sessions-row U lanes live above the top row and don't affect band sizing.
-	uOf(-1)
-		.sort((p, q) => Math.min(p.upper.x, p.lower.x) - Math.min(q.upper.x, q.lower.x))
-		.forEach((e, i) => {
-			e.uY = SESSION_Y - 44 - i * yGap;
-		});
+	for (const [e, lane] of uLanes(uOf(-1))) e.uY = SESSION_Y - 44 - lane * yGap;
 
 	let bandTop = eventsBottom;
 	let bottom = eventsBottom + 60;
 	for (let b = 0; b <= layers.length; b++) {
-		const us = uOf(b).sort(
-			(p, q) => Math.min(p.upper.x, p.lower.x) - Math.min(q.upper.x, q.lower.x)
-		);
-		us.forEach((e, i) => {
-			e.uY = bandTop + U_TOP + i * yGap;
-		});
+		const us = uLanes(uOf(b));
+		for (const [e, lane] of us) e.uY = bandTop + U_TOP + lane * yGap;
+		const uCount = laneCount(us);
 		if (b === layers.length) {
-			bottom = bandTop + (us.length > 0 ? U_TOP + us.length * yGap : 0) + 60;
+			bottom = bandTop + (uCount > 0 ? U_TOP + uCount * yGap : 0) + 60;
 			break;
 		}
 		const approaches = approachesOf(b);
@@ -1225,18 +1187,28 @@ function routeEdges(edges: CEdge[], placement: Placement, yGap: number, trunkGap
 					p.lower.x - q.lower.x ||
 					Math.abs(q.laneX - q.lower.x) - Math.abs(p.laneX - p.lower.x)
 			);
+		// A run spans its trunk to where it meets its entry diagonal. Runs into
+		// one node keep the farther-is-lower order above by flooring each one
+		// just above the same target's runs already placed.
+		const runLanes = packLanes(
+			runs,
+			(e) => {
+				const end = e.lower.x + e.fanOffset;
+				return [Math.min(e.laneX, end) - LANE_PAD, Math.max(e.laneX, end) + LANE_PAD];
+			},
+			(e, placed) =>
+				Math.max(0, ...[...placed].filter(([o]) => o.lower.id === e.lower.id).map(([, l]) => l + 1))
+		);
 		const height = Math.max(
 			MIN_BAND,
-			U_TOP + us.length * yGap + BAND_MID + (runs.length + 1) * yGap + APPROACH_BOTTOM
+			U_TOP + uCount * yGap + BAND_MID + (laneCount(runLanes) + 1) * yGap + APPROACH_BOTTOM
 		);
 		const rowY = bandTop + height;
 		for (const node of layers[b]) node.y = rowY;
 		// Base approach line closest to the row for run-less edges; each
 		// horizontal run gets its own lane above it.
 		for (const e of approaches) e.approachY = rowY - APPROACH_BOTTOM;
-		runs.forEach((e, j) => {
-			e.approachY = rowY - APPROACH_BOTTOM - (j + 1) * yGap;
-		});
+		for (const [e, lane] of runLanes) e.approachY = rowY - APPROACH_BOTTOM - (lane + 1) * yGap;
 		bandTop = rowY;
 	}
 

@@ -1,22 +1,16 @@
 import { App, TFile } from 'obsidian';
 import { setLoomKey } from './fm';
+import { decisionPointEventsOf } from './gm-decision-point';
 import { LoomIndexer } from './indexer';
 import { EntityRecord, EventKind, FM, SpecialCondition, SpecialConditionGroup } from './types';
 
 /**
- * Resolves once `app.metadataCache` has actually re-parsed `file` — NOT just
- * once a `processFrontMatter` write's own promise resolves. A real, reported
- * bug this fixes: `processFrontMatter`'s promise settles once the WRITE
- * lands on disk, but Obsidian's metadataCache re-parses the new frontmatter
- * on its own subsequent tick — reading `LoomIndexer`'s cached records (or
- * calling `rebuildNow`, which itself only re-reads whatever `metadataCache`
- * currently has, stale or not) immediately after a write could still see
- * the PRE-write value. Concretely: deleting a Special Condition that was
- * locking an event recomputed against the just-deleted condition's stale
- * cached copy, found nothing changed, and left the event stuck locked until
- * some LATER, unrelated write finally landed after the cache had caught up.
- * A capped timeout is a safety net only (an edit that produces byte-
- * identical frontmatter never fires `'changed'` at all).
+ * Resolves once `app.metadataCache` has actually re-parsed `file` — not just
+ * once a `processFrontMatter` write's promise resolves, which only means the
+ * write reached disk; the cache re-parses on a later tick, so reading the
+ * indexer (or `rebuildNow`) right away can still see the pre-write value
+ * (e.g. a deleted Special Condition still locking its event). The timeout is
+ * a safety net (byte-identical frontmatter never fires `'changed'`).
  */
 export function waitForMetadataSync(app: App, file: TFile, timeoutMs = 2000): Promise<void> {
 	return new Promise((resolve) => {
@@ -33,6 +27,23 @@ export function waitForMetadataSync(app: App, file: TFile, timeoutMs = 2000): Pr
 		});
 		const timer = window.setTimeout(finish, timeoutMs);
 	});
+}
+
+/** Resolves `target` to a record, waiting out the metadata cache first when
+ *  the note was only just written (a pick made through a "+ Create new"
+ *  action isn't indexed yet the instant its `onCreated` fires). */
+export async function resolveFresh(
+	app: App,
+	indexer: LoomIndexer,
+	target: string,
+	sourcePath: string
+): Promise<EntityRecord | null> {
+	const rec = indexer.resolve(target, sourcePath);
+	if (rec) return rec;
+	const pending = app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+	if (!pending) return null;
+	await waitForMetadataSync(app, pending);
+	return indexer.resolve(target, sourcePath);
 }
 
 /**
@@ -67,34 +78,17 @@ function conditionSatisfied(cond: SpecialCondition, event: EntityRecord, indexer
 			return target.type === 'event' && target.eventKind === 'happened';
 		case 'decisionPointHappened':
 			if (target.type !== 'decisionPoint') return false;
-			return indexer
-				.getAll('event', projectRoot)
-				.some(
-					(e) =>
-						e.eventKind === 'happened' &&
-						e.decisionPoint !== null &&
-						indexer.resolve(e.decisionPoint, e.path)?.path === target.path
-				);
+			return decisionPointEventsOf(target, indexer).some((e) => e.eventKind === 'happened');
 	}
 }
 
-/** A condition row with no target picked yet — e.g. the instant "+ Add a
- *  condition" creates a fresh row, before the user has chosen what it checks
- *  against. Never treated as a real, failing condition (see `groupComplete`'s
- *  own doc comment for why) — `conditionSatisfied` already reads it as
- *  unsatisfied on its own, which is right for "can this group satisfy", but
- *  wrong for "should this group's incompleteness itself lock the event". */
-function conditionComplete(cond: SpecialCondition): boolean {
-	return cond.target !== '';
-}
-
 /** A group only counts toward locking once every condition in it has a
- *  target picked — an incomplete group (still mid-edit) is neither satisfied
+ *  target picked (a fresh "+ Add a condition" row has none yet) — an incomplete group (still mid-edit) is neither satisfied
  *  NOR a lock reason; it's simply not evaluated yet. Without this, adding a
  *  fresh condition row locked the event the instant its TYPE was picked,
  *  before the user had a chance to choose what it checks against. */
 function groupComplete(group: SpecialConditionGroup): boolean {
-	return group.conditions.length > 0 && group.conditions.every(conditionComplete);
+	return group.conditions.length > 0 && group.conditions.every((c) => c.target !== '');
 }
 
 function groupSatisfied(group: SpecialConditionGroup, event: EntityRecord, indexer: LoomIndexer, projectRoot: string): boolean {
@@ -147,15 +141,9 @@ export function evaluateEvent(event: EntityRecord, indexer: LoomIndexer, project
 	if (event.decisionPoint !== null) {
 		const dp = indexer.resolve(event.decisionPoint, event.path);
 		if (dp) {
-			const siblingHappened = indexer
-				.getAll('event', projectRoot)
-				.some(
-					(e) =>
-						e.path !== event.path &&
-						e.eventKind === 'happened' &&
-						e.decisionPoint !== null &&
-						indexer.resolve(e.decisionPoint, e.path)?.path === dp.path
-				);
+			const siblingHappened = decisionPointEventsOf(dp, indexer).some(
+				(e) => e.path !== event.path && e.eventKind === 'happened'
+			);
 			if (siblingHappened) reasons.push('cascade');
 		}
 	}
