@@ -15,6 +15,9 @@ import {
 	CompletionResult,
 	autocompletion,
 	completionKeymap,
+	completionStatus,
+	currentCompletions,
+	selectedCompletionIndex,
 	startCompletion,
 } from '@codemirror/autocomplete';
 import { Menu, Notice, setIcon } from 'obsidian';
@@ -636,6 +639,15 @@ function pushBoxLines(
 function fixWidgetRowDisplay(row: HTMLElement, display: 'inline-flex' | 'inline-block'): void {
 	row.addClass(display === 'inline-flex' ? 'loom-fountain-branch-row-inline-flex' : 'loom-fountain-branch-row-inline-block');
 }
+
+/** Hovering a suggestion shows the same highlight as picking it with the
+ *  arrow keys (CM6's base-theme `[aria-selected]` colours). A theme
+ *  extension, not styles.css, so it also reaches a list mounted on
+ *  `document.body` (`escapeOverflowForTooltips`). */
+const completionHover = EditorView.baseTheme({
+	'&light .cm-tooltip-autocomplete ul li:hover': { background: '#17c', color: 'white' },
+	'&dark .cm-tooltip-autocomplete ul li:hover': { background: '#347', color: 'white' },
+});
 
 export const FountainField = forwardRef(function FountainField(
 	{
@@ -1389,18 +1401,36 @@ export const FountainField = forwardRef(function FountainField(
 					label: e.name,
 					detail: entityLabel(e.type),
 					apply: (v: EditorView, _c: unknown, _from: number, applyTo: number) => {
+						// Adds the closing `]` when it isn't there yet (`entityBracketPairing`
+						// pairs it, but not every way of typing `@[` goes through it).
+						const closed = v.state.sliceDoc(applyTo, applyTo + 1) === ']';
 						v.dispatch({
-							changes: { from, to: applyTo, insert: e.name },
-							// Past the closing `]` (already auto-inserted by
-							// `entityBracketPairing`), not just past the name — Enter
-							// (or Tab) accepting a suggestion means "done with this
-							// link", ready to keep typing ordinary prose right after it.
+							changes: { from, to: applyTo, insert: closed ? e.name : `${e.name}]` },
+							// Past the closing `]`, not just past the name — accepting a
+							// suggestion means "done with this link", ready to keep
+							// typing ordinary prose right after it.
 							selection: { anchor: from + e.name.length + 1 },
 						});
 					},
 				}));
 			if (options.length === 0) return null;
 			return { from, options, filter: false };
+		};
+
+		/** Enter/Tab inside `@[`: accepts the highlighted suggestion, or the first
+		 *  one when none is highlighted. The list opens with nothing selected
+		 *  (`selectOnOpen: false`, so Enter on an empty cue line still makes a
+		 *  newline), and CM6's own accept also ignores a press within 75ms of
+		 *  the list updating — both made Enter after typing a name do nothing. */
+		const acceptEntityLink = (v: EditorView): boolean => {
+			if (completionStatus(v.state) !== 'active') return false;
+			const head = v.state.selection.main.head;
+			const line = v.state.doc.lineAt(head);
+			if (!/@\[[^\]|]*$/.test(v.state.sliceDoc(line.from, head))) return false;
+			const option = currentCompletions(v.state)[selectedCompletionIndex(v.state) ?? 0];
+			if (typeof option?.apply !== 'function') return false;
+			option.apply(v, option, head, head);
+			return true;
 		};
 
 		/** A landing spot for `characterCompletion` to offer its FULL list on,
@@ -1702,6 +1732,18 @@ export const FountainField = forwardRef(function FountainField(
 				const isForcedCuePosition = before === '' && prevBlank;
 				if (!isForcedCuePosition && v.state.sliceDoc(from, from + 1) !== '[') {
 					v.dispatch({ changes: { from, to, insert: '@[]' }, selection: { anchor: from + 2 } });
+					startCompletion(v);
+					return true;
+				}
+			}
+			if (text === '[' && from === to) {
+				// `[` right after an auto-paired `@[]` — already there, step over nothing.
+				if (v.state.sliceDoc(from - 2, from) === '@[' && v.state.sliceDoc(from, from + 1) === ']') return true;
+				// `[` after a bare `@` (a line start, where `@` alone stays a forced
+				// cue): pair it now that it's a link.
+				if (v.state.sliceDoc(from - 1, from) === '@') {
+					v.dispatch({ changes: { from, to, insert: '[]' }, selection: { anchor: from + 1 } });
+					startCompletion(v);
 					return true;
 				}
 			}
@@ -1806,6 +1848,7 @@ export const FountainField = forwardRef(function FountainField(
 					entityBracketPairing,
 					...(embeddedBranchCards ? [branchAutoCreate] : []),
 					draftAnchors,
+					completionHover,
 					autocompletion({
 						override: [characterCompletion, entityLinkCompletion],
 						icons: false,
@@ -1814,7 +1857,14 @@ export const FountainField = forwardRef(function FountainField(
 						// it only accepts an option the user has moved to.
 						selectOnOpen: false,
 					}),
-					keymap.of([...completionKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
+					keymap.of([
+						{ key: 'Enter', run: acceptEntityLink },
+						{ key: 'Tab', run: acceptEntityLink },
+						...completionKeymap,
+						...historyKeymap,
+						...defaultKeymap,
+						indentWithTab,
+					]),
 					EditorView.updateListener.of((update) => {
 						// Excludes the external-value-sync's own dispatch
 						// (`userEvent: 'loom.externalSync'`) — it isn't an edit.

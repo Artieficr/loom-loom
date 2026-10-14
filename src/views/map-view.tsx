@@ -1620,10 +1620,16 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		// notes that are about to come straight back — and write the maps file to
 		// sync that loss out to every machine. Confirm the note is really gone.
 		const pending: number[] = [];
+		// While the outside-delete window still offers to put the note back,
+		// keep waiting — clearing now would lose the zone links it restores.
+		const scrubWhenDecided = (name: string, path: string) => {
+			if (plugin.isDeletePending(path)) pending.push(window.setTimeout(() => scrubWhenDecided(name, path), DELETE_SCRUB_MS));
+			else scrubDeleted(name);
+		};
 		const ref = plugin.app.vault.on('delete', (file) => {
 			if (!(file instanceof TFile) || file.extension !== 'md') return;
-			const name = file.basename;
-			pending.push(window.setTimeout(() => scrubDeleted(name), DELETE_SCRUB_MS));
+			const { basename, path } = file;
+			pending.push(window.setTimeout(() => scrubWhenDecided(basename, path), DELETE_SCRUB_MS));
 		});
 		return () => {
 			plugin.app.vault.offref(ref);

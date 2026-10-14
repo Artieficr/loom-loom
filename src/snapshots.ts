@@ -179,14 +179,21 @@ export async function restoreSnapshot(
 	const entries = JSON.parse(await gunzip(await app.vault.adapter.readBinary(snap.path))) as [string, string][];
 	const wanted = new Map(entries.map(([rel, text]) => [normalizePath(`${project.root}/${rel}`), text]));
 	let failed = 0;
-	for (const file of liveTextFiles(app, project)) {
-		if (wanted.has(file.path)) continue;
-		try {
-			await app.fileManager.trashFile(file);
-		} catch (e) {
-			console.error(`Loom Loom: restore could not trash ${file.path}`, e);
-			failed++;
+	// The restored script/book is consistent with the restored notes, so the
+	// notes trashed here must not ask to remove their text.
+	plugin.deletePromptPause++;
+	try {
+		for (const file of liveTextFiles(app, project)) {
+			if (wanted.has(file.path)) continue;
+			try {
+				await app.fileManager.trashFile(file);
+			} catch (e) {
+				console.error(`Loom Loom: restore could not trash ${file.path}`, e);
+				failed++;
+			}
 		}
+	} finally {
+		plugin.deletePromptPause--;
 	}
 	for (const [path, text] of wanted) {
 		try {

@@ -4,6 +4,7 @@ import { ProjectDef } from '../indexer';
 import { LoomNavigator } from './react-view';
 import { Icon, buildEntityLinkNames, buildLinkTargetLabels, openCreateLinkEntity, openEntityLink } from './common';
 import { MarkdownField, MarkdownFieldHandle } from './markdown-field';
+import { useIndexVersion } from './hooks';
 import { t } from '../i18n';
 import type LoomLoomPlugin from '../main';
 import { projectPath } from '../naming';
@@ -206,8 +207,9 @@ export function QuickNotesPanel({
 		[plugin]
 	);
 
-	const names = useMemo(() => buildEntityLinkNames(plugin, project), [plugin, project]);
-	const linkLabels = useMemo(() => buildLinkTargetLabels(plugin, project), [plugin, project]);
+	const version = useIndexVersion(plugin.indexer);
+	const names = useMemo(() => buildEntityLinkNames(plugin, project), [plugin, project, version]);
+	const linkLabels = useMemo(() => buildLinkTargetLabels(plugin, project), [plugin, project, version]);
 
 	return (
 		<>

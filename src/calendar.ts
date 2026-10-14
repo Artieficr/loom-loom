@@ -136,6 +136,18 @@ export function parseLoomDate(raw: unknown, calendar: CalendarId, config: Projec
 	};
 }
 
+/** The calendar a record's date is read in — sessions are always Gregorian. */
+export function calendarFor(type: string, config: ProjectConfig): CalendarId {
+	return type !== 'session' && config.customCalendar.enabled ? 'custom' : 'gregorian';
+}
+
+/** True for an empty date (cleared) or one `parseLoomDate` can read — checked
+ *  before a typed date is saved, since an unreadable one silently drops the
+ *  record off the timeline (and renames a session's file after it). */
+export function isValidDateInput(raw: string, type: string, config: ProjectConfig): boolean {
+	return raw.trim() === '' || parseLoomDate(raw, calendarFor(type, config), config) !== null;
+}
+
 /** Today as a raw Gregorian date string (YYYY-MM-DD, local time). */
 export function todayRaw(): string {
 	const now = new Date();

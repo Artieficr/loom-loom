@@ -191,9 +191,14 @@ built by `src/naming.ts`. The entity page's Name field writes `loomName`, refres
 the native `aliases` entry (so Obsidian's own `[[…]]` autocomplete finds the note by
 its user-entered name), and renames the file (via `fileManager.renameFile`, so links
 update). Plugin-written links always target the file basename (`linkTargetOf`);
-plugin pickers search and label by display name only, and the Notes-field link
-autocomplete inserts `[[basename|display]]` so raw markdown stays readable. A missing
-`loomName` falls back to the basename, so foreign notes still work.
+plugin pickers search and label by display name only. The Notes-field link
+autocomplete inserts a bare `[[basename]]` for the entity's main name — Loom's editors
+show it as the CURRENT display name (`linkLabels`), so it follows renames, which a
+frozen `|display` alias never would (Obsidian rewrites a link's target on rename, never
+its alias). Tradeoff: outside Loom's editors (Reading view, other plugins) such a link
+shows the managed basename. Picking one of the entity's aliases inserts
+`[[basename|alias]]`, and renaming that alias from the entity page rewrites those links.
+A missing `loomName` falls back to the basename, so foreign notes still work.
 
 ## Frontmatter conventions
 

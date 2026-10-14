@@ -37,6 +37,7 @@ import { managedEntityFileName, projectPath } from '../naming';
 import { LoomFileReactView, LoomNavigator } from './react-view';
 import { MarkdownField } from './markdown-field';
 import {
+	EmptyActMessage,
 	Icon,
 	ViewShell,
 	buildEntityLinkNames,
@@ -50,7 +51,7 @@ import {
 	scrollIntoContainer,
 	useCloseOnOutsideClick,
 } from './common';
-import { useIndexVersion, usePersistedChoice, useVaultFileText } from './hooks';
+import { useIndexVersion, usePersistedChoice, useRememberedScroll, useVaultFileText } from './hooks';
 import { t } from '../i18n';
 import { AnnotationSpan, cleanAnnotationMarkers, findAnnotationSpans } from '../fountain';
 import {
@@ -215,6 +216,7 @@ export async function syncActsChapters(
 			actById.set(act.loomId, synced);
 			continue;
 		}
+		if (plugin.holdsNoteRecreate(project.root, act.loomId)) continue;
 		const created = await createEntity(plugin, project, 'act', {
 			name: act.title,
 			tag: '',
@@ -312,6 +314,7 @@ export async function syncActsChapters(
 			}
 			continue;
 		}
+		if (plugin.holdsNoteRecreate(project.root, chapter.loomId)) continue;
 		const created = await createEntity(plugin, project, 'chapter', {
 			name: chapter.title,
 			tag: '',
@@ -590,7 +593,7 @@ export function ActChapterBlocks({
 	names: LinkOption[];
 	linkLabels?: Map<string, string>;
 	onOpenLink: (target: string, newTab?: boolean) => void;
-	emptyMessage: ReactElement;
+	emptyMessage: ReactElement | null;
 	/** Comments/alternative-text — optional, same as `MarkdownField`'s own
 	 *  props (omitting it leaves every chapter's field exactly as before).
 	 *  Alt-text cycling/picking uses `handleCycleAltReadOnly` (not
@@ -605,7 +608,7 @@ export function ActChapterBlocks({
 	 *  page's own standalone Preview has nothing further to open FROM. */
 	onOpenChapter?: (chapterId: string, offset: number) => void;
 }): ReactElement {
-	if (chapters.length === 0) return emptyMessage;
+	if (chapters.length === 0) return emptyMessage ?? <></>;
 	return (
 		<>
 			{chapters.map((ch) => {
@@ -698,6 +701,7 @@ export function BookSidePanels({
 	commentRows,
 	altRows,
 	onJumpAnnotation,
+	scrollKey,
 }: {
 	panel: BookSidePanel;
 	setPanel: (next: BookSidePanel) => void;
@@ -707,8 +711,11 @@ export function BookSidePanels({
 	commentRows: UnresolvedCommentRow[];
 	altRows: UndecidedAltRow[];
 	onJumpAnnotation: (span: AnnotationSpan) => void;
+	/** localStorage key the jump list's scroll position is kept under. */
+	scrollKey?: string;
 }): ReactElement {
 	const ref = useRef<HTMLDivElement | null>(null);
+	const navScrollRef = useRememberedScroll(scrollKey ?? null);
 	useCloseOnOutsideClick(ref, panel !== null, () => setPanel(null));
 	const jump = (selector: string) => {
 		const container = scroller.current;
@@ -726,7 +733,7 @@ export function BookSidePanels({
 				<Icon name={panel === 'nav' ? 'panel-left-close' : 'panel-left-open'} />
 			</button>
 			{panel === 'nav' ? (
-				<aside className="loom-script-nav">
+				<aside ref={navScrollRef} className="loom-script-nav">
 					<div className="loom-script-nav-head">
 						{t('view.entity.script.navigate')}
 						<button
@@ -770,7 +777,7 @@ export function BookSidePanels({
 
 function Book({ view }: { view: BookView }): ReactElement {
 	const plugin = view.plugin;
-	useIndexVersion(plugin.indexer);
+	const version = useIndexVersion(plugin.indexer);
 	const file = view.file;
 	const project = file ? plugin.indexer.projectForPath(file.path) : undefined;
 	const bookText = useBookText(plugin, project ?? null);
@@ -841,11 +848,11 @@ function Book({ view }: { view: BookView }): ReactElement {
 
 	const linkNames = useMemo<LinkOption[]>(
 		() => (project ? buildEntityLinkNames(plugin, project) : []),
-		[plugin, project]
+		[plugin, project, version]
 	);
 	const linkLabels = useMemo(
 		() => (project ? buildLinkTargetLabels(plugin, project) : new Map<string, string>()),
-		[plugin, project]
+		[plugin, project, version]
 	);
 
 	const openLinkTarget = (target: string, newTab = false) => {
@@ -1172,9 +1179,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 											{!collapsed ? (
 												<div className="loom-writer-outline-children">
 													{chapters.length === 0 ? (
-														<div className="loom-attendance-empty">
-															{t('view.entity.script.noChaptersYetPre')}<code># {act.name}</code>{t('view.entity.script.noChaptersYetPost')}
-														</div>
+														<EmptyActMessage plugin={plugin} project={project ?? null} act={act} type="chapter" />
 													) : (
 														chapters.map((ch, j) => {
 															const chGrabbed = seqDrag?.group === `book-chapters:${act.actId}` && seqDrag.from === j;
@@ -1214,6 +1219,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 							<BookSidePanels
 								panel={sidePanel}
 								setPanel={setSidePanel}
+								scrollKey={file ? `loom-book-nav-scroll:${file.path}` : undefined}
 								acts={acts}
 								chaptersOf={chaptersOf}
 								scroller={previewWrapperRef}
@@ -1242,11 +1248,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 													names={linkNames}
 													linkLabels={linkLabels}
 													onOpenLink={openLinkTarget}
-													emptyMessage={
-														<div className="loom-attendance-empty">
-															{t('view.entity.script.noChaptersYetPre')}<code># {act.name}</code>{t('view.entity.script.noChaptersYetPost')}
-														</div>
-													}
+													emptyMessage={null}
 													annotations={annotations}
 													highlightedAnnotationId={highlightedAnnotationId}
 													onOpenChapter={openThisChapterFromBook}

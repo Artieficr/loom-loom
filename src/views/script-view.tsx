@@ -96,7 +96,7 @@ import {
 } from './common';
 import { AlternativesBrowserPanel, CommentPopover, CommentsBrowserPanel } from './annotation-popover';
 import { isUnresolvedComment } from './annotation-cm6';
-import { useIndexVersion, usePersistedChoice } from './hooks';
+import { useIndexVersion, usePersistedChoice, useRememberedScroll } from './hooks';
 import type LoomLoomPlugin from '../main';
 
 export class ScriptView extends LoomFileReactView {
@@ -282,6 +282,7 @@ export async function syncScenes(
 			actById.set(id, found);
 			continue;
 		}
+		if (plugin.holdsNoteRecreate(project.root, id)) continue;
 		const created = await createEntity(plugin, project, 'act', {
 			name: section.title,
 			tag: '',
@@ -404,6 +405,7 @@ export async function syncScenes(
 			});
 			continue;
 		}
+		if (plugin.holdsNoteRecreate(project.root, scene.loomId)) continue;
 		const file = await createEntity(plugin, project, 'scene', {
 			name,
 			tag: '',
@@ -455,7 +457,7 @@ export function scriptSearchMatches(
 }
 
 /** A scene's display name: the heading without its INT./EXT. prefix. */
-function sceneName(scene: ParsedScene): string {
+export function sceneName(scene: ParsedScene): string {
 	const place = scene.location.trim() === '' ? t('project.createEntity.untitledScene') : scene.location.trim();
 	return scene.timeOfDay.trim() === '' ? place : `${place} — ${scene.timeOfDay.trim()}`;
 }
@@ -765,6 +767,8 @@ function Script({ view }: { view: ScriptView }) {
 		});
 	}, [file?.path, project?.root, text !== null]);
 
+	// Above the early returns below: a hook after them crashes React (#310).
+	const navScrollRef = useRememberedScroll(file ? `loom-script-nav-scroll:${file.path}` : null);
 	if (!file) return <div className="loom-empty">{t('view.script.loading')}</div>;
 	if (!project) return <>{noProjectMessage()}</>;
 	if (text === null || parsed === null) return <div className="loom-empty">{t('view.script.loading')}</div>;
@@ -1420,7 +1424,7 @@ function Script({ view }: { view: ScriptView }) {
 					<Icon name={navOpen ? 'panel-left-close' : 'panel-left-open'} />
 				</button>
 				{navOpen ? (
-					<aside className="loom-script-nav">
+					<aside ref={navScrollRef} className="loom-script-nav">
 						<div className="loom-script-nav-head">
 							{t('view.entity.script.navigate')}
 							<button
@@ -2540,7 +2544,7 @@ export async function deleteEntity(plugin: LoomLoomPlugin, project: ProjectDef, 
 /** Which file backs a Scene/Act/Chapter note in this project, if any. Gated
  *  on the project's own kind, not just the record's ids — an Act carries an
  *  `actId` in both Writer sub-modes. */
-function entityBacking(project: ProjectDef, record: EntityRecord): 'script' | 'book' | null {
+export function entityBacking(project: ProjectDef, record: EntityRecord): 'script' | 'book' | null {
 	if (
 		features(project.config).script &&
 		((record.type === 'act' && record.actId !== '') || (record.type === 'scene' && record.sceneId !== ''))
@@ -2590,3 +2594,4 @@ export async function deleteScriptEntity(
 	}
 	await deleteEntityNote(plugin, record);
 }
+

@@ -1,4 +1,4 @@
-import { EditorState, Facet, Prec } from '@codemirror/state';
+import { EditorState, Facet, Prec, StateEffect } from '@codemirror/state';
 import {
 	Decoration,
 	DecorationSet,
@@ -139,13 +139,17 @@ const plainLinksFacet = Facet.define<boolean, boolean>({ combine: (values) => va
 
 /** Clean display names for wikilink TARGETS that resolve to a Loom entity
  *  (`buildLinkTargetLabels`, common.tsx), keyed by the raw target string. The
- *  caller resolves targets and hands them down as plain data (`linkLabels`),
- *  so this stays pure. Set once per `EditorView` at mount, not reconfigured
- *  live: an entity renamed while another field is open shows its old clean
- *  name until that field reopens. A target missing from the map renders raw. */
-const linkLabelsFacet = Facet.define<Map<string, string>, Map<string, string>>({
-	combine: (values) => values[0] ?? new Map(),
+ *  caller resolves targets and hands them down as plain data (`linkLabels`).
+ *  The facet holds the field's own ref, kept current from the prop, and a
+ *  `refreshLinkLabels` effect redraws when it changes — Loom inserts bare
+ *  `[[target]]` links, so this map is what keeps them reading as the entity's
+ *  name, including entities created or renamed after the field mounted. A
+ *  target missing from the map renders raw. */
+const NO_LABELS = new Map<string, string>();
+const linkLabelsFacet = Facet.define<{ current: Map<string, string> }, { current: Map<string, string> }>({
+	combine: (values) => values[0] ?? { current: NO_LABELS },
 });
+const refreshLinkLabels = StateEffect.define<null>();
 
 
 /** Matches a `[[loom:<id>]]` identity marker OR a `[[loom-comment:<id>]]`/
@@ -254,6 +258,12 @@ class ResolvedLinkWidget extends WidgetType {
 		el.detach();
 		return el;
 	}
+
+	// Let clicks through to the field's mousedown handler, which opens the
+	// link — a widget's events are otherwise ignored by the editor.
+	ignoreEvent(): boolean {
+		return false;
+	}
 }
 
 function buildDecorations(view: EditorView): DecorationSet {
@@ -268,7 +278,7 @@ function buildDecorations(view: EditorView): DecorationSet {
 	const touches = (from: number, to: number) =>
 		revealRaw && sel.ranges.some((r) => r.from <= to && r.to >= from);
 	const plainLinks = view.state.facet(plainLinksFacet);
-	const linkLabels = view.state.facet(linkLabelsFacet);
+	const linkLabels = view.state.facet(linkLabelsFacet).current;
 
 	for (const range of view.visibleRanges) {
 		let pos = range.from;
@@ -486,7 +496,13 @@ const livePreview = ViewPlugin.fromClass(
 			this.decorations = buildDecorations(view);
 		}
 		update(update: ViewUpdate) {
-			if (update.docChanged || update.selectionSet || update.viewportChanged || update.focusChanged) {
+			if (
+				update.docChanged ||
+				update.selectionSet ||
+				update.viewportChanged ||
+				update.focusChanged ||
+				update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshLinkLabels)))
+			) {
 				this.decorations = buildDecorations(update.view);
 			}
 		}
@@ -893,6 +909,13 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 		viewRef.current?.dispatch({ effects: refreshAnnotations.of(null) });
 	}, [comments, altText, highlightedAnnotationId]);
 
+	const linkLabelsRef = useRef(linkLabels ?? NO_LABELS);
+	useEffect(() => {
+		if (linkLabelsRef.current === (linkLabels ?? NO_LABELS)) return;
+		linkLabelsRef.current = linkLabels ?? NO_LABELS;
+		viewRef.current?.dispatch({ effects: refreshLinkLabels.of(null) });
+	}, [linkLabels]);
+
 	useEffect(() => {
 		if (!hostRef.current) return;
 		// While the field is focused, this scope outranks Obsidian's global
@@ -1170,7 +1193,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 							// programmatically focusable, out of the tab order.
 							EditorView.contentAttributes.of({ tabindex: '-1' }),
 							plainLinksFacet.of(plainLinks ?? false),
-							linkLabelsFacet.of(linkLabels ?? new Map<string, string>()),
+							linkLabelsFacet.of(linkLabelsRef),
 							EditorView.lineWrapping,
 							scrollWithinEditor,
 							cmPlaceholder(placeholder ?? ''),
@@ -1210,7 +1233,7 @@ export const MarkdownField = forwardRef<MarkdownFieldHandle, {
 						]
 					: [
 							history(),
-							linkLabelsFacet.of(linkLabels ?? new Map<string, string>()),
+							linkLabelsFacet.of(linkLabelsRef),
 							EditorView.lineWrapping,
 							scrollWithinEditor,
 							cmPlaceholder(placeholder ?? ''),

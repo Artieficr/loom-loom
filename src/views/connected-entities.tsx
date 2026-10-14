@@ -102,9 +102,13 @@ function Entry({
 		const file = plugin.app.vault.getFileByPath(target.path);
 		if (!file) return;
 		let cancelled = false;
-		void plugin.app.vault.cachedRead(file).then((data) => {
-			if (!cancelled) setBody(stripFrontmatter(data).trim());
-		});
+		// See entity-view.tsx's body read: a rename racing this read is harmless.
+		plugin.app.vault
+			.cachedRead(file)
+			.then((data) => {
+				if (!cancelled) setBody(stripFrontmatter(data).trim());
+			})
+			.catch(() => undefined);
 		return () => {
 			cancelled = true;
 		};

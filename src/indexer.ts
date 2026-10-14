@@ -33,7 +33,7 @@ import {
 	formatTimestamp,
 	parseTimestamp,
 } from './types';
-import { ProjectConfig, parseLoomDate, parseProjectConfig } from './calendar';
+import { ProjectConfig, calendarFor, parseLoomDate, parseProjectConfig } from './calendar';
 import { managedEntityFileName } from './naming';
 import { fmValue } from './fm';
 import { t } from './i18n';
@@ -217,6 +217,10 @@ export class LoomIndexer extends Component {
 	 *  or another machine via sync), so it must not be answered with a stamp of
 	 *  our own — see `stampModified`. */
 	private knownModified = new Map<string, string>();
+	/** Called with a record whose note just left the vault — main.ts uses it to
+	 *  offer removing a Scene/Act/Chapter's text when its note was deleted
+	 *  outside Loom. */
+	onRecordDeleted: ((record: EntityRecord) => void) | null = null;
 
 	constructor(private app: App, private plugin: LoomLoomPlugin) {
 		super();
@@ -252,7 +256,9 @@ export class LoomIndexer extends Component {
 					return;
 				}
 				this.knownModified.delete(file.path);
+				const record = this.records.get(file.path);
 				if (this.records.delete(file.path) || this.timelines.delete(file.path)) this.bump();
+				if (record) this.onRecordDeleted?.(record);
 			})
 		);
 		this.registerEvent(
@@ -749,8 +755,7 @@ export class LoomIndexer extends Component {
 
 		// Sessions always track real-world dates; everything else follows the
 		// project's calendar (a custom calendar when enabled).
-		const calendar =
-			type !== 'session' && project.config.customCalendar.enabled ? 'custom' : 'gregorian';
+		const calendar = calendarFor(type, project.config);
 		const nameValue = fmValue(fm, FM.name);
 		const descriptionValue = fmValue(fm, FM.description);
 		const aliveValue = fmValue(fm, FM.alive);
