@@ -49,6 +49,7 @@ export abstract class LoomReactView extends ItemView implements LoomNavigator {
 	navigation = true;
 	private root: Root | null = null;
 	private quickNotesToggle: (() => void) | null = null;
+	private detachDeleteOverlay: (() => void) | null = null;
 
 	constructor(leaf: WorkspaceLeaf, readonly plugin: LoomLoomPlugin) {
 		super(leaf);
@@ -56,17 +57,27 @@ export abstract class LoomReactView extends ItemView implements LoomNavigator {
 
 	protected abstract renderReact(): ReactElement;
 
+	/** The project this tab shows (its `project` view state), if any. */
+	overlayProject(): string | null {
+		const project = this.getState().project;
+		return typeof project === 'string' ? project : null;
+	}
+
 	protected renderNow(): void {
 		this.root?.render(this.renderReact());
+		this.plugin.syncDeleteOverlay(this);
 	}
 
 	async onOpen(): Promise<void> {
 		this.contentEl.addClass('loom-view');
 		this.root = createRoot(this.contentEl);
+		this.detachDeleteOverlay = this.plugin.attachDeleteOverlay(this);
 		this.renderNow();
 	}
 
 	async onClose(): Promise<void> {
+		this.detachDeleteOverlay?.();
+		this.detachDeleteOverlay = null;
 		this.root?.unmount();
 		this.root = null;
 	}
@@ -101,6 +112,7 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 	allowNoFile = false;
 	private root: Root | null = null;
 	private quickNotesToggle: (() => void) | null = null;
+	private detachDeleteOverlay: (() => void) | null = null;
 
 	constructor(leaf: WorkspaceLeaf, readonly plugin: LoomLoomPlugin) {
 		super(leaf);
@@ -108,14 +120,21 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 
 	protected abstract renderReact(): ReactElement;
 
+	/** The project this tab's file belongs to, if any. */
+	overlayProject(): string | null {
+		return this.file ? (this.plugin.indexer.projectForPath(this.file.path)?.root ?? null) : null;
+	}
+
 	protected renderNow(): void {
 		this.root?.render(this.renderReact());
+		this.plugin.syncDeleteOverlay(this);
 	}
 
 	async onOpen(): Promise<void> {
 		await super.onOpen();
 		this.contentEl.addClass('loom-view');
 		this.root = createRoot(this.contentEl);
+		this.detachDeleteOverlay = this.plugin.attachDeleteOverlay(this);
 		this.renderNow();
 	}
 
@@ -125,6 +144,8 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 	}
 
 	async onClose(): Promise<void> {
+		this.detachDeleteOverlay?.();
+		this.detachDeleteOverlay = null;
 		this.root?.unmount();
 		this.root = null;
 		await super.onClose();

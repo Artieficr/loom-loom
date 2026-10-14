@@ -48,6 +48,26 @@ export function usePersistedChoice<T extends string>(
 	return [value, setValue];
 }
 
+/** A ref for a scrolling panel that's re-created each time it opens (the
+ *  Script/Book jump list): restores its scroll position from `key`
+ *  (localStorage) when it mounts and saves it as you scroll, so it reopens
+ *  where you left it. */
+export function useRememberedScroll(key: string | null): (el: HTMLElement | null) => void {
+	return useCallback(
+		(el: HTMLElement | null) => {
+			if (!el || !key) return;
+			const saved = Number(window.localStorage.getItem(key));
+			if (saved > 0) el.scrollTop = saved;
+			let timer: number | undefined;
+			el.addEventListener('scroll', () => {
+				window.clearTimeout(timer);
+				timer = window.setTimeout(() => window.localStorage.setItem(key, String(Math.round(el.scrollTop))), 150);
+			});
+		},
+		[key]
+	);
+}
+
 /** The text of the vault file at `path`, re-read whenever that file is
  *  modified, created or deleted; null while it doesn't exist (or `path` is
  *  null). Reads with `vault.read`, never `cachedRead` — a 'modify' event for

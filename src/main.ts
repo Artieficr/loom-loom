@@ -23,6 +23,7 @@ import {
 	ProjectSuggestModal,
 	SetupProjectModal,
 	ensureFolder,
+	followRenameInLinks,
 } from './project';
 import { projectFolderPath } from './project-kind';
 import { HomeView } from './views/home-view';
@@ -33,6 +34,15 @@ import { EntityView } from './views/entity-view';
 import { GroupView } from './views/group-view';
 import { MapView } from './views/map-view';
 import { ScriptView } from './views/script-view';
+import {
+	holdsNoteRecreate,
+	isDeletePending,
+	noteDeletedOutside,
+	OverlayHost,
+	attachOverlayHost,
+	syncOverlay,
+	trackNoteCopies,
+} from './outside-deletes';
 import { BookView } from './views/book-view';
 import { ProjectsView } from './views/projects-view';
 import { SnapshotsModal, startSnapshots } from './snapshots';
@@ -50,6 +60,26 @@ const LICENSE_RECHECK_TICK_MS = 6 * 60 * 60 * 1000;
 export default class LoomLoomPlugin extends Plugin {
 	settings: LoomLoomSettings = DEFAULT_SETTINGS;
 	indexer!: LoomIndexer;
+	/** Above 0 while Loom itself is trashing notes (an in-app delete, a
+	 *  snapshot restore) — those deletes must not open the outside-delete
+	 *  window (`src/outside-deletes.ts`). */
+	deletePromptPause = 0;
+	/** Whether a note deleted outside Loom still waits on the user's choice in
+	 *  the outside-delete window — exposed here so views needn't import it. */
+	isDeletePending = isDeletePending;
+	/** See `holdsNoteRecreate` — read by the script/book syncs. */
+	holdsNoteRecreate = holdsNoteRecreate;
+	/** Hooks for every Loom tab (react-view.ts): the outside-delete window
+	 *  covers a tab of a project that has notes deleted outside Loom. */
+	attachDeleteOverlay = (host: OverlayHost): (() => void) => attachOverlayHost(this, host);
+	syncDeleteOverlay = (host: OverlayHost): void => syncOverlay(this, host);
+	private markIndexReady!: () => void;
+	private markVaultReady!: () => void;
+	/** Resolves once the index is first built on startup. */
+	readonly indexReady = new Promise<void>((resolve) => (this.markIndexReady = resolve));
+	/** Resolves once the vault has settled and the startup migration ran —
+	 *  a half-synced vault isn't checked for deleted notes before this. */
+	readonly vaultReady = new Promise<void>((resolve) => (this.markVaultReady = resolve));
 	/** Freemium gate: one project of each kind is free, a license key unlocks
 	 *  unlimited projects — see `src/license/`. `PolarLicenseProvider` is the
 	 *  active provider (the Polar.sh org/product this points at is
@@ -82,6 +112,7 @@ export default class LoomLoomPlugin extends Plugin {
 		this.licenseManager = new LicenseManager(this.app, new PolarLicenseProvider(POLAR_ORGANIZATION_ID));
 
 		this.indexer = this.addChild(new LoomIndexer(this.app, this));
+		this.indexer.onRecordDeleted = (record) => noteDeletedOutside(this, record);
 
 		this.registerView(VIEW_HOME, (leaf) => new HomeView(leaf, this));
 		this.registerView(VIEW_LIST, (leaf) => new EntityListView(leaf, this));
@@ -178,6 +209,7 @@ export default class LoomLoomPlugin extends Plugin {
 					return;
 				}
 				if (!(file instanceof TFile)) return;
+				void followRenameInLinks(this, file, oldPath);
 				let changed = false;
 				for (const entries of this.perFileStateMaps()) {
 					if (oldPath in entries) {
@@ -218,12 +250,15 @@ export default class LoomLoomPlugin extends Plugin {
 			this.registerTimestampPropertyTypes();
 			void (async () => {
 				await this.indexer.rebuildNow();
+				trackNoteCopies(this);
+				this.markIndexReady();
 				// Managed-file-name migration of existing notes. It reads records
 				// and resolves links, so it needs a built index and a vault that has
 				// stopped moving under it — see `waitForVaultSettled`.
 				await this.waitForVaultSettled();
 				await this.indexer.rebuildNow();
 				await this.indexer.migrateFiles();
+				this.markVaultReady();
 				startSnapshots(this);
 			})();
 			// Internally throttled and a no-op with no local activation, so this

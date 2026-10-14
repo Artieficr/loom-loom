@@ -2572,7 +2572,8 @@ span.loom-row-caret {
 	cursor: pointer;
 }
 
-.loom-md-field .cm-tooltip-autocomplete ul li[aria-selected] {
+.loom-md-field .cm-tooltip-autocomplete ul li[aria-selected],
+.loom-md-field .cm-tooltip-autocomplete ul li:hover {
 	background: var(--background-modifier-hover);
 	color: var(--text-normal);
 }
@@ -6786,6 +6787,92 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 	white-space: pre-line;
 }
 
+/* Outside-delete window (src/outside-deletes.ts): a legend of the options
+   (bold name — what it does), then one row per deleted note — its name and
+   what's left behind on the left, its buttons on the right — then the
+   "For all" row. */
+.loom-choice-desc {
+	margin: 0.4em 0;
+}
+
+.loom-od-host {
+	position: relative;
+}
+
+/* Covers the tab's whole content (the tab strip above stays usable, so other
+   tabs can still be reached); the content itself is made `inert`. */
+.loom-od-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 40;
+	display: flex;
+	justify-content: center;
+	align-items: flex-start;
+	overflow-y: auto;
+	padding: 8vh var(--size-4-4) var(--size-4-4);
+	background: color-mix(in srgb, var(--background-primary) 55%, transparent);
+	backdrop-filter: blur(2px);
+}
+
+.loom-od-card {
+	width: 100%;
+	max-width: 620px;
+	padding: var(--size-4-4) var(--size-4-6);
+	background: var(--modal-background, var(--background-primary));
+	border: 1px solid var(--modal-border-color, var(--background-modifier-border));
+	border-radius: var(--modal-radius, var(--radius-l));
+	box-shadow: var(--shadow-l);
+}
+
+.loom-od-title {
+	margin-top: 0;
+	font-size: var(--font-ui-larger, 1.2em);
+}
+
+.loom-od-checking {
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.loom-od-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	margin: var(--size-4-3) 0;
+	max-height: 50vh;
+	overflow-y: auto;
+}
+
+.loom-od-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-3);
+	padding: var(--size-4-2) var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.loom-od-type,
+.loom-od-detail {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.loom-od-buttons,
+.loom-od-all {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+	flex-shrink: 0;
+}
+
+.loom-od-all-label {
+	color: var(--text-muted);
+}
+
 /* A scene's stretch of the script, edited on its page — the .fountain file
    stays the single home of the writing, never copied elsewhere. Height/resize
    are set on the more specific `textarea.loom-scene-script` rule further
@@ -8057,6 +8144,40 @@ body.loom-follow-theme-color .loom-branch-title-preview-bold {
 .loom-fountain-branch-header-row .loom-branch-label-synopsis,
 .loom-fountain-branch-gather-row .loom-branch-gather-label {
 	color: #666;
+}
+
+/* Dark theme: the editors go dark; the Pages/Book preview pages stay white
+   paper, since they show what prints. */
+.theme-dark .loom-fountain-field .cm-editor,
+.theme-dark .loom-scene-script .loom-md-field .cm-editor,
+.theme-dark .loom-fountain-branch-body-line {
+	background: #121314;
+	color: #bbbebf;
+}
+
+.theme-dark .loom-fountain-branch-header-row .loom-branch-label-section {
+	color: #bbbebf;
+}
+
+.theme-dark .loom-branch-input {
+	background: #121314 !important;
+	color: #bbbebf !important;
+}
+
+.theme-dark .loom-branch-input:disabled {
+	background: #1c1d1e !important;
+	color: #77797a !important;
+}
+
+.theme-dark .loom-fountain-branch-header-row .loom-branch-label-synopsis,
+.theme-dark .loom-fountain-branch-gather-row .loom-branch-gather-label {
+	color: #8a8d8e;
+}
+
+.theme-dark .loom-fountain-gutter-icon:hover,
+.theme-dark .loom-md-gutter-icon:hover {
+	color: #bbbebf;
+	background: rgba(255, 255, 255, 0.08);
 }
 
 /* `position: relative` is what makes the "+" button's own `position:

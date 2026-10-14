@@ -255,6 +255,64 @@ export function findEntityLinks(text: string): {
 }
 
 /**
+ * Points every `@[oldName…]` mention at `newName`, keeping a `|Display` part
+ * as written (without one, the shown name follows the rename). Matched
+ * case-insensitively, like `syncScenes`. Null when nothing changed.
+ */
+export function renameEntityMentions(text: string, oldName: string, newName: string): string | null {
+	return spliceMentions(text, oldName, (m) => [m.nameFrom, m.nameTo, newName]);
+}
+
+/** Replaces part of every `@[name…]` mention (case-insensitive name match)
+ *  with what `edit` returns — `[from, to, insert]`; null when none matched. */
+function spliceMentions(
+	text: string,
+	name: string,
+	edit: (m: ReturnType<typeof findEntityLinks>[number]) => [number, number, string]
+): string | null {
+	const key = name.trim().toLowerCase();
+	const hits = findEntityLinks(text).filter((m) => m.name.toLowerCase() === key);
+	if (hits.length === 0) return null;
+	return hits.reverse().reduce((out, m) => {
+		const [from, to, insert] = edit(m);
+		return out.slice(0, from) + insert + out.slice(to);
+	}, text);
+}
+
+/**
+ * Renames a character's dialogue cues (`ANDOR` → `ANDOR2`), keeping each
+ * cue's `(V.O.)` extension, `^` dual mark and forced `@` as written. A cue
+ * typed in capitals gets the new name in capitals. Without this, renaming a
+ * character leaves cues under the old name, and the next sync creates a new
+ * character for them. Null when nothing changed.
+ */
+export function renameCharacterCues(text: string, oldName: string, newName: string): string | null {
+	const key = oldName.trim().toLowerCase();
+	const lines = text.split('\n');
+	let changed = false;
+	for (const el of parseFountain(text).elements) {
+		if (el.type !== 'character' || el.text.toLowerCase() !== key) continue;
+		const line = lines[el.line];
+		const at = line.toLowerCase().indexOf(key);
+		if (at === -1) continue;
+		const typed = line.slice(at, at + key.length);
+		const name = typed === typed.toUpperCase() ? newName.trim().toUpperCase() : newName.trim();
+		lines[el.line] = line.slice(0, at) + name + line.slice(at + key.length);
+		changed = true;
+	}
+	return changed ? lines.join('\n') : null;
+}
+
+/**
+ * Turns every `@[name…]` mention into plain text — its display part, or the
+ * name without one — for an entity that no longer exists. Null when nothing
+ * changed.
+ */
+export function unlinkEntityMentions(text: string, name: string): string | null {
+	return spliceMentions(text, name, (m) => [m.from, m.to, m.display]);
+}
+
+/**
  * Collapses every `@[Name|Display]` to just its display text (or `Name` with
  * no `|Display`) — for EXPORT/render only, never the live document, same
  * contract as `stripLoomIds`.

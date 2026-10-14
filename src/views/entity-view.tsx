@@ -43,17 +43,22 @@ import {
 	EntityTypeSuggestModal,
 	RecordSuggestModal,
 	SessionConflictModal,
+	TextInputModal,
 	createEntity,
 	createItemCopy,
 	dailyNoteLink,
 	deleteEntityNote,
+	linkPointsAt,
+	linkText,
+	rewriteLinks,
 	renameEntityRecord,
 	showTypeFilterMenu,
 } from '../project';
 import { managedEntityFileName, managedSessionFileName } from '../naming';
-import { formatLoomDateShort, groupNameOf, todayRaw } from '../calendar';
+import { formatLoomDateShort, groupNameOf, isValidDateInput, todayRaw } from '../calendar';
 import { LoomFileReactView } from './react-view';
 import {
+	EmptyActMessage,
 	EntityChip,
 	Icon,
 	InfoIcon,
@@ -377,6 +382,23 @@ interface LocNoteEntry {
 	/** Virtual-Group snapshot on the note — see SessionNoteDecl.group. */
 	group: string[];
 	places: string[];
+}
+
+/** Rewrites every `[[…|oldAlias]]` link that points at `target` to show
+ *  `newAlias` — note text, properties and the project's Book. */
+async function renameAliasInLinks(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef | null,
+	target: TFile,
+	oldAlias: string,
+	newAlias: string
+): Promise<void> {
+	await rewriteLinks(
+		plugin,
+		project,
+		(m, from) => m.alias === oldAlias && linkPointsAt(plugin, m.path, from, target.path),
+		(m) => linkText(m, m.path, newAlias)
+	);
 }
 
 function EntityPage({ view }: { view: EntityView }) {
@@ -1179,9 +1201,15 @@ function EntityPage({ view }: { view: EntityView }) {
 	useEffect(() => {
 		if (!file) return;
 		let cancelled = false;
-		void plugin.app.vault.cachedRead(file).then((data) => {
-			if (!cancelled) setBody(stripFrontmatter(data));
-		});
+		// A rename landing between this read's start and the disk open fails
+		// with ENOENT on the old path; the body is unchanged by a rename, so
+		// keeping the already-loaded one is right.
+		plugin.app.vault
+			.cachedRead(file)
+			.then((data) => {
+				if (!cancelled) setBody(stripFrontmatter(data));
+			})
+			.catch(() => undefined);
 		return () => {
 			cancelled = true;
 		};
@@ -1577,30 +1605,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				await editBookAndSync(plugin, project, (raw) => renameBookChapterTitle(raw, record.chapterId, entered));
 				return;
 			}
-			// Checked BEFORE the frontmatter write below, not after: a collision
-			// must abort the rename entirely, never leave the note's displayed
-			// name changed while its file name silently stays behind.
-			const parentName =
-				record.type === 'location' && record.parentLocation !== null
-					? plugin.indexer.resolve(record.parentLocation, record.path)?.name
-					: undefined;
-			const base = managedEntityFileName(project.name, record.type, entered, parentName);
-			const parent = file.parent?.path ?? '';
-			const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
-			if (newPath !== file.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
-				new Notice(t('project.common.nameExists'));
-				setName(record.name);
-				return;
-			}
-			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, FM.name, entered);
-				const aliases: unknown[] = Array.isArray(fm.aliases)
-					? (fm.aliases as unknown[]).filter((a) => a !== record.name && a !== entered)
-					: [];
-				fm.aliases = [entered, ...aliases];
-			});
-			if (newPath === file.path) return;
-			await plugin.app.fileManager.renameFile(file, newPath);
+			if (!(await renameEntityRecord(plugin, project, record, entered))) setName(record.name);
 		} finally {
 			commitNameInFlightRef.current = false;
 		}
@@ -1656,9 +1661,37 @@ function EntityPage({ view }: { view: EntityView }) {
 			fm.aliases = cur.filter((a) => a !== alias);
 		});
 	};
+	// Renaming an alias in place (not remove + add) is the one moment both the
+	// old and new wording are known, so links written with the old alias are
+	// rewritten to the new one.
+	const renameAlias = (alias: string) => {
+		new TextInputModal(plugin.app, {
+			title: t('view.entity.common.renameAliasTitle', { alias }),
+			initial: alias,
+			cta: t('view.list.rename'),
+			onSubmit: (value) => {
+				const next = value.trim();
+				if (next === '' || next === alias) return;
+				if (fileAliases.includes(next) || next === record.name) {
+					new Notice(t('view.entity.common.aliasTaken'));
+					return;
+				}
+				writeFm((fm) => {
+					const cur: unknown[] = Array.isArray(fm.aliases) ? (fm.aliases as unknown[]) : [];
+					fm.aliases = cur.map((a) => (a === alias ? next : a));
+				});
+				void renameAliasInLinks(plugin, project, file, alias, next);
+			},
+		}).open();
+	};
 
 	const commitDate = async (raw: string = date) => {
 		const value = raw.trim();
+		if (project && !isValidDateInput(value, record.type, project.config)) {
+			new Notice(t('common.invalidDate', { example: todayRaw() }));
+			setDate(record.date?.raw ?? '');
+			return;
+		}
 		writeFm((fm) => {
 			setLoomKey(fm, FM.date, value);
 			// Native-graph link to the day's daily note — see `FM.dailyNote`'s
@@ -3563,33 +3596,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	);
 	const writeOwnerRels =(owner: EntityRecord, apply: (rels: unknown[]) => unknown[]) =>
 		editFmList(owner.path, FM.relationships, apply);
-	/** Renames another entity in place (hub rows): stores the entered name as
-	 *  its loomName + alias and moves the file to its managed name. */
+	/** Renames another entity in place (hub rows). */
 	const renameEntity = (owner: EntityRecord, raw: string) => {
-		const entered = raw.trim();
-		if (entered === '' || entered === owner.name || !project) return;
-		const f = plugin.app.vault.getFileByPath(owner.path);
-		if (!f) return;
-		const base = managedEntityFileName(project.name, owner.type, entered);
-		const parent = f.parent?.path ?? '';
-		const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
-		if (newPath !== f.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
-			new Notice(t('project.common.nameExists'));
-			return;
-		}
-		void plugin.app.fileManager
-			.processFrontMatter(f, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, FM.name, entered);
-				const aliases: unknown[] = Array.isArray(fm.aliases)
-					? (fm.aliases as unknown[]).filter((a) => a !== owner.name && a !== entered)
-					: [];
-				fm.aliases = [entered, ...aliases];
-			})
-			.then(() => (newPath !== f.path ? plugin.app.fileManager.renameFile(f, newPath) : undefined))
-			.catch((e) => {
-				console.error('Loom Loom: failed to rename entity', e);
-				new Notice(t('view.entity.common.renameFailed'));
-			});
+		if (!project) return;
+		renameEntityRecord(plugin, project, owner, raw).catch((e) => {
+			console.error('Loom Loom: failed to rename entity', e);
+			new Notice(t('view.entity.common.renameFailed'));
+		});
 	};
 	// Writer/Script projects: quests resolve against Scenes (`seq`);
 	// Writer/Prose ones resolve against Chapters (`seq` too — neither has a
@@ -4540,6 +4553,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									plugin={plugin}
 									record={null}
 									label={alias}
+									onOpen={() => renameAlias(alias)}
 									onRemove={() => removeAlias(alias)}
 									removeLabel={t('view.entity.common.removeAlias')}
 								/>
@@ -5543,11 +5557,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												{actNavPanel}
 												{actCommentsAside}
 												{actAltAside}
-												{actScenes.length === 0 ? (
-													<div className="loom-attendance-empty">
-														{t('view.entity.script.noScenesYetPre')}<code># {record.name}</code>{t('view.entity.script.noScenesYetPost')}
-													</div>
-												) : (
+												{actScenes.length === 0 ? null : (
 													<PagesPreviewBody
 														pages={actBodyPages}
 														startPageNumber={null}
@@ -5572,9 +5582,7 @@ function EntityPage({ view }: { view: EntityView }) {
 												}
 											>
 												{actScenes.length === 0 ? (
-													<div className="loom-attendance-empty">
-														{t('view.entity.script.noScenesYetPre')}<code># {record.name}</code>{t('view.entity.script.noScenesYetPost')}
-													</div>
+													<EmptyActMessage plugin={plugin} project={project} act={record} type="scene" />
 												) : (
 													actScenes.map((sc, i) => {
 														const grabbed = seqDrag?.group === 'act-scenes' && seqDrag.from === i;
@@ -5669,9 +5677,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							}
 						>
 							{actChapters.length === 0 ? (
-								<div className="loom-attendance-empty">
-									{t('view.entity.script.noChaptersYetPre')}<code># {record.name}</code>{t('view.entity.script.noChaptersYetPost')}
-								</div>
+								<EmptyActMessage plugin={plugin} project={project} act={record} type="chapter" />
 							) : (
 								actChapters.map((ch, i) => {
 									const grabbed = seqDrag?.group === 'act-chapters' && seqDrag.from === i;
@@ -5724,11 +5730,7 @@ function EntityPage({ view }: { view: EntityView }) {
 									names={linkNames}
 									linkLabels={linkLabels}
 									onOpenLink={openLinkTarget}
-									emptyMessage={
-										<div className="loom-attendance-empty">
-											{t('view.entity.script.noChaptersYetPre')}<code># {record.name}</code>{t('view.entity.script.noChaptersYetPost')}
-										</div>
-									}
+									emptyMessage={null}
 									annotations={bookAnnotations}
 									onOpenChapter={openThisChapterFromAct}
 								/>

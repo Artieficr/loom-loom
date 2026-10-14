@@ -537,7 +537,9 @@ export function buildEntityLinkNames(plugin: LoomLoomPlugin, project: ProjectDef
 		.flatMap((r) => {
 			const target = linkTargetOf(r);
 			const label = recordLabel(r, project);
-			const opts: LinkOption[] = [{ label, insert: target === label ? label : `${target}|${label}` }];
+			// Bare link: its shown name comes from `linkLabels` at render time,
+			// so it follows the entity through a rename. Aliases stay explicit.
+			const opts: LinkOption[] = [{ label, insert: target }];
 			const f = plugin.app.vault.getFileByPath(r.path);
 			const aliases = f ? (plugin.app.metadataCache.getFileCache(f)?.frontmatter?.aliases as unknown) : undefined;
 			if (Array.isArray(aliases)) {
@@ -599,13 +601,7 @@ export function openCreateLinkEntity(
 	new EntityTypeSuggestModal(plugin, (type) =>
 		new CreateEntityModal(plugin, type, project, {
 			initialName: entered,
-			onCreated: (created) => {
-				// Short name = managed basename minus its prefix (the index
-				// may not have caught the new file yet).
-				const prefix = `${project.name} ${ENTITY_META[type].label} `;
-				const label = created.basename.startsWith(prefix) ? created.basename.slice(prefix.length) : entered;
-				insert(created.basename === label ? label : `${created.basename}|${label}`);
-			},
+			onCreated: (created) => insert(created.basename),
 		}).open(),
 		project
 	).open();
@@ -653,13 +649,13 @@ export function EntityChip({
 			className="loom-chip loom-session-chip loom-entity-chip"
 			style={color !== null ? { background: color + '40', borderColor: color } : undefined}
 		>
-			{onOpen && record ? (
+			{onOpen ? (
 				<button
 					className="loom-subloc-link"
 					onClick={onOpen}
 					onAuxClick={(e) => {
 						// Middle click opens the linked entity in a new tab.
-						if (e.button === 1) {
+						if (record && e.button === 1) {
 							e.preventDefault();
 							plugin.openEntityFile(record.path);
 						}
@@ -936,6 +932,36 @@ export function ViewShell({
 }
 
 /** The empty-state shown when a view has no project to render. */
+/** An act's empty scene/chapter list in an Outline: says so, with a button
+ *  that creates one already placed in this act — the script/book have no
+ *  free-text editor to type a heading into any more. Not shown in the
+ *  previews, which read as the printed page. */
+export function EmptyActMessage({
+	plugin,
+	project,
+	act,
+	type,
+}: {
+	plugin: LoomLoomPlugin;
+	project: ProjectDef | null;
+	act: EntityRecord;
+	type: 'scene' | 'chapter';
+}): ReactNode {
+	return (
+		<div className="loom-attendance-empty">
+			{type === 'scene' ? t('view.entity.script.noScenesInAct') : t('view.entity.script.noChaptersInAct')}{' '}
+			{project ? (
+				<button
+					className="mod-cta"
+					onClick={() => new CreateEntityModal(plugin, type, project, { defaultAct: act }).open()}
+				>
+					{type === 'scene' ? t('view.entity.script.newSceneAction') : t('view.entity.script.newChapterAction')}
+				</button>
+			) : null}
+		</div>
+	);
+}
+
 export function noProjectMessage(): ReactNode {
 	return <div className="loom-empty">{t('common.noProjectFound')}</div>;
 }

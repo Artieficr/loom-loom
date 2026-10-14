@@ -51,7 +51,7 @@ import {
 	pcGroupStub,
 	bySeq,
 } from './types';
-import { defaultProjectConfig, groupNameOf, serializeProjectConfig, todayRaw } from './calendar';
+import { defaultProjectConfig, groupNameOf, isValidDateInput, serializeProjectConfig, todayRaw } from './calendar';
 import {
 	DEFAULT_PROJECT_KIND,
 	DEFAULT_WRITER_MODE,
@@ -72,8 +72,8 @@ import {
 } from './project-kind';
 import { managedEntityFileName, managedSessionFileName, projectPath, sanitizeFileName } from './naming';
 import { locationLabel, mainLocationFirst, recordLabel } from './display';
-import { ProjectDef, extractLinkpath, linkTargetOf } from './indexer';
-import { appendLoomList, newNoteEntry, setLoomKey, writeFmAt, writeNoteBody } from './fm';
+import { ProjectDef, extractLinkpath, isSyncConflictPath, linkTargetOf } from './indexer';
+import { FRONTMATTER_RE, appendLoomList, newNoteEntry, setLoomKey, writeFmAt, writeNoteBody } from './fm';
 import { queueWrite } from './write-queue';
 import { recomputeEventLocks, waitForMetadataSync } from './gm-lock';
 import { SessionConflict, cascadeDecisionPointSession, setEventSession } from './gm-decision-point';
@@ -86,9 +86,12 @@ import {
 	joinLocationSub,
 	moveSceneToSection,
 	parseFountain,
+	renameCharacterCues,
+	renameEntityMentions,
 	reorderScenesInSection,
 	reorderTopSections,
 	setSceneHeadingParts,
+	unlinkEntityMentions,
 } from './fountain';
 import {
 	appendBookAct,
@@ -99,7 +102,13 @@ import {
 	reorderBookActs,
 	reorderBookChaptersInAct,
 } from './prose';
-import { ensureScriptBufferLoaded, flushScriptBufferNow, mutateScriptBuffer } from './views/script-buffer';
+import {
+	ensureScriptBufferLoaded,
+	findScriptFile,
+	flushScriptBufferNow,
+	mutateScriptBuffer,
+	mutateScriptBufferAndFlush,
+} from './views/script-buffer';
 import type LoomLoomPlugin from './main';
 
 /** Folders scaffolded for a new project: only the entity types its kind (and,
@@ -370,6 +379,129 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
  * alone — only structured fields are cleared. Run BEFORE trashing the note so
  * links still resolve.
  */
+/** Whether `link` (a linkpath, read from note `from`) points at `targetPath`:
+ *  by resolution while that note exists, or — once it's deleted — by still
+ *  naming its old file (basename or path) and resolving to nothing. */
+export function linkPointsAt(plugin: LoomLoomPlugin, link: string, from: string, targetPath: string): boolean {
+	const linkpath = link.split('#')[0].trim();
+	if (linkpath === '') return false;
+	const dest = plugin.app.metadataCache.getFirstLinkpathDest(linkpath, from);
+	if (dest) return dest.path === targetPath;
+	const noExt = targetPath.replace(/\.md$/i, '').toLowerCase();
+	const lower = linkpath.toLowerCase();
+	return lower === noExt || lower === noExt.slice(noExt.lastIndexOf('/') + 1);
+}
+
+/** One `[[path#sub|alias]]` link (`!` embed prefix optional), in parts. */
+export interface LinkMatch {
+	bang: string;
+	path: string;
+	/** `#heading` / `#^block`, with its `#`; '' when none. */
+	sub: string;
+	alias: string | undefined;
+	whole: string;
+}
+
+const LINK_RE = /(!?)\[\[([^\]|#]*)(#[^\]|]*)?(?:\|([^\]]*))?\]\]/g;
+
+export function parseLinks(text: string): LinkMatch[] {
+	return [...text.matchAll(LINK_RE)]
+		.filter((m) => m[2].trim() !== '')
+		.map((m) => ({ bang: m[1], path: m[2], sub: m[3] ?? '', alias: m[4], whole: m[0] }));
+}
+
+/** A link rebuilt around a new path (and, optionally, a new alias). */
+export function linkText(m: LinkMatch, path: string, alias = m.alias): string {
+	return `${m.bang}[[${path}${m.sub}${alias === undefined ? '' : `|${alias}`}]]`;
+}
+
+/** Every string in a note's frontmatter, nested entries included. */
+function frontmatterStrings(fm: unknown): string[] {
+	if (typeof fm === 'string') return [fm];
+	if (Array.isArray(fm)) return fm.flatMap(frontmatterStrings);
+	if (typeof fm === 'object' && fm !== null) return Object.values(fm).flatMap(frontmatterStrings);
+	return [];
+}
+
+/** Every `[[link]]` path anywhere in a note's frontmatter — nested entries
+ *  and links inside longer text (an event note's `text`) included. */
+export function frontmatterLinkpaths(fm: unknown): string[] {
+	return frontmatterStrings(fm).flatMap((s) => parseLinks(s).map((m) => m.path));
+}
+
+/** Rewrites every string in a frontmatter object in place, nested ones too. */
+function mapFrontmatterStrings(node: unknown, fn: (s: string) => string): unknown {
+	if (typeof node === 'string') return fn(node);
+	if (Array.isArray(node)) return node.map((v) => mapFrontmatterStrings(v, fn));
+	if (typeof node === 'object' && node !== null) {
+		const obj = node as Record<string, unknown>;
+		for (const key of Object.keys(obj)) obj[key] = mapFrontmatterStrings(obj[key], fn);
+	}
+	return node;
+}
+
+/**
+ * The one walk behind every link rewrite (rename, delete, re-link, alias
+ * rename): each `[[link]]` that `matches` is replaced by `edit`'s result —
+ * in note properties (nested entries and links inside longer text
+ * included), note text, and the project's Book, as `where` says.
+ * `wholeValue` is true for a property whose value is exactly that one link.
+ * Sync-conflict copies are never touched; only notes holding a matching link
+ * are written.
+ */
+export async function rewriteLinks(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef | null,
+	matches: (m: LinkMatch, from: string) => boolean,
+	edit: (m: LinkMatch, wholeValue: boolean) => string,
+	where: { properties?: boolean; body?: boolean; book?: boolean } = { properties: true, body: true, book: true }
+): Promise<void> {
+	const { vault, metadataCache, fileManager } = plugin.app;
+	const rewrite = (text: string, from: string, wholeValue: boolean) =>
+		text.replace(LINK_RE, (whole: string) => {
+			const m = parseLinks(whole)[0];
+			return m && matches(m, from) ? edit(m, wholeValue) : whole;
+		});
+	for (const file of vault.getMarkdownFiles()) {
+		if (isSyncConflictPath(file.path)) continue;
+		const cache = metadataCache.getFileCache(file);
+		const holds = (texts: string[]) => texts.some((s) => parseLinks(s).some((m) => matches(m, file.path)));
+		if (where.properties && holds(frontmatterStrings(cache?.frontmatter))) {
+			await fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+				mapFrontmatterStrings(fm, (s) => rewrite(s, file.path, parseLinks(s)[0]?.whole === s.trim()));
+			});
+		}
+		if (where.body && holds((cache?.links ?? []).map((l) => l.original))) {
+			await vault.process(file, (data) => {
+				const fm = FRONTMATTER_RE.exec(data)?.[0] ?? '';
+				return fm + rewrite(data.slice(fm.length), file.path, false);
+			});
+		}
+	}
+	if (!where.book || !project) return;
+	const bookPath = projectPath(project, `${project.name}.${BOOK_EXTENSION}`);
+	if (vault.getFileByPath(bookPath)) await editBookFile(plugin, project, (raw) => rewrite(raw, bookPath, false));
+}
+
+/**
+ * Keeps links pointing at a renamed note where Obsidian's own updater doesn't
+ * reach: links inside longer property text (an event note's `text`) — it
+ * only rewrites property values that are exactly one link (checked in
+ * app.js 1.14.4) — and the project's Book, a `.loomprose` file it doesn't
+ * index. Note text is Obsidian's job.
+ */
+export async function followRenameInLinks(plugin: LoomLoomPlugin, file: TFile, oldPath: string): Promise<void> {
+	if (file.extension !== 'md') return;
+	const project = plugin.indexer.projectForPath(file.path) ?? plugin.indexer.projectForPath(oldPath) ?? null;
+	await rewriteLinks(
+		plugin,
+		project,
+		(m, from) => linkPointsAt(plugin, m.path, from, oldPath),
+		(m, wholeValue) => (wholeValue ? m.whole : linkText(m, file.basename)),
+		{ properties: true, book: true }
+	);
+}
+
 export async function purgeEntityReferences(
 	plugin: LoomLoomPlugin,
 	deletedPath: string,
@@ -377,14 +509,13 @@ export async function purgeEntityReferences(
 ): Promise<void> {
 	const others = plugin.indexer.getAll(undefined, projectRoot).filter((r) => r.path !== deletedPath);
 	for (const rec of others) {
-		// Only touch notes that actually connect to the deleted one (this includes
-		// body links, but we edit frontmatter only, so body links are untouched).
-		if (!plugin.indexer.getOutgoing(rec.path).some((c) => c.record.path === deletedPath)) continue;
 		const f = plugin.app.vault.getFileByPath(rec.path);
 		if (!f) continue;
-		const dead = (v: unknown): boolean =>
-			typeof v === 'string' &&
-			plugin.indexer.resolve(extractLinkpath(v) ?? '', rec.path)?.path === deletedPath;
+		const points = (linkpath: string) => linkPointsAt(plugin, linkpath, rec.path, deletedPath);
+		// Only touch notes whose frontmatter actually names the deleted one —
+		// read from the cache, so this works after the file is already gone.
+		if (!frontmatterLinkpaths(plugin.app.metadataCache.getFileCache(f)?.frontmatter).some(points)) continue;
+		const dead = (v: unknown): boolean => typeof v === 'string' && points(extractLinkpath(v) ?? '');
 		const isObj = (v: unknown): v is Record<string, unknown> =>
 			typeof v === 'object' && v !== null && !Array.isArray(v);
 		try {
@@ -455,12 +586,105 @@ export async function purgeEntityReferences(
 /** Removes every structured reference to a note, then moves it to the trash. */
 export async function deleteEntityNote(
 	plugin: LoomLoomPlugin,
-	record: { path: string; project: string }
+	record: { path: string; project: string; name: string; type: EntityType }
 ): Promise<void> {
 	const file = plugin.app.vault.getFileByPath(record.path);
 	if (!file) return;
 	await purgeEntityReferences(plugin, record.path, record.project);
-	await plugin.app.fileManager.trashFile(file);
+	plugin.deletePromptPause++;
+	try {
+		await plugin.app.fileManager.trashFile(file);
+	} finally {
+		plugin.deletePromptPause--;
+	}
+	await unlinkDeletedNote(plugin, record);
+}
+
+/** Entity types a script's `@[Name]` mention can point at (`syncScenes`). */
+export const MENTIONABLE_TYPES: EntityType[] = ['character', 'faction', 'location', 'item'];
+
+/** Rewrites the project script's `@[Name]` mentions with `apply`, unless
+ *  another mentionable entity still carries `name` (the mention would then
+ *  point at it, not the renamed/deleted one). Goes through the shared script
+ *  buffer so it can't race an open editor. */
+async function editScriptMentions(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	record: { path: string; type: EntityType },
+	name: string,
+	apply: (text: string) => string | null
+): Promise<void> {
+	if (!MENTIONABLE_TYPES.includes(record.type) || !findScriptFile(plugin, project)) return;
+	const key = name.trim().toLowerCase();
+	const shared = plugin.indexer
+		.getAll(undefined, project.root)
+		.some((r) => r.path !== record.path && MENTIONABLE_TYPES.includes(r.type) && r.name.trim().toLowerCase() === key);
+	if (shared) return;
+	await ensureScriptBufferLoaded(plugin, project);
+	await mutateScriptBufferAndFlush(plugin, project, apply);
+}
+
+/** Keeps the script's `@[Name]` mentions on an entity after its name changes —
+ *  and, for a character, its dialogue cues. */
+export async function followRenameInScript(
+	plugin: LoomLoomPlugin,
+	project: ProjectDef,
+	record: { path: string; type: EntityType },
+	oldName: string,
+	newName: string
+): Promise<void> {
+	await editScriptMentions(plugin, project, record, oldName, (raw) => {
+		const mentioned = renameEntityMentions(raw, oldName, newName) ?? raw;
+		const cued = record.type === 'character' ? (renameCharacterCues(mentioned, oldName, newName) ?? mentioned) : mentioned;
+		return cued === raw ? null : cued;
+	});
+}
+
+/** Turns `[[links]]` to a deleted note into plain text — the link's alias,
+ *  else the note's name — in every note's body and in the project's Book, and
+ *  its `@[Name]` mentions in the script into their display text, so the prose
+ *  still reads. Frontmatter is left to `purgeEntityReferences`.
+ *  Call once the file is gone: a link only counts if it no longer resolves. */
+export async function unlinkDeletedNote(
+	plugin: LoomLoomPlugin,
+	record: { path: string; project: string; name: string; type: EntityType }
+): Promise<void> {
+	const project = plugin.indexer.getProjectByRoot(record.project) ?? null;
+	// A property that is exactly the dead link is emptied (a field like a
+	// scene's act must not keep junk text); anywhere else the link becomes its
+	// alias, else the note's name.
+	await rewriteLinks(
+		plugin,
+		project,
+		(m, from) => linkPointsAt(plugin, m.path, from, record.path),
+		(m, wholeValue) => (wholeValue ? '' : (m.alias ?? record.name))
+	);
+	if (project) {
+		await editScriptMentions(plugin, project, record, record.name, (raw) => unlinkEntityMentions(raw, record.name));
+	}
+}
+
+/** Points every reference to a deleted note at `target` instead — for a note
+ *  that was renamed or replaced outside Loom. Covers links in note text, in
+ *  properties (whole-value and inside longer text), in the project's Book,
+ *  and the script's `@[Name]` mentions; each link keeps its `#sub|alias`. */
+export async function relinkDeletedNote(
+	plugin: LoomLoomPlugin,
+	record: { path: string; project: string; name: string; type: EntityType },
+	target: EntityRecord
+): Promise<void> {
+	const project = plugin.indexer.getProjectByRoot(record.project) ?? null;
+	await rewriteLinks(
+		plugin,
+		project,
+		(m, from) => linkPointsAt(plugin, m.path, from, record.path),
+		(m) => linkText(m, linkTargetOf(target))
+	);
+	if (project) {
+		await editScriptMentions(plugin, project, record, record.name, (raw) =>
+			renameEntityMentions(raw, record.name, target.name)
+		);
+	}
 }
 
 /** One-line text prompt (rename, alias, date…) by default — Enter or the CTA
@@ -756,11 +980,11 @@ export async function renameEntityRecord(
 	project: ProjectDef,
 	record: EntityRecord,
 	rawName: string
-): Promise<void> {
+): Promise<boolean> {
 	const entered = rawName.trim();
-	if (entered === '' || entered === record.name || record.type === 'session') return;
+	if (entered === '' || entered === record.name || record.type === 'session') return false;
 	const file = plugin.app.vault.getFileByPath(record.path);
-	if (!file) return;
+	if (!file) return false;
 	const parentName =
 		record.type === 'location' && record.parentLocation !== null
 			? plugin.indexer.resolve(record.parentLocation, record.path)?.name
@@ -768,9 +992,12 @@ export async function renameEntityRecord(
 	const base = managedEntityFileName(project.name, record.type, entered, parentName);
 	const parent = file.parent?.path ?? '';
 	const newPath = normalizePath(parent === '' ? `${base}.md` : `${parent}/${base}.md`);
+	// Checked BEFORE the frontmatter write: a collision must abort the rename
+	// entirely, never leave the displayed name changed while the file name
+	// silently stays behind.
 	if (newPath !== file.path && plugin.app.vault.getAbstractFileByPath(newPath)) {
 		new Notice(t('project.common.nameExists'));
-		return;
+		return false;
 	}
 	await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 		setLoomKey(fm, FM.name, entered);
@@ -780,6 +1007,8 @@ export async function renameEntityRecord(
 		fm.aliases = [entered, ...aliases];
 	});
 	if (newPath !== file.path) await plugin.app.fileManager.renameFile(file, newPath);
+	await followRenameInScript(plugin, project, record, record.name, entered);
+	return true;
 }
 
 /**
@@ -1187,7 +1416,7 @@ export async function findOrCreateSublocation(
 /** Types whose names legitimately repeat — sessions are named by date, and
  *  scenes/acts/chapters by their script or book heading — so a clash gets a
  *  numbered file. Every other type is named by the user and must be unique. */
-const REPEATABLE_NAME_TYPES: ReadonlySet<EntityType> = new Set(['session', 'scene', 'act', 'chapter']);
+export const REPEATABLE_NAME_TYPES: ReadonlySet<EntityType> = new Set(['session', 'scene', 'act', 'chapter']);
 
 /** The managed path a new entity of `type` named by `fields` would take. */
 export function newEntityPath(plugin: LoomLoomPlugin, project: ProjectDef, type: EntityType, fields: NewEntityFields): string {
@@ -2285,6 +2514,10 @@ export class CreateEntityModal extends Modal {
 		}
 		if (this.type === 'session' && this.fields.date === '') {
 			new Notice(t('project.createEntity.dateRequired'));
+			return;
+		}
+		if (!isValidDateInput(this.fields.date, this.type, this.project.config)) {
+			new Notice(t('common.invalidDate', { example: todayRaw() }));
 			return;
 		}
 		if (this.anchorRequired() && !this.options.noteSession && !this.pickedSession) {
