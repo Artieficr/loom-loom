@@ -1,8 +1,8 @@
 import {
 	App,
 	Menu as ObsidianMenu,
+	Modal,
 	Notice,
-	SliderComponent,
 	TFile,
 	TFolder,
 	ViewStateResult,
@@ -11,16 +11,20 @@ import {
 	setTooltip,
 } from 'obsidian';
 import {
+	CSSProperties,
 	MouseEvent as ReactMouseEvent,
 	PointerEvent as ReactPointerEvent,
 	ReactElement,
 	ReactNode,
 	useCallback,
+	RefObject,
 	useEffect,
+	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
 } from 'react';
+import { Root, createRoot } from 'react-dom/client';
 import { darkenHex } from '../settings';
 import {
 	EntityRecord,
@@ -33,7 +37,7 @@ import {
 	mapsLabel,
 } from '../types';
 import { linkTargetOf, ProjectDef } from '../indexer';
-import { ConfirmModal, ensureFolder } from '../project';
+import { ConfirmModal, TextInputModal, ensureFolder } from '../project';
 import type LoomLoomPlugin from '../main';
 import { LoomReactView } from './react-view';
 import { EntityChip, Icon, SearchableSelect, ViewShell, noProjectMessage } from './common';
@@ -91,6 +95,28 @@ interface MapZone {
 	subPins: { loc: string; x: number; y: number; size?: NodeSizePreset }[];
 	/** Locked zones can't be moved or reshaped (still selectable). */
 	locked: boolean;
+	/** Texture: a polygon's terrain (see TERRAINS), a path's surface (see
+	 *  PATH_STYLES — 'bricks' for a road, 'water' for a river), or null for plain. */
+	terrain: Texture | null;
+	/** A name for a zone or path that isn't a location ("the Silverrun"), shown
+	 *  on the map and found by the location search while `named` is on. */
+	name: string;
+	/** Which identity is in use: a linked location (false, the default) or the
+	 *  plain `name`. Switching to the name sets the location aside in `savedLoc`,
+	 *  so switching back restores it — one is in use at a time, both are kept. */
+	named: boolean;
+	savedLoc: { location: string; node: Pt | null } | null;
+}
+
+/** A free text label on a map page ("The Shattered Sea"), centred on x/y. */
+interface MapLabel {
+	id: string;
+	x: number;
+	y: number;
+	text: string;
+	/** Font size in world units — a label is part of the map, so it scales with
+	 *  it (fading out once too small or too big on screen, LABEL_PX). */
+	size: number;
 }
 
 /**
@@ -99,8 +125,8 @@ interface MapZone {
  *
  * `w`/`h` are world units and always keep the file's aspect ratio: an import
  * starts at the image's natural pixel size (1 image pixel = 1 world unit, so a
- * scanned map can be traced 1:1, and the page's element scale says how big a node
- * is against it), and every resize handle scales both axes together.
+ * scanned map can be traced 1:1), and every resize handle scales both axes
+ * together.
  */
 interface MapImage {
 	id: string;
@@ -131,9 +157,9 @@ interface MapPage {
 	zones: MapZone[];
 	/** Background images, painted in order under everything else. */
 	images: MapImage[];
-	/** Element scale — world px per size unit (see REF_ZONE_RADIUS). Inferred from
-	 *  the page's zones when absent, so pre-scale maps keep sensible markers. */
-	scale: number;
+	labels: MapLabel[];
+	/** The canvas colour (hex), or null for the theme's own. */
+	bg: string | null;
 }
 
 interface MapsFile {
@@ -143,6 +169,7 @@ interface MapsFile {
 }
 
 const DEFAULT_ALPHA = 0.35;
+/** Wheel-zoom limits for an empty page (a page with content derives its own). */
 const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 4;
 const CLOSE_SNAP = 12; // screen px to the first vertex that closes a draft
@@ -150,28 +177,11 @@ const VERTEX_R = 5; // handle radius (screen px)
 const CLICK_SLOP = 4; // px of movement below which a node press counts as a click
 const NODE_DBL_MS = 220; // short double-click window on a node (open its page)
 const DELETE_SCRUB_MS = 3000; // grace period before a deleted note's map pins are cleared
-const DEFAULT_ROAD_WIDTH = 280; // world units — wide enough that location nodes fit inside
-const ROAD_WIDTH_MIN = 8;
-const ROAD_WIDTH_MAX = 1000;
+const DEFAULT_ROAD_WIDTH = 280; // world units — only for a stored road with no valid width
 const MIN_VERTEX_DIST = 12; // screen px — clicks nearer than this to the last vertex don't add one
 const SUB_NODE_SCALE = 0.72; // each sublocation level renders this fraction of its parent's size
 const MIN_SUB_NODE_SIZE = 6; // px floor — deeper sublocations never shrink past this
 
-/**
- * Element scale — the map's own anchor for "how big is a thing here".
- *
- * Everything drawn on a map is relative (world units with no fixed meaning), so a
- * map hand-drawn with 3000-unit-wide continents and one drawn with 200-unit towns
- * would render identically sized nodes, labels and roads — tiny on the first,
- * huge on the second. A page therefore carries a `scale`: world px per size unit,
- * multiplying every world-fixed marker (nodes, pins, labels, new road widths) and
- * dividing the zoom thresholds, so "regular" and "node view" land where the map's
- * own geometry says they should. It is inferred from what's already drawn (a
- * typical zone reads about REF_ZONE_UNITS regular nodes across) and adjustable
- * from the Element-size control, so old maps need no redrawing.
- */
-const REF_ZONE_UNITS = 5;
-const REF_ZONE_RADIUS = REF_ZONE_UNITS * NODE_SIZE_PRESETS.regular;
 /** Smallest world width a background image can be resized to. */
 const IMAGE_MIN_W = 8;
 /** Screen-px band around a locked image's border that still opens its menu. */
@@ -179,38 +189,63 @@ const IMAGE_EDGE_PX = 10;
 /** Half-size (screen px) of an image resize grip, and the half-width of the
  *  invisible drag band along each side. */
 const IMAGE_GRIP_PX = 7;
-/** Footprint of the background-image picker panel (px), used to flip it to
- *  whichever side of the cursor has room. */
-const IMAGE_PICKER_W = 280;
-const IMAGE_PICKER_H = 400;
-const SCALE_MIN = 0.05;
-const SCALE_MAX = 60;
-/** The scale slider is logarithmic — the useful range spans three orders of
- *  magnitude, so equal slider travel has to mean equal proportional change. */
-const sliderToScale = (v: number) => SCALE_MIN * Math.pow(SCALE_MAX / SCALE_MIN, v / 100);
-const scaleToSlider = (s: number) =>
-	Math.round((Math.log(Math.max(SCALE_MIN, s) / SCALE_MIN) / Math.log(SCALE_MAX / SCALE_MIN)) * 100);
-/** Opacity of the main location node in "close up" mode (see-through, so the
- *  focus is on the sublocations within). */
+/** Opacity of a main location node once its zone fills the view (see-through,
+ *  so the focus is on the sublocations within). */
 const CLOSEUP_NODE_OPACITY = 0.28;
+/** Zoom of an empty page with no saved camera (a page with content opens fitted). */
+const DEFAULT_K = 0.5;
 
-/** The three map view modes, top→bottom on the scale slider. The mode is derived
- *  from the camera zoom (wheel-zoom flips it); a slider stop animates to that
- *  mode's zoom. */
-type ViewMode = 'closeup' | 'regular' | 'nodeview';
-// Translated at use (not stored — the locale can change at runtime).
-const VIEW_MODES: [ViewMode, () => string][] = [
-	['closeup', () => t('view.map.viewMode.closeup')],
-	['regular', () => t('view.map.viewMode.regular')],
-	['nodeview', () => t('view.map.viewMode.nodeview')],
-];
-/** Zoom thresholds between the modes, and the zoom each slider stop targets. */
-const CLOSEUP_K = 0.7;
-const NODEVIEW_K = 0.08;
-// The Node-view stop zooms to just PAST the threshold (not exactly on it) — so it
-// reliably crosses into node view partway through the ease (single click) and the
-// squish animation plays, rather than landing on the fragile boundary.
-const MODE_K: Record<ViewMode, number> = { closeup: 1, regular: 0.5, nodeview: NODEVIEW_K * 0.85 };
+/**
+ * Semantic zoom — every zone decides how it draws from its OWN on-screen size
+ * (area-equivalent radius × zoom, in px), never from a page-wide mode: zooming out
+ * folds small towns into their nodes while a continent beside them stays drawn.
+ * The bands are screen px, so they hold for a map drawn at any size. Each is
+ * [from, to] for a smoothstep; tune here.
+ */
+const COLLAPSE_PX: [number, number] = [28, 56]; // fully folded into its node below, fully drawn above
+const PINS_PX: [number, number] = [80, 140]; // doors, items and sublocations fade in
+const CLOSEUP_PX: [number, number] = [250, 400]; // the main node turns see-through
+/** Markers are sized from their own zone: a zone this many px in radius on
+ *  screen draws its node/pins at their preset size, scaling with it, clamped to
+ *  MARKER_MIN..MAX × preset so they never vanish or balloon. A folded zone's node
+ *  is a constant 1× on screen. No per-map setting — the zones are the scale. */
+const MARKER_REF_PX = 85;
+const MARKER_MIN = 0.6;
+const MARKER_MAX = 1.4;
+/** A free label shows across this on-screen font-size band (px): fades in once
+ *  readable, fades out once it would dwarf the view. */
+const LABEL_IN_PX: [number, number] = [7, 11];
+const LABEL_OUT_PX: [number, number] = [140, 220];
+
+/**
+ * Terrain presets for a polygon zone: the fill a preset sets, and its texture —
+ * a screen-px tile (so its density holds at any zoom) stroked in a darker shade
+ * of the zone's colour, masked clear around the zone's markers and labels.
+ */
+type Terrain = 'water' | 'forest' | 'mountains' | 'fields';
+const TERRAINS: Record<Terrain, { icon: string; color: string; alpha: number; tile: [number, number]; d: string }> = {
+	water: { icon: 'waves', color: '#7fb2d6', alpha: 0.55, tile: [28, 16], d: 'M2 5q3-3 6 0t6 0M16 13q3-3 6 0t6 0' },
+	forest: { icon: 'trees', color: '#8fb47a', alpha: 0.5, tile: [26, 26], d: 'M7 3l4 7H3zM7 10v3M20 15l4 7h-8zM20 22v3' },
+	mountains: { icon: 'mountain', color: '#a89a86', alpha: 0.5, tile: [30, 24], d: 'M2 11l5-7 5 7M17 22l5-7 5 7' },
+	fields: { icon: 'wheat', color: '#d8c779', alpha: 0.5, tile: [18, 10], d: 'M1 3h7M10 8h6' },
+};
+/** Every texture a zone or path can carry: the polygon terrains, plus 'bricks',
+ *  which only a path draws (dashed blocks along its own direction — a tile
+ *  pattern can't turn with a winding road). */
+type Texture = Terrain | 'bricks';
+const isTexture = (v: unknown): v is Texture => v === 'bricks' || (typeof v === 'string' && v in TERRAINS);
+/** Path presets (a path is a road, river, wall… — one tool, styled). `null`
+ *  colour = the map's own draw colour. */
+const PATH_STYLES: Record<'plain' | 'road' | 'river', { icon: string; color: string | null; alpha: number; texture: Texture | null }> = {
+	plain: { icon: 'minus', color: null, alpha: DEFAULT_ALPHA, texture: null },
+	road: { icon: 'route', color: '#b9a58a', alpha: 0.75, texture: 'bricks' },
+	river: { icon: 'waves', color: '#6fa8d6', alpha: 0.8, texture: 'water' },
+};
+
+const smoothstep = ([a, b]: [number, number], x: number): number => {
+	const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+	return t * t * (3 - 2 * t);
+};
 
 /** Node size dropdown labels. Translated at use (not stored — the locale can
  *  change at runtime). */
@@ -263,12 +298,7 @@ function parseZones(raw: unknown): MapZone[] {
 				.map((p) => ({ x: p.x, y: p.y })),
 			startLoc: typeof z.startLoc === 'string' ? z.startLoc : null,
 			endLoc: typeof z.endLoc === 'string' ? z.endLoc : null,
-			// Stored widths are absolute world units — the ROAD_WIDTH_MIN/MAX range is
-			// per-map (scaled), so clamping to it here would shrink a big map's roads.
-			width:
-				typeof z.width === 'number' && Number.isFinite(z.width) && z.width > 0
-					? Math.min(z.width, ROAD_WIDTH_MAX * SCALE_MAX)
-					: DEFAULT_ROAD_WIDTH,
+			width: typeof z.width === 'number' && Number.isFinite(z.width) && z.width > 0 ? z.width : DEFAULT_ROAD_WIDTH,
 			color: typeof z.color === 'string' ? z.color : '#c9a36b',
 			alpha: typeof z.alpha === 'number' ? Math.max(0, Math.min(1, z.alpha)) : DEFAULT_ALPHA,
 			location: typeof z.location === 'string' ? z.location : null,
@@ -281,9 +311,33 @@ function parseZones(raw: unknown): MapZone[] {
 			itemPins: pinEntries(z.itemPins, 'item').map((it) => ({ item: it.item, x: it.x, y: it.y, size: parsePreset(it.size) })),
 			subPins: pinEntries(z.subPins, 'loc').map((sp) => ({ loc: sp.loc, x: sp.x, y: sp.y, size: parsePreset(sp.size) })),
 			locked: z.locked === true,
+			terrain: isTexture(z.terrain) ? z.terrain : null,
+			name: typeof z.name === 'string' ? z.name : '',
+			named: z.named === true,
+			savedLoc:
+				z.savedLoc && typeof z.savedLoc.location === 'string'
+					? {
+							location: z.savedLoc.location,
+							node:
+								z.savedLoc.node && Number.isFinite(z.savedLoc.node.x) && Number.isFinite(z.savedLoc.node.y)
+									? { x: z.savedLoc.node.x, y: z.savedLoc.node.y }
+									: null,
+						}
+					: null,
 		});
 	}
 	return zones;
+}
+
+function parseLabels(raw: unknown): MapLabel[] {
+	if (!Array.isArray(raw)) return [];
+	const out: MapLabel[] = [];
+	for (const l of raw as Partial<MapLabel>[]) {
+		if (!l || typeof l.text !== 'string' || typeof l.x !== 'number' || typeof l.y !== 'number') continue;
+		if (typeof l.size !== 'number' || !(l.size > 0)) continue;
+		out.push({ id: typeof l.id === 'string' ? l.id : newId(), x: l.x, y: l.y, text: l.text, size: l.size });
+	}
+	return out;
 }
 
 /** Parses a raw background-image array tolerantly (drops unusable entries). */
@@ -321,18 +375,36 @@ function polygonRadius(pts: { x: number; y: number }[]): number {
 	return area > 0 ? Math.sqrt(area / Math.PI) : 0;
 }
 
-/** The element scale implied by what's already drawn: the median polygon zone
- *  should read about REF_ZONE_UNITS regular nodes across. An empty page (nothing
- *  to measure) stays at 1. */
-function inferScale(zones: MapZone[]): number {
+/** The camera that frames a page's zones and images in a w×h view, or null for
+ *  an empty page. */
+function fitCamera(zones: MapZone[], images: MapImage[], w: number, h: number): Camera | null {
+	const pts = [
+		...zones.flatMap((z) => z.points),
+		...images.flatMap((im) => [
+			{ x: im.x, y: im.y },
+			{ x: im.x + im.w, y: im.y + im.h },
+		]),
+	];
+	if (pts.length === 0) return null;
+	const x0 = Math.min(...pts.map((p) => p.x));
+	const x1 = Math.max(...pts.map((p) => p.x));
+	const y0 = Math.min(...pts.map((p) => p.y));
+	const y1 = Math.max(...pts.map((p) => p.y));
+	const k = 0.9 * Math.min(w / Math.max(1e-6, x1 - x0), h / Math.max(1e-6, y1 - y0));
+	return { k, tx: w / 2 - ((x0 + x1) / 2) * k, ty: h / 2 - ((y0 + y1) / 2) * k };
+}
+
+/** Wheel-zoom range from the page's own content: out to a quarter of the fit-all
+ *  view, in until its smallest zone is about a viewport across. */
+function zoomLimits(zones: MapZone[], images: MapImage[], w: number, h: number): [number, number] {
+	const fit = fitCamera(zones, images, w, h);
+	if (!fit) return [MIN_ZOOM, MAX_ZOOM];
 	const radii = zones
 		.filter((z) => z.kind === 'zone')
 		.map((z) => polygonRadius(z.points))
-		.filter((r) => r > 0)
-		.sort((a, b) => a - b);
-	if (radii.length === 0) return 1;
-	const median = radii[Math.floor(radii.length / 2)];
-	return Math.max(SCALE_MIN, Math.min(SCALE_MAX, median / REF_ZONE_RADIUS));
+		.filter((r) => r > 0);
+	const inK = radii.length ? Math.min(w, h) / Math.min(...radii) : fit.k * 20;
+	return [fit.k / 4, Math.max(fit.k * 4, inK)];
 }
 
 type ProjectRef = { root: string; name: string };
@@ -365,7 +437,7 @@ export function mapPageCount(text: string | null): number {
 
 /** A single default page (used for a brand-new project map). */
 function defaultPages(): MapPage[] {
-	return [{ id: newId(), name: t('view.map.defaultMapName'), parentId: null, order: 0, zones: [], images: [], scale: 1 }];
+	return [{ id: newId(), name: t('view.map.defaultMapName'), parentId: null, order: 0, zones: [], images: [], labels: [], bg: null }];
 }
 
 /**
@@ -379,7 +451,7 @@ function defaultPages(): MapPage[] {
  * `createImageBitmap`'s resize (so the full-size bitmap is never retained), then
  * kept as a tiny data URL.
  */
-const THUMB_PX = 64;
+const THUMB_PX = 192;
 const thumbCache = new Map<string, string>();
 /** Thumbnails are built one at a time — a burst of rows decoding in parallel is
  *  what stalls the UI, and the queue keeps the newest scroll position responsive. */
@@ -411,8 +483,8 @@ async function buildThumb(app: App, file: TFile): Promise<string | null> {
 	}
 }
 
-/** One picker row's thumbnail: blank until the row is actually scrolled into
- *  view, then its cached data URL. Nothing off-screen is ever decoded. */
+/** One picker tile's thumbnail: blank until it's actually scrolled into view,
+ *  then its cached data URL. Nothing off-screen is ever decoded. */
 function ImageThumb({ plugin, file }: { plugin: LoomLoomPlugin; file: TFile }) {
 	const [url, setUrl] = useState<string | null>(() => thumbCache.get(thumbKey(file)) ?? null);
 	const ref = useRef<HTMLSpanElement>(null);
@@ -431,7 +503,7 @@ function ImageThumb({ plugin, file }: { plugin: LoomLoomPlugin; file: TFile }) {
 					if (!cancelled && next) setUrl(next);
 				});
 			},
-			{ root: el.closest('.loom-map-subs-list'), rootMargin: '120px' }
+			{ root: el.closest('.loom-map-image-grid'), rootMargin: '200px' }
 		);
 		io.observe(el);
 		return () => {
@@ -440,7 +512,122 @@ function ImageThumb({ plugin, file }: { plugin: LoomLoomPlugin; file: TFile }) {
 		};
 	}, [plugin, file, url]);
 	if (!url) return <span className="loom-map-image-thumb" ref={ref} />;
-	return <img className="loom-map-image-thumb" src={url} alt="" width={28} height={28} decoding="async" />;
+	return <img className="loom-map-image-thumb" src={url} alt="" decoding="async" />;
+}
+
+/** Keeps a floating menu — and any popover open inside it — within the map
+ *  canvas: after every render it measures them and nudges the menu back in by
+ *  however much they overflow an edge (8px margin). Menus anchor at the cursor,
+ *  so near the canvas edge they'd otherwise be clipped. */
+function useKeepInMap(ref: RefObject<HTMLElement | null>) {
+	useLayoutEffect(() => {
+		const el = ref.current;
+		const wrap = el?.closest('.loom-map-wrap');
+		if (!el || !wrap) return;
+		el.setCssProps({ translate: 'none' });
+		const box = wrap.getBoundingClientRect();
+		const rects = [el, ...Array.from(el.querySelectorAll<HTMLElement>('.loom-map-palette-pop'))].map((e) =>
+			e.getBoundingClientRect()
+		);
+		const l = Math.min(...rects.map((r) => r.left));
+		const r = Math.max(...rects.map((r2) => r2.right));
+		const tp = Math.min(...rects.map((r2) => r2.top));
+		const b = Math.max(...rects.map((r2) => r2.bottom));
+		const m = 8;
+		// Pull back from the right/bottom edge, but never past the left/top one.
+		const dx = Math.max(box.left + m - l, Math.min(0, box.right - m - r));
+		const dy = Math.max(box.top + m - tp, Math.min(0, box.bottom - m - b));
+		if (dx || dy) el.setCssProps({ translate: `${dx}px ${dy}px` });
+	});
+}
+
+/** The background-image browser: every image already in the project's Maps
+ *  images folder as a searchable thumbnail grid, plus "Import image…". Picking
+ *  one (or importing) closes it; the caller places the image. */
+class ImagePickerModal extends Modal {
+	private root: Root | null = null;
+
+	constructor(
+		private plugin: LoomLoomPlugin,
+		private files: TFile[],
+		private onPickFile: (file: TFile) => void,
+		private onImport: () => void
+	) {
+		super(plugin.app);
+	}
+
+	onOpen(): void {
+		this.modalEl.addClass('loom-map-image-modal');
+		// Top-anchored: the grid's height changes as the search filters it, and a
+		// centred modal would move the search bar with every keystroke.
+		this.containerEl.addClass('loom-modal-top');
+		this.setTitle(t('view.map.backgroundImage'));
+		this.root = createRoot(this.contentEl);
+		this.root.render(
+			<ImagePicker
+				plugin={this.plugin}
+				files={this.files}
+				onPick={(f) => {
+					this.close();
+					this.onPickFile(f);
+				}}
+				onImport={() => {
+					this.close();
+					this.onImport();
+				}}
+			/>
+		);
+	}
+
+	onClose(): void {
+		this.root?.unmount();
+		this.root = null;
+		this.contentEl.empty();
+	}
+}
+
+function ImagePicker({
+	plugin,
+	files,
+	onPick,
+	onImport,
+}: {
+	plugin: LoomLoomPlugin;
+	files: TFile[];
+	onPick: (file: TFile) => void;
+	onImport: () => void;
+}) {
+	const [query, setQuery] = useState('');
+	const q = query.trim().toLowerCase();
+	const shown = q ? files.filter((f) => f.basename.toLowerCase().includes(q)) : files;
+	return (
+		<div className="loom-map-image-browser">
+			<div className="loom-map-image-bar">
+				<input
+					type="search"
+					placeholder={t('view.map.searchImages', { count: files.length })}
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+				/>
+				<button className="mod-cta" onClick={onImport}>
+					{t('view.map.importImage')}
+				</button>
+			</div>
+			<div className="loom-map-image-grid">
+				{shown.map((f) => (
+					<button key={f.path} className="loom-map-image-tile" title={f.name} onClick={() => onPick(f)}>
+						<ImageThumb plugin={plugin} file={f} />
+						<span>{f.basename}</span>
+					</button>
+				))}
+				{files.length === 0 ? (
+					<div className="loom-map-image-empty">{t('view.map.nothingImportedYet')}</div>
+				) : shown.length === 0 ? (
+					<div className="loom-map-image-empty">{t('common.noMatches')}</div>
+				) : null}
+			</div>
+		</div>
+	);
 }
 
 /** Parses the persisted Maps file. Returns null when nothing usable is found. */
@@ -457,12 +644,8 @@ function parseMapsFile(text: string): MapsFile | null {
 					order: typeof m.order === 'number' ? m.order : i,
 					zones,
 					images: parseImages(m.images),
-					// Pages written before element scale existed infer theirs from the
-					// geometry they already hold.
-					scale:
-						typeof m.scale === 'number' && Number.isFinite(m.scale) && m.scale > 0
-							? Math.max(SCALE_MIN, Math.min(SCALE_MAX, m.scale))
-							: inferScale(zones),
+					labels: parseLabels(m.labels),
+					bg: typeof m.bg === 'string' && /^#[0-9a-f]{6}$/i.test(m.bg) ? m.bg : null,
 				};
 			});
 			if (maps.length === 0) return { version: 2, activeId: null, maps: defaultPages() };
@@ -472,6 +655,16 @@ function parseMapsFile(text: string): MapsFile | null {
 		/* fall through */
 	}
 	return null;
+}
+
+/** Any CSS colour as #rrggbb (a canvas context normalises it), for a colour
+ *  input's value; mid-grey if it can't be read. */
+function cssColorToHex(color: string): string {
+	const ctx = createEl('canvas').getContext('2d');
+	if (!ctx || !color) return '#808080';
+	ctx.fillStyle = color;
+	const out = ctx.fillStyle;
+	return /^#[0-9a-f]{6}$/i.test(out) ? out : '#808080';
 }
 
 /** A darker shade of a hex color (for zone outlines + nodes). */
@@ -639,6 +832,39 @@ function boundaryExit(
  *  matching endpoint of every road attached to that location, so roads stay
  *  connected when their location is moved (a road stores its own endpoints, which
  *  otherwise stay frozen and detach). Roads are matched by location link target. */
+/** Re-shapes a path to `next` (same number of points) and carries what sits on
+ *  it along: its own node, doors, items and sublocation pins keep their spot
+ *  ALONG the path — same segment, same fraction, same offset — so moving a knot
+ *  moves them with that stretch of path instead of leaving them behind. */
+function reshapeRoad(road: MapZone, next: Pt[]): MapZone {
+	const old = road.points;
+	const carry = <T extends Pt>(p: T): T => {
+		let best = { d: Infinity, i: 0, t: 0, q: { x: p.x, y: p.y } };
+		for (let i = 0; i < old.length - 1; i++) {
+			const a = old[i];
+			const b = old[i + 1];
+			const dx = b.x - a.x;
+			const dy = b.y - a.y;
+			const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+			const q = { x: a.x + t * dx, y: a.y + t * dy };
+			const d = Math.hypot(p.x - q.x, p.y - q.y);
+			if (d < best.d) best = { d, i, t, q };
+		}
+		const a = next[best.i] ?? p;
+		const b = next[best.i + 1] ?? a;
+		const moved = { x: a.x + (b.x - a.x) * best.t + p.x - best.q.x, y: a.y + (b.y - a.y) * best.t + p.y - best.q.y };
+		return { ...p, ...clampToCapsule(moved, next, road.width / 2) };
+	};
+	return {
+		...road,
+		points: next,
+		node: road.node ? carry(road.node) : null,
+		doors: road.doors.map(carry),
+		itemPins: road.itemPins.map(carry),
+		subPins: road.subPins.map(carry),
+	};
+}
+
 function translateZoneWithRoads(list: MapZone[], movedId: string, dx: number, dy: number): MapZone[] {
 	const moved = list.find((z) => z.id === movedId);
 	if (!moved) return list;
@@ -649,8 +875,8 @@ function translateZoneWithRoads(list: MapZone[], movedId: string, dx: number, dy
 	const zoneIdForLoc = (lp: string | null | undefined): string | null =>
 		lp ? list.find((z) => z.kind === 'zone' && z.location === lp)?.id ?? null : null;
 	return list.map((z) => {
-		if (z.id === movedId)
-			return {
+		if (z.id === movedId) {
+			const shifted = {
 				...z,
 				points: z.points.map(shiftPt),
 				node: z.node ? shiftPt(z.node) : null,
@@ -658,6 +884,15 @@ function translateZoneWithRoads(list: MapZone[], movedId: string, dx: number, dy
 				itemPins: shiftArr(z.itemPins),
 				subPins: shiftArr(z.subPins),
 			};
+			if (z.kind !== 'road' || z.points.length < 2) return shifted;
+			// A moved path keeps its linked ends exactly where they're connected;
+			// only the rest of it moves (its node and pins ride along via reshapeRoad).
+			const last = z.points.length - 1;
+			const pts = z.points.map((p, i) =>
+				(i === 0 && z.startLoc) || (i === last && z.endLoc) ? { ...p } : shiftPt(p)
+			);
+			return reshapeRoad(z, pts);
+		}
 		if (movedLoc && z.kind === 'road' && z.points.length > 0) {
 			const startHit = zoneIdForLoc(z.startLoc) === movedId;
 			const endHit = zoneIdForLoc(z.endLoc) === movedId;
@@ -665,10 +900,7 @@ function translateZoneWithRoads(list: MapZone[], movedId: string, dx: number, dy
 				const pts = z.points.map((p) => ({ ...p }));
 				if (startHit) pts[0] = shiftPt(pts[0]);
 				if (endHit) pts[pts.length - 1] = shiftPt(pts[pts.length - 1]);
-				// Keep the road's OWN location node on the reshaped centerline, so it
-				// doesn't get left behind in world space when an end is dragged.
-				const node = z.node ? clampToCapsule(z.node, pts, z.width / 2) : null;
-				return { ...z, points: pts, node };
+				return reshapeRoad(z, pts);
 			}
 		}
 		return z;
@@ -749,7 +981,7 @@ function naturalSize(url: string): Promise<{ w: number; h: number }> {
 const SEP = '\0';
 
 /** One undo step: everything drawable on a map page. */
-type MapState = { zones: MapZone[]; images: MapImage[] };
+type MapState = { zones: MapZone[]; images: MapImage[]; labels: MapLabel[] };
 
 /** The eight resize grips of a background image, by compass position. */
 type ImageHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
@@ -872,22 +1104,21 @@ function resizeImage(orig: MapImage, handle: ImageHandle, p: { x: number; y: num
 	}
 }
 
-/** A freshly drawn zone/road's shared defaults — width scaled to the page's
- *  element scale, the map's own draw color, no location/pins yet. The three
- *  ways to create one (freeform polygon, road, rectangle) differ only in
- *  `kind`, `points`, and (a road only) `startLoc`/`endLoc`. */
+/** A freshly drawn zone/road's shared defaults — the map's own draw color, no
+ *  location/pins yet. The three ways to create one (freeform polygon, road,
+ *  rectangle) differ only in `kind`, `points`, and (a road only) its
+ *  `startLoc`/`endLoc` and `width`. */
 function newZone(
 	kind: 'zone' | 'road',
 	points: { x: number; y: number }[],
-	scale: number,
 	color: string,
-	extra?: Partial<Pick<MapZone, 'startLoc' | 'endLoc'>>
+	extra?: Partial<Pick<MapZone, 'startLoc' | 'endLoc' | 'width'>>
 ): MapZone {
 	return {
 		id: newId(),
 		kind,
 		points,
-		width: DEFAULT_ROAD_WIDTH * scale,
+		width: DEFAULT_ROAD_WIDTH,
 		color,
 		alpha: DEFAULT_ALPHA,
 		location: null,
@@ -897,6 +1128,10 @@ function newZone(
 		itemPins: [],
 		subPins: [],
 		locked: false,
+		terrain: null,
+		name: '',
+		named: false,
+		savedLoc: null,
 		...extra,
 	};
 }
@@ -1035,6 +1270,9 @@ interface Camera {
 type Menu =
 	| { kind: 'zone'; id: string; wx: number; wy: number }
 	| { kind: 'empty'; sx: number; sy: number }
+	/** A free label's panel — anchored to the label itself, so it follows a drag.
+	 *  `focus` puts the caret in its text field (double-click opens it that way). */
+	| { kind: 'label'; id: string; focus: boolean }
 	| null;
 
 export class MapView extends LoomReactView {
@@ -1074,7 +1312,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const project = resolveProject(plugin.indexer, projectRoot);
 
 	const wrapRef = useRef<HTMLDivElement>(null);
-	const [camera, setCamera] = useState<Camera>(() => ({ tx: 0, ty: 0, k: MODE_K.regular }));
+	const [camera, setCamera] = useState<Camera>(() => ({ tx: 0, ty: 0, k: DEFAULT_K }));
 	const cameraRef = useRef(camera);
 	cameraRef.current = camera;
 	const camRaf = useRef(0);
@@ -1095,10 +1333,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	useEffect(() => {
 		if (project && activeIdRef.current) saveCamera(cameraKey(activeIdRef.current), camera);
 	}, [camera, project, saveCamera, cameraKey]);
-	/** Restores (or defaults to regular, centered) the camera for a map page. The
-	 *  page's element scale sets what "regular" means in zoom terms. */
+	/** Restores a map page's remembered camera; a page without one opens framing
+	 *  everything on it (an empty page: centered at DEFAULT_K). */
 	const restoreCamera = useCallback(
-		(pageId: string, pageScale: number) => {
+		(pageId: string, page: Pick<MapPage, 'zones' | 'images'> | undefined) => {
 			const saved = plugin.settings.mapCameras[cameraKey(pageId)];
 			if (saved) {
 				setCamera(saved);
@@ -1107,7 +1345,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			const el = wrapRef.current;
 			const w = el?.clientWidth ?? 900;
 			const h = el?.clientHeight ?? 600;
-			setCamera({ k: MODE_K.regular / pageScale, tx: w / 2, ty: h / 2 });
+			setCamera(
+				(page && fitCamera(page.zones, page.images, w, h)) ?? { k: DEFAULT_K, tx: w / 2, ty: h / 2 }
+			);
 		},
 		[plugin, cameraKey]
 	);
@@ -1115,7 +1355,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 
 	// All map pages of the project. The ACTIVE page's zones live in `zones` (the
 	// editing working copy); other pages keep their zones in this list. The panel
-	// reads page metadata (name / parentId / order / scale) from here.
+	// reads page metadata (name / parentId / order) from here.
 	const [pages, setPages] = useState<MapPage[]>([]);
 	const pagesRef = useRef(pages);
 	pagesRef.current = pages;
@@ -1144,49 +1384,40 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const [selectedVerts, setSelectedVerts] = useState<Set<string>>(new Set());
 	const selectedVertsRef = useRef(selectedVerts);
 	selectedVertsRef.current = selectedVerts;
-	// The active page's element scale (see REF_ZONE_RADIUS): world px per size unit.
-	// A ref too, because the wheel handler is installed once and can't close over it.
-	const scale = pages.find((p) => p.id === activeId)?.scale ?? 1;
-	const scaleRef = useRef(scale);
-	scaleRef.current = scale;
-	// View mode is derived from the camera zoom, so wheel-zoom flips it: close up
-	// when zoomed in, node view when zoomed far out, regular between. The
-	// thresholds divide by the element scale — a map drawn 10× bigger needs 10×
-	// less zoom to read as the same view.
-	const viewMode: ViewMode =
-		camera.k >= CLOSEUP_K / scale ? 'closeup' : camera.k <= NODEVIEW_K / scale ? 'nodeview' : 'regular';
-	const viewModeRef = useRef(viewMode);
-	viewModeRef.current = viewMode;
-	// Squish animation: zones warp into their node as node view turns on (0 = full
-	// zones, 1 = collapsed into the node). Eased toward the mode's target.
-	const squishRef = useRef(0);
+	// Semantic zoom (see COLLAPSE_PX): each polygon zone's area-equivalent world
+	// radius (a road's: half its width), times the zoom, is its on-screen size.
+	// Refs only, so the pointer handlers installed once still read the live values.
+	const zoneRadii = useMemo(
+		() => new Map(zones.map((z) => [z.id, z.kind === 'zone' ? polygonRadius(z.points) : z.width / 2])),
+		[zones]
+	);
+	const zoneRadiiRef = useRef(zoneRadii);
+	zoneRadiiRef.current = zoneRadii;
 	const [, forceTick] = useState(0);
-	useEffect(() => {
-		const target = viewMode === 'nodeview' ? 1 : 0;
-		const from = squishRef.current;
-		if (from === target) return;
-		// Time-based ease-in-out over a fixed duration, so the squish is clearly
-		// visible even after the camera has finished zooming (an exponential ease
-		// front-loads and looks instant against the zoom-out).
-		const start = performance.now();
-		const dur = 260;
-		let raf = 0;
-		const step = (now: number) => {
-			const frac = Math.min(1, (now - start) / dur);
-			const e = frac < 0.5 ? 2 * frac * frac : 1 - Math.pow(-2 * frac + 2, 2) / 2;
-			squishRef.current = from + (target - from) * e;
-			forceTick((x) => x + 1);
-			if (frac < 1) raf = window.requestAnimationFrame(step);
-			else squishRef.current = target;
-		};
-		raf = window.requestAnimationFrame(step);
-		return () => window.cancelAnimationFrame(raf);
-	}, [viewMode]);
+	/** A polygon zone's on-screen radius (px). */
+	const screenR = (z: MapZone): number => (zoneRadiiRef.current.get(z.id) ?? 0) * cameraRef.current.k;
+	/** How far a zone has folded into its node: 0 drawn, 1 collapsed. A road
+	 *  follows the two zones it connects. */
+	const squishOf = (z: MapZone): number => {
+		if (z.kind === 'road') return (endSquish(z.startLoc) + endSquish(z.endLoc)) / 2;
+		// A zone with no location is terrain (a lake, a forest) — part of the map
+		// itself, never folded away.
+		if (!z.location) return 0;
+		return 1 - smoothstep(COLLAPSE_PX, screenR(z));
+	};
+	/** Squish of the zone a road end anchors to (its main location's zone). */
+	const endSquish = (locLp: string | null | undefined): number => {
+		const z = mainLocZone(locLp);
+		return z ? squishOf(z) : 0;
+	};
 	const [draft, setDraft] = useState<{ x: number; y: number }[]>([]);
 	const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+	/** Whether the path-draw cursor is snapped onto a location zone's outline
+	 *  (then a dot previews where the end will go). */
+	const cursorSnap = useRef(false);
 	/** Road drawing: the start location's link target, picked with the first click
 	 *  (a road runs location→location; the drawn `draft` points are the waypoints). */
-	const [roadDraft, setRoadDraft] = useState<{ startLoc: string } | null>(null);
+	const [roadDraft, setRoadDraft] = useState<{ startLoc: string | null } | null>(null);
 	/** Zone whose vertices are editable (left-click select), independent of the
 	 *  context menu (right-click only). */
 	const [selectedZone, setSelectedZone] = useState<string | null>(null);
@@ -1196,10 +1427,42 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	/** Background image selected by clicking it — outlines it (and, unless locked,
 	 *  shows its resize grips). */
 	const [selectedImage, setSelectedImage] = useState<string | null>(null);
+	/** Free label selected by clicking it (Delete removes it). */
+	const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+	/** What's typed in the map search — it also filters the Elements drawer. */
+	const [elementQuery, setElementQuery] = useState('');
+	// Drawer opening mode per drawer: on hover (default) or on click (the tab or
+	// the gap strip toggles it). A per-device UI preference, so it lives in the
+	// vault's local storage, not the synced maps file or settings.
+	const [drawerClick, setDrawerClick] = useState<Record<Drawer, boolean>>(() => {
+		const v: unknown = plugin.app.loadLocalStorage(DRAWER_MODE_KEY);
+		const o = v && typeof v === 'object' ? (v as Partial<Record<Drawer, unknown>>) : {};
+		return { maps: o.maps === true, elements: o.elements === true };
+	});
+	const [drawerOpen, setDrawerOpen] = useState<Record<Drawer, boolean>>({ maps: false, elements: false });
+	const toggleDrawerMode = (d: Drawer) => {
+		const next = { ...drawerClick, [d]: !drawerClick[d] };
+		setDrawerClick(next);
+		plugin.app.saveLocalStorage(DRAWER_MODE_KEY, next);
+		// The button sits inside the open drawer — switching to click mode keeps it
+		// out (it was out on hover), instead of snapping it shut under the cursor.
+		setDrawerOpen((o) => ({ ...o, [d]: next[d] }));
+	};
+	const toggleDrawerOpen = (d: Drawer) => {
+		if (drawerClick[d]) setDrawerOpen((o) => ({ ...o, [d]: !o[d] }));
+	};
+	/** The right-click (empty-space) menu, kept inside the canvas. */
+	const emptyMenuRef = useRef<HTMLDivElement>(null);
+	useKeepInMap(emptyMenuRef);
 	// Background images of the active page, and the selected one. A LOCKED image
 	// still outlines when clicked — that outline is the only hint that its edge is
 	// where its context menu lives — it just has nothing to grab.
 	const images = pages.find((p) => p.id === activeId)?.images ?? [];
+	const labels = pages.find((p) => p.id === activeId)?.labels ?? [];
+	const pageBg = pages.find((p) => p.id === activeId)?.bg ?? null;
+	/** Per-view prefix for svg ids (patterns, masks) — two open Maps tabs share a
+	 *  document, and each needs its own zoom-dependent pattern tiles. */
+	const uid = useMemo(() => newId(), []);
 	const selImage = images.find((im) => im.id === selectedImage) ?? null;
 	/** The selected image when it can actually be edited (unlocked). */
 	const selectedImageObj = selImage && !selImage.locked ? selImage : null;
@@ -1218,33 +1481,21 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		if (subGraphRef.current) setFocusClosing(subGraphRef.current);
 		setSubGraph(null);
 	};
-	// The focus graph doesn't exist in node view — the whole map is a node graph
-	// there, so a second one on top of it is just noise. Zooming out into node view
-	// retracts an open one.
+	// A folded zone has no focus graph — it's already just a node among nodes, so a
+	// web on top of it is noise. Zooming out until it folds retracts an open one.
 	useEffect(() => {
-		if (viewMode !== 'nodeview' || !subGraphRef.current) return;
-		setFocusClosing(subGraphRef.current);
+		const z = subGraphRef.current ? zonesRef.current.find((zz) => zz.id === subGraphRef.current) : null;
+		if (!z || squishOf(z) <= 0.5) return;
+		setFocusClosing(z.id);
 		setSubGraph(null);
-	}, [viewMode]);
+	}, [camera.k]);
 	const [menu, setMenu] = useState<Menu>(null);
 	/** Where the last menu was opened in world space (a new node lands here). */
 	const menuWorld = useRef<{ x: number; y: number } | null>(null);
-	/** Element-size popover (the page's scale anchor) open state. */
-	const [sizeOpen, setSizeOpen] = useState(false);
 	/** Hidden file picker for a background-image import, and the world point the
 	 *  imported image should be centred on (the menu's open point). */
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const pendingImageAt = useRef<{ x: number; y: number } | null>(null);
-	/** The global menu's second page: the background-image list + its search. */
-	const [imagePicker, setImagePicker] = useState(false);
-	const [imageQuery, setImageQuery] = useState('');
-	// Every fresh menu (a new right-click anywhere, or closing it) lands on the
-	// root page with an empty search. Opening the image page only flips
-	// `imagePicker` — no menu change — so it survives this.
-	useEffect(() => {
-		setImagePicker(false);
-		setImageQuery('');
-	}, [menu]);
 
 	// --- Persistence (multi-map) ---------------------------------------------
 	const mapsPath = useMemo(() => (project ? mapsFilePath(project) : null), [project]);
@@ -1312,7 +1563,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			const activePage = maps.find((m) => m.id === active);
 			const activeZones = activePage?.zones ?? [];
 			setZones(activeZones);
-			restoreCamera(active, activePage?.scale ?? 1);
+			restoreCamera(active, activePage);
 			if (pruned) {
 				pagesRef.current = maps;
 				saveLater(activeZones);
@@ -1337,6 +1588,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				if (subPins.length !== z.subPins.length || itemPins.length !== z.itemPins.length)
 					nz = { ...nz, subPins, itemPins };
 				if (nz.location === name) nz = { ...nz, location: null };
+				if (nz.savedLoc?.location === name) nz = { ...nz, savedLoc: null };
 				if (nz.kind === 'road') {
 					if (nz.startLoc === name) nz = { ...nz, startLoc: null };
 					if (nz.endLoc === name) nz = { ...nz, endLoc: null };
@@ -1399,19 +1651,24 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		(): MapImage[] => pagesRef.current.find((p) => p.id === activeIdRef.current)?.images ?? [],
 		[]
 	);
-	/** Replaces the active page's images. `save` false = a live drag frame, which
-	 *  updates the view without queueing a write (the drop saves once). */
-	const putImages = useCallback(
-		(next: MapImage[], save = true) => {
-			const pages2 = pagesRef.current.map((p) =>
-				p.id === activeIdRef.current ? { ...p, images: next } : p
-			);
+	/** The active page's free labels. */
+	const activeLabels = useCallback(
+		(): MapLabel[] => pagesRef.current.find((p) => p.id === activeIdRef.current)?.labels ?? [],
+		[]
+	);
+	/** Replaces the active page's images and/or labels. `save` false = a live drag
+	 *  frame, which updates the view without queueing a write (the drop saves once). */
+	const putActive = useCallback(
+		(patch: Partial<Pick<MapPage, 'images' | 'labels' | 'bg'>>, save = true) => {
+			const pages2 = pagesRef.current.map((p) => (p.id === activeIdRef.current ? { ...p, ...patch } : p));
 			pagesRef.current = pages2;
 			setPages(pages2);
 			if (save) saveLater(zonesRef.current);
 		},
 		[saveLater]
 	);
+	const putImages = useCallback((next: MapImage[], save = true) => putActive({ images: next }, save), [putActive]);
+	const putLabels = useCallback((next: MapLabel[], save = true) => putActive({ labels: next }, save), [putActive]);
 	const patchImage = useCallback(
 		(id: string, patch: Partial<MapImage>, save = true) => {
 			putImages(
@@ -1433,8 +1690,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				node: z.node ? { ...z.node } : null,
 			})),
 			images: activeImages().map((im) => ({ ...im })),
+			labels: activeLabels().map((l) => ({ ...l })),
 		}),
-		[activeImages]
+		[activeImages, activeLabels]
 	);
 	const history = useRef<{ undo: MapState[]; redo: MapState[] }>({ undo: [], redo: [] });
 	const pendingSnap = useRef<MapState | null>(null);
@@ -1463,10 +1721,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		(s: MapState) => {
 			setMenu(null);
 			setZones(s.zones);
-			putImages(s.images, false);
+			putActive({ images: s.images, labels: s.labels }, false);
 			saveLater(s.zones);
 		},
-		[putImages, saveLater]
+		[putActive, saveLater]
 	);
 	const undo = useCallback(() => {
 		const h = history.current;
@@ -1525,8 +1783,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			setSelectedVerts(new Set());
 			setDraft([]);
 			setTool('select');
-			// Each page restores its own remembered camera (a fresh page → regular).
-			restoreCamera(id, target.scale);
+			// Each page restores its own remembered camera (a fresh page → fitted).
+			restoreCamera(id, target);
 			saveLater(target.zones);
 		},
 		[saveLater, restoreCamera, plugin, cameraKey]
@@ -1543,30 +1801,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			const siblings = pagesRef.current.filter((p) => p.parentId === parentId);
 			const order = siblings.length ? Math.max(...siblings.map((s) => s.order)) + 1 : 0;
 			// Empty name → the panel names it (inline field / auto "New map N").
-			// A new page inherits the current one's element scale, so drawing across
-			// pages of one world stays consistent.
-			const page: MapPage = {
-				id: newId(),
-				name: '',
-				parentId,
-				order,
-				zones: [],
-				images: [],
-				scale: pagesRef.current.find((p) => p.id === activeIdRef.current)?.scale ?? 1,
-			};
-			// A brand-new page has no saved camera → activatePage restores regular.
+			const page: MapPage = { id: newId(), name: '', parentId, order, zones: [], images: [], labels: [], bg: null };
+			// A brand-new page has no saved camera → activatePage centers it.
 			activatePage([...foldActiveZones(), page], page.id);
 		},
 		[activatePage, foldActiveZones]
-	);
-	/** Sets the active page's element scale (world px per size unit). Markers and
-	 *  the view-mode thresholds follow it immediately — no zone geometry changes. */
-	const setPageScale = useCallback(
-		(next: number) => {
-			const s = Math.max(SCALE_MIN, Math.min(SCALE_MAX, next));
-			commitPages(pagesRef.current.map((p) => (p.id === activeIdRef.current ? { ...p, scale: s } : p)));
-		},
-		[commitPages]
 	);
 	const renameMap = useCallback(
 		(id: string, name: string) => {
@@ -1615,15 +1854,24 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		if (!el) return;
 		const onWheel = (e: WheelEvent) => {
 			// Over a menu/dropdown/panel, let the wheel scroll that instead of zooming.
-			if ((e.target as HTMLElement).closest('.loom-map-menu, .loom-combo-menu, .loom-map-panel')) return;
+			if ((e.target as HTMLElement).closest('.loom-map-menu, .loom-combo-menu, .loom-map-panel, .loom-map-elements')) return;
 			e.preventDefault();
 			const rect = el.getBoundingClientRect();
 			const px = e.clientX - rect.left;
 			const py = e.clientY - rect.top;
+			const [minK, maxK] = zoomLimits(
+				zonesRef.current,
+				pagesRef.current.find((p) => p.id === activeIdRef.current)?.images ?? [],
+				rect.width,
+				rect.height
+			);
 			setCamera((c) => {
-				// Zoom limits are per-map too: a big-scale map needs to zoom further out.
-				const s = scaleRef.current;
-				const k = Math.max(MIN_ZOOM / s, Math.min(MAX_ZOOM / s, c.k * Math.exp(-e.deltaY * 0.0015)));
+				// Never snaps: a camera already outside the range (the content changed
+				// since) just can't go further out of it.
+				const k = Math.max(
+					Math.min(minK, c.k),
+					Math.min(Math.max(maxK, c.k), c.k * Math.exp(-e.deltaY * 0.0015))
+				);
 				const wx = (px - c.tx) / c.k;
 				const wy = (py - c.ty) / c.k;
 				return { k, tx: px - wx * k, ty: py - wy * k };
@@ -1668,6 +1916,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		| { kind: 'rect'; start: { x: number; y: number }; end: { x: number; y: number } }
 		| { kind: 'marquee'; start: { x: number; y: number }; end: { x: number; y: number } }
 		| { kind: 'image-move'; id: string; startX: number; startY: number; moved: boolean; last: { x: number; y: number } }
+		| { kind: 'label-move'; id: string; startX: number; startY: number; moved: boolean; last: { x: number; y: number } }
 		/** Resizing a background image: `orig` is its box at gesture start, so the
 		 *  aspect-preserving maths always works off a clean baseline. */
 		| { kind: 'image-resize'; handle: ImageHandle; orig: MapImage }
@@ -1719,20 +1968,33 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						zonesRef.current.map((z) => {
 							const idxs = byZone.get(z.id);
 							if (!idxs) return z;
-							return {
-								...z,
-								points: z.points.map((p, i) => (idxs.has(i) ? { x: p.x + dvx, y: p.y + dvy } : p)),
-							};
+							const pts = z.points.map((p, i) => (idxs.has(i) ? { x: p.x + dvx, y: p.y + dvy } : p));
+							return z.kind === 'road' ? reshapeRoad(z, pts) : { ...z, points: pts };
 						})
 					);
 				} else {
-					setZones(
-						zonesRef.current.map((z) =>
-							z.id === d.id
-								? { ...z, points: z.points.map((p, i) => (i === d.index ? { x: tx, y: ty } : p)) }
-								: z
-						)
-					);
+					let at = { x: tx, y: ty };
+					const zz = zonesRef.current.find((z) => z.id === d.id);
+					if (zz?.kind === 'road') {
+						// A path end attaches to the location zone it's dragged onto or
+						// along (sliding on its outline), and comes free anywhere else —
+						// or anywhere with Alt held, like when drawing.
+						const end = d.index === 0 ? 'startLoc' : d.index === zz.points.length - 1 ? 'endLoc' : null;
+						const link: Partial<Pick<MapZone, 'startLoc' | 'endLoc'>> = {};
+						if (end) {
+							const az = e.altKey ? null : attachZoneAt(at);
+							if (az) at = nearestOnPath(at, az.points, true).q;
+							link[end] = az?.location ?? null;
+						}
+						const pts = zz.points.map((p, i) => (i === d.index ? at : p));
+						setZones(zonesRef.current.map((z) => (z.id === d.id ? { ...reshapeRoad(z, pts), ...link } : z)));
+					} else {
+						setZones(
+							zonesRef.current.map((z) =>
+								z.id === d.id ? { ...z, points: z.points.map((p, i) => (i === d.index ? at : p)) } : z
+							)
+						);
+					}
 				}
 			} else if (d.kind === 'grip' || d.kind === 'zone-move') {
 				if (d.kind === 'zone-move' && !d.moved) {
@@ -1750,9 +2012,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				d.moved = true;
 				const z = zonesRef.current.find((zz) => zz.id === d.id);
 				if (!z) return;
-				if (viewModeRef.current === 'nodeview') {
-					// In node view the zone is collapsed into its node, so dragging the
-					// node moves the whole zone.
+				if (squishOf(z) > 0.5) {
+					// A folded zone IS its node, so dragging the node moves the whole
+					// zone.
 					const dx = w.x - d.last.x;
 					const dy = w.y - d.last.y;
 					d.last = { x: w.x, y: w.y };
@@ -1770,6 +2032,16 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				d.last = { x: w.x, y: w.y };
 				putImages(
 					activeImages().map((im) => (im.id === d.id ? { ...im, x: im.x + dx, y: im.y + dy } : im)),
+					false
+				);
+			} else if (d.kind === 'label-move') {
+				if (!d.moved && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < CLICK_SLOP) return;
+				d.moved = true;
+				const dx = w.x - d.last.x;
+				const dy = w.y - d.last.y;
+				d.last = { x: w.x, y: w.y };
+				putLabels(
+					activeLabels().map((l) => (l.id === d.id ? { ...l, x: l.x + dx, y: l.y + dy } : l)),
 					false
 				);
 			} else if (d.kind === 'image-resize') {
@@ -1816,8 +2088,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			// A node press without movement is a CLICK. A fast second click on the
 			// same node (short window) opens its page; otherwise it toggles the focus
 			// graph — so a normal open-then-close pair isn't swallowed as a dblclick.
-			// Node view has no focus graph at all (the map is already a node graph
-			// there), so a click there only selects.
+			// A folded zone has no focus graph (it's already just a node), so a click
+			// there only selects.
 			if (d.kind === 'node' && !d.moved) {
 				const z = zonesRef.current.find((zz) => zz.id === d.id);
 				const now = performance.now();
@@ -1830,7 +2102,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					return;
 				}
 				setSelectedNode((cur) => (cur === d.id ? null : d.id));
-				if (viewModeRef.current === 'nodeview') return;
+				if (z && squishOf(z) > 0.5) return;
 				if (subGraphRef.current === d.id) closeFocus();
 				else {
 					setFocusClosing(null);
@@ -1840,7 +2112,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			}
 			// Image gestures live in `pages`, so they save the maps file rather than
 			// the zones list (which `saveLater` writes alongside it anyway).
-			if (d.kind === 'image-resize' || (d.kind === 'image-move' && d.moved)) {
+			if (d.kind === 'image-resize' || ((d.kind === 'image-move' || d.kind === 'label-move') && d.moved)) {
 				saveLater(zonesRef.current);
 				return;
 			}
@@ -1866,7 +2138,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			ownerWin.removeEventListener('pointerup', onUp);
 			ownerWin.removeEventListener('pointercancel', onUp);
 		};
-	}, [dragActive, localXY, toWorld, saveLater, activeImages, putImages]);
+	}, [dragActive, localXY, toWorld, saveLater, activeImages, putImages, activeLabels, putLabels]);
 
 	// --- Canvas pointer (draw / select / pan) --------------------------------
 	const onCanvasPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
@@ -1874,6 +2146,13 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const { sx, sy } = localXY(e.clientX, e.clientY);
 		const w = toWorld(sx, sy);
 		setMenu(null);
+
+		// Middle-drag pans in every tool, so a drawing tool never traps the camera.
+		if (e.button === 1 && tool !== 'select') {
+			drag.current = { kind: 'pan', startX: e.clientX, startY: e.clientY, tx0: camera.tx, ty0: camera.ty };
+			setDragActive(true);
+			return;
+		}
 
 		// Rectangle tool: press-drag defines the rect.
 		if (tool === 'rect') {
@@ -1903,32 +2182,32 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			return;
 		}
 
-		// A road runs location → location: the first click picks the start
-		// location, the drawn clicks are waypoints, and clicking a second location
-		// finishes it.
+		// A path (road, river, wall…): each end either SNAPS to a location — a click
+		// inside a location zone attaches it there — or is a free point (anywhere
+		// else, or anywhere with Alt held). The clicks between are waypoints; a
+		// snapped end finishes it, and so does clicking the last point again (or
+		// Enter) for a free end.
 		if (tool === 'road') {
 			if (e.button !== 0) return;
-			const hit = hitZone(sx, sy);
-			const hitLoc = hit && hit.kind === 'zone' && hit.location ? hit.location : null;
+			// A snapped end goes on the outline point nearest the click, and stays there.
+			const sz = e.altKey ? null : snapZone(sx, sy);
+			const snap = sz?.location ?? null;
+			const at = sz ? nearestOnPath(w, sz.points, true).q : { x: w.x, y: w.y };
 			if (!roadDraft) {
-				if (!hitLoc) {
-					new Notice(t('view.map.roadsStartOnLocation'));
-					return;
-				}
-				const sNode = locNode(hitLoc);
-				setRoadDraft({ startLoc: hitLoc });
-				setDraft(sNode ? [sNode] : []);
+				setRoadDraft({ startLoc: snap });
+				setDraft([at]);
 				return;
 			}
-			if (hitLoc && hitLoc !== roadDraft.startLoc) {
-				const eNode = locNode(hitLoc);
-				finishRoad(roadDraft.startLoc, hitLoc, eNode ? [...draft, eNode] : draft);
+			if (snap && snap !== roadDraft.startLoc) {
+				finishRoad(roadDraft.startLoc, snap, [...draft, at]);
 				return;
 			}
-			// Otherwise a waypoint (skip near-duplicates).
 			if (draft.length > 0) {
 				const lastV = screenOf(draft[draft.length - 1].x, draft[draft.length - 1].y);
-				if (Math.hypot(lastV.x - sx, lastV.y - sy) < MIN_VERTEX_DIST) return;
+				if (Math.hypot(lastV.x - sx, lastV.y - sy) < MIN_VERTEX_DIST) {
+					if (draft.length >= 2) finishRoad(roadDraft.startLoc, null, draft);
+					return;
+				}
 			}
 			setDraft((d) => [...d, { x: w.x, y: w.y }]);
 			return;
@@ -1936,13 +2215,14 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 
 		// A zone: left-drag moves it, a plain click selects it for editing (vertex
 		// handles). The context menu is right-click only. Locked zones only select.
+		setSelectedLabel(null);
 		const hit = hitZone(sx, sy);
 		if (hit) {
 			// Pressing a zone selects it (deselecting any other) whether it becomes
 			// a move-drag or a plain click.
 			setSelectedZone(hit.id);
 			setSelectedImage(null);
-			if (e.button === 0 && !hit.locked && viewMode !== 'closeup') {
+			if (e.button === 0 && !hit.locked) {
 				beginPending();
 				drag.current = {
 					kind: 'zone-move',
@@ -1954,8 +2234,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				};
 				setDragActive(true);
 			} else if (e.button === 0 || e.button === 1) {
-				// Locked zones and close-up mode aren't movable — a drag over them
-				// pans the camera instead.
+				// Locked zones aren't movable — a drag over them pans the camera
+				// instead.
 				drag.current = { kind: 'pan', startX: e.clientX, startY: e.clientY, tx0: camera.tx, ty0: camera.ty };
 				setDragActive(true);
 			}
@@ -2005,7 +2285,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const el = wrapRef.current;
 		if (tool === 'draw' || tool === 'road') {
 			el?.classList.remove('loom-map-edge-hover');
-			setCursor(toWorld(sx, sy));
+			// A path's preview line snaps to the location it would attach to.
+			const sz = tool === 'road' && !e.altKey ? snapZone(sx, sy) : null;
+			const w = toWorld(sx, sy);
+			cursorSnap.current = !!sz;
+			setCursor(sz ? nearestOnPath(w, sz.points, true).q : w);
 			return;
 		}
 		// Select mode: over a zone outline / road body, show the same pointer cursor
@@ -2249,12 +2533,14 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		for (let i = zonesRef.current.length - 1; i >= 0; i--) {
 			const z = zonesRef.current[i];
 			if (z.kind === 'road') {
-				const line = roadCenterline(z, squishRef.current);
+				const line = roadCenterline(z);
 				if (!line) continue;
 				const d = distToPolyline(w.x, w.y, line);
 				if (d <= z.width / 2 || d * k <= 6) return z;
 				continue;
 			}
+			// A folded zone is just its node — its invisible area doesn't catch presses.
+			if (squishOf(z) >= 0.995) continue;
 			if (pointInPolygon(w.x, w.y, z.points) || distToPolygon(w.x, w.y, z.points) * k <= 6) {
 				return z;
 			}
@@ -2277,7 +2563,6 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const zone = newZone(
 			'zone',
 			draft.map((p) => ({ ...p })),
-			scale,
 			plugin.settings.mapsColor
 		);
 		addZoneWithMenu(zone);
@@ -2286,13 +2571,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		setTool('select');
 	};
 	/** Creates a road connecting two locations, with the drawn waypoints between. */
-	const finishRoad = (startLoc: string, endLoc: string, waypoints: { x: number; y: number }[]) => {
+	const finishRoad = (startLoc: string | null, endLoc: string | null, waypoints: { x: number; y: number }[]) => {
 		const road = newZone(
 			'road',
 			waypoints.map((p) => ({ ...p })),
-			scale,
 			plugin.settings.mapsColor,
-			{ startLoc, endLoc }
+			{ startLoc, endLoc, width: defaultRoadWidth(startLoc, endLoc) }
 		);
 		snapshot();
 		commit([...zonesRef.current, road]);
@@ -2322,7 +2606,6 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				{ x: x1, y: y1 },
 				{ x: x0, y: y1 },
 			],
-			scale,
 			plugin.settings.mapsColor
 		);
 		addZoneWithMenu(zone);
@@ -2346,39 +2629,68 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	/** The polygon zone on this map associated with a location link target. */
 	const zoneForLoc = (locLp: string | null | undefined): MapZone | null =>
 		locLp ? zonesRef.current.find((z) => z.kind === 'zone' && z.location === locLp) ?? null : null;
-	const locNode = (locLp: string | null | undefined): { x: number; y: number } | null => {
-		const z = zoneForLoc(locLp);
-		return z ? nodeOf(z) : null;
+	/** The location zone a dragged path end attaches to at a world point: the
+	 *  topmost drawn one it's inside of, or within 12px of the outline of. */
+	const attachZoneAt = (p: Pt): MapZone | null => {
+		const k = cameraRef.current.k;
+		for (let i = zonesRef.current.length - 1; i >= 0; i--) {
+			const c = zonesRef.current[i];
+			if (c.kind !== 'zone' || !c.location || squishOf(c) >= 0.995) continue;
+			if (pointInPolygon(p.x, p.y, c.points) || distToPolygon(p.x, p.y, c.points) * k <= 12) return c;
+		}
+		return null;
 	};
-	/** The top (main) location's node — a sublocation collapses into its main
-	 *  location in node view, so roads anchor there. Falls back to the location's
-	 *  own node when its main isn't placed on this map. */
-	const mainLocNode = (locLp: string | null | undefined): { x: number; y: number } | null => {
-		if (!locLp || !project) return locNode(locLp);
+	/** The location zone a path end snaps to at a screen point, if any. */
+	const snapZone = (sx: number, sy: number): MapZone | null => attachZoneAt(toWorld(sx, sy));
+	/** A new road's width: half the radius of the smaller place it connects, so it
+	 *  reads as a road beside them on a map of any size; with neither end placed,
+	 *  24 px on screen at the current zoom. */
+	const defaultRoadWidth = (startLoc?: string | null, endLoc?: string | null): number => {
+		const radii = [zoneForLoc(startLoc), zoneForLoc(endLoc)]
+			.map((z) => (z ? polygonRadius(z.points) : 0))
+			.filter((r) => r > 0);
+		return radii.length ? Math.min(...radii) / 2 : 24 / cameraRef.current.k;
+	};
+	/** The top (main) location's zone — a sublocation folds into its main
+	 *  location, so roads anchor there. Falls back to the location's own zone when
+	 *  its main isn't placed on this map. */
+	const mainLocZone = (locLp: string | null | undefined): MapZone | null => {
+		if (!locLp || !project) return zoneForLoc(locLp);
 		const loc = plugin.indexer.resolve(locLp, project.loomPath);
 		const top = loc ? ([loc, ...plugin.indexer.locationAncestors(loc)].pop() ?? loc) : null;
-		return (top ? locNode(linkTargetOf(top)) : null) ?? locNode(locLp);
+		return (top ? zoneForLoc(linkTargetOf(top)) : null) ?? zoneForLoc(locLp);
 	};
-	/** The road as rendered for a squish level. A road is its own editable zone —
-	 *  `points` is the full centerline. Its two ends only drive the VISUAL: in
-	 *  regular view the first/last segment is clipped to the start/end zone edge
-	 *  (so the road doesn't overlap the zone); in node view the ends anchor to the
-	 *  main-location nodes. Null when the road has fewer than 2 points. */
-	const roadCenterline = (road: MapZone, squishAmt: number): { x: number; y: number }[] | null => {
+	/** The road as rendered. A road is its own editable zone — `points` is the
+	 *  full centerline. Its two ends only drive the VISUAL: while the end zone is
+	 *  drawn the first/last segment is clipped to its edge (so the road doesn't
+	 *  overlap the zone); as that zone folds the end slides to the main-location
+	 *  node. Null when the road has fewer than 2 points. */
+	const roadCenterline = (road: MapZone): { x: number; y: number }[] | null => {
 		const pts = road.points;
 		if (pts.length < 2) return null;
 		const last = pts.length - 1;
 		const sZone = zoneForLoc(road.startLoc);
 		const eZone = zoneForLoc(road.endLoc);
-		const sReg = sZone ? boundaryExit(pts[0], pts[1], sZone.points) : pts[0];
-		const eReg = eZone ? boundaryExit(pts[last], pts[last - 1], eZone.points) : pts[last];
-		const sMain = mainLocNode(road.startLoc) ?? pts[0];
-		const eMain = mainLocNode(road.endLoc) ?? pts[last];
-		const lerp = (a: { x: number; y: number }, b: { x: number; y: number }) => ({
-			x: a.x + (b.x - a.x) * squishAmt,
-			y: a.y + (b.y - a.y) * squishAmt,
+		// An end still inside its zone is clipped to the outline; one already on it
+		// (or outside) stays put.
+		// An end strictly inside its zone (a path drawn before ends sat on the
+		// outline) is clipped to it; one on the outline or outside stays put.
+		const inside = (p: Pt, z: MapZone) => pointInPolygon(p.x, p.y, z.points) && distToPolygon(p.x, p.y, z.points) > 1e-6;
+		const sReg = sZone && inside(pts[0], sZone) ? boundaryExit(pts[0], pts[1], sZone.points) : pts[0];
+		const eReg = eZone && inside(pts[last], eZone) ? boundaryExit(pts[last], pts[last - 1], eZone.points) : pts[last];
+		const sTop = mainLocZone(road.startLoc);
+		const eTop = mainLocZone(road.endLoc);
+		const sMain = sTop ? nodeOf(sTop) : pts[0];
+		const eMain = eTop ? nodeOf(eTop) : pts[last];
+		const lerp = (a: { x: number; y: number }, b: { x: number; y: number }, t: number) => ({
+			x: a.x + (b.x - a.x) * t,
+			y: a.y + (b.y - a.y) * t,
 		});
-		return [lerp(sReg, sMain), ...pts.slice(1, -1).map((p) => ({ ...p })), lerp(eReg, eMain)];
+		return [
+			lerp(sReg, sMain, endSquish(road.startLoc)),
+			...pts.slice(1, -1).map((p) => ({ ...p })),
+			lerp(eReg, eMain, endSquish(road.endLoc)),
+		];
 	};
 
 	useEffect(() => {
@@ -2387,18 +2699,27 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			const focusEl = e.target as HTMLElement | null;
 			if (focusEl && (focusEl.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(focusEl.tagName))) return;
 			// Undo / redo (map-local).
-			if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+			// By physical key (`code`), so undo works whatever the keyboard layout —
+			// with a Russian layout, Ctrl+Z reports `key` 'я'.
+			if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
 				e.preventDefault();
 				if (e.shiftKey) redo();
 				else undo();
 				return;
 			}
-			if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+			if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') {
 				e.preventDefault();
 				redo();
 				return;
 			}
 			if ((e.key === 'Delete' || e.key === 'Backspace') && draft.length === 0 && !roadDraft) {
+				if (selectedLabel) {
+					snapshot();
+					putLabels(activeLabels().filter((l) => l.id !== selectedLabel));
+					setSelectedLabel(null);
+					setMenu(null);
+					return;
+				}
 				if (selectedZone) {
 					deleteZone(selectedZone);
 					return;
@@ -2410,6 +2731,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					return;
 				}
 			}
+			if (e.key === 'Enter' && roadDraft && draft.length >= 2) {
+				finishRoad(roadDraft.startLoc, null, draft);
+				return;
+			}
 			if (e.key !== 'Escape') return;
 			if (roadDraft || draft.length > 0) cancelDraft();
 			else if (subGraph) closeFocus();
@@ -2418,6 +2743,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			else if (selectedNode) setSelectedNode(null);
 			else if (selectedZone) setSelectedZone(null);
 			else if (selectedImage) setSelectedImage(null);
+			else if (selectedLabel) setSelectedLabel(null);
 			else if (tool !== 'select') setTool('select');
 		};
 		const ownerDoc = wrapRef.current?.doc ?? activeDocument;
@@ -2430,11 +2756,14 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		selectedNode,
 		selectedImage,
 		selectedImageObj,
+		selectedLabel,
 		subGraph,
 		tool,
 		roadDraft,
 		activeImages,
 		putImages,
+		activeLabels,
+		putLabels,
 		snapshot,
 	]);
 
@@ -2470,12 +2799,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		() => new Set(zones.filter((z) => z.location).map((z) => z.location as string)),
 		[zones]
 	);
-	// Region wraps (node view only): each region's placed locations' ZONES are
+	// Region wraps (shown as their places fold): each region's placed locations' ZONES are
 	// clustered by proximity, and each cluster gets its own padded convex hull
 	// around the actual zone areas (not the collapsed nodes) — so a region wraps
 	// the land its locations occupy, and far-apart members wrap separately.
 	const regionClusters = useMemo(() => {
-		if (!project) return [] as { region: EntityRecord; vertices: Pt[] }[];
+		if (!project) return [] as { region: EntityRecord; zones: MapZone[] }[];
 		const byRegion = new Map<string, { region: EntityRecord; zones: MapZone[] }>();
 		const allNodePts: Pt[] = [];
 		for (const z of zones) {
@@ -2493,7 +2822,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		// Zones within ~2.5x the typical node spacing share a wrap; beyond it they
 		// form a separate cluster (the "far lands" case).
 		const threshold = spacing > 0 ? spacing * 2.5 : Infinity;
-		const out: { region: EntityRecord; vertices: Pt[] }[] = [];
+		const out: { region: EntityRecord; zones: MapZone[] }[] = [];
 		for (const { region, zones: rzones } of byRegion.values()) {
 			// Cluster the region's zones by their node positions (union-find).
 			const nodes = rzones.map((z) => nodeOf(z));
@@ -2520,7 +2849,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			});
 			// The hull wraps every vertex of the cluster's zones (their real areas).
 			for (const clusterZones of groups.values()) {
-				out.push({ region, vertices: clusterZones.flatMap((z) => z.points) });
+				out.push({ region, zones: clusterZones });
 			}
 		}
 		return out;
@@ -2541,7 +2870,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	// clusters (a split); a region seen for the first time appears at final shape.
 	useMemo(() => {
 		const perRegion = new Map<string, { region: EntityRecord; centroid: Pt; ring: Pt[]; weight: number }[]>();
-		for (const { region, vertices } of regionClusters) {
+		for (const { region, zones: cz } of regionClusters) {
+			const vertices = cz.flatMap((z) => z.points);
 			const uh = convexHull(vertices);
 			const base = uh.length >= 3 ? uh : regionHull(vertices, NODE_SIZE_PRESETS.regular);
 			if (base.length < 3) continue;
@@ -2591,10 +2921,25 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		hullTargets.current = targets;
 		return targets;
 	}, [regionClusters]);
-	// Ease display rings toward their targets each frame while in node view; drop
+	// A region's wrap fades in as its places fold — the mean squish of its zones.
+	const regionSquish = new Map<string, number>();
+	{
+		const sums = new Map<string, { sum: number; n: number }>();
+		for (const c of regionClusters) {
+			const acc = sums.get(c.region.path) ?? { sum: 0, n: 0 };
+			for (const z of c.zones) {
+				acc.sum += squishOf(z);
+				acc.n++;
+			}
+			sums.set(c.region.path, acc);
+		}
+		for (const [path, { sum, n }] of sums) regionSquish.set(path, n ? sum / n : 0);
+	}
+	const anyFolded = [...regionSquish.values()].some((v) => v > 0.02);
+	// Ease display rings toward their targets each frame while any wrap shows; drop
 	// vanished clusters after they shrink into their centroid.
 	useEffect(() => {
-		if (viewMode !== 'nodeview') return;
+		if (!anyFolded) return;
 		let raf = 0;
 		const step = () => {
 			const st = hullState.current;
@@ -2635,7 +2980,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		};
 		raf = window.requestAnimationFrame(step);
 		return () => window.cancelAnimationFrame(raf);
-	}, [viewMode]);
+	}, [anyFolded]);
 
 	const openLocation = (target: string | null, newTab = false) => {
 		if (!target) return;
@@ -2653,10 +2998,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	);
 	const pageName = (id: string): string => pages.find((p) => p.id === id)?.name || t('view.map.untitledMap');
 	/** Where the `count`-th new pin goes: offset diagonally from the zone's
-	 *  centre so several don't fully overlap. */
+	 *  centre (a fifth of its radius per pin) so several don't fully overlap. */
 	const nextPinPos = (zone: MapZone, count: number) => {
 		const base = zoneCenter(zone);
-		const off = 18 * count * scale;
+		const off = 0.2 * count * (zoneRadiiRef.current.get(zone.id) ?? 0);
 		return clampToZone({ x: base.x + off, y: base.y + off }, zone);
 	};
 	const addDoor = (zone: MapZone, pageId: string) => {
@@ -2834,9 +3179,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		if (kind === 'door') switchMap(zone.doors[index].page);
 		else openTarget(kind === 'subpin' ? zone.subPins[index].loc : zone.itemPins[index].item);
 	};
-	/** One marker inside a zone: squishes with it, drags within it, right-click
-	 *  menu, double-click opens. Each kind draws its own `body` (the look stays
-	 *  per kind); the label sits `labelGap` size units below its radius `r`. */
+	/** One marker inside a zone: squishes with it, fades in once the zone is big
+	 *  enough on screen (PINS_PX), drags within it, right-click menu, double-click
+	 *  opens. Each kind draws its own `body` (the look stays per kind); the label
+	 *  sits `labelGap` screen px below its radius `r` (labels are a constant
+	 *  on-screen size, so neighbouring zones' text matches). */
 	const renderPin = (
 		z: MapZone,
 		kind: PinKind,
@@ -2848,7 +3195,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		<g
 			key={`${kind}-${z.id}-${i}`}
 			className={o.className}
-			{...squishProps(z)}
+			transform={squishProps(z).transform}
+			opacity={pinAlpha(z)}
 			onPointerDown={(e) => startPinDrag(e, z.id, kind, i)}
 			onContextMenu={(e) => {
 				e.preventDefault();
@@ -2863,10 +3211,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			{o.body}
 			<text
 				x={at.x}
-				y={at.y + (r + o.labelGap) * nodeUnit}
+				y={at.y + r * unitOf(z) + o.labelGap / camera.k}
 				textAnchor="middle"
 				className="loom-map-node-label"
-				style={{ fontSize: `${o.fontSize * nodeUnit}px` }}
+				style={{ fontSize: `${o.fontSize / camera.k}px` }}
 			>
 				{clampLabel(o.label)}
 			</text>
@@ -2916,21 +3264,41 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		};
 		camRaf.current = window.requestAnimationFrame(step);
 	};
-	/** Eases the camera zoom to a target level around the viewport center — used
-	 *  by the scale slider (which manipulates the zoom, driving the view mode). */
-	const animateCameraK = (targetK: number) => {
+	/** Flies to a zone/path (its node, or its centre if it has none) and selects it. */
+	const goToZone = (z: MapZone) => {
+		const pt = z.location ? nodeOf(z) : zoneCenter(z);
+		flyTo(pt.x, pt.y);
+		setSelectedLabel(null);
+		setSelectedImage(null);
+		setSelectedZone(z.id);
+	};
+	/** Flies to a free label and selects it. */
+	const goToLabel = (lb: MapLabel) => {
+		flyTo(lb.x, lb.y);
+		setSelectedZone(null);
+		setSelectedImage(null);
+		setSelectedLabel(lb.id);
+	};
+	/** Eases the camera to frame everything on the page (zones, roads, images). */
+	const fitAll = () => {
 		const el = wrapRef.current;
 		const w = el?.clientWidth ?? 900;
 		const h = el?.clientHeight ?? 600;
+		const to = fitCamera(zones, images, w, h);
+		if (!to) return;
 		const from = cameraRef.current;
-		const wx = (w / 2 - from.tx) / from.k;
-		const wy = (h / 2 - from.ty) / from.k;
+		// World points at the view centre, before and after.
+		const fc = { x: (w / 2 - from.tx) / from.k, y: (h / 2 - from.ty) / from.k };
+		const tc = { x: (w / 2 - to.tx) / to.k, y: (h / 2 - to.ty) / to.k };
 		const start = performance.now();
 		window.cancelAnimationFrame(camRaf.current);
 		const step = (now: number) => {
-			const frac = Math.min(1, (now - start) / 260);
-			const e = 1 - (1 - frac) * (1 - frac);
-			const k = from.k + (targetK - from.k) * e;
+			const frac = Math.min(1, (now - start) / 420);
+			const e = frac < 0.5 ? 2 * frac * frac : 1 - Math.pow(-2 * frac + 2, 2) / 2;
+			// Zoom geometrically, centre linearly.
+			const k = from.k * Math.pow(to.k / from.k, e);
+			const wx = fc.x + (tc.x - fc.x) * e;
+			const wy = fc.y + (tc.y - fc.y) * e;
 			setCamera({ k, tx: w / 2 - wx * k, ty: h / 2 - wy * k });
 			if (frac < 1) camRaf.current = window.requestAnimationFrame(step);
 		};
@@ -2948,16 +3316,18 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const menuZone = menu?.kind === 'zone' ? zones.find((z) => z.id === menu.id) ?? null : null;
 	// Screen anchor for the open menu: zone menus track a world point (so they
 	// follow the zone when moved), the empty menu is a fixed screen point.
+	const menuLabel = menu?.kind === 'label' ? labels.find((l) => l.id === menu.id) ?? null : null;
 	const menuPos =
 		menu?.kind === 'zone'
 			? screenOf(menu.wx, menu.wy)
 			: menu?.kind === 'empty'
 				? { x: menu.sx, y: menu.sy }
-				: null;
-	const squish = squishRef.current;
-	/** Collapses a zone's contents toward its node (or centroid) as node view
-	 *  turns on. */
+				: menuLabel
+					? screenOf(menuLabel.x, menuLabel.y - menuLabel.size / 2)
+					: null;
+	/** Collapses a zone's contents toward its node (or centroid) as it folds. */
 	const squishProps = (z: MapZone): { transform?: string; opacity?: number } => {
+		const squish = squishOf(z);
 		if (squish <= 0.001) return { transform: undefined, opacity: undefined };
 		const p = nodeOf(z);
 		const s = 1 - squish;
@@ -2974,13 +3344,81 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		drag.current = { kind, id: zoneId, index, startX: e.clientX, startY: e.clientY, moved: false };
 		setDragActive(true);
 	};
-	// Node/pin/label sizing blends world-fixed (regular/close-up) → screen-space
-	// (node view). At squish 0 a marker takes a fixed WORLD size — the page's
-	// element scale, so it stays proportional to the drawn zones and scales with the
-	// map; at squish 1 it is preset / camera.k, the constant on-screen size node
-	// view has always used. In between it crossfades, which is what makes markers
-	// shrink back to the map's own scale as you zoom in.
-	const nodeUnit = (1 - squish) * scale + squish / camera.k;
+	/** World size of one marker size unit for a zone while drawn: scales with the
+	 *  zone's on-screen size (MARKER_REF_PX), clamped to MARKER_MIN..MAX. */
+	const drawnUnit = (z: MapZone): number =>
+		Math.max(MARKER_MIN, Math.min(MARKER_MAX, screenR(z) / MARKER_REF_PX)) / camera.k;
+	/** …crossfading to a constant on-screen size as the zone folds. */
+	const unitOf = (z: MapZone): number => {
+		const sq = squishOf(z);
+		return (1 - sq) * drawnUnit(z) + sq / camera.k;
+	};
+	/** Doors / items / sublocations inside a zone: shown only once the zone is
+	 *  big enough on screen to hold them, gone again as it folds. A road has no
+	 *  area to measure, so its markers just follow its fold. */
+	const pinAlpha = (z: MapZone): number =>
+		z.kind === 'road' ? 1 - squishOf(z) : (1 - squishOf(z)) * smoothstep(PINS_PX, screenR(z));
+
+	/** Clear margins around a zone's visible markers and their labels — black
+	 *  shapes in its terrain mask, so the texture never runs through a node or
+	 *  under text. Mirrors the node/pin/label geometry rendered below. */
+	const markerHoles = (z: MapZone): ReactNode[] => {
+		const k = camera.k;
+		const u = unitOf(z);
+		const out: ReactNode[] = [];
+		const hole = (key: string, cx: number, cy: number, r: number, label: string, gap: number, font: number) => {
+			out.push(<circle key={key} cx={cx} cy={cy} r={r + 4 / k} fill="black" />);
+			const text = clampLabel(label);
+			if (!text) return;
+			const w = (text.length * font * 0.6 + 8) / k;
+			const base = cy + r + gap / k;
+			out.push(
+				<rect key={`${key}-l`} x={cx - w / 2} y={base - (font + 3) / k} width={w} height={(font + 7) / k} rx={3 / k} fill="black" />
+			);
+		};
+		if (z.location) {
+			const n = nodeOf(z);
+			hole('n', n.x, n.y, NODE_SIZE_PRESETS[z.nodeSize] * u, locationName(z.location), 14, 13);
+		} else if (z.named && z.name) {
+			const c = zoneCenter(z);
+			const w = (z.name.length * 13 * 0.6 + 12) / k;
+			out.push(<rect key="name" x={c.x - w / 2} y={c.y - 12 / k} width={w} height={24 / k} rx={4 / k} fill="black" />);
+		}
+		if (pinAlpha(z) >= 0.02) {
+			z.doors.forEach((dr, i) =>
+				hole(`d${i}`, dr.x, dr.y, NODE_SIZE_PRESETS[dr.size ?? DOOR_SIZE] * u, pageName(dr.page), 12, 13)
+			);
+			z.itemPins.forEach((it, i) => hole(`i${i}`, it.x, it.y, itemPinRadius(z, it.size) * u, targetName(it.item), 12, 11));
+			z.subPins.forEach((sp, i) => hole(`s${i}`, sp.x, sp.y, subPinRadius(z, sp.loc, sp.size) * u, targetName(sp.loc), 9, 11));
+		}
+		return out;
+	};
+	/** Adds a label at a world point, prompting for its text (empty = nothing). */
+	const addLabel = (at: { x: number; y: number }) =>
+		new TextInputModal(plugin.app, {
+			title: t('view.map.labelPromptTitle'),
+			cta: t('view.map.addLabel'),
+			onSubmit: (v) => {
+				if (!v.trim()) return;
+				snapshot();
+				// 18px on screen at the zoom it was placed at; it scales with the map from there.
+				putLabels([...activeLabels(), { id: newId(), x: at.x, y: at.y, text: v.trim(), size: 18 / cameraRef.current.k }]);
+			},
+		}).open();
+	/** Label sizes that stay visible somewhere in the page's zoom range: big
+	 *  enough to fade in at full zoom-in, small enough not to fade out at full
+	 *  zoom-out — past either, a label could never be seen again. */
+	const labelSizeRange = (): [number, number] => {
+		const [minK, maxK] = zoomLimits(
+			zones,
+			images,
+			wrapRef.current?.clientWidth ?? 900,
+			wrapRef.current?.clientHeight ?? 600
+		);
+		return [LABEL_IN_PX[1] / maxK, Math.min(SIZE_MAX, LABEL_OUT_PX[0] / minK)];
+	};
+	const patchLabel = (id: string, patch: Partial<MapLabel>) =>
+		putLabels(activeLabels().map((l) => (l.id === id ? { ...l, ...patch } : l)));
 
 	// Vertex handles for a zone/road (when selected or marquee-hit). Rendered in a
 	// SEPARATE layer above all zone/road bodies, so a road drawn over a location
@@ -2988,7 +3426,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const renderHandles = (z: MapZone): ReactElement | null => {
 		const zoneSel = selectedZone === z.id;
 		const hasSelVerts = [...selectedVerts].some((key) => key.startsWith(z.id + ':'));
-		if (!(zoneSel || hasSelVerts) || z.locked || squish >= 0.02) return null;
+		if (!(zoneSel || hasSelVerts) || z.locked || squishOf(z) >= 0.02) return null;
 		return (
 			<g key={`handles-${z.id}`}>
 				{z.points.map((p, i) => {
@@ -3000,7 +3438,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							cx={p.x}
 							cy={p.y}
 							r={(vSel ? VERTEX_R + 1.5 : VERTEX_R) / camera.k}
-							className={vSel ? 'loom-map-vertex loom-map-vertex-sel' : 'loom-map-vertex'}
+							className={vSel ? 'loom-map-vertex loom-map-knot loom-map-vertex-sel' : 'loom-map-vertex loom-map-knot'}
 							onPointerDown={(e) => {
 								if (tool !== 'select') return;
 								e.stopPropagation();
@@ -3046,7 +3484,28 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 
 	return (
 		<ViewShell view={view} project={project} title={mapsLabel()} railActive="map">
-			<div className={tool !== 'select' ? 'loom-map-wrap loom-map-drawing' : 'loom-map-wrap'} ref={wrapRef}>
+			<div className="loom-map-frame">
+			{/* The padding between the nav rail and the canvas: hovering it opens the
+			    Maps drawer too, so overshooting the edge tab still works. */}
+			<div
+				className={drawerClick.maps ? 'loom-map-gap-hover loom-map-gap-click' : 'loom-map-gap-hover'}
+				aria-hidden="true"
+				onClick={() => toggleDrawerOpen('maps')}
+			/>
+			<div
+				className={
+					drawerClick.elements
+						? 'loom-map-gap-hover loom-map-gap-hover-right loom-map-gap-click'
+						: 'loom-map-gap-hover loom-map-gap-hover-right'
+				}
+				aria-hidden="true"
+				onClick={() => toggleDrawerOpen('elements')}
+			/>
+			<div
+				className={tool !== 'select' ? 'loom-map-wrap loom-map-drawing' : 'loom-map-wrap'}
+				ref={wrapRef}
+				style={pageBg ? ({ '--loom-map-bg': pageBg } as CSSProperties) : undefined}
+			>
 				<MapsPanel
 					plugin={plugin}
 					pages={pages}
@@ -3061,6 +3520,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						setPinDrag(null);
 						setPinDragPos(null);
 					}}
+					clickMode={drawerClick.maps}
+					open={drawerOpen.maps}
+					onToggleMode={() => toggleDrawerMode('maps')}
+					onToggleOpen={() => toggleDrawerOpen('maps')}
 				/>
 				<svg
 					className="loom-map-svg"
@@ -3123,18 +3586,19 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 								/>
 							);
 						})}
-						{/* Zones layer — in node view each polygon zone squishes (warps)
-						    into its node and disappears, leaving just the nodes; a road
-						    instead thins into a line so it still shows what it connects. */}
+						{/* Zones layer — a zone too small on screen squishes (warps) into
+						    its node and disappears; a road between folded places instead
+						    thins into a line so it still shows what it connects. */}
 						{zones.map((z) => {
 									const isRoad = z.kind === 'road';
-									// Polygon zones fully collapse in node view; roads stay as a line.
+									const squish = squishOf(z);
+									// Polygon zones fully collapse; roads stay as a line.
 									if (!isRoad && squish >= 0.995) return null;
 									// A road is rendered along its location→location centerline
-									// (clipped to the zone edges in regular view, anchored to the
-									// main-location nodes in node view); its `points` are only the
-									// editable waypoints. Skip when an endpoint isn't on this map.
-									const roadLine = isRoad ? roadCenterline(z, squish) : null;
+									// (clipped to drawn zone edges, anchored to folded zones'
+									// nodes); its `points` are only the editable waypoints. Skip
+									// when an endpoint isn't on this map.
+									const roadLine = isRoad ? roadCenterline(z) : null;
 									if (isRoad && (!roadLine || roadLine.length < 2)) return null;
 									const stroke = darker(z.color);
 									const linePts = isRoad ? (roadLine as Pt[]) : z.points;
@@ -3144,21 +3608,37 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 
 									if (isRoad) {
 										// A road: an open, width-rendered centerline (a long box that
-										// bends) — outline stroke behind, fill stroke on top. In node
-										// view it thins toward a constant-screen line (and goes opaque)
-										// so it still reads as a connector between the collapsed nodes.
+										// bends) — outline stroke behind, fill stroke on top. As its
+										// places fold it thins toward a constant-screen line (and goes
+										// opaque) so it still reads as a connector between the nodes.
 										const rw = z.width * (1 - squish) + (3 / camera.k) * squish;
 										const rop = z.alpha + (1 - z.alpha) * squish;
+										// The zones its ends attach to are cut out of it, so it stops
+										// exactly at their outlines (no round cap poking inside), at
+										// any angle; the cut-outs fold along with their zones.
+										const cuts = [zoneForLoc(z.startLoc), zoneForLoc(z.endLoc)].filter(
+											(c): c is MapZone => !!c && squishOf(c) < 0.995
+										);
+										const cutId = `${uid}-cut-${z.id}`;
 										return (
-											<g key={z.id}>
+											<g key={z.id} mask={cuts.length ? `url(#${cutId})` : undefined}>
+												{cuts.length ? (
+													<defs>
+														<mask id={cutId} maskUnits="userSpaceOnUse" x={-1e7} y={-1e7} width={2e7} height={2e7}>
+															<rect x={-1e7} y={-1e7} width={2e7} height={2e7} fill="white" />
+															{cuts.map((c) => (
+																<path key={c.id} d={pathD(c.points) + ' Z'} transform={squishProps(c).transform} fill="black" />
+															))}
+														</mask>
+													</defs>
+												) : null}
 												<path
 													d={d}
 													fill="none"
 													stroke={stroke}
 													strokeOpacity={rop}
-													// The outline border is a constant screen size in regular
-													// view; fade it toward node view so it doesn't dwarf the
-													// thinned road line there.
+													// The outline border is a constant screen size; fade it as
+													// the road folds so it doesn't dwarf the thinned line.
 													strokeWidth={rw + ((zoneSel ? 5 : 3) * (1 - 0.85 * squish)) / camera.k}
 													strokeLinejoin="round"
 													strokeLinecap="round"
@@ -3172,11 +3652,86 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 													strokeLinejoin="round"
 													strokeLinecap="round"
 												/>
+												{/* Surface texture, fading as the path folds to a line. Bricks
+												    are dashes, so the blocks follow the road's own direction;
+												    a centre line splits them into two courses. Water is the
+												    lake tile, stroked along the river. */}
+												{z.terrain === 'bricks' && squish < 0.99 ? (
+													<g opacity={1 - squish} fill="none" strokeLinejoin="round">
+														<path
+															d={d}
+															stroke={stroke}
+															strokeOpacity={0.35}
+															strokeWidth={rw * 0.88}
+															strokeDasharray={`${rw * 0.42} ${rw * 0.1}`}
+														/>
+														<path d={d} stroke={z.color} strokeWidth={rw * 0.08} />
+													</g>
+												) : null}
+												{z.terrain === 'water' && squish < 0.99 ? (
+													<>
+														<defs>
+															<pattern
+																id={`${uid}-pat-${z.id}`}
+																patternUnits="userSpaceOnUse"
+																width={TERRAINS.water.tile[0]}
+																height={TERRAINS.water.tile[1]}
+																patternTransform={`scale(${1 / camera.k})`}
+															>
+																<path
+																	d={TERRAINS.water.d}
+																	fill="none"
+																	stroke={stroke}
+																	strokeOpacity={0.55}
+																	strokeWidth={1.2}
+																	strokeLinecap="round"
+																/>
+															</pattern>
+														</defs>
+														<path
+															d={d}
+															fill="none"
+															stroke={`url(#${uid}-pat-${z.id})`}
+															strokeWidth={rw}
+															strokeLinejoin="round"
+															strokeLinecap="round"
+															opacity={1 - squish}
+														/>
+													</>
+												) : null}
 											</g>
 										);
 									}
+									const ter = z.terrain && z.terrain !== 'bricks' ? TERRAINS[z.terrain] : null;
+									const patId = `${uid}-pat-${z.id}`;
+									const maskId = `${uid}-mask-${z.id}`;
 									return (
 										<g key={z.id} {...squishProps(z)}>
+											{ter ? (
+												<defs>
+													<pattern
+														id={patId}
+														patternUnits="userSpaceOnUse"
+														width={ter.tile[0]}
+														height={ter.tile[1]}
+														patternTransform={`scale(${1 / camera.k})`}
+													>
+														<path
+															d={ter.d}
+															fill="none"
+															stroke={stroke}
+															strokeOpacity={0.55}
+															strokeWidth={1.2}
+															strokeLinecap="round"
+															strokeLinejoin="round"
+														/>
+													</pattern>
+													<mask id={maskId} maskUnits="userSpaceOnUse" x={-1e7} y={-1e7} width={2e7} height={2e7}>
+														<rect x={-1e7} y={-1e7} width={2e7} height={2e7} fill="white" />
+														{markerHoles(z)}
+													</mask>
+												</defs>
+											) : null}
 											<path
 												d={d}
 												fill={z.color}
@@ -3184,6 +3739,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 												stroke={stroke}
 												strokeWidth={(zoneSel ? 2.5 : 1.5) / camera.k}
 											/>
+											{ter ? (
+												<path d={d} fill={`url(#${patId})`} mask={`url(#${maskId})`} pointerEvents="none" />
+											) : null}
 										</g>
 									);
 								})}
@@ -3266,7 +3824,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 												fill="none"
 												stroke={plugin.settings.mapsColor}
 												strokeOpacity={DEFAULT_ALPHA + 0.2}
-												strokeWidth={DEFAULT_ROAD_WIDTH * scale}
+												strokeWidth={defaultRoadWidth(roadDraft.startLoc)}
 												strokeLinejoin="round"
 												strokeLinecap="round"
 											/>
@@ -3284,6 +3842,16 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									);
 								})()
 							: null}
+						{/* Path tool over a location zone: a dot where the end will go (the
+						    outline point nearest the cursor), before and during a draft. */}
+						{tool === 'road' && cursor && cursorSnap.current ? (
+							<circle
+								cx={cursor.x}
+								cy={cursor.y}
+								r={VERTEX_R / camera.k}
+								className="loom-map-vertex loom-map-vertex-first"
+							/>
+						) : null}
 						{/* Zone (polygon) draw preview. The dashed outline is drawn OPEN (no
 						    closing edge from the last vertex back to the first) so the
 						    still-incomplete edge stands out; the fill previews the area. */}
@@ -3352,12 +3920,64 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 								strokeDasharray={`${4 / camera.k} ${3 / camera.k}`}
 							/>
 						) : null}
-						{/* Region wraps — node view only: a padded hull around each cluster of
-						    a region's location nodes (far-apart members wrap separately).
-						    Drawn from the eased DISPLAY ring (see the hull-morph loop) so a
-						    cluster split retracts/grows smoothly instead of snapping. Behind
-						    the nodes; fades in with the squish. */}
-						{squish > 0.02
+						{/* Free labels — part of the map, so world-sized; each fades in once
+						    readable and out once it would dwarf the view (LABEL_*_PX).
+						    Click selects (Delete removes), left-drag moves, right-click
+						    opens its panel, double-click opens it on the text field. */}
+						{labels.map((lb) => {
+							const px = lb.size * camera.k;
+							const op = smoothstep(LABEL_IN_PX, px) * (1 - smoothstep(LABEL_OUT_PX, px));
+							if (op < 0.02) return null;
+							return (
+								<text
+									key={lb.id}
+									className={selectedLabel === lb.id ? 'loom-map-free-label loom-map-free-label-sel' : 'loom-map-free-label'}
+									x={lb.x}
+									y={lb.y}
+									textAnchor="middle"
+									dominantBaseline="middle"
+									opacity={op}
+									style={{ fontSize: `${lb.size}px` }}
+									onPointerDown={(e) => {
+										if (tool !== 'select' || e.button !== 0) return;
+										e.stopPropagation();
+										setMenu(null);
+										setSelectedLabel(lb.id);
+										setSelectedZone(null);
+										setSelectedImage(null);
+										beginPending();
+										const { sx, sy } = localXY(e.clientX, e.clientY);
+										drag.current = {
+											kind: 'label-move',
+											id: lb.id,
+											startX: e.clientX,
+											startY: e.clientY,
+											moved: false,
+											last: toWorld(sx, sy),
+										};
+										setDragActive(true);
+									}}
+									onDoubleClick={(e) => {
+										e.stopPropagation();
+										setMenu({ kind: 'label', id: lb.id, focus: true });
+									}}
+									onContextMenu={(e) => {
+										e.preventDefault();
+										e.stopPropagation();
+										setSelectedLabel(lb.id);
+										setMenu({ kind: 'label', id: lb.id, focus: false });
+									}}
+								>
+									{lb.text}
+								</text>
+							);
+						})}
+						{/* Region wraps: a padded hull around each cluster of a region's
+						    location nodes (far-apart members wrap separately). Drawn from the
+						    eased DISPLAY ring (see the hull-morph loop) so a cluster split
+						    retracts/grows smoothly instead of snapping. Behind the nodes;
+						    fades in as the region's places fold. */}
+						{anyFolded
 							? [...hullState.current.entries()].map(([key, s]) => {
 									if (s.display.length < 3 || s.alpha < 0.02) return null;
 									// A modest constant-screen margin, applied to the eased ring;
@@ -3379,7 +3999,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										<g
 											key={key}
 											className="loom-map-region"
-											opacity={squish * s.alpha}
+											opacity={(regionSquish.get(region.path) ?? 0) * s.alpha}
 											onDoubleClick={(e) => {
 												e.stopPropagation();
 												view.openEntity(region.path);
@@ -3406,24 +4026,19 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									);
 								})
 							: null}
-						{/* Nodes layer — always on top of every zone, screen-space sized
-						    (constant apparent size when zooming). Right-click falls
-						    through to the zone menu; left-drag moves the node (or, in
-						    node view, the whole zone). Unassociated zones show a light-
-						    grey placeholder node in node view. */}
+						{/* Nodes layer — always on top of every zone. Right-click falls
+						    through to the zone menu; left-drag moves the node (or, once
+						    the zone has folded, the whole zone). Only a zone or path
+						    linked to a location has a node. */}
 						{zones.map((z) => {
-							const placeholder = !z.node;
-							// A road only shows a node if it carries its own location — no
-							// grey placeholder for roads.
-							if (z.kind === 'road' && placeholder) return null;
-							// Placeholder (locationless) nodes only exist in node view — they
-							// grow in (curved scale, like the graph time-lapse), never fade.
-							if (placeholder && squish < 0.01) return null;
+							if (!z.node) return null;
 							const node = nodeOf(z);
 							const stroke = darker(z.color);
-							const grow = placeholder ? 1 - Math.pow(1 - squish, 3) : 1;
-							const r = NODE_SIZE_PRESETS[z.nodeSize] * nodeUnit * grow;
-							const opacity = !placeholder && viewMode === 'closeup' ? CLOSEUP_NODE_OPACITY : 1;
+							const nodeUnit = unitOf(z);
+							const r = NODE_SIZE_PRESETS[z.nodeSize] * nodeUnit;
+							// See-through once the zone fills the view, so the focus is on
+							// the sublocations within.
+							const opacity = 1 - (1 - CLOSEUP_NODE_OPACITY) * smoothstep(CLOSEUP_PX, screenR(z));
 							return (
 								<g
 									key={`node-${z.id}`}
@@ -3475,7 +4090,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										cx={node.x}
 										cy={node.y}
 										r={r}
-										fill={placeholder ? '#bdbdbd' : stroke}
+										fill={stroke}
 										className={
 											selectedNode === z.id ? 'loom-map-node-dot loom-map-node-sel' : 'loom-map-node-dot'
 										}
@@ -3493,10 +4108,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									{z.location ? (
 										<text
 											x={node.x}
-											y={node.y + (NODE_SIZE_PRESETS[z.nodeSize] + 14) * nodeUnit}
+											y={node.y + NODE_SIZE_PRESETS[z.nodeSize] * nodeUnit + 14 / camera.k}
 											textAnchor="middle"
 											className="loom-map-node-label"
-											style={{ fontSize: `${13 * nodeUnit}px` }}
+											style={{ fontSize: `${13 / camera.k}px` }}
 										>
 											{clampLabel(locationName(z.location))}
 										</text>
@@ -3504,14 +4119,39 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 								</g>
 							);
 						})}
+						{/* Names of unlinked zones and paths (a lake, a river): at the
+						    zone's balance centre or the path's midpoint, a constant
+						    on-screen size, fading as the zone folds. */}
+						{zones.map((z) => {
+							if (!z.named || !z.name) return null;
+							const sq = squishOf(z);
+							if (sq >= 0.99) return null;
+							const c = zoneCenter(z);
+							return (
+								<text
+									key={`name-${z.id}`}
+									className="loom-map-zone-name"
+									x={c.x}
+									y={c.y}
+									textAnchor="middle"
+									dominantBaseline="middle"
+									opacity={1 - sq}
+									style={{ fontSize: `${13 / camera.k}px` }}
+								>
+									{z.name}
+								</text>
+							);
+						})}
 						{/* Zone markers — doors (portals to other map pages), item pins and
 						    sublocation nodes, in that paint order. Double-click opens,
 						    right-click sizes/removes, drag repositions within the zone;
-						    they squish into the zone's node and vanish in node view. */}
-						{squish >= 0.995
-							? null
-							: zones.flatMap((z) =>
-									z.doors.map((dr, i) => {
+						    they fade in once the zone is big enough on screen and squish
+						    into its node as it folds (pinAlpha). */}
+						{zones
+							.filter((z) => pinAlpha(z) >= 0.02)
+							.flatMap((z) => {
+									const nodeUnit = unitOf(z);
+									return z.doors.map((dr, i) => {
 										const r = NODE_SIZE_PRESETS[dr.size ?? DOOR_SIZE];
 										return renderPin(z, 'door', i, dr, r, {
 											className: 'loom-map-door',
@@ -3539,11 +4179,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 												</>
 											),
 										});
-									})
-								)}
-						{squish >= 0.995
-							? null
-							: zones.flatMap((z) => {
+									});
+								})}
+						{zones
+							.filter((z) => pinAlpha(z) >= 0.02)
+							.flatMap((z) => {
+									const nodeUnit = unitOf(z);
 									const itemColor = plugin.settings.nodeColors.item;
 									return z.itemPins.map((it, i) => {
 										const r = itemPinRadius(z, it.size);
@@ -3573,9 +4214,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 										});
 									});
 								})}
-						{squish >= 0.995
-							? null
-							: zones.flatMap((z) => {
+						{zones
+							.filter((z) => pinAlpha(z) >= 0.02)
+							.flatMap((z) => {
+									const nodeUnit = unitOf(z);
 									const col = darker(z.color);
 									return z.subPins.map((sp, i) => {
 										const r = subPinRadius(z, sp.loc, sp.size);
@@ -3599,7 +4241,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 												: pinDrag.kind === 'door'
 													? NODE_SIZE_PRESETS[gz.doors.find((d) => d.page === pinDrag.target)?.size ?? DOOR_SIZE]
 													: itemPinRadius(gz, gz.itemPins.find((p) => p.item === pinDrag.target)?.size)
-											: 9) * nodeUnit;
+											: 9) * (gz ? unitOf(gz) : 1 / camera.k);
 									return <circle cx={pinDragPos.x} cy={pinDragPos.y} r={gr} className="loom-map-sub-ghost" />;
 								})()
 								: null}
@@ -3626,11 +4268,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									project={project}
 									focusPath={fgLoc.path}
 									nodeWorld={nodeWorld}
-									// The map's element scale, NOT `nodeUnit`: the graph only ever
-									// shows in regular/close-up (where they're equal), and a
-									// retraction into node view would otherwise balloon as
-									// `nodeUnit` crossfades to screen space.
-									unit={scale}
+									// The zone's DRAWN marker unit, not `unitOf`: the graph only
+									// shows on a drawn zone, and a retraction as it folds would
+									// otherwise balloon as that unit crossfades to screen space.
+									unit={drawnUnit(fgZone)}
 									version={indexVersion}
 									closing={!subGraph}
 									onOpen={(path) => {
@@ -3646,78 +4287,164 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					})()}
 				</svg>
 
-				{/* Top-left controls: find-a-location search + the 3-stop scale slider. */}
+				{/* Top-right controls: fit-all + search, in a row. They step aside
+				    (left) while the Elements drawer is out. */}
 				<div className="loom-map-controls">
+					{/* Fit-all sits left of the search, clear of the right edge (where
+					    the Elements drawer's hover strip is). */}
+					<button className="loom-map-icon-btn loom-map-fit" aria-label={t('view.map.fitAllAria')} onClick={fitAll}>
+						<Icon name="maximize" />
+					</button>
 					<div className="loom-map-search">
 						<SearchableSelect
-							placeholder={t('view.map.findLocationPlaceholder')}
-							options={zones
-								.filter((z) => z.location)
-								.map((z) => ({ value: z.id, label: locationName(z.location) }))
-								.sort((a, b) => a.label.localeCompare(b.label))}
-							onPick={(id) => {
+							placeholder={t('view.map.searchPlaceholder')}
+							onQueryChange={setElementQuery}
+							// Everything on the page with a name: locations, named zones and
+							// paths, and free labels — each with its kind as a faded hint.
+							options={[
+								...zones
+									.filter((z) => z.location || (z.named && z.name))
+									.map((z) => ({
+										value: `zone:${z.id}`,
+										label: z.location ? locationName(z.location) : z.name,
+										hint: z.location
+											? t('view.map.searchKind.location')
+											: z.kind === 'road'
+												? t('view.map.searchKind.path')
+												: t('view.map.searchKind.zone'),
+									})),
+								...labels.map((lb) => ({
+									value: `label:${lb.id}`,
+									label: lb.text,
+									hint: t('view.map.searchKind.label'),
+								})),
+							].sort((a, b) => a.label.localeCompare(b.label))}
+							onPick={(value) => {
+								const id = value.slice(value.indexOf(':') + 1);
+								if (value.startsWith('label:')) {
+									const lb = labels.find((l) => l.id === id);
+									if (lb) goToLabel(lb);
+									return;
+								}
 								const z = zones.find((zz) => zz.id === id);
-								if (!z) return;
-								const pt = nodeOf(z);
-								flyTo(pt.x, pt.y);
-								setSelectedZone(z.id);
+								if (z) goToZone(z);
 							}}
 						/>
 					</div>
-					<div className="loom-map-scale" role="group" aria-label={t('view.map.viewScaleAria')}>
-						{VIEW_MODES.map(([m, label]) => (
-							<button
-								key={m}
-								className={viewMode === m ? 'loom-map-scale-stop loom-map-scale-on' : 'loom-map-scale-stop'}
-								aria-pressed={viewMode === m}
-								onClick={() => animateCameraK(MODE_K[m] / scale)}
-							>
-								{label()}
-							</button>
-						))}
-					</div>
-					{/* Element size — the page's own "how big is a thing here" anchor. It
-					    sizes every world-fixed marker and shifts the view-mode zoom
-					    thresholds, so a map drawn at any scale reads correctly. */}
-					<div className="loom-map-elemsize">
-						<button
-							className={sizeOpen ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-							aria-label={t('view.map.elementSizeAria')}
-							onClick={() => setSizeOpen(!sizeOpen)}
-						>
-							<Icon name="ruler" />
-						</button>
-						{sizeOpen ? (
-							<div className="loom-map-palette-pop">
-								<label className="loom-map-palette-row">
-									<span>{t('view.map.elements')}</span>
-									<ObsidianSlider
-										min={0}
-										max={100}
-										step={1}
-										value={scaleToSlider(scale)}
-										onChange={(v) => setPageScale(sliderToScale(v))}
-									/>
-									<button
-										className="loom-map-icon-btn loom-map-reset"
-										aria-label={t('view.map.fitToZonesAria')}
-										onClick={() => setPageScale(inferScale(zonesRef.current))}
-									>
-										<Icon name="wand-2" />
-									</button>
-								</label>
-								<div className="loom-map-elemsize-readout">
-									{t('view.map.elementScaleReadout', {
-										scale: scale >= 10 ? scale.toFixed(0) : scale.toFixed(2),
-										units: Math.round(NODE_SIZE_PRESETS.regular * scale),
-									})}
-								</div>
-							</div>
-						) : null}
-					</div>
 				</div>
 
+				{/* Elements drawer (right) — every element on the page grouped by kind,
+				    so nothing is lost even when it's hard to see (an unnamed path, a
+				    label faded out at this zoom). A row flies to it and selects it.
+				    Slides out on hover like the Maps drawer, pins open. */}
+				<ElementsPanel
+					query={elementQuery}
+					clickMode={drawerClick.elements}
+					open={drawerOpen.elements}
+					onToggleMode={() => toggleDrawerMode('elements')}
+					onToggleOpen={() => toggleDrawerOpen('elements')}
+					groups={[
+						{
+							key: 'locations',
+							title: t('view.map.elementsPanel.locations'),
+							items: zones
+								.filter((z) => z.location)
+								.map((z) => ({
+									key: z.id,
+									label: locationName(z.location),
+									hint: z.kind === 'road' ? t('view.map.searchKind.path') : undefined,
+									active: selectedZone === z.id,
+									onPick: () => goToZone(z),
+								})),
+						},
+						{
+							key: 'zones',
+							title: t('view.map.elementsPanel.zones'),
+							items: zones
+								.filter((z) => z.kind === 'zone' && !z.location)
+								.map((z) => ({
+									key: z.id,
+									label: z.named && z.name ? z.name : t('view.map.elementsPanel.unnamedZone'),
+									hint: z.terrain && z.terrain !== 'bricks' ? t(`view.map.terrain.${z.terrain}`) : undefined,
+									active: selectedZone === z.id,
+									onPick: () => goToZone(z),
+								})),
+						},
+						{
+							key: 'paths',
+							title: t('view.map.elementsPanel.paths'),
+							items: zones
+								.filter((z) => z.kind === 'road' && !z.location)
+								.map((z) => ({
+									key: z.id,
+									label: z.named && z.name ? z.name : t('view.map.elementsPanel.unnamedPath'),
+									hint:
+										z.terrain === 'bricks'
+											? t('view.map.pathStyle.road')
+											: z.terrain === 'water'
+												? t('view.map.pathStyle.river')
+												: undefined,
+									active: selectedZone === z.id,
+									onPick: () => goToZone(z),
+								})),
+						},
+						{
+							key: 'labels',
+							title: t('view.map.elementsPanel.labels'),
+							items: labels.map((lb) => ({
+								key: lb.id,
+								label: lb.text,
+								active: selectedLabel === lb.id,
+								onPick: () => goToLabel(lb),
+							})),
+						},
+						{
+							key: 'images',
+							title: t('view.map.elementsPanel.images'),
+							items: images.map((im) => ({
+								key: im.id,
+								label: im.path.slice(im.path.lastIndexOf('/') + 1),
+								active: selectedImage === im.id,
+								onPick: () => {
+									setSelectedZone(null);
+									setSelectedLabel(null);
+									setSelectedImage(im.id);
+									flyTo(im.x + im.w / 2, im.y + im.h / 2);
+								},
+							})),
+						},
+					]}
+				/>
+
 				{/* Zone context menu (right-click, follows the zone). */}
+				{menu?.kind === 'label' && menuLabel && menuPos ? (
+					<LabelPanel
+						key={menuLabel.id}
+						label={menuLabel}
+						left={menuPos.x}
+						top={menuPos.y}
+						focusText={menu.focus}
+						sizeRange={labelSizeRange()}
+						onEditStart={beginPending}
+						onEditEnd={commitPending}
+						onText={(text) => patchLabel(menuLabel.id, { text })}
+						onTextDone={() => {
+							// A label emptied out is removed (inside the same undo step).
+							if (!activeLabels().find((l) => l.id === menuLabel.id)?.text.trim()) {
+								putLabels(activeLabels().filter((l) => l.id !== menuLabel.id));
+								setMenu(null);
+							}
+							commitPending();
+						}}
+						onSize={(size) => patchLabel(menuLabel.id, { size })}
+						onDelete={() => {
+							snapshot();
+							putLabels(activeLabels().filter((l) => l.id !== menuLabel.id));
+							setSelectedLabel(null);
+							setMenu(null);
+						}}
+					/>
+				) : null}
 				{menu?.kind === 'zone' && menuZone && menuPos ? (
 					<ZonePanel
 						key={menuZone.id}
@@ -3768,11 +4495,37 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							snapshot();
 							updateZone(menuZone.id, { location: null, node: null });
 						}}
+						onName={(name) => {
+							beginPending();
+							updateZone(menuZone.id, { name });
+						}}
+						onNameDone={commitPending}
+						onToggleNamed={() => {
+							snapshot();
+							const z = menuZone;
+							if (!z.named) {
+								updateZone(z.id, {
+									named: true,
+									savedLoc: z.location ? { location: z.location, node: z.node } : z.savedLoc,
+									location: null,
+									node: null,
+								});
+								return;
+							}
+							// Back to the location — the remembered one, unless it's been
+							// placed on another zone of this map since (one zone each).
+							const back = z.savedLoc && !usedLocations.has(z.savedLoc.location) ? z.savedLoc : null;
+							updateZone(z.id, {
+								named: false,
+								savedLoc: null,
+								location: back?.location ?? null,
+								node: back ? clampToZone(back.node ?? zoneCenter(z), z) : null,
+							});
+						}}
 						onNodeSize={(size) => {
 							snapshot();
 							updateZone(menuZone.id, { nodeSize: size });
 						}}
-						scale={scale}
 						onWidth={(width) => {
 							beginPending();
 							// Narrowing a road pulls its own node and pins back inside the
@@ -3781,7 +4534,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						}}
 						onResetWidth={() => {
 							snapshot();
-							const w = DEFAULT_ROAD_WIDTH * scale;
+							const w = defaultRoadWidth(menuZone.startLoc, menuZone.endLoc);
 							updateZone(menuZone.id, { width: w, ...reclampToWidth(menuZone, w) });
 						}}
 						onColor={(color) => {
@@ -3796,6 +4549,18 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							snapshot();
 							updateZone(menuZone.id, { alpha: DEFAULT_ALPHA });
 						}}
+						onPreset={(patch) => {
+							snapshot();
+							updateZone(menuZone.id, patch);
+						}}
+						onFront={() => {
+							snapshot();
+							commit([...zonesRef.current.filter((z) => z.id !== menuZone.id), menuZone]);
+						}}
+						onBack={() => {
+							snapshot();
+							commit([menuZone, ...zonesRef.current.filter((z) => z.id !== menuZone.id)]);
+						}}
 						onToggleLock={() => {
 							snapshot();
 							updateZone(menuZone.id, { locked: !menuZone.locked });
@@ -3805,124 +4570,84 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				) : null}
 
 				{/* Global (empty-space) menu — a VERTICAL list: each row is an icon plus a
-				    short label, so what an entry does is readable instead of guessed from
-				    a bare glyph. The two draw entries and the image entries still open
-				    their own sub-menus at the cursor. */}
-				{menu?.kind === 'empty' && menuPos && !imagePicker ? (
-					<div className="loom-map-menu loom-map-menu-vert" style={{ left: menuPos.x, top: menuPos.y }}>
+				    short label. The draw tools, then labels, then the background-image
+				    browser (its own window), split by separators. */}
+				{menu?.kind === 'empty' && menuPos ? (
+					<div ref={emptyMenuRef} className="loom-map-menu loom-map-menu-vert" style={{ left: menuPos.x, top: menuPos.y }}>
+						{(
+							[
+								['rect', t('view.map.tool.rectangle'), 'square'],
+								['draw', t('view.map.tool.polygon'), 'loom-vector-polygon'],
+								['road', t('view.map.tool.road'), 'route'],
+							] as const
+						).map(([tool, title, icon]) => (
+							<button
+								key={tool}
+								className="loom-map-menu-row"
+								onClick={() => {
+									setMenu(null);
+									setTool(tool);
+								}}
+							>
+								<Icon name={icon} />
+								<span>{title}</span>
+							</button>
+						))}
+						<div className="loom-map-menu-divider" />
 						<button
 							className="loom-map-menu-row"
-							onClick={(e) => {
-								const m = new ObsidianMenu();
-								for (const [tool, title, icon] of [
-									['rect', t('view.map.tool.rectangle'), 'square'],
-									['draw', t('view.map.tool.polygon'), 'pen-tool'],
-									['road', t('view.map.tool.road'), 'route'],
-								] as const) {
-									m.addItem((i) =>
-										i
-											.setTitle(title)
-											.setIcon(icon)
-											.onClick(() => {
-												setMenu(null);
-												setTool(tool);
-											})
-									);
-								}
-								m.showAtMouseEvent(e.nativeEvent);
+							onClick={() => {
+								const at = menuWorld.current;
+								setMenu(null);
+								if (at) addLabel(at);
 							}}
 						>
-							<Icon name="square-dashed" />
-							<span>{t('view.map.drawAZone')}</span>
-							<Icon name="chevron-right" />
+							<Icon name="type" />
+							<span>{t('view.map.addLabel')}</span>
 						</button>
-						<button className="loom-map-menu-row" onClick={() => setImagePicker(true)}>
-							<Icon name="image" />
-							<span>{t('view.map.backgroundImage')}</span>
-							<Icon name="chevron-right" />
-						</button>
-					</div>
-				) : null}
-
-				{/* Background-image panel — the global menu's second page. Every image in
-				    `Entities/Maps/Images` is listed (a project can hold plenty), so it has
-				    its own search and the rows scroll inside a fixed height instead of the
-				    old silent 20-item cap that could also run off the bottom of the view. */}
-				{menu?.kind === 'empty' && menuPos && imagePicker ? (
-					<div
-						className="loom-map-menu loom-map-menu-vert loom-map-image-picker"
-						// This page is tall and wide, so it flips to whichever side of the
-						// cursor has room instead of being clipped by the view edge (an inline
-						// transform, which beats the class's default up-and-right anchor).
-						style={{
-							left: menuPos.x,
-							top: menuPos.y,
-							transform: `translate(${
-								menuPos.x + IMAGE_PICKER_W > (wrapRef.current?.clientWidth ?? 900) ? '-100%' : '0'
-							}, ${menuPos.y < IMAGE_PICKER_H ? '12px' : 'calc(-100% - 12px)'})`,
-						}}
-					>
-						<button className="loom-map-menu-row" onClick={() => setImagePicker(false)}>
-							<Icon name="chevron-left" />
-							<span>{t('view.map.backgroundImage')}</span>
-						</button>
+						<div className="loom-map-menu-divider" />
 						<button
 							className="loom-map-menu-row"
 							onClick={() => {
 								// Where the menu was opened is where the image lands.
-								pendingImageAt.current = menuWorld.current ?? { x: 0, y: 0 };
+								const at = menuWorld.current ?? { x: 0, y: 0 };
 								setMenu(null);
-								fileInputRef.current?.click();
+								new ImagePickerModal(
+									plugin,
+									importedImages,
+									(f) => void placeImage(f, at),
+									() => {
+										pendingImageAt.current = at;
+										fileInputRef.current?.click();
+									}
+								).open();
 							}}
 						>
-							<Icon name="image-plus" />
-							<span>{t('view.map.importImage')}</span>
+							<Icon name="image" />
+							<span>{t('view.map.backgroundImage')}</span>
 						</button>
-						{(() => {
-							if (importedImages.length === 0) {
-								return <div className="loom-map-subs-more">{t('view.map.nothingImportedYet')}</div>;
-							}
-							const q = imageQuery.trim().toLowerCase();
-							const filtered = q
-								? importedImages.filter((f) => f.name.toLowerCase().includes(q))
-								: importedImages;
-							const at = menuWorld.current ?? { x: 0, y: 0 };
-							return (
-								<>
-									{/* Search only earns its space once the list is long enough to
-									    need it. */}
-									{importedImages.length > 6 ? (
-										<input
-											className="loom-map-subs-search"
-											type="text"
-											placeholder={t('view.map.searchImages', { count: importedImages.length })}
-											value={imageQuery}
-											onChange={(e) => setImageQuery(e.target.value)}
-										/>
-									) : null}
-									<div className="loom-map-subs-list">
-										{filtered.map((f) => (
-											<button
-												key={f.path}
-												className="loom-map-menu-row loom-map-image-row"
-												title={f.name}
-												onClick={() => {
-													setMenu(null);
-													void placeImage(f, at);
-												}}
-											>
-												{/* A thumbnail makes the list actually pickable — file
-												    names rarely say which map an image is. Downscaled and
-												    cached, never the raw file (see buildThumb). */}
-												<ImageThumb plugin={plugin} file={f} />
-												<span>{f.name}</span>
-											</button>
-										))}
-										{filtered.length === 0 ? <div className="loom-map-subs-more">{t('common.noMatches')}</div> : null}
-									</div>
-								</>
-							);
-						})()}
+						{/* Icon + swatch only (named by its tooltip), so this row doesn't
+						    widen the menu. */}
+						<div className="loom-map-menu-row loom-map-menu-row-static">
+							<Icon name="paint-bucket" />
+							<input
+								type="color"
+								className="loom-map-color loom-map-bg-color"
+								aria-label={t('view.map.backgroundColor')}
+								// A colour input needs a hex, so the theme default is read off
+								// the canvas itself when the page has no colour of its own.
+								value={pageBg ?? cssColorToHex(wrapRef.current ? getComputedStyle(wrapRef.current).backgroundColor : '')}
+								onChange={(e) => putActive({ bg: e.target.value })}
+							/>
+							<button
+								className="loom-map-icon-btn loom-map-reset"
+								aria-label={t('view.map.resetBackgroundColor')}
+								disabled={!pageBg}
+								onClick={() => putActive({ bg: null })}
+							>
+								<Icon name="rotate-ccw" />
+							</button>
+						</div>
 					</div>
 				) : null}
 
@@ -3946,48 +4671,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					<div className="loom-map-hint">{t('view.map.rightClickHint')}</div>
 				) : null}
 			</div>
+			</div>
 		</ViewShell>
 	);
-}
-
-/** Obsidian's SliderComponent embedded in React — the same slider (and value
- *  tooltip via setDynamicTooltip) as the settings tab. onChange reports the raw
- *  slider value; the parent keeps `value` in sync (e.g. on a reset). */
-function ObsidianSlider({
-	value,
-	min,
-	max,
-	step,
-	onChange,
-}: {
-	value: number;
-	min: number;
-	max: number;
-	step: number;
-	onChange: (v: number) => void;
-}) {
-	const ref = useRef<HTMLDivElement>(null);
-	const slider = useRef<SliderComponent | null>(null);
-	const onChangeRef = useRef(onChange);
-	onChangeRef.current = onChange;
-	useEffect(() => {
-		const host = ref.current;
-		if (!host) return;
-		const s = new SliderComponent(host);
-		s.setLimits(min, max, step);
-		s.setValue(value);
-		s.onChange((v) => onChangeRef.current(v));
-		slider.current = s;
-		return () => {
-			host.empty();
-			slider.current = null;
-		};
-		// Mount once; value is kept in sync by the effect below.
-	}, []);
-	useEffect(() => {
-		if (slider.current && slider.current.getValue() !== value) slider.current.setValue(value);
-	}, [value]);
-	return <div className="loom-map-obsidian-slider" ref={ref} />;
 }
 
 /**
@@ -4076,6 +4762,173 @@ function ZonePinList({
 
 /** The horizontal per-zone context menu. Style settings (color + transparency)
  *  live behind the palette icon; the rest are icon-only. */
+/** A size as typed/shown: whole numbers from 10 up, two decimals below. */
+const fmtSize = (v: number): string => (v >= 10 ? String(Math.round(v)) : String(Math.round(v * 100) / 100));
+/** Widest a path, and biggest a label, can be (map units). */
+const SIZE_MAX = 5000;
+
+/** A number box with its icon that also scrubs: press and drag inside it —
+ *  up/right grows, down/left shrinks, 1% per px (so it feels the same at 2 and
+ *  at 2000) or a fixed `step` per px — or click without moving to type. Clamped to min..max; reports every
+ *  value live. Named for screen readers by a hidden label, not an aria-label
+ *  (Obsidian would turn that into a tooltip). */
+function ScrubNumber({
+	icon,
+	label,
+	value,
+	min,
+	max,
+	step,
+	onChange,
+	onEditStart,
+	onEditEnd,
+}: {
+	icon: string;
+	label: string;
+	value: number;
+	min: number;
+	max: number;
+	/** Scrub additively by this much per px (a 0–100 percentage, where a
+	 *  multiplicative scrub would stick at 0). Omitted: 1% per px. */
+	step?: number;
+	onChange: (v: number) => void;
+	/** Bracket an edit (a scrub, or typing) as one undo step. */
+	onEditStart?: () => void;
+	onEditEnd?: () => void;
+}) {
+	const scrub = useRef<{ x: number; y: number; v: number; moved: boolean } | null>(null);
+	// While focused the field shows what's being typed, not the reformatted live
+	// value (which would fight the caret).
+	const [draft, setDraft] = useState<string | null>(null);
+	const clamp = (v: number) => Math.max(min, Math.min(max, v));
+	return (
+		<label className="loom-map-scrub-wrap">
+			<Icon name={icon} />
+			<span className="loom-sr-only">{label}</span>
+			<input
+				className={draft === null ? 'loom-map-scrub loom-map-scrub-idle' : 'loom-map-scrub'}
+				type="text"
+				inputMode="decimal"
+				value={draft ?? fmtSize(value)}
+				onPointerDown={(e) => {
+					// Not focused yet: a press is a scrub (or, without moving, a click
+					// that focuses for typing). Once focused it's a normal text field.
+					if (e.button !== 0 || draft !== null) return;
+					e.preventDefault();
+					e.currentTarget.setPointerCapture(e.pointerId);
+					scrub.current = { x: e.clientX, y: e.clientY, v: value, moved: false };
+				}}
+				onPointerMove={(e) => {
+					const sc = scrub.current;
+					if (!sc) return;
+					const d = e.clientX - sc.x - (e.clientY - sc.y);
+					if (!sc.moved && Math.abs(d) < 3) return;
+					if (!sc.moved) {
+						sc.moved = true;
+						onEditStart?.();
+					}
+					onChange(clamp(step ? sc.v + d * step : sc.v * Math.pow(1.01, d)));
+				}}
+				onPointerUp={(e) => {
+					const sc = scrub.current;
+					scrub.current = null;
+					if (!sc) return;
+					if (sc.moved) onEditEnd?.();
+					else {
+						e.currentTarget.focus();
+						e.currentTarget.select();
+					}
+				}}
+				onFocus={() => {
+					setDraft(fmtSize(value));
+					onEditStart?.();
+				}}
+				onChange={(e) => {
+					setDraft(e.target.value);
+					const v = parseFloat(e.target.value.replace(',', '.'));
+					if (v > 0) onChange(clamp(v));
+				}}
+				onBlur={() => {
+					setDraft(null);
+					onEditEnd?.();
+				}}
+				onKeyDown={(e) => {
+					if (e.key === 'Enter') e.currentTarget.blur();
+				}}
+			/>
+		</label>
+	);
+}
+
+/** Right-click panel for a free label: its text, its size (map units, a
+ *  ScrubNumber) and delete. Both fields apply live. */
+function LabelPanel({
+	label,
+	left,
+	top,
+	focusText,
+	sizeRange,
+	onEditStart,
+	onEditEnd,
+	onText,
+	onTextDone,
+	onSize,
+	onDelete,
+}: {
+	label: MapLabel;
+	left: number;
+	top: number;
+	focusText: boolean;
+	/** Sizes the label stays visible at somewhere in the page's zoom range. */
+	sizeRange: [number, number];
+	/** Bracket a live edit as one undo step. */
+	onEditStart: () => void;
+	onEditEnd: () => void;
+	onText: (text: string) => void;
+	onTextDone: () => void;
+	onSize: (size: number) => void;
+	onDelete: () => void;
+}) {
+	const textRef = useRef<HTMLInputElement>(null);
+	useEffect(() => {
+		if (focusText) textRef.current?.select();
+	}, [focusText]);
+	const rootRef = useRef<HTMLDivElement>(null);
+	useKeepInMap(rootRef);
+	return (
+		<div ref={rootRef} className="loom-map-menu loom-map-zone-menu" style={{ left, top }}>
+			<input
+				ref={textRef}
+				className="loom-map-label-text"
+				type="text"
+				aria-label={t('view.map.labelMenu.text')}
+				value={label.text}
+				onFocus={onEditStart}
+				onChange={(e) => onText(e.target.value)}
+				onBlur={onTextDone}
+				onKeyDown={(e) => {
+					if (e.key === 'Enter') e.currentTarget.blur();
+				}}
+			/>
+			<span className="loom-map-sep" />
+			<ScrubNumber
+				icon="a-large-small"
+				label={t('view.map.labelMenu.size')}
+				value={label.size}
+				min={sizeRange[0]}
+				max={sizeRange[1]}
+				onChange={onSize}
+				onEditStart={onEditStart}
+				onEditEnd={onEditEnd}
+			/>
+			<span className="loom-map-sep" />
+			<button className="loom-map-icon-btn loom-map-danger" aria-label={t('view.map.labelMenu.delete')} onClick={onDelete}>
+				<Icon name="trash-2" />
+			</button>
+		</div>
+	);
+}
+
 function ZonePanel({
 	zone,
 	left,
@@ -4105,13 +4958,18 @@ function ZonePanel({
 	onPickLocation,
 	onOpenLocation,
 	onClearLocation,
+	onName,
+	onNameDone,
+	onToggleNamed,
 	onNodeSize,
-	scale,
 	onWidth,
 	onResetWidth,
 	onColor,
 	onAlpha,
 	onResetAlpha,
+	onPreset,
+	onFront,
+	onBack,
 	onToggleLock,
 	onDelete,
 }: {
@@ -4143,14 +5001,22 @@ function ZonePanel({
 	onPickLocation: (target: string) => void;
 	onOpenLocation: () => void;
 	onClearLocation: () => void;
+	/** Sets the zone's name (name mode — a zone with no location). */
+	onName: (name: string) => void;
+	onNameDone: () => void;
+	/** Switches between the linked location and the name. */
+	onToggleNamed: () => void;
 	onNodeSize: (size: NodeSizePreset) => void;
-	/** The active page's element scale — sets the road-width slider's range. */
-	scale: number;
 	onWidth: (width: number) => void;
 	onResetWidth: () => void;
 	onColor: (color: string) => void;
 	onAlpha: (alpha: number) => void;
 	onResetAlpha: () => void;
+	/** Applies a terrain / path-style preset (colour, opacity, texture). */
+	onPreset: (patch: Partial<MapZone>) => void;
+	/** Stacking order among this page's zones and paths. */
+	onFront: () => void;
+	onBack: () => void;
 	onToggleLock: () => void;
 	onDelete: () => void;
 }) {
@@ -4166,8 +5032,11 @@ function ZonePanel({
 	const [editingLoc, setEditingLoc] = useState(false);
 	const isRoad = zone.kind === 'road';
 	const showSearch = !zone.location || editingLoc;
+	const rootRef = useRef<HTMLDivElement>(null);
+	useKeepInMap(rootRef);
+
 	return (
-		<div className="loom-map-menu loom-map-zone-menu" style={{ left, top }}>
+		<div ref={rootRef} className="loom-map-menu loom-map-zone-menu" style={{ left, top }}>
 			{/* Grip — a drag handle, not a button (no hover box, grab cursor). */}
 			<button
 				className="loom-map-icon-btn loom-map-grip"
@@ -4177,10 +5046,36 @@ function ZonePanel({
 			>
 				<Icon name="grip" />
 			</button>
+			{/* Location or name — one button cycles which identity the zone uses;
+			    the other is kept for when it's switched back. */}
+			<button
+				className="loom-map-icon-btn"
+				aria-label={zone.named ? t('view.map.zoneAria.useLocation') : t('view.map.zoneAria.useName')}
+				onClick={() => {
+					setEditingLoc(false);
+					onToggleNamed();
+				}}
+			>
+				<Icon name={zone.named ? 'tag' : 'map-pin'} />
+			</button>
 			{/* Location association — a road is its own zone too, so it can carry
 			    its own location just like a polygon zone (its start/end endpoints
 			    are separate, drawing-only). */}
-			{showSearch ? (
+			{zone.named ? (
+				<div className="loom-map-loc loom-map-loc-search">
+					<input
+						className="loom-map-zone-name-input"
+						type="text"
+						placeholder={t('view.map.zoneAria.namePlaceholder')}
+						value={zone.name}
+						onChange={(e) => onName(e.target.value)}
+						onBlur={onNameDone}
+						onKeyDown={(e) => {
+							if (e.key === 'Enter') e.currentTarget.blur();
+						}}
+					/>
+				</div>
+			) : showSearch ? (
 				<div className="loom-map-loc loom-map-loc-search">
 					<SearchableSelect
 						// Keyed on the association state so clearing remounts it empty
@@ -4193,7 +5088,9 @@ function ZonePanel({
 							(o) => o.value === zone.location || !usedLocations.has(o.value)
 						)}
 						initialQuery={editingLoc ? locationName : ''}
-						autoFocus
+						// Only grab the caret when changing a link on purpose (the pen
+						// button) — a fresh zone may well be terrain, not a location.
+						autoFocus={editingLoc}
 						onPick={(target) => {
 							onPickLocation(target);
 							setEditingLoc(false);
@@ -4330,6 +5227,53 @@ function ZonePanel({
 				</button>
 				{openPanel === 'style' ? (
 					<div className="loom-map-palette-pop">
+						{/* Presets: a polygon's terrain (colour + texture), a path's kind. */}
+						<div className="loom-map-palette-row">
+							<span>{isRoad ? t('view.map.zoneAria.pathStyle') : t('view.map.zoneAria.terrain')}</span>
+							<div className="loom-map-presets">
+								{isRoad
+									? (Object.keys(PATH_STYLES) as (keyof typeof PATH_STYLES)[]).map((key) => {
+											const ps = PATH_STYLES[key];
+											const color = ps.color ?? plugin.settings.mapsColor;
+											return (
+												<button
+													key={key}
+													className={zone.terrain === ps.texture ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
+													aria-label={t(`view.map.pathStyle.${key}`)}
+													onClick={() => onPreset({ color, alpha: ps.alpha, terrain: ps.texture })}
+												>
+													<Icon name={ps.icon} />
+												</button>
+											);
+										})
+									: (
+										<>
+											<button
+												className={zone.terrain === null ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
+												aria-label={t('view.map.terrain.plain')}
+												// Plain = the map's own default look, not just "no texture".
+												onClick={() =>
+													onPreset({ terrain: null, color: plugin.settings.mapsColor, alpha: DEFAULT_ALPHA })
+												}
+											>
+												<Icon name="square" />
+											</button>
+											{(Object.keys(TERRAINS) as Terrain[]).map((key) => (
+												<button
+													key={key}
+													className={zone.terrain === key ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
+													aria-label={t(`view.map.terrain.${key}`)}
+													onClick={() =>
+														onPreset({ terrain: key, color: TERRAINS[key].color, alpha: TERRAINS[key].alpha })
+													}
+												>
+													<Icon name={TERRAINS[key].icon} />
+												</button>
+											))}
+										</>
+									)}
+							</div>
+						</div>
 						<label className="loom-map-palette-row">
 							<span>{t('view.map.zoneAria.color')}</span>
 							<input
@@ -4339,14 +5283,16 @@ function ZonePanel({
 								className="loom-map-color"
 							/>
 						</label>
-						<label className="loom-map-palette-row">
+						<div className="loom-map-palette-row">
 							<span>{t('view.map.zoneAria.opacity')}</span>
-							<ObsidianSlider
+							<ScrubNumber
+								icon="blend"
+								label={t('view.map.zoneAria.opacity')}
+								value={Math.round(zone.alpha * 100)}
 								min={0}
 								max={100}
-								step={5}
-								value={Math.round(zone.alpha * 100)}
-								onChange={(v) => onAlpha(v / 100)}
+								step={1}
+								onChange={(v) => onAlpha(Math.round(v) / 100)}
 							/>
 							<button
 								className="loom-map-icon-btn loom-map-reset"
@@ -4355,19 +5301,17 @@ function ZonePanel({
 							>
 								<Icon name="rotate-ccw" />
 							</button>
-						</label>
+						</div>
 						{isRoad ? (
-							<label className="loom-map-palette-row">
+							<div className="loom-map-palette-row">
 								<span>{t('view.map.zoneAria.width')}</span>
-								{/* Widths are world units, so the usable range scales with the
-								    map's element scale — the same feel on a 200-unit town map and
-								    on a 3000-unit continent. */}
-								<ObsidianSlider
-									min={Math.round(ROAD_WIDTH_MIN * scale)}
-									max={Math.round(ROAD_WIDTH_MAX * scale)}
-									step={Math.max(1, Math.round(2 * scale))}
-									value={Math.round(zone.width)}
-									onChange={(v) => onWidth(v)}
+								<ScrubNumber
+									icon="move-horizontal"
+									label={t('view.map.zoneAria.width')}
+									value={zone.width}
+									min={0.5}
+									max={SIZE_MAX}
+									onChange={onWidth}
 								/>
 								<button
 									className="loom-map-icon-btn loom-map-reset"
@@ -4376,11 +5320,18 @@ function ZonePanel({
 								>
 									<Icon name="rotate-ccw" />
 								</button>
-							</label>
+							</div>
 						) : null}
 					</div>
 				) : null}
 			</div>
+			<span className="loom-map-sep" />
+			<button className="loom-map-icon-btn" aria-label={t('view.map.zoneAria.bringToFront')} onClick={onFront}>
+				<Icon name="arrow-up-to-line" />
+			</button>
+			<button className="loom-map-icon-btn" aria-label={t('view.map.zoneAria.sendToBack')} onClick={onBack}>
+				<Icon name="arrow-down-to-line" />
+			</button>
 			<span className="loom-map-sep" />
 			<button
 				className={zone.locked ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
@@ -4401,6 +5352,166 @@ function ZonePanel({
 	);
 }
 
+type Drawer = 'maps' | 'elements';
+const DRAWER_MODE_KEY = 'loom-map-drawer-click';
+
+/** A drawer's root classes: pinned stays out; click mode turns hover-opening
+ *  off and is out only while `open`. */
+const drawerClass = (right: boolean, pinned: boolean, clickMode: boolean, open: boolean): string =>
+	[
+		'loom-map-panel',
+		right ? 'loom-map-panel-right' : '',
+		pinned ? 'loom-map-panel-pinned' : '',
+		clickMode ? 'loom-map-panel-click' : '',
+		clickMode && open ? 'loom-map-panel-open' : '',
+	]
+		.filter(Boolean)
+		.join(' ');
+
+/** In click mode, a click on the drawer's tab or hover margin (not its card)
+ *  toggles it. */
+const drawerTabClick = (clickMode: boolean, onToggleOpen: () => void) => (e: ReactMouseEvent<HTMLDivElement>) => {
+	if (clickMode && !(e.target as HTMLElement).closest('.loom-map-panel-inner')) onToggleOpen();
+};
+
+/** A drawer header's opening-mode + pin buttons. */
+function DrawerButtons({
+	pinned,
+	onPin,
+	clickMode,
+	onToggleMode,
+}: {
+	pinned: boolean;
+	onPin: () => void;
+	clickMode: boolean;
+	onToggleMode: () => void;
+}) {
+	return (
+		<>
+			<button
+				className="loom-map-icon-btn"
+				aria-label={clickMode ? t('view.map.drawerMode.click') : t('view.map.drawerMode.hover')}
+				onClick={onToggleMode}
+			>
+				<Icon name={clickMode ? 'target' : 'circle-dot'} />
+			</button>
+			<button
+				className={pinned ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
+				aria-label={pinned ? t('view.map.unpinPanel') : t('view.map.pinPanelOpen')}
+				onClick={onPin}
+			>
+				<Icon name={pinned ? 'pin' : 'pin-off'} />
+			</button>
+		</>
+	);
+}
+
+/** Right-click on a drawer's empty space or its tab toggles its pin (like its
+ *  pin button); rows, buttons and fields keep their own right-click. */
+function pinOnEmptyRightClick(togglePin: () => void) {
+	return (e: ReactMouseEvent<HTMLDivElement>) => {
+		if ((e.target as HTMLElement).closest('button, input, .loom-map-page-row')) return;
+		e.preventDefault();
+		togglePin();
+	};
+}
+
+/** Right-hand drawer listing every element on the page, grouped by kind, each
+ *  group collapsible (empty groups left out) — the Maps drawer mirrored: a tab
+ *  on the right edge, slides out on hover, pins open. */
+function ElementsPanel({
+	query,
+	clickMode,
+	open,
+	onToggleMode,
+	onToggleOpen,
+	groups,
+}: {
+	/** The map search's text: only matching elements are listed. */
+	query: string;
+	clickMode: boolean;
+	open: boolean;
+	onToggleMode: () => void;
+	onToggleOpen: () => void;
+	groups: {
+		key: string;
+		title: string;
+		items: { key: string; label: string; hint?: string; active: boolean; onPick: () => void }[];
+	}[];
+}) {
+	const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+	const [pinned, setPinned] = useState(false);
+	const q = query.trim().toLowerCase();
+	const shown = groups
+		.map((g) => (q ? { ...g, items: g.items.filter((it) => it.label.toLowerCase().includes(q)) } : g))
+		.filter((g) => g.items.length > 0);
+	return (
+		<div
+			className={drawerClass(true, pinned, clickMode, open)}
+			onClick={drawerTabClick(clickMode, onToggleOpen)}
+			onContextMenu={pinOnEmptyRightClick(() => setPinned((v) => !v))}
+		>
+			<div className="loom-map-panel-inner">
+			<div className="loom-map-panel-head">
+				<span className="loom-map-panel-title">{t('view.map.elementsPanel.title')}</span>
+				<div className="loom-shell-spacer" />
+				<DrawerButtons
+					pinned={pinned}
+					onPin={() => setPinned((v) => !v)}
+					clickMode={clickMode}
+					onToggleMode={onToggleMode}
+				/>
+			</div>
+			<div className="loom-map-panel-list">
+				{shown.map((g) => {
+					const isCollapsed = collapsed.has(g.key);
+					return (
+						<div key={g.key} className="loom-map-elements-group">
+							<button
+								className="loom-map-elements-head"
+								onClick={() =>
+									setCollapsed((cur) => {
+										const next = new Set(cur);
+										if (next.has(g.key)) next.delete(g.key);
+										else next.add(g.key);
+										return next;
+									})
+								}
+							>
+								<Icon name={isCollapsed ? 'chevron-right' : 'chevron-down'} />
+								<span>{g.title}</span>
+								<span className="loom-map-elements-count">{g.items.length}</span>
+							</button>
+							{isCollapsed
+								? null
+								: g.items
+										.slice()
+										.sort((a, b) => a.label.localeCompare(b.label))
+										.map((it) => (
+											<button
+												key={it.key}
+												className={it.active ? 'loom-map-elements-row loom-map-elements-row-on' : 'loom-map-elements-row'}
+												onClick={it.onPick}
+											>
+												<span>{it.label}</span>
+												{it.hint ? <span className="loom-combo-hint">{it.hint}</span> : null}
+											</button>
+										))}
+						</div>
+					);
+				})}
+				{shown.length === 0 ? (
+					<div className="loom-map-panel-empty">{q ? t('common.noMatches') : t('view.map.elementsPanel.empty')}</div>
+				) : null}
+			</div>
+			</div>
+			<div className="loom-map-panel-edge" aria-hidden="true">
+				<Icon name="file-box" />
+			</div>
+		</div>
+	);
+}
+
 /** Left navigator for a project's map pages: slides out on hover, pins open, has
  *  its own name search, and supports drag-to-nest (folder-like). */
 function MapsPanel({
@@ -4414,6 +5525,10 @@ function MapsPanel({
 	onNest,
 	onPageDragStart,
 	onPageDragEnd,
+	clickMode,
+	open,
+	onToggleMode,
+	onToggleOpen,
 }: {
 	plugin: LoomLoomPlugin;
 	pages: MapPage[];
@@ -4427,6 +5542,11 @@ function MapsPanel({
 	 *  (never for the active page: a door to the map you're on goes nowhere). */
 	onPageDragStart: (id: string) => void;
 	onPageDragEnd: () => void;
+	/** Opening mode — on hover, or on click (`open` then says whether it's out). */
+	clickMode: boolean;
+	open: boolean;
+	onToggleMode: () => void;
+	onToggleOpen: () => void;
 }) {
 	const [pinned, setPinned] = useState(false);
 	const [menuOpen, setMenuOpen] = useState(false);
@@ -4625,7 +5745,11 @@ function MapsPanel({
 	// right-click menu or the rename field doesn't slide the panel shut.
 	const forceOpen = pinned || menuOpen || renaming !== null;
 	return (
-		<div className={forceOpen ? 'loom-map-panel loom-map-panel-pinned' : 'loom-map-panel'}>
+		<div
+			className={drawerClass(false, forceOpen, clickMode, open)}
+			onClick={drawerTabClick(clickMode, onToggleOpen)}
+			onContextMenu={pinOnEmptyRightClick(() => setPinned((v) => !v))}
+		>
 			<div className="loom-map-panel-inner">
 				<div className="loom-map-panel-head">
 					<span className="loom-map-panel-title">{mapsLabel()}</span>
@@ -4633,13 +5757,12 @@ function MapsPanel({
 					<button className="loom-map-icon-btn" aria-label={t('view.map.newMap')} onClick={() => onCreate(null)}>
 						<Icon name="plus" />
 					</button>
-					<button
-						className={pinned ? 'loom-map-icon-btn loom-filter-active' : 'loom-map-icon-btn'}
-						aria-label={pinned ? t('view.map.unpinPanel') : t('view.map.pinPanelOpen')}
-						onClick={() => setPinned((v) => !v)}
-					>
-						<Icon name={pinned ? 'pin' : 'pin-off'} />
-					</button>
+					<DrawerButtons
+						pinned={pinned}
+						onPin={() => setPinned((v) => !v)}
+						clickMode={clickMode}
+						onToggleMode={onToggleMode}
+					/>
 				</div>
 				<input
 					className="loom-map-panel-search"
@@ -4668,7 +5791,7 @@ function MapsPanel({
 				</div>
 			</div>
 			<div className="loom-map-panel-edge" aria-hidden="true">
-				<Icon name="chevrons-right" />
+				<Icon name="map" />
 			</div>
 		</div>
 	);
@@ -4706,8 +5829,8 @@ const FG_STAGGER = 0.06; // per-layer delay fraction for the web-growth ripple
 const FG_LABEL_PX = 13; // label size in unit space (scaled by the view's node unit)
 
 // --- Focus-graph geometry (all in UNIT space — one unit = the regular node
-// radius in world px at scale 1; the renderer multiplies everything by the map's
-// node unit, so the whole graph switches between regular and node-view scale).
+// radius; the renderer multiplies everything by the focused zone's drawn marker
+// unit, so the graph sizes like the markers it grows out of).
 // The numbers mirror the main graph's routing constants (see graph/layout.ts), so
 // a focus graph reads exactly like the main one: diagonal exits into a vertical
 // trunk lane, an optional horizontal run in the band above the target row, and a
@@ -4777,8 +5900,8 @@ function FocusGraphLayer({
 	project: ProjectDef;
 	focusPath: string;
 	nodeWorld: { x: number; y: number };
-	/** World px per unit — the map page's element scale, so the graph is sized
-	 *  against the map's own geometry. */
+	/** World px per unit — the focused zone's drawn marker unit, so the graph is
+	 *  sized like the markers it grows out of. */
 	unit: number;
 	/** Index version — recompute the neighborhood when the vault changes. */
 	version: number;
@@ -5091,8 +6214,8 @@ function FocusGraphLayer({
 		return easeOut(Math.max(0, Math.min(1, (prog - startAt) / (1 - startAt))));
 	};
 	// A node's live (animated) world position + its reveal progress. Unit space →
-	// world: offsets and radii scale by `unit` (the page's element scale), so the
-	// graph is proportional to the map it grows out of.
+	// world: offsets and radii scale by `unit` (the zone's marker unit), so the
+	// graph is proportional to the zone it grows out of.
 	const posOf = (id: string) => {
 		const s = slots.get(id);
 		if (!s) return null;

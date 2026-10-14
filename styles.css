@@ -1835,6 +1835,14 @@ span.loom-row-caret {
 	background: var(--background-modifier-hover);
 }
 
+/* Secondary text after a result's name (what kind of thing it is) — faded, so
+   it doesn't read as part of the name. */
+.loom-combo-hint {
+	margin-left: var(--size-2-2);
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
 /* Arrow-key highlight (SuggestInput) — a plain :hover would fight the
    keyboard-driven selection whenever the cursor happens to sit over a row. */
 .loom-combo-menu .loom-combo-item-active {
@@ -2101,19 +2109,23 @@ span.loom-row-caret {
 	flex: 1 1 0;
 }
 
-/* Anchors "Set up project" to the top of the window instead of Obsidian's
-   default vertical centering (`align-items: center` on `.modal-container`,
-   the modal's own `containerEl`) — this modal's height changes noticeably
-   switching Create/Use, and centering made the box's own top edge jump up
-   and down on every switch since centering holds the MIDDLE fixed, not the
-   top. `!important` since the specificity of Obsidian's own base rule here
-   isn't something a plugin stylesheet can otherwise be sure to win. */
-.loom-setup-modal-container {
+/* Anchors a modal whose height changes while it's open ("Set up project"
+   switching kinds, the map image browser filtering its grid) to the top of the
+   window instead of Obsidian's default vertical centering (`align-items: center`
+   on `.modal-container`, the modal's own `containerEl`): centering holds the
+   MIDDLE fixed, so the box's top edge — and everything on it — jumped on every
+   height change. `!important` since the specificity of Obsidian's own base rule
+   here isn't something a plugin stylesheet can otherwise be sure to win. */
+.loom-modal-top {
 	align-items: flex-start !important;
 }
 
-.loom-setup-modal-container .modal {
+.loom-modal-top .modal {
 	margin-top: 10vh;
+}
+
+.loom-modal-top .modal.loom-map-image-modal {
+	margin-top: calc(10vh + 100px);
 }
 
 /* ---- entity page ---- */
@@ -4406,12 +4418,47 @@ span.loom-row-caret {
 }
 
 /* ---- maps ---- */
+.loom-map-frame {
+	position: relative;
+	height: 100%;
+}
+
+/* Invisible strip over the shell padding left of the canvas (outside the
+   canvas's clipped box, so the drawer itself can't reach it): hovering it slides
+   the drawer open, and once open the drawer's own :hover keeps it there. */
+.loom-map-gap-hover {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: calc(-1 * var(--size-4-4));
+	width: var(--size-4-4);
+}
+
+.loom-map-gap-hover:not(.loom-map-gap-hover-right):hover
+	~ .loom-map-wrap
+	.loom-map-panel:not(.loom-map-panel-right):not(.loom-map-panel-click) {
+	transform: translateX(0);
+}
+
+/* The same strip on the right, for the Elements drawer. */
+.loom-map-gap-hover.loom-map-gap-hover-right {
+	left: auto;
+	right: calc(-1 * var(--size-4-4));
+}
+
+.loom-map-gap-hover-right:hover ~ .loom-map-wrap .loom-map-panel-right:not(.loom-map-panel-click) {
+	transform: translateX(0);
+}
+
+/* `--loom-map-bg` is the page's own background colour when one is set (the
+   right-click menu's "Background color"); everything that needs to match the
+   canvas — its fill, the halo behind map text — reads it. */
 .loom-map-wrap {
 	position: relative;
 	height: 100%;
 	min-height: 0;
 	overflow: hidden;
-	background: var(--background-secondary);
+	background: var(--loom-map-bg, var(--background-secondary));
 	border-radius: var(--radius-m);
 }
 
@@ -4437,6 +4484,19 @@ span.loom-row-caret {
 
 .loom-map-vertex-first {
 	fill: var(--interactive-accent);
+}
+
+/* A zone/path knot grows + fills on hover, so it's clear a press moves just
+   that knot, not the whole zone around it. */
+.loom-map-knot {
+	transform-box: fill-box;
+	transform-origin: center;
+	transition: transform 0.1s ease, fill 0.1s ease;
+}
+
+.loom-map-knot:hover {
+	fill: var(--interactive-accent);
+	transform: scale(1.54);
 }
 
 /* Marquee-selected vertices: filled accent so the group reads as one selection. */
@@ -4466,11 +4526,100 @@ span.loom-row-caret {
 	cursor: pointer;
 }
 
+/* Terrain / path-style preset buttons in the zone style popover. */
+.loom-map-presets {
+	display: flex;
+	gap: 2px;
+}
+
+/* Map text — free labels, zone/path names, node labels, region titles — gets a
+   halo in the canvas colour, so it reads over zones and paths. */
+.loom-map-free-label,
+.loom-map-zone-name,
+.loom-map-node-label,
+.loom-map-region-label {
+	stroke: var(--loom-map-bg, var(--background-secondary));
+	stroke-width: 3px;
+	paint-order: stroke;
+}
+
+/* Free map labels ("The Shattered Sea"): map lettering, with a halo in the
+   canvas colour so they read over zones and paths. */
+.loom-map-free-label {
+	fill: var(--text-muted);
+	font-style: italic;
+	font-weight: var(--font-semibold);
+	letter-spacing: 0.06em;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+	cursor: pointer;
+	user-select: none;
+}
+
+.loom-map-free-label-sel {
+	fill: var(--interactive-accent);
+}
+
+/* Label panel text field: no focus ring (the panel is the context). */
+.loom-view .loom-map-label-text {
+	width: 180px;
+}
+
+/* Text fields in the map's panels: no focus ring (the panel is the context). */
+.loom-view .loom-map-label-text:focus,
+.loom-view .loom-map-scrub:focus,
+.loom-view .loom-map-zone-name-input:focus {
+	box-shadow: none !important;
+}
+
+/* ScrubNumber: one box holding its icon and the number. */
+.loom-map-scrub-wrap {
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-1);
+	height: var(--input-height);
+	padding: 0 var(--size-2-2);
+	border: var(--input-border-width, 1px) solid var(--background-modifier-border);
+	border-radius: var(--input-radius);
+	background: var(--background-modifier-form-field);
+	color: var(--text-muted);
+}
+
+.loom-map-scrub-wrap .loom-icon {
+	display: flex;
+}
+
+.loom-map-scrub-wrap .loom-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.loom-view .loom-map-scrub {
+	width: 40px;
+	height: auto;
+	padding: 0;
+	border: none !important;
+	background: transparent !important;
+	text-align: center;
+}
+
+/* Unfocused, the number is a scrubber: press and drag to change it. */
+.loom-view .loom-map-scrub-idle {
+	cursor: nesw-resize;
+}
+
+/* Text kept for screen readers only. */
+.loom-sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
 .loom-map-node-label {
 	fill: var(--text-normal);
-	paint-order: stroke;
-	stroke: var(--background-secondary);
-	stroke-width: 3px;
 	pointer-events: none;
 }
 
@@ -4539,30 +4688,104 @@ span.loom-row-caret {
 	color: var(--text-muted);
 }
 
-/* Background-image page of the global menu: wide enough for file names, and its
-   row list scrolls (a project can hold plenty of images). */
-.loom-map-image-picker {
-	width: 260px;
+/* Background colour row in the global menu: label, swatch, reset — not a
+   clickable row itself. */
+.loom-view .loom-map-menu-row.loom-map-menu-row-static {
+	cursor: default;
 }
 
-.loom-map-image-picker .loom-map-subs-search {
+.loom-view .loom-map-menu-row-static:hover {
+	background: transparent;
+}
+
+/* The zone menu's swatch (`.loom-map-color`: the whole element is the colour),
+   filling the menu row between its icon and the reset button. */
+.loom-view .loom-map-color.loom-map-bg-color {
+	flex: 1;
+	width: auto;
+	min-width: 0;
+	height: 22px;
+}
+
+/* Separator between the global menu's groups. */
+.loom-map-menu-divider {
+	height: 1px;
 	margin: var(--size-2-1) 0;
+	background: var(--background-modifier-border);
+}
+
+/* Background-image browser (a modal): search + import on top, a scrolling grid
+   of thumbnail tiles below. */
+.loom-map-image-modal {
+	width: min(760px, 90vw);
+}
+
+.loom-map-image-bar {
+	display: flex;
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-3);
+}
+
+.loom-map-image-bar input {
+	flex: 1;
+}
+
+.loom-map-image-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+	gap: var(--size-4-2);
+	max-height: 60vh;
+	overflow-y: auto;
+}
+
+.loom-map-image-modal .loom-map-image-tile {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: var(--size-2-2);
+	height: auto;
+	padding: var(--size-2-2);
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: none;
+	cursor: pointer;
+}
+
+.loom-map-image-modal .loom-map-image-tile:hover {
+	border-color: var(--interactive-accent);
+}
+
+.loom-map-image-tile > span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	text-align: center;
+}
+
+.loom-map-image-empty {
+	grid-column: 1 / -1;
+	color: var(--text-muted);
+	text-align: center;
+	padding: var(--size-4-4);
 }
 
 /* A file name alone rarely says which map an image is — show a thumbnail. */
 .loom-map-image-thumb {
-	flex: none;
-	width: 28px;
-	height: 28px;
+	display: block;
+	width: 100%;
+	aspect-ratio: 1;
 	border-radius: var(--radius-s);
 	object-fit: cover;
 	background: var(--background-modifier-border);
 }
 
-.loom-view .loom-map-image-row > span {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+/* The icon span is inline by default, so its svg sat on the text baseline and
+   rode a couple of px off-centre. */
+.loom-view .loom-map-icon-btn .loom-icon {
+	display: flex;
 }
 
 /* Icon-style menu items: a bare icon (no button box), tinting only on hover.
@@ -4707,20 +4930,49 @@ span.loom-row-caret {
 	white-space: nowrap;
 }
 
+/* A row's reset button sits at its right edge, so resets line up whatever the
+   control before them. */
+.loom-view .loom-map-palette-row .loom-map-reset {
+	margin-left: auto;
+}
+
+/* Number boxes in the style popover fill the row between its label and its
+   reset button. */
+.loom-map-palette-row .loom-map-scrub-wrap {
+	flex: 1;
+}
+
+/* `width: 0` + flex: the number fills the row without its own intrinsic input
+   width (~20 characters) stretching the whole popover. */
+.loom-view .loom-map-palette-row .loom-map-scrub {
+	flex: 1;
+	width: 0;
+	min-width: 0;
+	text-align: center;
+}
+
+/* The name field fills the same slot as the location search it swaps with. */
+.loom-view .loom-map-zone-name-input {
+	flex: 1;
+	min-width: 0;
+	width: 100%;
+}
+
+/* Name of an unlinked zone or path, written on the map like a free label. */
+.loom-map-zone-name {
+	fill: var(--text-muted);
+	font-style: italic;
+	letter-spacing: 0.04em;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+	pointer-events: none;
+}
+
 .loom-map-palette-row input[type='range'] {
 	width: 96px;
 }
 
 /* Embedded Obsidian SliderComponent (matches the settings-tab sliders). */
-.loom-map-obsidian-slider {
-	display: flex;
-	align-items: center;
-}
-
-.loom-map-obsidian-slider .slider {
-	width: 96px;
-}
-
 /* The whole element IS the color: a wide horizontal rectangle filled edge-to-edge
    with the picked color — no visible frame/padding around an inner swatch. */
 .loom-view .loom-map-color {
@@ -4728,7 +4980,7 @@ span.loom-row-caret {
 	-webkit-appearance: none;
 	flex: 1;
 	width: auto;
-	min-width: 120px;
+	min-width: 96px;
 	height: 26px;
 	padding: 0;
 	margin: 0;
@@ -4738,6 +4990,24 @@ span.loom-row-caret {
 	box-shadow: none;
 	cursor: pointer;
 	overflow: hidden;
+}
+
+/* No hover/focus outline (Obsidian's ring, drawn on the inner swatch, got
+   clipped inside the menu rows); a slight dim says it's clickable instead. */
+.loom-view .loom-map-color:hover,
+.loom-view .loom-map-color:focus,
+.loom-view .loom-map-color:focus-visible,
+.loom-view .loom-map-color::-webkit-color-swatch,
+.loom-view .loom-map-color::-webkit-color-swatch:hover,
+.loom-view .loom-map-color:focus::-webkit-color-swatch,
+.loom-view .loom-map-color:focus-visible::-webkit-color-swatch {
+	border: none !important;
+	box-shadow: none !important;
+	outline: none !important;
+}
+
+.loom-view .loom-map-color:hover {
+	filter: brightness(0.94);
 }
 
 .loom-map-color::-webkit-color-swatch-wrapper {
@@ -4807,16 +5077,13 @@ span.loom-row-caret {
 	cursor: pointer;
 }
 
-/* Region wraps (node view): auto-hull around a region's location clusters. */
+/* Region wraps (shown as a region's places fold): auto-hull around a region's location clusters. */
 .loom-map-region {
 	cursor: pointer;
 }
 
 .loom-map-region-label {
 	font-weight: var(--font-semibold);
-	paint-order: stroke;
-	stroke: var(--background-secondary);
-	stroke-width: 3px;
 	pointer-events: none;
 	user-select: none;
 }
@@ -4982,7 +5249,6 @@ span.loom-row-caret {
 	text-align: center;
 }
 
-/* Top-left map controls: find-a-location search + the vertical scale slider. */
 /* ---- Maps navigator panel (left, slides on hover, pins open) ---- */
 .loom-map-panel {
 	position: absolute;
@@ -4992,25 +5258,38 @@ span.loom-row-caret {
 	z-index: 28;
 	display: flex;
 	align-items: stretch;
-	/* Hidden: only the 16px edge tab peeks out; hover/pin slides it in. */
-	transform: translateX(-240px);
+	/* Hidden: only the 16px edge tab peeks out; hover/pin slides it in. The
+	   transparent right padding widens the hover strip past the tab (full height,
+	   32px), so it's easy to hit. */
+	padding-right: 16px;
+	/* Card (240) + its gap from the canvas edge (6) — only the tab and the hover
+	   padding stay in view. */
+	transform: translateX(-246px);
 	transition: transform 0.18s ease;
 }
 
-.loom-map-panel:hover,
-.loom-map-panel-pinned {
+.loom-map-panel:not(.loom-map-panel-click):hover,
+.loom-map-panel-pinned,
+.loom-map-panel-open {
 	transform: translateX(0);
 }
 
 .loom-map-panel-inner {
 	width: 240px;
-	height: 100%;
+	/* Inset from the canvas's top and bottom (the panel row stretches it), so it
+	   reads as a card sliding out from under the left edge. The hover strip — the
+	   panel row itself — stays full height. */
+	margin-block: var(--size-2-3);
+	/* A floating card, inset from the canvas edge by the same 6px as from its top
+	   and bottom — fully outlined, every corner rounded. */
+	margin-left: var(--size-2-3);
 	display: flex;
 	flex-direction: column;
 	gap: var(--size-2-2);
 	padding: var(--size-2-3);
 	background: var(--background-primary);
-	border-right: 1px solid var(--background-modifier-border);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
 	box-shadow: var(--shadow-s);
 }
 
@@ -5029,13 +5308,62 @@ span.loom-row-caret {
 	height: 64px;
 }
 
-.loom-map-panel-pinned .loom-map-panel-edge {
-	display: none;
+/* Click mode: hovering doesn't open a drawer — clicking its tab (or the gap
+   strip beside the canvas) does. */
+.loom-map-panel-click .loom-map-panel-edge,
+.loom-map-gap-click {
+	cursor: pointer;
 }
 
 .loom-map-panel-edge svg {
 	width: 14px;
 	height: 14px;
+}
+
+/* Both drawers carry a slight accent tint, so they read as panels over the map
+   rather than more map. */
+.loom-map-panel-inner,
+.loom-map-panel-edge {
+	background: color-mix(in srgb, var(--background-primary) 94%, var(--interactive-accent));
+}
+
+/* Elements drawer: the Maps drawer mirrored onto the right edge — tab on its
+   left side, outline open on the right, left corners rounded. */
+.loom-map-panel.loom-map-panel-right {
+	left: auto;
+	right: 0;
+	flex-direction: row-reverse;
+	padding-right: 0;
+	padding-left: 16px;
+	transform: translateX(246px);
+}
+
+.loom-map-panel.loom-map-panel-right:not(.loom-map-panel-click):hover,
+.loom-map-panel.loom-map-panel-right.loom-map-panel-pinned,
+.loom-map-panel.loom-map-panel-right.loom-map-panel-open {
+	transform: translateX(0);
+}
+
+.loom-map-panel-right .loom-map-panel-inner {
+	margin-left: 0;
+	margin-right: var(--size-2-3);
+}
+
+.loom-map-panel-right .loom-map-panel-edge {
+	border: 1px solid var(--background-modifier-border);
+	border-right: none;
+	border-radius: var(--radius-m) 0 0 var(--radius-m);
+}
+
+/* The search/fit controls step left while the Elements drawer is out. */
+.loom-map-frame:has(
+		.loom-map-panel-right:not(.loom-map-panel-click):hover,
+		.loom-map-panel-right.loom-map-panel-pinned,
+		.loom-map-panel-right.loom-map-panel-open,
+		.loom-map-gap-hover-right:hover ~ .loom-map-wrap .loom-map-panel-right:not(.loom-map-panel-click)
+	)
+	.loom-map-controls {
+	right: calc(240px + var(--size-2-3) + var(--size-4-3) + 4px);
 }
 
 .loom-map-panel-head {
@@ -5068,7 +5396,10 @@ span.loom-row-caret {
 	padding: var(--size-2-2);
 }
 
-.loom-view .loom-map-page-row {
+/* Rows in both map drawers (Maps pages, Elements). */
+.loom-view .loom-map-page-row,
+.loom-view .loom-map-elements-head,
+.loom-view .loom-map-elements-row {
 	display: flex;
 	align-items: center;
 	gap: var(--size-2-1);
@@ -5079,7 +5410,9 @@ span.loom-row-caret {
 	user-select: none;
 }
 
-.loom-view .loom-map-page-row:hover {
+.loom-view .loom-map-page-row:hover,
+.loom-view .loom-map-elements-head:hover,
+.loom-view .loom-map-elements-row:hover {
 	background: var(--background-modifier-hover);
 }
 
@@ -5137,16 +5470,83 @@ span.loom-row-caret {
 	top: var(--size-4-3);
 	/* Top-right so the sliding Maps panel on the left never covers them. */
 	right: var(--size-4-3);
-	z-index: 25;
+	/* Above the Elements drawer's hidden hover strip, so it can't swallow them;
+	   they slide left while that drawer is out. */
+	z-index: 29;
+	transition: right 0.18s ease;
 	display: flex;
-	flex-direction: column;
-	align-items: flex-end;
+	align-items: center;
 	gap: var(--size-2-3);
+}
+
+.loom-map-search {
 	width: 172px;
 }
 
 .loom-map-search .loom-combo {
 	max-width: none;
+}
+
+/* Elements rows are buttons: strip the button look (Obsidian centres button
+   content; these read left-aligned, at the Maps drawer's text size). */
+.loom-view .loom-map-elements-head,
+.loom-view .loom-map-elements-row {
+	justify-content: flex-start;
+	width: 100%;
+	height: auto;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	text-align: left;
+	font-size: inherit;
+}
+
+.loom-view .loom-map-elements-head {
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+}
+
+.loom-map-elements-head .loom-icon {
+	display: flex;
+}
+
+.loom-map-elements-head .loom-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.loom-map-elements-count {
+	margin-left: auto;
+	color: var(--text-faint);
+	font-weight: var(--font-normal);
+}
+
+.loom-view .loom-map-elements-row {
+	padding-left: calc(var(--size-2-2) + 18px);
+}
+
+.loom-map-elements-row > span:first-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-view .loom-map-elements-row.loom-map-elements-row-on {
+	background: var(--background-modifier-hover);
+	color: var(--text-accent);
+}
+
+/* The search sits at the map's top-right corner, so its results open leftward
+   from the field's right edge — anchored left, they ran off the canvas and got
+   clipped. Rows read left-aligned, name then its faded kind. */
+.loom-map-search .loom-combo-menu {
+	left: auto;
+	right: 0;
+}
+
+.loom-view .loom-map-search .loom-combo-item {
+	display: block;
+	text-align: left;
 }
 
 /* The find-a-location field sits over the canvas — give it an opaque background
@@ -5156,41 +5556,18 @@ span.loom-row-caret {
 	background-color: var(--background-primary);
 }
 
-.loom-map-scale {
-	display: flex;
-	flex-direction: column;
-	width: max-content;
+/* Fit-all button. */
+.loom-view .loom-map-controls > .loom-map-fit {
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);
 	box-shadow: var(--shadow-s);
-	overflow: hidden;
 }
 
-.loom-view .loom-map-scale-stop {
-	background: transparent;
-	border: none;
-	box-shadow: none;
-	border-radius: 0;
-	padding: var(--size-2-2) var(--size-4-3);
-	text-align: left;
-	color: var(--text-muted);
-	cursor: pointer;
-	font-size: var(--font-ui-smaller);
-}
-
-.loom-view .loom-map-scale-stop:not(:last-child) {
-	border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.loom-view .loom-map-scale-stop:hover {
-	background: var(--background-modifier-hover);
-}
-
-.loom-view .loom-map-scale-stop.loom-map-scale-on {
-	background: var(--interactive-accent);
-	color: var(--text-on-accent);
-	font-weight: var(--font-semibold);
+/* Hover stays opaque — the shared icon-button hover tint is translucent, which
+   let the map show through these floating buttons. */
+.loom-view .loom-map-controls > .loom-map-fit:hover:not(:disabled) {
+	background: var(--background-primary-alt);
 }
 
 /* Background images — the bottom layer of a map. Click-through: the svg's own
@@ -5247,33 +5624,6 @@ span.loom-row-caret {
 /* The background-image file picker is opened from the global menu, never shown. */
 .loom-map-file-input {
 	display: none;
-}
-
-/* Element size — the page's marker-scale anchor, next to the view-scale stops. */
-.loom-map-elemsize {
-	position: relative;
-	display: flex;
-}
-
-.loom-view .loom-map-elemsize > .loom-map-icon-btn {
-	background: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m);
-	box-shadow: var(--shadow-s);
-}
-
-/* Anchor the popover to the control's right edge — it sits at the view's right
-   side, so a centered pop would hang off the canvas. */
-.loom-map-elemsize .loom-map-palette-pop {
-	left: auto;
-	right: 0;
-	transform: none;
-}
-
-.loom-map-elemsize-readout {
-	font-size: var(--font-ui-smaller);
-	color: var(--text-faint);
-	white-space: nowrap;
 }
 
 /* --- Fountain script view ------------------------------------------------ */
