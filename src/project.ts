@@ -3196,7 +3196,7 @@ export class SetupProjectModal extends Modal {
 		// Anchored to the top instead of Obsidian's vertical centering: the
 		// modal's height changes with the picked kind (Writer adds its pills),
 		// and centering would move its top edge on every switch.
-		this.containerEl.addClass('loom-setup-modal-container');
+		this.containerEl.addClass('loom-modal-top');
 		this.render();
 	}
 

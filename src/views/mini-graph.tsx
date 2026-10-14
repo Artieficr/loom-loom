@@ -182,7 +182,7 @@ export function GraphFilter({
 						aria-checked={filterMode === 'hide'}
 						onClick={() => setFilterMode(filterMode === 'dim' ? 'hide' : 'dim')}
 					>
-						<Icon name={filterMode === 'dim' ? 'eye-off' : 'eye-closed'} />
+						<Icon name={filterMode === 'dim' ? 'loom-eye-dashed' : 'eye-closed'} />
 						<span>{filterMode === 'dim' ? t('view.graph.dimmed') : t('view.graph.hidden')}</span>
 						<div className={filterMode === 'hide' ? 'checkbox-container is-enabled' : 'checkbox-container'} />
 					</div>

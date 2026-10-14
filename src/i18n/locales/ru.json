@@ -498,11 +498,6 @@
 			"newConnectedType": "Новая связанная сущность: {label}"
 		},
 		"map": {
-			"viewMode": {
-				"closeup": "Крупный план",
-				"regular": "Обычный",
-				"nodeview": "Вид узлов"
-			},
 			"size": {
 				"s": "S",
 				"m": "M",
@@ -515,7 +510,6 @@
 			"untitledMap": "Карта без названия",
 			"newMap": "Новая карта",
 			"newMapNumbered": "Новая карта {n}",
-			"roadsStartOnLocation": "Дороги начинаются от локации — щёлкните по локации, чтобы начать.",
 			"importedAtRealSize": "Изображение «{name}» импортировано в реальном пиксельном размере.",
 			"imageMenu": {
 				"unlock": "Разблокировать",
@@ -533,19 +527,12 @@
 			"tool": {
 				"rectangle": "Прямоугольник",
 				"polygon": "Полигон",
-				"road": "Дорога"
+				"road": "Путь"
 			},
-			"drawAZone": "Нарисовать зону",
 			"backgroundImage": "Фоновое изображение",
 			"importImage": "Импортировать изображение…",
 			"nothingImportedYet": "Пока ничего не импортировано",
 			"searchImages": "Поиск среди {count} изображений…",
-			"findLocationPlaceholder": "Найти локацию…",
-			"viewScaleAria": "Масштаб отображения",
-			"elementSizeAria": "Размер элементов",
-			"elements": "Элементы",
-			"fitToZonesAria": "Подогнать под уже нарисованные зоны",
-			"elementScaleReadout": "{scale}× · узел ≈ {units} ед.",
 			"showAsNodeAria": "Показывать как узел в зоне",
 			"showDoorAria": "Показывать дверь в зоне",
 			"columnLocation": "Локация",

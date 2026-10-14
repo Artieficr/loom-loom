@@ -429,9 +429,12 @@ export function SearchableSelect({
 	action,
 	initialQuery,
 	autoFocus,
+	onQueryChange,
 }: {
 	placeholder: string;
-	options: { value: string; label: string }[];
+	/** `hint` is optional secondary text shown faded after the label (e.g. the
+	 *  kind of thing a result is); it isn't searched. */
+	options: { value: string; label: string; hint?: string }[];
 	onPick: (value: string) => void;
 	/** Extra fixed entry pinned at the top of the list (e.g. "+ New session…"),
 	 *  so it never needs scrolling to reach. */
@@ -440,9 +443,15 @@ export function SearchableSelect({
 	initialQuery?: string;
 	/** Focus (and select) the field on mount, so typing starts immediately. */
 	autoFocus?: boolean;
+	/** Reports the typed query as it changes (e.g. to filter a list elsewhere). */
+	onQueryChange?: (query: string) => void;
 }) {
 	const [open, setOpen] = useState(false);
-	const [query, setQuery] = useState(initialQuery ?? '');
+	const [query, setQueryState] = useState(initialQuery ?? '');
+	const setQuery = (q: string) => {
+		setQueryState(q);
+		onQueryChange?.(q);
+	};
 	const wrapRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
 	useEffect(() => {
@@ -501,6 +510,7 @@ export function SearchableSelect({
 					{filtered.map((o) => (
 						<button key={o.value} className="loom-combo-item" onClick={() => pick(o.value)}>
 							{o.label}
+							{o.hint ? <span className="loom-combo-hint">{o.hint}</span> : null}
 						</button>
 					))}
 					{filtered.length === 0 ? <div className="loom-combo-empty">{t('common.noMatches')}</div> : null}

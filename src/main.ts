@@ -39,6 +39,7 @@ import { SnapshotsModal, startSnapshots } from './snapshots';
 import { LicenseManager } from './license/manager';
 import { POLAR_ORGANIZATION_ID, PolarLicenseProvider } from './license/polar-provider';
 import { resolveActiveLocale, setLocale, t } from './i18n';
+import { registerIcons } from './icons';
 
 /** How often the plugin re-checks an activated license in the background.
  *  Well inside the 30-day
@@ -60,6 +61,7 @@ export default class LoomLoomPlugin extends Plugin {
 	private windowBodies = new Set<HTMLElement>([document.body]);
 
 	async onload(): Promise<void> {
+		registerIcons();
 		await this.loadSettings();
 		this.registerEvent(
 			this.app.workspace.on('window-open', (_w, win) => {

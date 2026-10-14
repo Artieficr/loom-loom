@@ -574,11 +574,6 @@
 			"newConnectedType": "New connected {label}"
 		},
 		"map": {
-			"viewMode": {
-				"closeup": "Close up",
-				"regular": "Regular",
-				"nodeview": "Node view"
-			},
 			"size": {
 				"s": "S",
 				"m": "M",
@@ -591,7 +586,6 @@
 			"untitledMap": "Untitled map",
 			"newMap": "New map",
 			"newMapNumbered": "New map {n}",
-			"roadsStartOnLocation": "Roads start on a location — click a location to begin.",
 			"importedAtRealSize": "Imported {name} at its real pixel size.",
 			"imageMenu": {
 				"unlock": "Unlock",
@@ -610,19 +604,52 @@
 			"tool": {
 				"rectangle": "Rectangle",
 				"polygon": "Polygon",
-				"road": "Road"
+				"road": "Path"
 			},
-			"drawAZone": "Draw a zone",
+			"addLabel": "Add label",
+			"labelPromptTitle": "Map label",
+			"labelMenu": {
+				"text": "Label text",
+				"size": "Font size",
+				"delete": "Delete label"
+			},
+			"terrain": {
+				"plain": "Plain",
+				"water": "Water",
+				"forest": "Forest",
+				"mountains": "Mountains",
+				"fields": "Fields"
+			},
+			"pathStyle": {
+				"plain": "Plain",
+				"road": "Road",
+				"river": "River"
+			},
+			"backgroundColor": "Background color",
+			"resetBackgroundColor": "Reset to the theme's color",
 			"backgroundImage": "Background image",
 			"importImage": "Import image…",
 			"nothingImportedYet": "Nothing imported yet",
 			"searchImages": "Search {count} images…",
-			"findLocationPlaceholder": "Find a location…",
-			"viewScaleAria": "View scale",
-			"elementSizeAria": "Element size",
-			"elements": "Elements",
-			"fitToZonesAria": "Fit to the zones already drawn",
-			"elementScaleReadout": "{scale}× · node ≈ {units} units",
+			"searchPlaceholder": "Search…",
+			"elementsPanel": {
+				"title": "Elements",
+				"locations": "Locations",
+				"zones": "Zones",
+				"paths": "Paths",
+				"labels": "Labels",
+				"images": "Background images",
+				"unnamedZone": "Unnamed zone",
+				"unnamedPath": "Unnamed path",
+				"empty": "Nothing on this map yet"
+			},
+			"searchKind": {
+				"location": "location",
+				"zone": "zone",
+				"path": "path",
+				"label": "label"
+			},
+			"fitAllAria": "Fit everything in view",
 			"showAsNodeAria": "Show as node in the zone",
 			"showDoorAria": "Show a door in the zone",
 			"columnLocation": "Location",
@@ -651,6 +678,13 @@
 				"resetWidth": "Reset width",
 				"unlockZone": "Unlock zone",
 				"lockZone": "Lock zone",
+				"useName": "Use a name instead of a location",
+				"useLocation": "Use a linked location instead of a name",
+				"namePlaceholder": "Name…",
+				"terrain": "Terrain",
+				"pathStyle": "Kind",
+				"bringToFront": "Bring to front",
+				"sendToBack": "Send to back",
 				"deleteZone": "Delete zone"
 			},
 			"nameExistsTitle": "Name already exists",
@@ -663,6 +697,10 @@
 			"collapse": "Collapse",
 			"searchMapsPlaceholder": "Search maps…",
 			"noMaps": "No maps",
+			"drawerMode": {
+				"hover": "Opens on hover — switch to opening on click",
+				"click": "Opens on click — switch to opening on hover"
+			},
 			"unpinPanel": "Unpin panel",
 			"pinPanelOpen": "Pin panel open",
 			"rightClickHint": "Right-click for options, then draw a zone."
