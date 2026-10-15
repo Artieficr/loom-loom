@@ -1,5 +1,6 @@
 import { Menu, Notice, ViewStateResult, debounce, setTooltip } from 'obsidian';
 import {
+	CSSProperties,
 	MouseEvent as ReactMouseEvent,
 	PointerEvent as ReactPointerEvent,
 	ReactElement,
@@ -39,6 +40,7 @@ import {
 	TimelineDef,
 	VIEW_GRAPH,
 	newEntityTitle,
+	entityPlural,
 } from '../types';
 import type { LoomTextSize, SavedGraphView } from '../settings';
 import { ConfirmModal, CreateEntityModal, TextInputModal, deleteEntityNote } from '../project';
@@ -58,8 +60,11 @@ import {
 	buildLinkTargetLabels,
 	noProjectMessage,
 	openEntityLink,
+	StartCue,
+	StartGuide,
 	useCloseOnOutsideClick,
 } from './common';
+import { TutorialStep, advanceTutorial, currentTutorialStep } from '../tutorial';
 import { recordLabel } from '../display';
 import { TimelineStrip } from './timeline-strip';
 import { resolveProject, useIndexVersion } from './hooks';
@@ -87,7 +92,7 @@ export class GraphView extends LoomReactView {
 		return VIEW_GRAPH;
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		return t('common.loomGraph');
 	}
 
@@ -1077,6 +1082,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			next.delete(node.id);
 			return next;
 		});
+		tutorialDone('graphUnpin');
 	};
 	/** Right-click toggles a node's pin: off if pinned, else locked where it is. */
 	const togglePin = (node: LayoutNode) => {
@@ -1110,10 +1116,38 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 	const unpinAllRef = useRef(unpinAll);
 	unpinAllRef.current = unpinAll;
 
+	// --- Tutorial ---------------------------------------------------------------
+	// The graph's own steps: completions in these effects and in the node
+	// handlers (focus, drag, pin, unpin), cues and lit targets in the JSX.
+	const tutorialStep = currentTutorialStep(project?.config);
+	const tutorialDone = (step: TutorialStep) => {
+		if (project && tutorialStep === step) advanceTutorial(plugin, project, step);
+	};
+	useEffect(() => {
+		if (!project) return;
+		if (tutorialStep === 'openGraph' || tutorialStep === 'graphBack') advanceTutorial(plugin, project, tutorialStep);
+		else if (tutorialStep === 'graphSelect' && selected !== null) advanceTutorial(plugin, project, 'graphSelect');
+		else if (tutorialStep === 'graphTimeline' && drawerOpen) advanceTutorial(plugin, project, 'graphTimeline');
+	}, [tutorialStep, selected, drawerOpen, project, plugin]);
+	// Focus: glide out a little first, so the zoom-in that follows shows.
+	useEffect(() => {
+		const el = wrapRef.current;
+		if (tutorialStep !== 'graphFocus' || !el) return;
+		const c = cameraRef.current;
+		const k = c.k * 0.6;
+		const cx = el.clientWidth / 2;
+		const cy = el.clientHeight / 2;
+		animateCamera({ k, tx: cx - (cx - c.tx) * (k / c.k), ty: cy - (cy - c.ty) * (k / c.k) });
+	}, [tutorialStep]);
+	// The drag / drag-and-pin hint plays until a node is pressed.
+	const [ghostOff, setGhostOff] = useState(false);
+	useEffect(() => setGhostOff(false), [tutorialStep]);
+
 	const onNodePointerDown = (node: LayoutNode, e: ReactPointerEvent<SVGGElement>) => {
 		// The creation-order animation owns node positions — no dragging/selecting
 		// while it plays.
 		if (animRef.current) return;
+		setGhostOff(true);
 		if (e.button !== 0) {
 			// Keep right/middle presses on a node away from the pan handler.
 			e.stopPropagation();
@@ -1141,6 +1175,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 			if (!drag || drag.id !== node.id || drag.moved) return;
 			drag.held = true;
 			focusNode(node);
+			tutorialDone('graphFocus');
 		}, HOLD_MS);
 		dragRef.current = {
 			id: node.id,
@@ -1303,6 +1338,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				setManualVersion((v) => v + 1);
 			} else {
 				startSpring();
+				tutorialDone('graphDrag');
 			}
 		} else {
 			dispRef.current.delete(drag.id);
@@ -1335,6 +1371,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		e.stopPropagation();
 		window.clearTimeout(drag.holdTimer);
 		pinNodeAt(drag.id, drag.worldX, drag.worldY);
+		tutorialDone('graphPin');
 		const d = dispRef.current.get(drag.id);
 		if (d) d.dragging = false;
 		dragRef.current = null;
@@ -1722,6 +1759,15 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (!pan.moved && e.button === 0) setSelected(null);
 	};
 
+	const createOfType = (type: EntityType) => {
+		if (!project) return;
+		new CreateEntityModal(plugin, type, project, {
+			// Stay on the graph — opening the new page would break
+			// the flow; double-clicking the node opens it anytime.
+			onCreated: () => {},
+		}).open();
+	};
+
 	const onSvgContextMenu = (e: ReactMouseEvent<SVGSVGElement>) => {
 		e.preventDefault();
 		if (!project) return;
@@ -1731,13 +1777,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 				item
 					.setTitle(newEntityTitle(type))
 					.setIcon(ENTITY_META[type].icon)
-					.onClick(() =>
-						new CreateEntityModal(plugin, type, project, {
-							// Stay on the graph — opening the new page would break
-							// the flow; double-clicking the node opens it anytime.
-							onCreated: () => {},
-						}).open()
-					)
+					.onClick(() => createOfType(type))
 			);
 		}
 		menu.showAtMouseEvent(e.nativeEvent);
@@ -2001,12 +2041,50 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		);
 	}
 
+	// What the tutorial lights and says on the graph for the current step.
+	const tutNext = (step: TutorialStep) => () => advanceTutorial(plugin, project, step);
+	const canvasCue: { text: string; next?: () => void; bottom?: boolean } | null =
+		tutorialStep === 'graphSelect'
+			? { text: t('tutorial.graphSelect') }
+			: tutorialStep === 'graphPanel'
+				? { text: t('tutorial.graphPanel') }
+				: tutorialStep === 'graphFocus'
+					? { text: t('tutorial.graphFocus') }
+					: tutorialStep === 'graphDrag'
+						? { text: t('tutorial.graphDrag') }
+						: tutorialStep === 'graphPin'
+							? { text: t('tutorial.graphPin') }
+							: tutorialStep === 'graphUnpin'
+								? { text: t('tutorial.graphUnpin') }
+								: tutorialStep === 'graphTimeline'
+									? {
+											text: t('tutorial.graphTimeline', {
+												anchors: entityPlural(anchorType).toLowerCase(),
+												beats: entityPlural(projectRoleType(project.config, 'beat')).toLowerCase(),
+											}),
+											bottom: true,
+										}
+									: tutorialStep === 'graphCreate'
+										? { text: t('tutorial.graphCreate'), next: tutNext('graphCreate') }
+										: null;
+	// The canvas is lit for the steps done on it (the side-panel step too: its
+	// double-click on a node happens there).
+	const canvasLit = canvasCue !== null && !canvasCue.bottom;
+	// The drag hints play over a node with connections (one that springs back).
+	const ghostKind = !ghostOff && (tutorialStep === 'graphDrag' || tutorialStep === 'graphPin')
+		? (tutorialStep === 'graphDrag' ? 'drag' : 'pin')
+		: null;
+	const ghostNode = ghostKind
+		? layout.nodes.find((n) => (layout.neighbors.get(n.id)?.size ?? 0) > 0 && !pinned.has(n.id))
+		: undefined;
+
 	return (
 		<ViewShell
 			view={view}
 			project={project}
 			title={t('common.loomGraph')}
 			railActive="graph"
+			tutorialPage="graph"
 		titleExtra={
 				<>
 			<div className="loom-graph-search">
@@ -2056,16 +2134,21 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							</button>
 						</div>
 					) : null}
-				<div className="loom-graph-filter" ref={viewsRef}>
+				<div className="loom-graph-filter loom-start-anchor" ref={viewsRef}>
 							<button
 								className="loom-rel-filter"
 								aria-label={t('view.graph.savedViews')}
 								onClick={() => setViewsOpen(!viewsOpen)}
+								data-tutorial-target={tutorialStep === 'graphViews' ? '' : undefined}
 							>
 								<Icon name="bookmark" />
 							</button>
+							{tutorialStep === 'graphViews' && !viewsOpen ? <StartCue text={t('tutorial.graphViews')} /> : null}
 							{viewsOpen ? (
-								<div className="loom-filter-pop loom-views-pop">
+								<div
+									className="loom-filter-pop loom-views-pop"
+									data-tutorial-target={tutorialStep === 'graphViews' ? '' : undefined}
+								>
 									{views.length > 0 ? (
 										<div className="loom-views-list">
 											{views.map((v) => (
@@ -2107,14 +2190,44 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 									) : (
 										<div className="loom-views-empty">{t('view.graph.noSavedViewsYet')}</div>
 									)}
-									<button className="loom-filter-clear" onClick={saveCurrentAsView}>
+									<button
+										className="loom-filter-clear"
+										onClick={() => {
+											saveCurrentAsView();
+											// Saving one is the saved-views step done, as is →.
+											tutorialDone('graphViews');
+										}}
+									>
 										<Icon name="plus" />
 										{t('view.graph.saveCurrentAsViewAction')}
 									</button>
+									{/* Open, the panel joins the spotlight (free to use) and
+									    the cue slides down below it. */}
+									{tutorialStep === 'graphViews' ? (
+										<div className="loom-pop-cue">
+											<StartCue inline text={t('tutorial.graphViews')} onNext={tutNext('graphViews')} />
+										</div>
+									) : null}
 								</div>
 							) : null}
 						</div>
 					<GraphFilter
+						tutorial={
+							tutorialStep === 'graphFilter' || tutorialStep === 'graphFilterInside'
+								? {
+										button: <StartCue text={t('tutorial.graphFilter')} />,
+										pop:
+											tutorialStep === 'graphFilterInside' ? (
+												<StartCue
+													inline
+													text={t('tutorial.graphFilterInside')}
+													onNext={tutNext('graphFilterInside')}
+												/>
+											) : undefined,
+										onOpen: () => tutorialDone('graphFilter'),
+									}
+								: undefined
+						}
 						types={projectTypes(project?.config)}
 						filterTypes={filterTypes}
 						setFilterTypes={setFilterTypes}
@@ -2203,13 +2316,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							<Icon name="pin-off" />
 						</button>
 					) : null}
-					<button
-						className={animActive ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
-						aria-label={animActive ? t('view.graph.stopAnimation') : t('view.graph.startAnimation')}
-						onClick={() => (animActive ? finishAnimation() : startAnimation())}
-					>
-						<Icon name={animActive ? 'square' : 'play'} />
-					</button>
+					<div className="loom-start-anchor">
+						<button
+							className={animActive ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
+							aria-label={animActive ? t('view.graph.stopAnimation') : t('view.graph.startAnimation')}
+							onClick={() => (animActive ? finishAnimation() : startAnimation())}
+							data-tutorial-target={tutorialStep === 'graphAnimate' ? '' : undefined}
+						>
+							<Icon name={animActive ? 'square' : 'play'} />
+						</button>
+						{tutorialStep === 'graphAnimate' ? (
+							<StartCue text={t('tutorial.graphAnimate')} onNext={tutNext('graphAnimate')} />
+						) : null}
+					</div>
 					<button className="loom-rel-filter" aria-label={t('view.graph.fitView')} onClick={fitAll}>
 						<Icon name="scan" />
 					</button>
@@ -2218,7 +2337,15 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		>
 			<div className="loom-graph-stack">
 				<div className="loom-graph-wrap">
-					<div className="loom-graph-viewport" ref={wrapRef}>
+					<div className="loom-graph-viewport" ref={wrapRef} data-tutorial-target={canvasLit ? '' : undefined}>
+					{ghostKind && ghostNode ? (
+						<GraphGhost
+							kind={ghostKind}
+							x={pos(ghostNode).x * cameraRef.current.k + cameraRef.current.tx}
+							y={pos(ghostNode).y * cameraRef.current.k + cameraRef.current.ty}
+							r={radiusOf(ghostNode) * cameraRef.current.k}
+						/>
+					) : null}
 					{(() => {
 						// Trash sector: fades in as a dragged node nears the corner.
 						// Rendered under the svg so nodes pass over it.
@@ -2586,16 +2713,33 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						onOpen={panelOnOpen}
 						onClose={panelOnClose}
 						onCreate={panelOnCreate}
+						tutorialTarget={tutorialStep === 'graphPanel'}
 					/>
 				) : null}
+				{canvasCue ? (
+					<div className={canvasCue.bottom ? 'loom-graph-cue loom-graph-cue-bottom' : 'loom-graph-cue'}>
+						<StartCue key={tutorialStep} inline text={canvasCue.text} onNext={canvasCue.next} />
+					</div>
+				) : null}
 				{layout.nodes.length === 0 ? (
-					<div className="loom-empty loom-graph-empty">{t('view.graph.noEntitiesYet')}</div>
+					<div className="loom-empty loom-graph-empty">
+						{/* The right-click menu's rows, in place, so there's a start. */}
+						<StartGuide
+							label={t('view.graph.noEntitiesYet')}
+							actions={(project ? projectTypes(project.config) : []).map((type) => ({
+								icon: ENTITY_META[type].icon,
+								label: newEntityTitle(type),
+								onClick: () => createOfType(type),
+							}))}
+						/>
+					</div>
 				) : null}
 				</div>
 				<div className="loom-drawer">
 					<div
 						ref={drawerBarRef}
 						className={drawerOpen ? 'loom-drawer-bar loom-drawer-bar-open' : 'loom-drawer-bar'}
+						data-tutorial-target={tutorialStep === 'graphTimeline' ? '' : undefined}
 						onPointerDown={onDrawerBarPointerDown}
 						onPointerMove={onDrawerBarPointerMove}
 						onPointerUp={onDrawerBarPointerUp}
@@ -2711,5 +2855,35 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					)
 				: null}
 		</ViewShell>
+	);
+}
+
+/**
+ * The tutorial's looping hint for dragging a node (`drag`: it springs back)
+ * and for pinning it mid-drag (`pin`: right-click while holding — it stays),
+ * played over a real node at screen position (`x`, `y`, radius `r`). Pure
+ * CSS keyframes; the graph drops it as soon as any node is pressed.
+ */
+function GraphGhost({ kind, x, y, r }: { kind: 'drag' | 'pin'; x: number; y: number; r: number }) {
+	return (
+		<div
+			className={`loom-graph-ghost loom-graph-ghost-${kind}`}
+			style={{ '--gx': `${x}px`, '--gy': `${y}px`, '--gr': `${Math.max(r, 8)}px` } as CSSProperties}
+			aria-hidden="true"
+		>
+			<div className="loom-graph-ghost-node" />
+			<div className="loom-graph-ghost-pointer">
+				<svg className="loom-graph-ghost-cursor" viewBox="0 0 24 24">
+					<path d="M5 3 L5 19 L9 15 L12 21 L14.5 20 L11.5 14 L17 14 Z" />
+				</svg>
+				{kind === 'pin' ? (
+					<svg className="loom-graph-ghost-mouse" viewBox="0 0 16 24">
+						<rect x="1" y="1" width="14" height="22" rx="7" />
+						<path className="loom-graph-ghost-mouse-right" d="M8 1 A7 7 0 0 1 15 8 L15 10 L8 10 Z" />
+						<path d="M8 1 L8 10 M1 10 L15 10" />
+					</svg>
+				) : null}
+			</div>
+		</div>
 	);
 }

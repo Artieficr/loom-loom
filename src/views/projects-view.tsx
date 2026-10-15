@@ -1,13 +1,13 @@
-import { Keymap, Menu, TFile, WorkspaceLeaf } from 'obsidian';
+import { Keymap, Menu, Notice, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
 import { KeyboardEvent, MouseEvent, ReactElement, useState } from 'react';
 import { VIEW_PROJECTS } from '../types';
 import { PROJECT_KINDS, PROJECT_KIND_META, ProjectKind, projectKindLabel } from '../project-kind';
-import { SetupProjectModal } from '../project';
+import { ConfirmModal, SetupProjectModal } from '../project';
 import { SnapshotsModal } from '../snapshots';
 import type { ProjectDef } from '../indexer';
 import { t } from '../i18n';
 import { LoomReactView } from './react-view';
-import { Icon } from './common';
+import { Icon, StartGuide, systemOpen } from './common';
 import { useIndexVersion } from './hooks';
 
 /**
@@ -21,7 +21,7 @@ export class ProjectsView extends LoomReactView {
 		return VIEW_PROJECTS;
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		return t('view.projects.title');
 	}
 
@@ -98,24 +98,76 @@ function ProjectManager({ view }: { view: ProjectsView }) {
 		save();
 	};
 
+	/** Moves the whole project folder to the trash (recoverable from there),
+	 *  with the outside-delete window held off — this delete is the user's own. */
+	const confirmDelete = (project: ProjectDef) => {
+		new ConfirmModal(
+			plugin.app,
+			t('view.projects.deleteTitle'),
+			t('view.projects.deleteDetail', { name: project.name }),
+			async () => {
+				const folder = plugin.app.vault.getAbstractFileByPath(project.root);
+				if (!(folder instanceof TFolder)) return;
+				plugin.deletePromptPause++;
+				try {
+					await plugin.app.fileManager.trashFile(folder);
+				} catch (err) {
+					console.error('Loom Loom: failed to delete project', err);
+					new Notice(t('view.projects.deleteFailed'));
+					return;
+				} finally {
+					plugin.deletePromptPause--;
+				}
+				settings.projectOrder = settings.projectOrder.filter((r) => r !== project.root);
+				save();
+			},
+			t('project.common.delete')
+		).open();
+	};
+
 	const open = (project: ProjectDef, evt: MouseEvent | KeyboardEvent) => {
 		const file = plugin.app.vault.getFileByPath(project.loomPath);
 		if (file instanceof TFile) void view.targetLeaf(Keymap.isModEvent(evt.nativeEvent) !== false).openFile(file, { active: true });
 	};
 
 	return (
-		<div className="loom-pm">
+		<div
+			className="loom-pm"
+			onContextMenu={(e) => {
+				e.preventDefault();
+				new Menu()
+					.addItem((item) =>
+						item
+							.setTitle(t('view.projects.newProject'))
+							.setIcon('plus')
+							.onClick(() => new SetupProjectModal(plugin).open())
+					)
+					.showAtMouseEvent(e.nativeEvent);
+			}}
+		>
 			<div className="loom-pm-header">
 				<span className="loom-pm-title">{t('view.projects.title')}</span>
 				<button
-					className="clickable-icon"
+					className="mod-cta loom-pm-new"
 					aria-label={t('view.projects.newProject')}
 					onClick={() => new SetupProjectModal(plugin).open()}
 				>
 					<Icon name="plus" />
 				</button>
 			</div>
-			{byKind.size === 0 && <div className="loom-pm-empty">{t('view.projects.empty')}</div>}
+			{byKind.size === 0 && (
+				<div className="loom-pm-empty">
+					<StartGuide
+						stack
+						label={t('view.projects.emptyCreate')}
+						actions={PROJECT_KINDS.map((kind) => ({
+							icon: PROJECT_KIND_META[kind].icon,
+							label: projectKindLabel(kind),
+							onClick: () => new SetupProjectModal(plugin, kind).open(),
+						}))}
+					/>
+				</div>
+			)}
 			{PROJECT_KINDS.filter((kind) => byKind.has(kind)).map((kind) => {
 				const list = byKind.get(kind) ?? [];
 				const collapsed = settings.collapsedProjectKinds.includes(kind);
@@ -170,12 +222,28 @@ function ProjectManager({ view }: { view: ProjectsView }) {
 											}}
 											onContextMenu={(e) => {
 												e.preventDefault();
+												// Not the manager's own "New project" menu.
+												e.stopPropagation();
 												new Menu()
 													.addItem((item) =>
 														item
 															.setTitle(t('view.projects.snapshots'))
 															.setIcon('history')
 															.onClick(() => new SnapshotsModal(plugin, project).open())
+													)
+													.addItem((item) =>
+														item
+															.setTitle(t('common.showInSystemExplorer'))
+															.setIcon('arrow-up-right')
+															.onClick(() => systemOpen(plugin.app, 'showInFolder', project.root))
+													)
+													.addSeparator()
+													.addItem((item) =>
+														item
+															.setTitle(t('view.projects.delete'))
+															.setIcon('trash-2')
+															.setWarning(true)
+															.onClick(() => confirmDelete(project))
 													)
 													.showAtMouseEvent(e.nativeEvent);
 											}}

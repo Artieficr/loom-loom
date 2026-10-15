@@ -35,7 +35,7 @@ import {
 } from './types';
 import { ProjectConfig, calendarFor, parseLoomDate, parseProjectConfig } from './calendar';
 import { managedEntityFileName } from './naming';
-import { fmValue } from './fm';
+import { fmValue, stripFrontmatter } from './fm';
 import { t } from './i18n';
 import type LoomLoomPlugin from './main';
 
@@ -640,6 +640,7 @@ export class LoomIndexer extends Component {
 		const record = fm ? this.parseEntity(file, project, fm) : null;
 		if (record) {
 			this.records.set(file.path, record);
+			void this.loadNotes(file, record);
 			// Compare as an instant, not as raw YAML: the parser can hand the same
 			// stamp back as a string on one machine and a Date on another, and a
 			// spurious difference there would re-open the stamping loop.
@@ -757,7 +758,6 @@ export class LoomIndexer extends Component {
 		// project's calendar (a custom calendar when enabled).
 		const calendar = calendarFor(type, project.config);
 		const nameValue = fmValue(fm, FM.name);
-		const descriptionValue = fmValue(fm, FM.description);
 		const aliveValue = fmValue(fm, FM.alive);
 		const outcomeValue = fmValue(fm, FM.questOutcome);
 		const rewardValue = fmValue(fm, FM.reward);
@@ -774,7 +774,9 @@ export class LoomIndexer extends Component {
 			type,
 			project: project.root,
 			loomTags: parseTagList(fmValue(fm, FM.tags)),
-			description: typeof descriptionValue === 'string' ? descriptionValue : '',
+			// The body arrives after this (`loadNotes`); keep the last known
+			// one meanwhile so previews don't flicker on every re-index.
+			notes: this.records.get(file.path)?.notes ?? '',
 			relationships,
 			sessionNotes,
 			date: parseLoomDate(fmValue(fm, FM.date), calendar, project.config),
@@ -846,6 +848,27 @@ export class LoomIndexer extends Component {
 		this.incoming = null;
 		this.events.trigger('changed');
 	}
+
+	/** Fills a record's `notes` from its note's body. The metadata cache holds
+	 *  only the frontmatter, so this reads the file (`cachedRead`, usually from
+	 *  memory); a whole rebuild's worth of these lands as one bump. */
+	private async loadNotes(file: TFile, record: EntityRecord): Promise<void> {
+		let text: string;
+		try {
+			text = stripFrontmatter(await this.app.vault.cachedRead(file)).trim();
+		} catch {
+			return;
+		}
+		// Re-indexed meanwhile: that pass reads it again.
+		if (this.records.get(file.path) !== record || record.notes === text) return;
+		record.notes = text;
+		if (this.notesBumpTimer !== null) return;
+		this.notesBumpTimer = window.setTimeout(() => {
+			this.notesBumpTimer = null;
+			this.bump();
+		}, 50);
+	}
+	private notesBumpTimer: number | null = null;
 
 	/**
 	 * Stamps `loomModified` on a loom entity note whenever its content changes.

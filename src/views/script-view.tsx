@@ -1,6 +1,7 @@
-import { Menu, Notice, normalizePath } from 'obsidian';
+import { Menu, Notice, normalizePath, setTooltip } from 'obsidian';
 import { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement, useEffect, useMemo, useRef, useState } from 'react';
 import { t, tn } from '../i18n';
+import { advanceTutorial, currentTutorialStep } from '../tutorial';
 import {
 	EntityRecord,
 	EntityType,
@@ -93,6 +94,9 @@ import {
 	ViewShell,
 	noProjectMessage,
 	scrollIntoContainer,
+	systemOpen,
+	PageNav,
+	StartCue,
 } from './common';
 import { AlternativesBrowserPanel, CommentPopover, CommentsBrowserPanel } from './annotation-popover';
 import { isUnresolvedComment } from './annotation-cm6';
@@ -104,7 +108,7 @@ export class ScriptView extends LoomFileReactView {
 		return VIEW_SCRIPT;
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		return this.file ? `${this.file.basename} — ${scriptLabel()}` : scriptLabel();
 	}
 
@@ -184,7 +188,7 @@ export async function syncScenes(
 				name,
 				tag: type === 'character' ? 'Cast' : '',
 				date: '',
-				description: '',
+				notes: '',
 			});
 			map.set(key, { ...pcGroupStub(project.root), path: created.path, name, type });
 		}
@@ -287,7 +291,7 @@ export async function syncScenes(
 			name: section.title,
 			tag: '',
 			date: '',
-			description: '',
+			notes: '',
 		});
 		await plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
 			setLoomKey(fm, FM.actId, id);
@@ -410,7 +414,7 @@ export async function syncScenes(
 			name,
 			tag: '',
 			date: '',
-			description: '',
+			notes: '',
 		});
 		await plugin.app.fileManager.processFrontMatter(file, apply);
 	}
@@ -549,13 +553,6 @@ function Script({ view }: { view: ScriptView }) {
 		const n = saved ? Number(saved) : NaN;
 		return Number.isFinite(n) && n >= 1 ? n : 1;
 	});
-	/** The page-number input's own typed text while being edited — separate
-	 *  from `page` so clearing the field to type a new number doesn't
-	 *  immediately snap back to showing the current page (a controlled input
-	 *  bound straight to `page` re-filled itself with the old value the
-	 *  instant the field went empty, before a new digit could be typed).
-	 *  Null = not being edited, show the real current page. */
-	const [pageDraft, setPageDraft] = useState<string | null>(null);
 	/** Search across the script; shared by both panes. */
 	const [query, setQuery] = useState('');
 	/** Navigation panel, overlaid rather than taking width from the page. */
@@ -593,6 +590,12 @@ function Script({ view }: { view: ScriptView }) {
 	 *  every other nav target uses; it renders above the Script/Pages/Outline
 	 *  tabs regardless of mode, so opening it is the same act in all three. */
 	const titleDetailsRef = useRef<HTMLDetailsElement | null>(null);
+	/** Set once the title page has first rendered: an empty script opens it
+	 *  then, as the place to start; afterwards it's left as the user sets it. */
+	const titleInitRef = useRef(false);
+	/** Something has been typed into a title-page field (before it's even
+	 *  committed on blur) — the onboarding chain's cue for the next step. */
+	const [titleTyped, setTitleTyped] = useState(false);
 	const [matchIndex, setMatchIndex] = useState(0);
 	/** A marker id the CURRENT search match points at — highlights an
 	 *  alt-text's icon, or a comment's icon while its popover is being
@@ -769,6 +772,27 @@ function Script({ view }: { view: ScriptView }) {
 
 	// Above the early returns below: a hook after them crashes React (#310).
 	const navScrollRef = useRememberedScroll(file ? `loom-script-nav-scroll:${file.path}` : null);
+	/** A fresh script's title page (`createScriptFile`): anything else is the
+	 *  user's own. */
+	const titleScaffold: Partial<Record<keyof TitlePage, string>> = { title: project?.name ?? '', credit: 'Written by' };
+	const titleFilled =
+		titleTyped ||
+		(!!parsed &&
+			(['title', 'credit', 'author', 'source', 'draftDate', 'contact', 'copyright', 'notes'] as const).some(
+				(k) => parsed.titlePage[k].trim() !== (titleScaffold[k] ?? '')
+			));
+	// Tutorial: the Script is where opening it, the title page and its Outline
+	// complete.
+	const tutorialStep = currentTutorialStep(project?.config);
+	useEffect(() => {
+		if (!project || !parsed) return;
+		if (tutorialStep === 'openDoc') advanceTutorial(plugin, project, 'openDoc');
+		else if (tutorialStep === 'fillTitle') {
+			if (titleFilled) advanceTutorial(plugin, project, 'fillTitle');
+			else if (titleDetailsRef.current) titleDetailsRef.current.open = true;
+		} else if (tutorialStep === 'openOutline' && mode === 'outline') advanceTutorial(plugin, project, 'openOutline');
+	}, [tutorialStep, titleFilled, mode, project, parsed, plugin]);
+
 	if (!file) return <div className="loom-empty">{t('view.script.loading')}</div>;
 	if (!project) return <>{noProjectMessage()}</>;
 	if (text === null || parsed === null) return <div className="loom-empty">{t('view.script.loading')}</div>;
@@ -1104,27 +1128,6 @@ function Script({ view }: { view: ScriptView }) {
 	};
 
 	// --- Menus --------------------------------------------------------------
-	/**
-	 * Hands a vault file to the OS.
-	 *
-	 * `openWithDefaultApp` and `showInFolder` are long-standing internal APIs,
-	 * absent from the public typings; guarded so a rename in a future release
-	 * degrades to a notice rather than throwing.
-	 */
-	const systemOpen = (method: 'openWithDefaultApp' | 'showInFolder', path: string) => {
-		const api = plugin.app as unknown as Record<string, ((p: string) => void) | undefined>;
-		const fn = api[method];
-		if (typeof fn !== 'function') {
-			new Notice(t('view.script.systemOpenUnsupported'));
-			return;
-		}
-		try {
-			fn.call(plugin.app, path);
-		} catch (err) {
-			console.error('Loom Loom: system open failed', err);
-			new Notice(t('view.script.systemOpenFailed'));
-		}
-	};
 
 	/**
 	 * Saves an export wherever the user says.
@@ -1310,13 +1313,13 @@ function Script({ view }: { view: ScriptView }) {
 			i
 				.setTitle(t('view.script.openInDefaultApp'))
 				.setIcon('external-link')
-				.onClick(() => systemOpen('openWithDefaultApp', file.path))
+				.onClick(() => systemOpen(plugin.app, 'openWithDefaultApp', file.path))
 		);
 		menu.addItem((i) =>
 			i
-				.setTitle(t('view.script.showInSystemFileManager'))
+				.setTitle(t('common.showInSystemExplorer'))
 				.setIcon('folder-open')
-				.onClick(() => systemOpen('showInFolder', file.path))
+				.onClick(() => systemOpen(plugin.app, 'showInFolder', file.path))
 		);
 		menu.addSeparator();
 		menu.addItem((i) =>
@@ -1349,6 +1352,9 @@ function Script({ view }: { view: ScriptView }) {
 				type="text"
 				placeholder={placeholder}
 				defaultValue={parsed.titlePage[field] as string}
+				onChange={(e) => {
+					if (e.target.value.trim() !== (titleScaffold[field] ?? '')) setTitleTyped(true);
+				}}
 				onBlur={(e) => {
 					if (e.target.value !== parsed.titlePage[field]) setTitleField(field, e.target.value);
 				}}
@@ -1356,24 +1362,30 @@ function Script({ view }: { view: ScriptView }) {
 		</label>
 	);
 
-	// Scenes grouped under the act (top-level `#` section) they sit in.
-	// Each group carries its section's own script line, so navigation can jump
-	// to the `# Act` heading itself and not only to the scenes beneath it.
 	const topSections = parsed.sections.filter((sec) => sec.level === 1);
-	const sectionLineOf = (title: string, beforeLine: number) => {
-		let best = -1;
-		for (const sec of topSections) {
-			if (sec.text.trim() === title && sec.line <= beforeLine) best = sec.line;
-		}
-		return best;
-	};
-	const groups: { section: string; line: number; scenes: ParsedScene[] }[] = [];
-	for (const scene of parsed.scenes) {
-		const section = scene.sectionPath[0]?.trim() ?? '';
-		const last = groups[groups.length - 1];
-		if (last && last.section === section) last.scenes.push(scene);
-		else groups.push({ section, line: sectionLineOf(section, scene.line), scenes: [scene] });
-	}
+	// A fresh script — only its title page — walks the user through starting:
+	// fill the title page, then the Outline, then the first act.
+	const scriptEmpty = topSections.length === 0 && parsed.scenes.length === 0;
+
+	// What the tutorial lights on this page for the current step (an act's
+	// steps are reached from Home, through the Acts list).
+	// The title page stays lit until the first act: the user may still be
+	// filling it in when the next cue appears.
+	const tutTitle =
+		tutorialStep === 'fillTitle' ||
+		tutorialStep === 'openOutline' ||
+		(tutorialStep === 'createAct' && topSections.length === 0);
+	/** Outline button: the step itself, or the way on to the Outline. */
+	const tutOutlineCue =
+		mode === 'outline'
+			? null
+			: tutorialStep === 'openOutline'
+				? t('tutorial.goHereAfterTitle')
+				: tutorialStep === 'createAct'
+					? t('tutorial.continueHere')
+					: null;
+	const tutNewAct = tutorialStep === 'createAct' && mode === 'outline';
+	const tutTable = tutNewAct && topSections.length > 0;
 
 	// The navigation panel's own tree, built by `buildNavTree` (below) from
 	// the whole script; the Scene page's own mini nav panel calls the same
@@ -1477,6 +1489,7 @@ function Script({ view }: { view: ScriptView }) {
 			project={project}
 			title={`${project.name} — ${scriptLabel()}`}
 			railActive="script"
+			tutorialPage="doc"
 			titleExtra={
 				<div className="loom-script-actions">
 					<span className="loom-writer-stat">
@@ -1490,8 +1503,21 @@ function Script({ view }: { view: ScriptView }) {
 		>
 			<div className="loom-writer-layout">
 				<div className="loom-writer-main">
-					<details className="loom-script-section" ref={titleDetailsRef}>
-						<summary>{t('view.script.titlePage')}</summary>
+					<details
+						className="loom-script-section"
+						data-tutorial-target={tutTitle ? '' : undefined}
+						ref={(el) => {
+							titleDetailsRef.current = el;
+							if (el && !titleInitRef.current) {
+								titleInitRef.current = true;
+								if (scriptEmpty) el.open = true;
+							}
+						}}
+					>
+						<summary>
+							{t('view.script.titlePage')}
+							{tutorialStep === 'fillTitle' ? <StartCue side="left" text={t('tutorial.startByFilling')} /> : null}
+						</summary>
 						<div className="loom-field-group">
 							{titleField(t('project.createEntity.titleLabel'), 'title', project.name)}
 							{titleField(t('view.script.titlePageField.credit'), 'credit', t('view.script.creditDefault'))}
@@ -1545,6 +1571,7 @@ function Script({ view }: { view: ScriptView }) {
 							<MatchStat query={query} count={matches.length} index={matchIndex} />
 						) : null}
 						<div className="loom-shell-spacer" />
+						{tutOutlineCue ? <StartCue side="right" text={tutOutlineCue} /> : null}
 						{/* Pages is the sole read-only reading view now — this is the one
 						    remaining toggle, swapping in the act/scene drag-reorder tree
 						    instead. Sits to the LEFT of the page-swiper/creation-button
@@ -1552,45 +1579,13 @@ function Script({ view }: { view: ScriptView }) {
 						<button
 							className={mode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
 							onClick={() => clickTab('outline')}
+							data-tutorial-target={tutOutlineCue ? '' : undefined}
 						>
 							{t('view.entity.script.outline')}
 						</button>
 						{mode === 'pages' ? (
-							<>
-								<button
-									className="loom-rel-filter"
-									aria-label={t('view.script.previousPage')}
-									disabled={currentPage <= 1}
-									onClick={() => scrollToPage(currentPage - 1)}
-								>
-									<Icon name="chevron-left" />
-								</button>
-								<input
-									className="loom-script-pagenum"
-									type="number"
-									min={1}
-									max={pageCount}
-									value={pageDraft ?? currentPage}
-									onChange={(e) => setPageDraft(e.target.value)}
-									onKeyDown={(e) => {
-										if (e.key !== 'Enter') return;
-										e.preventDefault();
-										const n = Number(pageDraft);
-										if (pageDraft && pageDraft.trim() !== '' && n > 0) scrollToPage(n);
-										setPageDraft(null);
-									}}
-									onBlur={() => setPageDraft(null)}
-								/>
-								<span className="loom-writer-stat">{t('view.script.ofCount', { count: pageCount })}</span>
-								<button
-									className="loom-rel-filter"
-									aria-label={t('view.script.nextPage')}
-									disabled={currentPage >= pageCount}
-									onClick={() => scrollToPage(currentPage + 1)}
-								>
-									<Icon name="chevron-right" />
-								</button>
-							</>
+							// An empty script has no pages to step through.
+							scriptEmpty ? null : <PageNav current={currentPage} count={pageCount} onGo={scrollToPage} />
 						) : (
 							// Script and Outline share this spot — Pages uses it for page
 							// navigation instead, so these never coexist with that. Both
@@ -1604,12 +1599,23 @@ function Script({ view }: { view: ScriptView }) {
 								>
 									{t('view.entity.script.newSceneAction')}
 								</button>
-								<button
-									className="loom-rel-add"
-									onClick={() => new CreateEntityModal(plugin, 'act', project, {}).open()}
-								>
-									{t('project.newActStub')}
-								</button>
+								<div className="loom-start-anchor">
+									<button
+										className="loom-rel-add"
+										onClick={() => new CreateEntityModal(plugin, 'act', project, {}).open()}
+										data-tutorial-target={tutNewAct ? '' : undefined}
+									>
+										{t('project.newActStub')}
+									</button>
+									{tutNewAct ? (
+										<StartCue
+											above
+											text={
+												topSections.length === 0 ? t('tutorial.createFirstActAfterTitle') : t('tutorial.createOrOpenAct')
+											}
+										/>
+									) : null}
+								</div>
 								{/* Page breaks are an Outline-only concept — the Script/Pages
 								    editors already write a bare `===` by hand, and this
 								    button exists so a manually-placed one isn't the only way
@@ -1627,7 +1633,7 @@ function Script({ view }: { view: ScriptView }) {
 					</div>
 
 					{mode === 'outline' ? (
-						<div className="loom-writer-outline" ref={outlineRef}>
+						<div className="loom-writer-outline" ref={outlineRef} data-tutorial-target={tutTable ? '' : undefined}>
 							{/* Column headings — same row shape as the act rows below
 							    (grip/caret placeholders reserve their gutters) so "Title"
 							    and "Scenes" land exactly over their real columns; the
@@ -1650,6 +1656,7 @@ function Script({ view }: { view: ScriptView }) {
 								<span className="loom-writer-row-num">#</span>
 								<span className="loom-script-scene-head">{t('project.createEntity.titleLabel')}</span>
 								<span className="loom-writer-outline-leader" aria-hidden="true" />
+								<span className="loom-writer-row-cast">{entityPlural('character')}</span>
 								<span className="loom-writer-row-count">{entityPlural('scene')}</span>
 							</div>
 							<div
@@ -1673,13 +1680,6 @@ function Script({ view }: { view: ScriptView }) {
 											{titleFirst ? t('view.entity.script.pageAbbrev', { range: '1' }) : '—'}
 										</span>
 									</div>
-									{topLevelRows.length === 0 ? (
-										<div className="loom-attendance-empty">
-											{t('view.script.outlineNoActsPre')}
-											<code># Act name</code>
-											{t('view.script.outlineNoActsPost')}
-										</div>
-									) : null}
 									{(() => {
 										let actIndex = 0;
 										return topLevelRows.map((row, i) => {
@@ -1779,6 +1779,7 @@ function Script({ view }: { view: ScriptView }) {
 													    between the title and the count, adapting to title
 													    length automatically instead of leaving a ragged gap. */}
 													<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+													<CastCell names={[...new Set(scenes.flatMap((sc) => sc.characters))]} />
 													{/* Its own fixed-width column, not sized to its text, so
 													    the cell's left edge doesn't shift row to row. */}
 													<span className="loom-writer-row-count">
@@ -1824,6 +1825,7 @@ function Script({ view }: { view: ScriptView }) {
 																		<span className="loom-script-scene-head">{scene.heading}</span>
 																	)}
 																	<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+																	<CastCell names={scene.characters} />
 																	<span className="loom-writer-row-count">
 																		{t('view.entity.script.pageAbbrev', { range: scenePages(scene) })}
 																	</span>
@@ -1838,6 +1840,8 @@ function Script({ view }: { view: ScriptView }) {
 									})()}
 								</div>
 							</div>
+					) : scriptEmpty ? (
+						<div className="loom-writer-empty">{t('view.script.noActsYet')}</div>
 					) : (
 						// Every page in one scroller, like a PDF viewer: the page box
 						// navigates by scrolling to a page rather than swapping which
@@ -1892,50 +1896,6 @@ function Script({ view }: { view: ScriptView }) {
 						/>
 					) : null}
 
-					<details className="loom-script-section">
-						<summary>{t('view.script.outlineLinksHeading', { count: parsed.scenes.length })}</summary>
-						{groups.length === 0 ? (
-							<div className="loom-attendance-empty">
-								{t('view.script.outlineNoScenesPre')}
-								<code>INT. HOUSE - DAY</code>
-								{t('view.script.outlineNoScenesPost')}
-							</div>
-						) : null}
-						{groups.map((group, gi) => (
-							<div key={`${group.section}-${gi}`} className="loom-hub-section">
-								{group.section !== '' ? (
-									<span className="loom-rel-group-label">{group.section}</span>
-								) : null}
-								<div className="loom-script-scenes">
-									{group.scenes.map((scene) => {
-										const note = sceneNote(scene);
-										return (
-											<div key={scene.loomId ?? scene.line} className="loom-script-scene">
-												<span className="loom-script-scene-num">{scene.index}</span>
-												<span className="loom-script-scene-head">
-													{note ? (
-														<button
-															className="loom-subloc-link"
-															onClick={() => view.openEntity(note.path)}
-														>
-															{scene.heading}
-														</button>
-													) : (
-														scene.heading
-													)}
-												</span>
-												<span className="loom-script-scene-no">{scene.sceneNumber}</span>
-												<span className="loom-script-scene-page">
-													{t('view.entity.script.pageAbbrev', { range: scenePages(scene) })}
-												</span>
-												<span className="loom-script-scene-cast">{scene.characters.join(', ')}</span>
-											</div>
-										);
-									})}
-								</div>
-							</div>
-						))}
-					</details>
 
 					{actless.length > 0 ? (
 						<div className="loom-field loom-field-sep">
@@ -1991,6 +1951,36 @@ export function highlight(html: string, query: string): string {
 		.split(/(<[^>]*>)/)
 		.map((part) => (part.startsWith('<') ? part : part.replace(re, (m) => `<mark>${m}</mark>`)))
 		.join('');
+}
+
+/**
+ * The Outline's characters column: the cue names, one line, cut off with an
+ * ellipsis, then the row's dashed leader again up to the page count — so the
+ * dashes run from wherever the names end (straight through when there are
+ * none). Only a cut-off list carries a tooltip, and it opens at once:
+ * `aria-label` is set on pointer-over, before Obsidian's own body-level
+ * tooltip handler reads it.
+ */
+function CastCell({ names }: { names: string[] }) {
+	const text = names.join(', ');
+	return (
+		<span className={text === '' ? 'loom-writer-row-cast loom-writer-row-cast-empty' : 'loom-writer-row-cast'}>
+			{text !== '' ? (
+				<span
+					className="loom-writer-row-cast-text"
+					onPointerOver={(e) => {
+						const el = e.currentTarget;
+						if (el.scrollWidth > el.clientWidth) {
+							setTooltip(el, text, { delay: 1, classes: ['loom-solid-tooltip'] });
+						} else el.removeAttribute('aria-label');
+					}}
+				>
+					{text}
+				</span>
+			) : null}
+			<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
+		</span>
+	);
 }
 
 /**

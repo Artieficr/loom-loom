@@ -51,3 +51,18 @@ export function autoGrowTextarea(el: HTMLTextAreaElement | null): void {
 	el.setCssProps({ height: 'auto' });
 	el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
 }
+
+/**
+ * A one-line preview of a note's Notes (`record.notes`): the first line with
+ * any text, its markdown reduced to plain text — `[[target|label]]` to
+ * `label`, emphasis marks, a heading's `#`s and a list bullet dropped.
+ */
+export function notesPreview(notes: string): string {
+	const line = notes.split('\n').find((l) => l.trim() !== '') ?? '';
+	return line
+		.replace(/\[\[([^\]|]*)\|([^\]]*)\]\]/g, '$2')
+		.replace(/\[\[([^\]]*)\]\]/g, '$1')
+		.replace(/[*_~`]+/g, '')
+		.replace(/^\s*(#+|[-+*]|\d+\.|>)\s+/, '')
+		.trim();
+}

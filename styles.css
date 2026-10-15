@@ -417,12 +417,14 @@ body.loom-text-large {
 
 /* Sits beside the (minimal, Quick-Notes-only) rail in `.loom-shell-row` —
    see home-view.tsx — so it needs the same flex/scroll treatment `.loom-shell`
-   gives every other view's content column, on top of its own centering. */
+   gives every other view's content column, on top of its own centering. Full
+   width (the title and wheel centre themselves): scrolling vertically makes
+   it clip sideways too, so a narrower box cut off a tutorial cue beside a
+   right-hand satellite. */
 .loom-home {
 	flex: 1;
 	min-width: 0;
 	overflow-y: auto;
-	max-width: 760px;
 	margin: 0 auto;
 	padding: var(--size-4-8) var(--size-4-4);
 	text-align: center;
@@ -512,6 +514,34 @@ body.loom-text-large {
 
 .loom-home-wheel .loom-wheel-card .loom-card-label {
 	font-size: 0.95em;
+}
+
+/* The tutorial's cue: just right of the satellite it points at (the same
+   --wheel-x/--wheel-y as that satellite, then half its 22% width plus a
+   gap), pointing back at it. */
+.loom-home-wheel .loom-wheel-cue {
+	position: absolute;
+	left: calc(50% + var(--wheel-x) * var(--wheel-radius) + 11% + var(--size-4-2));
+	top: calc(50% + var(--wheel-y) * var(--wheel-radius));
+	transform: translateY(-50%);
+	pointer-events: none;
+	z-index: 3;
+}
+
+.loom-home-wheel .loom-wheel-cue .loom-start-cue-side {
+	margin: 0;
+}
+
+/* …or just under the centre Loom button (half its 34% width down), centred
+   — beside it, it would sit on the right-hand satellites. */
+.loom-home-wheel .loom-wheel-cue.loom-wheel-cue-center {
+	left: 50%;
+	top: calc(50% + 17%);
+	transform: translateX(-50%);
+}
+
+.loom-home-wheel .loom-wheel-cue-center .loom-start-cue-inline {
+	white-space: nowrap;
 }
 
 .loom-home-wheel .loom-wheel-center {
@@ -4652,9 +4682,9 @@ span.loom-row-caret {
 	align-items: stretch;
 	gap: 2px;
 	padding: var(--size-2-2);
-	/* Anchored above the cursor by its bottom-left corner — a centered transform
+	/* Opens down from the cursor by its top-left corner — a centered transform
 	   would put a wide row half off the cursor. */
-	transform: translate(0, calc(-100% - 12px));
+	transform: none;
 }
 
 .loom-view .loom-map-menu-row {
@@ -5247,7 +5277,48 @@ span.loom-row-caret {
 	transform: translate(-50%, -50%);
 	color: var(--text-muted);
 	pointer-events: none;
-	text-align: center;
+}
+
+/* An empty map/graph: the hint with the right-click menu's rows beside it. */
+.loom-empty-guide {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--size-4-3);
+}
+
+/* One line, so its closing "here:" sits right beside the menu it points at,
+   level with the menu's first row. */
+.loom-empty-guide > :first-child {
+	white-space: nowrap;
+	padding-top: calc(1px + var(--size-2-2) + var(--size-2-1));
+}
+
+/* Narrow spots (the project manager sidebar): the actions go under the hint. */
+.loom-empty-guide-stack {
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
+.loom-empty-guide-stack > :first-child {
+	white-space: normal;
+	padding-top: 0;
+}
+
+/* An empty script/book (or its outline): the guide, centred in the space the
+   pages would fill. */
+.loom-writer-empty {
+	display: flex;
+	justify-content: center;
+	padding: var(--size-4-8) var(--size-4-4);
+	color: var(--text-muted);
+}
+
+/* The right-click menu's rows shown in place on an empty map or graph. */
+.loom-map-menu.loom-map-menu-inline {
+	position: static;
+	pointer-events: auto;
+	color: var(--text-normal);
+	text-align: start;
 }
 
 /* ---- Maps navigator panel (left, slides on hover, pins open) ---- */
@@ -5678,6 +5749,17 @@ span.loom-row-caret {
 	left: 0.3em;
 }
 
+/* In a page preview (Script, Book, Act, Scene, Chapter — all 8.5in pages),
+   the toggle sits in the middle of the free space left of the page, so it
+   reads the same however wide the preview is: that space is the preview's
+   1em padding plus half of what the page leaves over, and the toggle's
+   centre goes at half of it (measured from the content edge, hence the
+   -0.5em). Never closer to the preview's edge than at rest. */
+.loom-view .loom-screenplay .loom-script-nav-sticky-inset .loom-script-nav-toggle {
+	left: max(calc(var(--icon-s) / 2 + 0.2em - 1em + 0.3em), calc((100% - 8.5in) / 4 - 0.5em));
+	transform: translateX(-50%);
+}
+
 /* The panel floats over the page instead of sitting in the flow: as a flex
    column it permanently narrowed the working area, which is the opposite of
    what a navigation aid should do. */
@@ -6064,6 +6146,41 @@ span.loom-row-caret {
 	width: 100%;
 }
 
+/* The characters column: a fixed-width box holding the names (one line, cut
+   off with an ellipsis — the full list shows as a tooltip, see `CastCell`)
+   and the dashed leader after them. Its own leader drops the left margin so
+   an empty cell continues the title's dashes without a gap. */
+.loom-view .loom-writer-outline .loom-writer-row-cast {
+	display: flex;
+	align-items: center;
+	flex: 0 0 20em;
+	min-width: 0;
+	/* Full row height, so its leader centres on the same line as the
+	   title's (the row aligns on the baseline, and this cell's smaller text
+	   would otherwise sit it a few pixels lower). */
+	align-self: stretch;
+	color: var(--text-muted);
+	font-size: 0.85em;
+}
+
+.loom-view .loom-writer-outline .loom-writer-row-cast-text {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.loom-view .loom-writer-outline .loom-writer-row-cast > .loom-writer-outline-leader-dashed:first-child {
+	margin-left: 0;
+}
+
+/* With no names, the title's leader reaches across the row's 0.5em flex gap
+   into the column's own leader, so the dashes run unbroken to the count. */
+.loom-view .loom-writer-outline .loom-writer-outline-leader-dashed:has(+ .loom-writer-row-cast-empty) {
+	margin-right: -0.5em;
+}
+
 /* Fixed width, not sized to its own text — otherwise a longer "N scenes"
    count shifts its own left edge (and so its start position) row to row. */
 .loom-view .loom-writer-outline .loom-writer-row-count {
@@ -6139,43 +6256,11 @@ span.loom-row-caret {
 	line-height: 1.4;
 }
 
-/* Outline rows: a grid, so every column lines up down the whole list rather
-   than wrapping around whatever each heading happens to be. */
-.loom-view .loom-script-scenes {
-	display: grid;
-	grid-template-columns: 2.5ch minmax(10em, 2fr) 5em 5em minmax(0, 1fr);
-	align-items: baseline;
-	gap: 0.15em 0.6em;
-}
-
-.loom-view .loom-script-scene {
-	display: contents;
-}
-
-.loom-view .loom-script-scene-num {
-	color: var(--text-faint);
-	font-variant-numeric: tabular-nums;
-	text-align: right;
-}
-
-.loom-view .loom-script-scene-head,
-.loom-view .loom-script-scene-cast {
+/* A heading with no note to open: one line, cut off with an ellipsis. */
+.loom-view .loom-script-scene-head {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-}
-
-.loom-view .loom-script-scene-no,
-.loom-view .loom-script-scene-page {
-	color: var(--text-muted);
-	font-size: 0.85em;
-	font-variant-numeric: tabular-nums;
-	white-space: nowrap;
-}
-
-.loom-view .loom-script-scene-cast {
-	color: var(--text-muted);
-	font-size: 0.85em;
 }
 
 /* The raw editor: one page tall and scrolling inside itself, so the view's own
@@ -6956,7 +7041,10 @@ body.loom-follow-theme-color .loom-setting-color-preview u {
 }
 
 .loom-view .loom-scene-heading-intext {
-	flex: 0 0 8em;
+	/* A fixed width fitting "INT./EXT." and the arrow (see the dropdown
+	   width notes in settings.ts) — not sized per selection. */
+	flex: 0 0 15ch;
+	width: 15ch;
 }
 
 .loom-view .loom-scene-heading-location {
@@ -8292,14 +8380,28 @@ body.loom-follow-theme-color .loom-branch-title-preview-bold {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: var(--size-4-1) var(--size-4-2) var(--size-4-2);
+	/* 5px less right padding: the + sits a little right of the group counts below
+	   instead of lining up with them. */
+	padding: var(--size-4-1) calc(var(--size-4-2) - 5px) var(--size-4-2) var(--size-4-2);
 }
+
+/* "New project": a compact square accent button, icon only. */
+.loom-view .loom-pm-new {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: calc(var(--icon-m) + var(--size-2-2) * 2);
+	height: calc(var(--icon-m) + var(--size-2-2) * 2);
+	padding: 0;
+}
+
+.loom-view .loom-pm-new .loom-icon {
+	display: flex;
+}
+
 .loom-pm-title {
 	font-weight: var(--font-semibold);
 	font-size: 1.4em;
-}
-.mod-sidedock .loom-pm-title {
-	font-size: 1em;
 }
 .loom-pm-empty {
 	padding: var(--size-4-2);
@@ -8364,4 +8466,461 @@ body.loom-follow-theme-color .loom-branch-title-preview-bold {
 .loom-snapshot-list {
 	max-height: 50vh;
 	overflow-y: auto;
+}
+
+/* "Start here" cue under a list's New button while the list has nothing yet,
+   drifting gently so it reads as a pointer, not a label. */
+.loom-start-anchor {
+	position: relative;
+}
+
+.loom-start-cue {
+	position: absolute;
+	/* 5px below the header's bottom border: the header's bottom padding + the
+	   1px border + 5px. */
+	top: calc(100% + var(--size-4-2) + 6px);
+	/* The arrow's upright stroke sits 1/3em (its 4/12 of a 1em-wide svg) plus
+	   the right padding in from the cue's right edge; line that up with the
+	   button's centre, whatever the button's width. */
+	right: calc(50% - 1em / 3 - var(--size-4-2));
+	z-index: 5;
+	display: flex;
+	align-items: center;
+	gap: var(--size-2-2);
+	padding: var(--size-2-2) var(--size-4-2);
+	border-radius: var(--radius-m);
+	border: 1px solid var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 12%, var(--background-primary));
+	color: var(--text-accent);
+	font-size: var(--font-ui-small);
+	white-space: nowrap;
+	pointer-events: none;
+	/* Every cue fades in a beat after its page, so it visibly appears and
+	   draws the eye rather than looking like it was always there. */
+	animation:
+		loom-fade-in 0.6s ease-out 0.25s both,
+		loom-start-drift 2.4s ease-in-out infinite alternate;
+}
+
+/* Above the button instead, the arrow flipped to turn down to it. */
+.loom-start-cue.loom-start-cue-above {
+	top: auto;
+	bottom: calc(100% + var(--size-4-2));
+}
+
+.loom-start-cue-above .loom-start-arrow {
+	transform: scaleY(-1);
+}
+
+/* Twice the text's height, so its horizontal stroke sits on the text's middle;
+   the negative margins keep it from growing the box. */
+.loom-start-arrow {
+	width: 1em;
+	height: 2em;
+	margin-block: -0.5em;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+/* The inline, sideways variant (beside the Script's Title page, or ahead of
+   an Outline button): fades in like every cue, then drifts sideways. */
+.loom-view .loom-start-cue.loom-start-cue-side {
+	position: relative;
+	top: auto;
+	right: auto;
+	display: inline-flex;
+	vertical-align: middle;
+	margin-inline: var(--size-4-3);
+	/* Wraps within the room left before the view's right edge (`StartCue`
+	   measures it), never down to a word per line. */
+	max-width: var(--loom-cue-max, none);
+	min-width: min(8em, var(--loom-cue-max, 8em));
+	white-space: normal;
+	width: max-content;
+	animation:
+		loom-fade-in 0.6s ease-out 0.25s both,
+		loom-start-drift-side 2.4s ease-in-out infinite alternate;
+}
+
+@keyframes loom-fade-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+.loom-start-arrow-side {
+	flex: none;
+	width: 1.6em;
+	height: 0.8em;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+@keyframes loom-start-drift-side {
+	from {
+		transform: translateX(0);
+	}
+	to {
+		transform: translateX(5px);
+	}
+}
+
+@keyframes loom-start-drift {
+	from {
+		transform: translateY(0);
+	}
+	to {
+		transform: translateY(5px);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.loom-start-cue,
+	.loom-view .loom-start-cue.loom-start-cue-side {
+		animation: none;
+	}
+}
+
+/* Obsidian's own accent hover barely shifts the colour; brighten instead so
+   every accent button visibly responds. */
+.loom-view button.mod-cta:hover {
+	filter: brightness(1.12);
+}
+
+/* An opaque, outlined tooltip — for long text the theme's tooltip (often
+   translucent) makes hard to read. */
+.tooltip.loom-solid-tooltip {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	opacity: 1;
+}
+
+.tooltip.loom-solid-tooltip .tooltip-arrow {
+	border-bottom-color: var(--background-modifier-border);
+}
+
+/* The tutorial's lock: a dim layer over the whole view with holes cut for
+   what the current step lights (`TutorialSpotlight` sets its clip-path). It
+   sits above the rail (21) and the Quick Notes panel. */
+.loom-tutorial-dim,
+.loom-tutorial-block {
+	position: absolute;
+	inset: 0;
+	z-index: 40;
+}
+
+.loom-tutorial-dim {
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+}
+
+.loom-tutorial-dim-fill {
+	fill: var(--background-modifier-cover);
+}
+
+.loom-tutorial-block {
+	clip-path: var(--loom-tutorial-clip, none);
+}
+
+.loom-tutorial-off,
+.loom-tutorial-block.loom-tutorial-pass {
+	display: none;
+}
+
+
+/* A cue next to a rail button: just right of the rail, level with the
+   button (`--loom-rail-cue-top`, measured by NavRail — the buttons scroll). */
+.loom-rail-cue {
+	position: absolute;
+	left: calc(100% + var(--size-4-2));
+	top: var(--loom-rail-cue-top, 0);
+	transform: translateY(-50%);
+	pointer-events: none;
+}
+
+.loom-rail-cue .loom-start-cue-side {
+	margin: 0;
+}
+
+.loom-start-anchor-inline {
+	display: inline-block;
+}
+
+/* "Continue tutorial" (rail bottom, while paused): a gap above Quick Notes,
+   and its cue just right of the rail. */
+.loom-rail-continue {
+	position: relative;
+	margin-bottom: var(--size-2-2);
+}
+
+.loom-rail-continue-cue {
+	position: absolute;
+	left: calc(100% + var(--size-2-2) + var(--size-4-2));
+	top: 50%;
+	transform: translateY(-50%);
+	pointer-events: none;
+}
+
+.loom-rail-continue-cue .loom-start-cue-side {
+	margin: 0;
+}
+
+/* A cue in the flow, right under what it means (the Scene page's heading,
+   the new-scene dialog): its text keeps its line breaks and wraps rather
+   than running off a narrow modal; a "continue" button sits in its
+   bottom-right corner. */
+.loom-start-cue.loom-start-cue-inline,
+.loom-view .loom-start-cue.loom-start-cue-inline {
+	position: relative;
+	top: auto;
+	right: auto;
+	display: flex;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: var(--size-4-3);
+	box-sizing: border-box;
+	/* Fits its text, kept compact; one lined up with the lit fields
+	   (`StartCue matchLit` measures them) takes their width instead. */
+	margin-left: var(--loom-cue-left, 0);
+	width: var(--loom-cue-width, fit-content);
+	max-width: var(--loom-cue-max-inline, min(100%, 36em));
+	margin-top: var(--size-4-2);
+	padding: var(--size-2-3) var(--size-2-3) var(--size-2-3) var(--size-4-2);
+	white-space: normal;
+	/* Static: it sits right under its fields, so it fades in but doesn't
+	   drift. */
+	animation: loom-fade-in 0.6s ease-out 0.25s both;
+}
+
+.loom-start-cue-inline .loom-start-cue-text {
+	white-space: pre-line;
+	line-height: 1.5;
+}
+
+/* No lone word left on the last line of a cue that wraps (an inline or
+   side one). Not the button cues: `text-wrap` is a shorthand that also turns
+   wrapping back on, and those stay one line. */
+.loom-start-cue-inline .loom-start-cue-text,
+.loom-start-cue-side .loom-start-cue-text {
+	text-wrap: pretty;
+}
+
+/* The cue's round "continue" button (a step with nothing to do but read):
+   a fixed size against Obsidian's own button height/padding, so it stays
+   inside the panel. */
+.loom-start-cue button.loom-start-cue-next {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	box-sizing: border-box;
+	width: 22px;
+	height: 22px;
+	min-height: 0;
+	padding: 0;
+	margin: 0;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	box-shadow: none;
+	pointer-events: auto;
+	cursor: pointer;
+}
+
+.loom-start-cue-next .loom-icon,
+.loom-start-cue-next svg {
+	display: flex;
+	width: 14px;
+	height: 14px;
+}
+
+/* A modal the tutorial spotlights inside (the new-scene dialog). */
+.loom-tutorial-root {
+	position: relative;
+}
+
+/* ---- Graph tutorial ---- */
+
+/* A tutorial cue over the graph canvas: top centre, or just above the
+   timeline drawer for its step. */
+.loom-graph-cue {
+	position: absolute;
+	top: var(--size-4-3);
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 6;
+	pointer-events: none;
+	max-width: calc(100% - var(--size-4-8));
+}
+
+.loom-graph-cue.loom-graph-cue-bottom {
+	top: auto;
+	bottom: var(--size-4-3);
+}
+
+.loom-graph-cue .loom-start-cue-inline {
+	margin-top: 0;
+}
+
+/* The drag / drag-and-pin hint over a real node (`GraphGhost`): a cursor
+   presses the node, carries a ghost of it along an arc, and lets go — the
+   ghost springs back (drag) or, after a right-click while held, stays (pin).
+   Positioned at the node's centre (--gx/--gy), sized from its radius. */
+.loom-graph-ghost {
+	position: absolute;
+	left: var(--gx);
+	top: var(--gy);
+	width: 0;
+	height: 0;
+	z-index: 5;
+	pointer-events: none;
+	animation: loom-ghost-fade 3.4s ease-in-out 0.8s infinite both;
+}
+
+.loom-graph-ghost-node {
+	position: absolute;
+	left: calc(-1 * var(--gr));
+	top: calc(-1 * var(--gr));
+	width: calc(2 * var(--gr));
+	height: calc(2 * var(--gr));
+	border-radius: 50%;
+	border: 2px dashed var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+	animation: loom-ghost-drag-node 3.4s ease-in-out 0.8s infinite both;
+}
+
+.loom-graph-ghost-pin .loom-graph-ghost-node {
+	animation-name: loom-ghost-pin-node;
+}
+
+.loom-graph-ghost-pointer {
+	position: absolute;
+	left: 0;
+	top: 0;
+	animation: loom-ghost-pointer 3.4s ease-in-out 0.8s infinite both;
+}
+
+.loom-graph-ghost-cursor {
+	width: 22px;
+	height: 22px;
+	fill: var(--text-normal);
+	stroke: var(--background-primary);
+	stroke-width: 1.5;
+	stroke-linejoin: round;
+	/* The arrow's tip (5,3 of 24) sits on the point it presses. */
+	transform: translate(-5px, -3px);
+	animation: loom-ghost-press 3.4s ease-in-out 0.8s infinite both;
+}
+
+.loom-graph-ghost-mouse {
+	position: absolute;
+	left: 18px;
+	top: 14px;
+	width: 14px;
+	height: 21px;
+	fill: var(--background-primary);
+	stroke: var(--text-normal);
+	stroke-width: 1.5;
+	animation: loom-ghost-mouse 3.4s ease-in-out 0.8s infinite both;
+}
+
+.loom-graph-ghost-mouse .loom-graph-ghost-mouse-right {
+	fill: var(--interactive-accent);
+	stroke: none;
+	animation: loom-ghost-right-click 3.4s ease-in-out 0.8s infinite both;
+}
+
+/* The right button lights as it's clicked, just as the carry ends. */
+@keyframes loom-ghost-right-click {
+	0%, 54% { opacity: 0.25; }
+	58%, 66% { opacity: 1; }
+	72%, 100% { opacity: 0.25; }
+}
+
+/* One cycle: approach (0–15%), press (15–22%), carry along an arc (22–58%),
+   then the drag's release springs the ghost home (62–78%), while the pin's
+   right-click (58–68%) leaves it where it is. Fade out at the end. */
+@keyframes loom-ghost-pointer {
+	0% { transform: translate(46px, 46px); }
+	15%, 22% { transform: translate(0, 0); }
+	40% { transform: translate(70px, -60px); }
+	58%, 100% { transform: translate(120px, -40px); }
+}
+
+@keyframes loom-ghost-press {
+	0%, 15% { scale: 1; }
+	18%, 58% { scale: 0.85; }
+	62%, 100% { scale: 1; }
+}
+
+@keyframes loom-ghost-drag-node {
+	0%, 22% { transform: translate(0, 0); opacity: 0; }
+	24% { opacity: 1; }
+	40% { transform: translate(70px, -60px); }
+	58%, 62% { transform: translate(120px, -40px); }
+	72% { transform: translate(-8px, 6px); }
+	78%, 100% { transform: translate(0, 0); opacity: 1; }
+}
+
+@keyframes loom-ghost-pin-node {
+	0%, 22% { transform: translate(0, 0); opacity: 0; }
+	24% { opacity: 1; }
+	40% { transform: translate(70px, -60px); }
+	58%, 100% { transform: translate(120px, -40px); opacity: 1; }
+}
+
+@keyframes loom-ghost-mouse {
+	0%, 48% { opacity: 0; }
+	52%, 76% { opacity: 1; }
+	84%, 100% { opacity: 0; }
+}
+
+@keyframes loom-ghost-fade {
+	0%, 86% { opacity: 1; }
+	96%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.loom-graph-ghost,
+	.loom-graph-ghost * {
+		animation: none;
+	}
+}
+
+/* A tutorial cue just below an open popover (the graph's saved views),
+   sliding down into place from where it sat under the button. */
+.loom-pop-cue {
+	position: absolute;
+	top: calc(100% + var(--size-4-2));
+	right: 0;
+	z-index: 6;
+	pointer-events: none;
+	animation: loom-cue-slide-down 0.35s ease-out both;
+}
+
+.loom-pop-cue .loom-start-cue-inline {
+	margin-top: 0;
+	animation: none;
+}
+
+@keyframes loom-cue-slide-down {
+	from {
+		transform: translateY(-2.5em);
+		opacity: 0;
+	}
+	to {
+		transform: translateY(0);
+		opacity: 1;
+	}
 }

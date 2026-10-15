@@ -57,7 +57,6 @@
 			"receivedInSession": "Получен в сессии",
 			"pickSession": "Выберите сессию…",
 			"reward": "Награда",
-			"description": "Описание",
 			"date": "Дата",
 			"anchorDescRequired": "{anchor}, к которой относится этот элемент («{type}»).",
 			"anchorDescOptional": "Когда это произошло; оставьте пустым для лорного события без привязки к сессии.",
@@ -178,6 +177,7 @@
 		"scriptLabel": "Сценарий",
 		"bookLabel": "Книга",
 		"noMatches": "Совпадений нет.",
+		"showInSystemExplorer": "Показать в Проводнике",
 		"remove": "Удалить",
 		"noProjectFound": "Проект не найден. Сначала откройте домашний файл проекта (.loom).",
 		"home": "Домой",
@@ -313,7 +313,6 @@
 				"anchorGraph": "Граф: {anchor}",
 				"tags": "Метки",
 				"anchorNotes": "Заметки: {anchor}",
-				"descriptionPlaceholder": "Короткое описание…",
 				"notesPlaceholder": "Заметки…"
 			},
 			"notEntity": {
@@ -411,8 +410,6 @@
 				"removeFromPage": "Убрать со страницы",
 				"addItemPlaceholder": "Добавить предмет…",
 				"itemsInSublocations": "Предметы в подлокациях",
-				"alternativeDescription": "Альтернативное описание",
-				"originalDescription": "Исходное описание",
 				"addToCharacterPlaceholder": "Добавить персонажу…",
 				"removeFromCharacter": "Убрать у этого персонажа",
 				"addToLocationPlaceholder": "Добавить локации…",
@@ -709,7 +706,7 @@
 			},
 			"unpinPanel": "Открепить панель",
 			"pinPanelOpen": "Закрепить панель открытой",
-			"rightClickHint": "Щёлкните правой кнопкой, выберите инструмент, затем нарисуйте зону."
+			"rightClickHint": "Щёлкните правой кнопкой, чтобы открыть инструменты рисования, или выберите их здесь:"
 		},
 		"markdownField": {
 			"createEntityOption": "+ Создать «{name}»…"
@@ -735,15 +732,10 @@
 			"pageBreakLabel": "Разрыв страницы",
 			"openThisSceneAction": "Открыть эту сцену",
 			"openThisChapterAction": "Открыть эту главу",
-			"outlineNoActsPre": "Пока нет актов — их создаёт строка ",
-			"outlineNoActsPost": ".",
 			"expandScenesAria": "Развернуть сцены",
 			"collapseScenesAria": "Свернуть сцены",
 			"expandChaptersAria": "Развернуть главы",
 			"collapseChaptersAria": "Свернуть главы",
-			"outlineLinksHeading": "Ссылки структуры ({count})",
-			"outlineNoScenesPre": "Пока нет сцен — начать может заголовок вроде ",
-			"outlineNoScenesPost": ".",
 			"scenesWithoutAct": "Сцены без акта",
 			"scenesWithoutActHintPre": "Сцена принадлежит разделу ",
 			"scenesWithoutActHintMid": ", в который она входит — это её акт, и там же живёт её текст. Добавьте выше строку ",
@@ -771,7 +763,6 @@
 			"exportWriteFailed": "Не удалось записать экспорт. Подробности в консоли.",
 			"editWriteFailed": "Не удалось записать изменения в сценарий.",
 			"openInDefaultApp": "Открыть в приложении по умолчанию",
-			"showInSystemFileManager": "Показать в системном менеджере файлов",
 			"exportAsPdf": "Экспортировать как PDF…",
 			"exportAsFountain": "Экспортировать как .fountain (без ID Loom)…",
 			"importScriptAction": "Импортировать сценарий…",
@@ -844,7 +835,6 @@
 		"projects": {
 			"title": "Loom Loom",
 			"newProject": "Новый проект",
-			"empty": "Нет проектов",
 			"snapshots": "Резервные копии…"
 		}
 	},

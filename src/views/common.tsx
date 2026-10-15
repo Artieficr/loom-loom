@@ -1,10 +1,11 @@
-import { setIcon, setTooltip } from 'obsidian';
+import { App, Notice, setIcon, setTooltip } from 'obsidian';
 import {
 	CSSProperties,
 	KeyboardEvent as ReactKeyboardEvent,
 	ReactNode,
 	RefObject,
 	useEffect,
+	useLayoutEffect,
 	useRef,
 	useState,
 } from 'react';
@@ -26,6 +27,7 @@ import {
 	scriptLabel,
 } from '../types';
 import { groupNameOf } from '../calendar';
+import type { ProjectConfig } from '../calendar';
 import { features, projectRoleType, projectTypes } from '../project-kind';
 import { createScriptFile } from './script-buffer';
 import { createBookFile } from './book-view';
@@ -36,6 +38,19 @@ import type { LinkOption } from './markdown-field';
 import { CreateEntityModal, EntityTypeSuggestModal } from '../project';
 import { recordLabel } from '../display';
 import { LocaleKey, t } from '../i18n';
+import {
+	GRAPH_STEPS,
+	TutorialPage,
+	TutorialStep,
+	currentTutorialStep,
+	graphDetour,
+	setTutorialPaused,
+	tutorialPaused,
+	tutorialRoute,
+	tutorialRouteKey,
+} from '../tutorial';
+import { CUE_ARROW, startSpotlight } from '../tutorial-spotlight';
+import { preventOrphans } from '../fountain';
 import type LoomLoomPlugin from '../main';
 
 
@@ -328,6 +343,9 @@ export function SuggestInput({
 	onPick,
 	onBlur,
 	action,
+	freeText,
+	upperCase,
+	tutorialTarget,
 }: {
 	className?: string;
 	placeholder?: string;
@@ -340,32 +358,49 @@ export function SuggestInput({
 	/** Extra fixed entry pinned at the top of the list (e.g. "+ Create entity…"),
 	 *  shown even when nothing matches the current text. */
 	action?: { label: string; onPick: () => void };
+	/** The typed text is a value in its own right: Enter keeps it — it leaves
+	 *  the field, so `onBlur` commits it once — unless a suggestion was
+	 *  highlighted with the arrow keys. */
+	freeText?: boolean;
+	/** Shows, types and picks in capitals. */
+	upperCase?: boolean;
+	/** Lit by the tutorial's spotlight. */
+	tutorialTarget?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
 	// Keyboard highlight into the filtered list — Arrow Down/Up move it, Enter
-	// takes whichever entry is highlighted (defaults to the top match).
+	// takes whichever entry is highlighted (defaults to the top match, except
+	// in `freeText` mode, where only an arrowed-to entry counts).
 	const [active, setActive] = useState(0);
+	const [navigated, setNavigated] = useState(false);
 	const wrapRef = useRef<HTMLDivElement>(null);
 	useCloseOnOutsideClick(wrapRef, open, () => setOpen(false));
+	const caps = (v: string) => (upperCase ? v.toUpperCase() : v);
 
 	const query = value.trim().toLowerCase();
 	const filtered = options.filter((o) => o.toLowerCase().includes(query));
 	const activeIndex = Math.min(active, Math.max(0, filtered.length - 1));
+	const highlighted = !freeText || navigated;
 
 	const pick = (v: string) => {
 		setOpen(false);
-		onPick(v);
+		onPick(caps(v));
 	};
 
 	return (
-		<div className={className ? `loom-combo ${className}` : 'loom-combo'} ref={wrapRef}>
+		<div
+			className={className ? `loom-combo ${className}` : 'loom-combo'}
+			ref={wrapRef}
+			data-tutorial-target={tutorialTarget ? '' : undefined}
+		>
 			<input
 				type="text"
 				placeholder={placeholder}
-				value={value}
+				value={caps(value)}
 				onChange={(e) => {
-					onChange(e.target.value);
+					onChange(caps(e.target.value));
 					setActive(0);
+					setNavigated(false);
 					setOpen(true);
 				}}
 				onFocus={() => setOpen(true)}
@@ -376,13 +411,29 @@ export function SuggestInput({
 					else if (e.key === 'ArrowDown') {
 						e.preventDefault();
 						setOpen(true);
-						setActive((a) => Math.min(filtered.length - 1, a + 1));
+						// The first press in free-text mode lands on the top entry.
+						setActive((a) => (highlighted ? Math.min(filtered.length - 1, a + 1) : 0));
+						setNavigated(true);
 					} else if (e.key === 'ArrowUp') {
 						e.preventDefault();
 						setActive((a) => Math.max(0, a - 1));
+						setNavigated(true);
 					} else if (e.key === 'Enter') {
-						if (open && filtered.length > 0 && filtered[activeIndex] !== value) pick(filtered[activeIndex]);
-						else setOpen(false);
+						if (open && highlighted && filtered.length > 0 && filtered[activeIndex] !== value) {
+							pick(filtered[activeIndex]);
+						} else {
+							setOpen(false);
+							if (freeText) {
+								// Leave the field once this keypress is over: blurring
+								// commits, and a commit that opens a dialog (a rename
+								// confirmation) during the keypress has Obsidian hand
+								// that same Enter to the dialog, which dismisses it.
+								e.preventDefault();
+								e.stopPropagation();
+								const input = e.currentTarget;
+								input.win.setTimeout(() => input.blur(), 0);
+							}
+						}
 					}
 				}}
 			/>
@@ -404,11 +455,13 @@ export function SuggestInput({
 					{filtered.map((o, i) => (
 						<button
 							key={o}
-							className={i === activeIndex ? 'loom-combo-item loom-combo-item-active' : 'loom-combo-item'}
+							className={
+								highlighted && i === activeIndex ? 'loom-combo-item loom-combo-item-active' : 'loom-combo-item'
+							}
 							onMouseEnter={() => setActive(i)}
 							onClick={() => pick(o)}
 						>
-							{o}
+							{caps(o)}
 						</button>
 					))}
 				</div>
@@ -713,12 +766,19 @@ export function RailButton({
 	label,
 	active,
 	onClick,
+	tutorialTarget,
+	railKey,
 }: {
 	icon: string;
 	/** Substitute icon for older Obsidian bundles missing `icon` (see Icon). */
 	label: string;
 	active?: boolean;
 	onClick: () => void;
+	/** Lit by the tutorial's spotlight. */
+	tutorialTarget?: boolean;
+	/** What the button opens (`script`, `book`, an entity type) — how the
+	 *  tutorial finds the button its cue points at. */
+	railKey?: string;
 }) {
 	const ref = useRef<HTMLButtonElement>(null);
 	useEffect(() => {
@@ -730,10 +790,24 @@ export function RailButton({
 			className={active ? 'loom-rail-btn loom-rail-btn-active' : 'loom-rail-btn'}
 			aria-label={label}
 			onClick={onClick}
+			data-tutorial-target={tutorialTarget ? '' : undefined}
+			data-rail-key={railKey}
 		>
 			<Icon name={icon} />
 		</button>
 	);
+}
+
+/** What a tutorial cue that leads on to `step` says — on a detour back for
+ *  an act with a scene, why it's going there. */
+export function tutorialCueText(step: TutorialStep | null, config?: ProjectConfig): string {
+	if (config?.tutorial?.returnTo && (step === 'createAct' || step === 'openActOutline' || step === 'createBeat')) {
+		return step === 'createAct' ? t('tutorial.graphDetourNoAct') : t('tutorial.graphDetour');
+	}
+	if (step === 'openDoc') return t('tutorial.startHere');
+	if (step === 'openLocations') return t('tutorial.checkLocations');
+	if (step === 'openGraph') return t('tutorial.openGraph');
+	return t('tutorial.continueHere');
 }
 
 /**
@@ -750,21 +824,57 @@ export function NavRail({
 	project,
 	active,
 	minimal,
+	tutorialPage = 'other',
 }: {
 	navigator: LoomNavigator;
 	project: ProjectDef;
 	active?: string;
 	minimal?: boolean;
+	/** What this page is to the tutorial — a page that can't lead on to the
+	 *  current step points the user back Home. */
+	tutorialPage?: TutorialPage;
 }) {
 	const [quickNotesOpen, setQuickNotesOpen] = useQuickNotesToggle(navigator);
+	// The tutorial, when this page can't lead on to its step: the rail button
+	// that does is lit with the cue, and Home with it (the wheel leads there
+	// too).
+	const step = currentTutorialStep(project.config);
+	const routeKey = step !== null && tutorialRoute(step, tutorialPage) === 'rail' ? tutorialRouteKey(step, project.config) : null;
+	const lit = (key: string) => routeKey !== null && key === routeKey;
+	const navRef = useRef<HTMLElement>(null);
+	const [cueTop, setCueTop] = useState<number | null>(null);
+	useEffect(() => {
+		const nav = navRef.current;
+		const btn = routeKey ? nav?.querySelector<HTMLElement>(`[data-rail-key="${routeKey}"]`) : null;
+		if (!nav || !btn) {
+			setCueTop(null);
+			return;
+		}
+		// The buttons scroll inside the rail, so the cue (outside that
+		// scroller, which would clip it) follows the button's position.
+		const list = nav.querySelector('.loom-rail-buttons');
+		const measure = () => {
+			const r = btn.getBoundingClientRect();
+			setCueTop(r.top - nav.getBoundingClientRect().top + r.height / 2);
+		};
+		measure();
+		list?.addEventListener('scroll', measure);
+		return () => list?.removeEventListener('scroll', measure);
+	}, [routeKey]);
 	return (
 		<>
-			<nav className={minimal ? 'loom-rail loom-rail-minimal' : 'loom-rail'}>
+			<nav ref={navRef} className={minimal ? 'loom-rail loom-rail-minimal' : 'loom-rail'}>
+				{routeKey && cueTop !== null ? (
+					<div className="loom-rail-cue" style={{ '--loom-rail-cue-top': `${cueTop}px` } as CSSProperties}>
+						<StartCue side="left" text={tutorialCueText(step, project.config)} />
+					</div>
+				) : null}
 				<div className="loom-rail-buttons">
 					<RailButton
 						icon="home"
 						label={t('common.home')}
 						onClick={() => navigator.openLoomFile(project.loomPath)}
+						tutorialTarget={routeKey !== null}
 					/>
 					<div className="loom-rail-sep" />
 					{/* The script leads, in the slot the Group takes in the other kinds,
@@ -774,6 +884,8 @@ export function NavRail({
 							icon={SCRIPT_ICON}
 							label={scriptLabel()}
 							active={active === 'script'}
+							railKey="script"
+							tutorialTarget={lit('script')}
 							// Created on demand: a project switched to Writer after
 							// setup has no script file yet.
 							onClick={() =>
@@ -789,6 +901,8 @@ export function NavRail({
 							icon={BOOK_ICON}
 							label={bookLabel()}
 							active={active === 'book'}
+							railKey="book"
+							tutorialTarget={lit('book')}
 							onClick={() =>
 								void createBookFile(navigator.plugin, project).then((f) => navigator.openLoomFile(f.path))
 							}
@@ -806,6 +920,8 @@ export function NavRail({
 										icon={ENTITY_META[et].icon}
 										label={entityPlural(et)}
 										active={active === et}
+										railKey={et}
+										tutorialTarget={lit(et)}
 										onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: et })}
 									/>
 								)
@@ -846,6 +962,8 @@ export function NavRail({
 									icon={ENTITY_META[et].icon}
 									label={entityPlural(et)}
 									active={active === et}
+									railKey={et}
+									tutorialTarget={lit(et)}
 									onClick={() => navigator.navigateTo(VIEW_LIST, { project: project.root, entityType: et })}
 								/>
 							);
@@ -869,10 +987,37 @@ export function NavRail({
 						icon="spool"
 						label={t('common.loomGraph')}
 						active={active === 'graph'}
+						railKey="graph"
+						tutorialTarget={lit('graph')}
 						onClick={() => navigator.navigateTo(VIEW_GRAPH, { project: project.root })}
 					/>
 				</div>
 				<div className="loom-rail-spacer" />
+				{step !== null ? (
+					// Where "Continue tutorial" appears once paused. Clickable
+					// through the tutorial's dim without being lit itself.
+					<div className="loom-rail-continue" data-tutorial-free="">
+						<RailButton
+							icon="pause"
+							label={t('tutorial.pause')}
+							active
+							onClick={() => setTutorialPaused(navigator.plugin, project, true)}
+						/>
+					</div>
+				) : null}
+				{tutorialPaused(project.config) ? (
+					<div className="loom-rail-continue">
+						<RailButton
+							icon="graduation-cap"
+							label={t('tutorial.continue')}
+							active
+							onClick={() => setTutorialPaused(navigator.plugin, project, false)}
+						/>
+						<div className="loom-rail-continue-cue">
+							<StartCue side="left" text={t('tutorial.continue')} />
+						</div>
+					</div>
+				) : null}
 				{/* `.loom-qn-trigger-wrap` (`display: contents`, no layout effect of
 				    its own) marks this button as Quick-Notes UI for the focus
 				    tracker in quick-notes.tsx — clicking it shifts DOM focus to the
@@ -904,6 +1049,7 @@ export function ViewShell({
 	railActive,
 	titleExtra,
 	toolbar,
+	tutorialPage,
 	children,
 }: {
 	view: LoomNavigator;
@@ -913,11 +1059,13 @@ export function ViewShell({
 	/** Rendered on the right side of the title row (view-specific actions). */
 	titleExtra?: ReactNode;
 	toolbar?: ReactNode;
+	tutorialPage?: TutorialPage;
 	children: ReactNode;
 }) {
 	return (
 		<div className="loom-shell-row">
-			{project ? <NavRail navigator={view} project={project} active={railActive} /> : null}
+			<TutorialSpotlight plugin={view.plugin} project={project} />
+			{project ? <NavRail navigator={view} project={project} active={railActive} tutorialPage={tutorialPage} /> : null}
 			<div className="loom-shell">
 				<div className="loom-shell-header">
 					<h2 className="loom-shell-title">{title}</h2>
@@ -931,6 +1079,227 @@ export function ViewShell({
 	);
 }
 
+/**
+ * An empty state that offers its first actions instead of only describing the
+ * emptiness: the hint, with a menu-styled list of actions beside it (`stack`:
+ * under it, for a narrow sidebar). The map's empty page builds the same layout
+ * around its own right-click rows.
+ */
+export function StartGuide({
+	label,
+	actions,
+	stack,
+}: {
+	label: string;
+	actions: { icon: string; label: string; onClick: () => void }[];
+	stack?: boolean;
+}): ReactNode {
+	return (
+		<div className={stack ? 'loom-empty-guide loom-empty-guide-stack' : 'loom-empty-guide'}>
+			<div>{label}</div>
+			<div className="loom-map-menu loom-map-menu-vert loom-map-menu-inline">
+				{actions.map((a) => (
+					<button key={a.label} className="loom-map-menu-row" onClick={a.onClick}>
+						<Icon name={a.icon} />
+						<span>{a.label}</span>
+					</button>
+				))}
+			</div>
+		</div>
+	);
+}
+
+/** A drifting onboarding cue. By default it hangs under the button it
+ *  follows, pointing up at it (both inside one `.loom-start-anchor`);
+ *  `above` puts it over the button instead, pointing down — for a button
+ *  with a table right under it; `inline` sits in the flow right under what
+ *  it means, with no arrow, its text keeping its line breaks. `side` makes it inline, drifting sideways, its arrow pointing
+ *  `'left'` at what comes before it or `'right'` at what comes after.
+ *  `onNext` adds a round "continue" button, for a step with nothing to do
+ *  but read. Every cue fades in. */
+export function StartCue({
+	text,
+	side,
+	above,
+	inline,
+	matchLit,
+	onNext,
+}: {
+	text: string;
+	side?: 'left' | 'right';
+	above?: boolean;
+	inline?: boolean;
+	/** Inline: line up with the lit fields beside it (their left edge and
+	 *  width) instead of fitting the text. */
+	matchLit?: boolean;
+	onNext?: () => void;
+}): ReactNode {
+	const shape = side ? CUE_ARROW[side] : CUE_ARROW.up;
+	const arrow = (
+		<svg className={shape.cls} viewBox={shape.viewBox} aria-hidden="true">
+			<path d={shape.d} />
+		</svg>
+	);
+	const next = onNext ? (
+		<button className="loom-start-cue-next" aria-label={t('tutorial.next')} data-tutorial-target="" onClick={onNext}>
+			<Icon name="arrow-right" />
+		</button>
+	) : null;
+	// An inline cue sits right under what it means, so it needs no arrow, and
+	// lines up with it: the left edge and width of the lit fields beside it.
+	// A side cue wraps rather than running past what would clip it.
+	const ref = useRef<HTMLElement>(null);
+	useLayoutEffect(() => {
+		const el = ref.current;
+		if (!el) return;
+		const parent = el.parentElement;
+		// What would cut the cue off: its nearest ancestor that clips (one
+		// scrolling vertically clips sideways too).
+		let clip: HTMLElement | null = parent;
+		while (clip && clip.win.getComputedStyle(clip).overflowX === 'visible') clip = clip.parentElement;
+		const view = clip ?? el.closest<HTMLElement>('.loom-view');
+		const measure = () => {
+			if (side && view) {
+				// A cue after its target grows rightwards, one before it (arrow
+				// pointing right) leftwards.
+				const box = view.getBoundingClientRect();
+				const r = el.getBoundingClientRect();
+				const room = (side === 'left' ? box.right - r.left : r.right - box.left) - 12;
+				el.setCssProps({ '--loom-cue-max': `${Math.max(room, 0)}px` });
+				return;
+			}
+			if (!inline || !matchLit || !parent) return;
+			const lit = [...parent.querySelectorAll<HTMLElement>('[data-tutorial-target]')].filter((t) => !el.contains(t));
+			if (lit.length === 0) return;
+			const rects = lit.map((t) => t.getBoundingClientRect());
+			const left = Math.min(...rects.map((r) => r.left));
+			const right = Math.max(...rects.map((r) => r.right));
+			// From the parent's content edge, where the cue's own margin starts.
+			const contentLeft = parent.getBoundingClientRect().left + parseFloat(getComputedStyle(parent).paddingLeft);
+			el.setCssProps({
+				'--loom-cue-left': `${left - contentLeft}px`,
+				// Never so narrow the text crams.
+				'--loom-cue-width': `max(${right - left}px, 16em)`,
+				'--loom-cue-max-inline': '100%',
+			});
+		};
+		measure();
+		const observer = new ResizeObserver(measure);
+		const watched = side ? view : parent;
+		if (watched) observer.observe(watched);
+		return () => observer.disconnect();
+	}, [inline, matchLit, side, text]);
+	if (side) {
+		return (
+			<span ref={ref} className="loom-start-cue loom-start-cue-side">
+				{side === 'left' ? arrow : null}
+				<span className="loom-start-cue-text">{preventOrphans(text)}</span>
+				{side === 'right' ? arrow : null}
+				{next}
+			</span>
+		);
+	}
+	const cls = ['loom-start-cue', above ? 'loom-start-cue-above' : '', inline ? 'loom-start-cue-inline' : '']
+		.filter(Boolean)
+		.join(' ');
+	return (
+		<div ref={ref as RefObject<HTMLDivElement>} className={cls}>
+			<span className="loom-start-cue-text">{preventOrphans(text)}</span>
+			{inline ? null : arrow}
+			{next}
+		</div>
+	);
+}
+
+/**
+ * A Pages preview's page stepper: previous / the page number (type one and
+ * press Enter to jump) / "of N" / next.
+ */
+export function PageNav({
+	current,
+	count,
+	onGo,
+}: {
+	current: number;
+	count: number;
+	onGo: (page: number) => void;
+}): ReactNode {
+	// The input's own typed text while being edited, separate from `current`,
+	// so clearing the field to type a new number doesn't snap straight back to
+	// the current page. Null = not being edited.
+	const [draft, setDraft] = useState<string | null>(null);
+	return (
+		<>
+			<button
+				className="loom-rel-filter"
+				aria-label={t('view.script.previousPage')}
+				disabled={current <= 1}
+				onClick={() => onGo(current - 1)}
+			>
+				<Icon name="chevron-left" />
+			</button>
+			<input
+				className="loom-script-pagenum"
+				type="number"
+				min={1}
+				max={count}
+				value={draft ?? current}
+				onChange={(e) => setDraft(e.target.value)}
+				onKeyDown={(e) => {
+					if (e.key !== 'Enter') return;
+					e.preventDefault();
+					const n = Number(draft);
+					if (draft && draft.trim() !== '' && n > 0) onGo(n);
+					setDraft(null);
+				}}
+				onBlur={() => setDraft(null)}
+			/>
+			<span className="loom-writer-stat">{t('view.script.ofCount', { count })}</span>
+			<button
+				className="loom-rel-filter"
+				aria-label={t('view.script.nextPage')}
+				disabled={current >= count}
+				onClick={() => onGo(current + 1)}
+			>
+				<Icon name="chevron-right" />
+			</button>
+		</>
+	);
+}
+
+/**
+ * The tutorial's lock over a view — `startSpotlight` (tutorial-spotlight.ts)
+ * on the view's root row, mounted as its first child, while a step runs.
+ * (Pausing is the side rail's own button.)
+ */
+export function TutorialSpotlight({ plugin, project }: { plugin: LoomLoomPlugin; project: ProjectDef | null }): ReactNode {
+	const step = currentTutorialStep(project?.config);
+	const markerRef = useRef<HTMLSpanElement>(null);
+	// The graph's steps need an act with a scene (chapter) in it: checked as
+	// they start or resume (once the index is built), detouring if it's gone.
+	useEffect(() => {
+		if (!project || !step || !GRAPH_STEPS.includes(step)) return;
+		let cancelled = false;
+		void plugin.indexReady.then(() => {
+			if (cancelled) return;
+			const beat = project.config.writerMode === 'prose' ? 'chapter' : 'scene';
+			const acts = plugin.indexer.getAll(projectRoleType(project.config, 'anchor'), project.root);
+			if (!acts.some((act) => plugin.indexer.membersOfAct(act, beat).length > 0)) {
+				graphDetour(plugin, project, acts.length > 0);
+			}
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [step, project, plugin]);
+	useEffect(() => {
+		const root = markerRef.current?.parentElement;
+		if (!step || !root) return;
+		return startSpotlight(root);
+	}, [step]);
+	return step && project ? <span ref={markerRef} hidden /> : null;
+}
+
 /** The empty-state shown when a view has no project to render. */
 /** An act's empty scene/chapter list in an Outline: says so, with a button
  *  that creates one already placed in this act — the script/book have no
@@ -941,22 +1310,29 @@ export function EmptyActMessage({
 	project,
 	act,
 	type,
+	tutorialCue,
 }: {
 	plugin: LoomLoomPlugin;
 	project: ProjectDef | null;
 	act: EntityRecord;
 	type: 'scene' | 'chapter';
+	/** The tutorial's cue under the button, which it then lights. */
+	tutorialCue?: string;
 }): ReactNode {
 	return (
 		<div className="loom-attendance-empty">
 			{type === 'scene' ? t('view.entity.script.noScenesInAct') : t('view.entity.script.noChaptersInAct')}{' '}
 			{project ? (
-				<button
-					className="mod-cta"
-					onClick={() => new CreateEntityModal(plugin, type, project, { defaultAct: act }).open()}
-				>
-					{type === 'scene' ? t('view.entity.script.newSceneAction') : t('view.entity.script.newChapterAction')}
-				</button>
+				<span className="loom-start-anchor loom-start-anchor-inline">
+					<button
+						className="mod-cta"
+						onClick={() => new CreateEntityModal(plugin, type, project, { defaultAct: act }).open()}
+						data-tutorial-target={tutorialCue ? '' : undefined}
+					>
+						{type === 'scene' ? t('view.entity.script.newSceneAction') : t('view.entity.script.newChapterAction')}
+					</button>
+					{tutorialCue ? <StartCue text={tutorialCue} /> : null}
+				</span>
 			) : null}
 		</div>
 	);
@@ -987,4 +1363,25 @@ export function scrollIntoContainer(
 	let top = container.scrollTop + (targetRect.top - containerRect.top);
 	if (align === 'center') top += targetRect.height / 2 - container.clientHeight / 2;
 	container.scrollTo({ top: Math.max(0, top), behavior });
+}
+
+/**
+ * Hands a vault file or folder to the OS.
+ *
+ * `openWithDefaultApp` and `showInFolder` are long-standing internal APIs,
+ * absent from the public typings; guarded so a rename in a future release
+ * degrades to a notice rather than throwing.
+ */
+export function systemOpen(app: App, method: 'openWithDefaultApp' | 'showInFolder', path: string): void {
+	const fn = (app as unknown as Record<string, ((p: string) => void) | undefined>)[method];
+	if (typeof fn !== 'function') {
+		new Notice(t('view.script.systemOpenUnsupported'));
+		return;
+	}
+	try {
+		fn.call(app, path);
+	} catch (err) {
+		console.error('Loom Loom: system open failed', err);
+		new Notice(t('view.script.systemOpenFailed'));
+	}
 }

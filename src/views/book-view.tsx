@@ -49,10 +49,12 @@ import {
 	MatchStat,
 	AnnotationPanelToggles,
 	scrollIntoContainer,
+	StartCue,
 	useCloseOnOutsideClick,
 } from './common';
 import { useIndexVersion, usePersistedChoice, useRememberedScroll, useVaultFileText } from './hooks';
 import { t } from '../i18n';
+import { advanceTutorial, currentTutorialStep } from '../tutorial';
 import { AnnotationSpan, cleanAnnotationMarkers, findAnnotationSpans } from '../fountain';
 import {
 	type UndecidedAltRow,
@@ -221,7 +223,7 @@ export async function syncActsChapters(
 			name: act.title,
 			tag: '',
 			date: '',
-			description: '',
+			notes: '',
 		});
 		await plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
 			setLoomKey(fm, FM.actId, act.loomId);
@@ -319,7 +321,7 @@ export async function syncActsChapters(
 			name: chapter.title,
 			tag: '',
 			date: '',
-			description: '',
+			notes: '',
 		});
 		await plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
 			setLoomKey(fm, FM.chapterId, chapter.loomId);
@@ -651,7 +653,7 @@ export class BookView extends LoomFileReactView {
 		return VIEW_PROSE;
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		return this.file ? `${this.file.basename} — ${bookLabel()}` : bookLabel();
 	}
 
@@ -863,6 +865,14 @@ function Book({ view }: { view: BookView }): ReactElement {
 	const openThisChapterFromBook = (chapterId: string, offset: number) =>
 		openThisChapter(plugin, project, view, chapterId, offset);
 
+	// Tutorial: the Book is where opening it and its Outline complete.
+	const tutorialStep = currentTutorialStep(project?.config);
+	useEffect(() => {
+		if (!project) return;
+		if (tutorialStep === 'openDoc') advanceTutorial(plugin, project, 'openDoc');
+		else if (tutorialStep === 'openOutline' && mode === 'outline') advanceTutorial(plugin, project, 'openOutline');
+	}, [tutorialStep, mode, project, plugin]);
+
 	if (!project) {
 		return <div className="loom-view loom-book-view loom-empty">{t('view.home.loadingProject')}</div>;
 	}
@@ -896,6 +906,20 @@ function Book({ view }: { view: BookView }): ReactElement {
 	type BookTopLevelRow =
 		| { kind: 'act'; id: string; line: number; act: EntityRecord }
 		| { kind: 'page-break'; id: string; line: number };
+	// What the tutorial lights on this page for the current step (an act's
+	// steps are reached from Home, through the Acts list).
+	/** Outline button: the step itself, or the way on to the Outline. */
+	const tutOutlineCue =
+		mode === 'outline'
+			? null
+			: tutorialStep === 'openOutline'
+				? t('tutorial.goHere')
+				: tutorialStep === 'createAct' && acts.length > 0
+					? t('tutorial.continueHere')
+					: null;
+	/** "+ New act" shows in both modes; with acts to open, only in Outline. */
+	const tutNewAct = tutorialStep === 'createAct' && (acts.length === 0 || mode === 'outline');
+	const tutTable = tutNewAct && acts.length > 0;
 	const topLevelRows: BookTopLevelRow[] = (() => {
 		if (!parsed) return [];
 		const actByLoomId = new Map(acts.map((a) => [a.actId, a]));
@@ -1016,6 +1040,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 			project={project}
 			title={`${project.name} — ${bookLabel()}`}
 			railActive="book"
+			tutorialPage="doc"
 			titleExtra={
 				<span className="loom-writer-stat">
 					{acts.length} · {plugin.indexer.getAll('chapter', project.root).length}
@@ -1066,9 +1091,11 @@ function Book({ view }: { view: BookView }): ReactElement {
 						    drag-reorder tree instead. Sits to the LEFT of the
 						    creation-button group below, not on the far right — those
 						    own that slot. */}
+						{tutOutlineCue ? <StartCue side="right" text={tutOutlineCue} /> : null}
 						<button
 							className={mode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
 							onClick={() => switchMode('outline')}
+							data-tutorial-target={tutOutlineCue ? '' : undefined}
 						>
 							{t('view.entity.script.outline')}
 						</button>
@@ -1078,9 +1105,18 @@ function Book({ view }: { view: BookView }): ReactElement {
 						>
 							{t('view.entity.script.newChapterAction')}
 						</button>
-						<button className="loom-rel-add" onClick={() => new CreateEntityModal(plugin, 'act', project, {}).open()}>
-							{t('project.newActStub')}
-						</button>
+						<div className="loom-start-anchor">
+							<button
+								className="loom-rel-add"
+								onClick={() => new CreateEntityModal(plugin, 'act', project, {}).open()}
+								data-tutorial-target={tutNewAct ? '' : undefined}
+							>
+								{t('project.newActStub')}
+							</button>
+							{tutNewAct ? (
+								<StartCue above text={acts.length === 0 ? t('tutorial.createFirstAct') : t('tutorial.createOrOpenAct')} />
+							) : null}
+						</div>
 						{/* Page breaks are an Outline-only concept — the Editor already
 						    writes a bare `===` by hand, and this button exists so a
 						    manually-placed one isn't the only way onto the drag list.
@@ -1092,10 +1128,12 @@ function Book({ view }: { view: BookView }): ReactElement {
 						) : null}
 					</div>
 					{mode === 'outline' ? (
-						<div className={seqDrag ? 'loom-subloc-list loom-subloc-dragging loom-writer-outline' : 'loom-subloc-list loom-writer-outline'}>
-							{topLevelRows.length === 0 ? (
-								<div className="loom-attendance-empty">{t('view.script.noActsYetBook')}</div>
-							) : (
+						<div
+							className={seqDrag ? 'loom-subloc-list loom-subloc-dragging loom-writer-outline' : 'loom-subloc-list loom-writer-outline'}
+							data-tutorial-target={tutTable ? '' : undefined}
+						>
+							{/* No acts: nothing but the cue under "+ New act". */}
+							{topLevelRows.length === 0 ? null : (
 								topLevelRows.map((row, i) => {
 									const grabbed = seqDrag?.group === 'book-top-level' && seqDrag.from === i;
 									if (row.kind === 'page-break') {
@@ -1228,9 +1266,7 @@ function Book({ view }: { view: BookView }): ReactElement {
 								onJumpAnnotation={jumpToAnnotation}
 							/>
 							{acts.length === 0 ? (
-								<div className="loom-book-page">
-									<div className="loom-attendance-empty">{t('view.script.noActsYetBook')}</div>
-								</div>
+								<div className="loom-writer-empty">{t('view.script.noActsYet')}</div>
 							) : (
 								previewPageGroups.map((group, gi) => (
 									<div className="loom-book-page" key={gi}>

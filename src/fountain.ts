@@ -562,6 +562,27 @@ export interface SceneHeadingParts {
  * space or a period) and preceded by a blank line is a scene heading; a leading
  * `.` forces one for anything else (`.BLACK SCREEN`).
  */
+/** The scene-heading prefixes offered for a new or edited heading (the
+ *  parser accepts more spellings, `SCENE_PREFIXES`). */
+export const HEADING_PREFIXES = ['INT.', 'EXT.', 'INT./EXT.', 'EST.'];
+
+/** The heading prefix a key picks in the prefix dropdown — I, E, / and S, so
+ *  INT./EXT. and EST. are one key away as well. */
+export function headingPrefixForKey(key: string): string | null {
+	switch (key.toLowerCase()) {
+		case 'i':
+			return 'INT.';
+		case 'e':
+			return 'EXT.';
+		case '/':
+			return 'INT./EXT.';
+		case 's':
+			return 'EST.';
+		default:
+			return null;
+	}
+}
+
 const SCENE_PREFIXES = ['INT./EXT.', 'INT/EXT.', 'INT./EXT', 'I/E.', 'I/E', 'INT.', 'EXT.', 'EST.', 'INT', 'EXT', 'EST'];
 
 function scenePrefixOf(line: string): string | null {

@@ -1282,7 +1282,7 @@ export class MapView extends LoomReactView {
 		return VIEW_MAP;
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		return mapsLabel();
 	}
 
@@ -3319,6 +3319,88 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		);
 	}
 
+	/**
+	 * The global (empty-space) menu's rows — the draw tools, then labels, then the
+	 * background. Shared by the right-click menu and the empty-map hint, so a new
+	 * map starts with the tools in view. `at` is where a label or image lands.
+	 */
+	const globalMenuRows = (at: () => { x: number; y: number }) => (
+		<>
+			{(
+				[
+					['rect', t('view.map.tool.rectangle'), 'square'],
+					['draw', t('view.map.tool.polygon'), 'loom-vector-polygon'],
+					['road', t('view.map.tool.road'), 'route'],
+				] as const
+			).map(([tool, title, icon]) => (
+				<button
+					key={tool}
+					className="loom-map-menu-row"
+					onClick={() => {
+						setMenu(null);
+						setTool(tool);
+					}}
+				>
+					<Icon name={icon} />
+					<span>{title}</span>
+				</button>
+			))}
+			<div className="loom-map-menu-divider" />
+			<button
+				className="loom-map-menu-row"
+				onClick={() => {
+					setMenu(null);
+					addLabel(at());
+				}}
+			>
+				<Icon name="type" />
+				<span>{t('view.map.addLabel')}</span>
+			</button>
+			<div className="loom-map-menu-divider" />
+			<button
+				className="loom-map-menu-row"
+				onClick={() => {
+					const p = at();
+					setMenu(null);
+					new ImagePickerModal(
+						plugin,
+						importedImages,
+						(f) => void placeImage(f, p),
+						() => {
+							pendingImageAt.current = p;
+							fileInputRef.current?.click();
+						}
+					).open();
+				}}
+			>
+				<Icon name="image" />
+				<span>{t('view.map.backgroundImage')}</span>
+			</button>
+			{/* Icon + swatch only (named by its tooltip), so this row doesn't
+			    widen the menu. */}
+			<div className="loom-map-menu-row loom-map-menu-row-static">
+				<Icon name="paint-bucket" />
+				<input
+					type="color"
+					className="loom-map-color loom-map-bg-color"
+					aria-label={t('view.map.backgroundColor')}
+					// A colour input needs a hex, so the theme default is read off
+					// the canvas itself when the page has no colour of its own.
+					value={pageBg ?? cssColorToHex(wrapRef.current ? getComputedStyle(wrapRef.current).backgroundColor : '')}
+					onChange={(e) => putActive({ bg: e.target.value })}
+				/>
+				<button
+					className="loom-map-icon-btn loom-map-reset"
+					aria-label={t('view.map.resetBackgroundColor')}
+					disabled={!pageBg}
+					onClick={() => putActive({ bg: null })}
+				>
+					<Icon name="rotate-ccw" />
+				</button>
+			</div>
+		</>
+	);
+
 	const menuZone = menu?.kind === 'zone' ? zones.find((z) => z.id === menu.id) ?? null : null;
 	// Screen anchor for the open menu: zone menus track a world point (so they
 	// follow the zone when moved), the empty menu is a fixed screen point.
@@ -4580,80 +4662,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				    browser (its own window), split by separators. */}
 				{menu?.kind === 'empty' && menuPos ? (
 					<div ref={emptyMenuRef} className="loom-map-menu loom-map-menu-vert" style={{ left: menuPos.x, top: menuPos.y }}>
-						{(
-							[
-								['rect', t('view.map.tool.rectangle'), 'square'],
-								['draw', t('view.map.tool.polygon'), 'loom-vector-polygon'],
-								['road', t('view.map.tool.road'), 'route'],
-							] as const
-						).map(([tool, title, icon]) => (
-							<button
-								key={tool}
-								className="loom-map-menu-row"
-								onClick={() => {
-									setMenu(null);
-									setTool(tool);
-								}}
-							>
-								<Icon name={icon} />
-								<span>{title}</span>
-							</button>
-						))}
-						<div className="loom-map-menu-divider" />
-						<button
-							className="loom-map-menu-row"
-							onClick={() => {
-								const at = menuWorld.current;
-								setMenu(null);
-								if (at) addLabel(at);
-							}}
-						>
-							<Icon name="type" />
-							<span>{t('view.map.addLabel')}</span>
-						</button>
-						<div className="loom-map-menu-divider" />
-						<button
-							className="loom-map-menu-row"
-							onClick={() => {
-								// Where the menu was opened is where the image lands.
-								const at = menuWorld.current ?? { x: 0, y: 0 };
-								setMenu(null);
-								new ImagePickerModal(
-									plugin,
-									importedImages,
-									(f) => void placeImage(f, at),
-									() => {
-										pendingImageAt.current = at;
-										fileInputRef.current?.click();
-									}
-								).open();
-							}}
-						>
-							<Icon name="image" />
-							<span>{t('view.map.backgroundImage')}</span>
-						</button>
-						{/* Icon + swatch only (named by its tooltip), so this row doesn't
-						    widen the menu. */}
-						<div className="loom-map-menu-row loom-map-menu-row-static">
-							<Icon name="paint-bucket" />
-							<input
-								type="color"
-								className="loom-map-color loom-map-bg-color"
-								aria-label={t('view.map.backgroundColor')}
-								// A colour input needs a hex, so the theme default is read off
-								// the canvas itself when the page has no colour of its own.
-								value={pageBg ?? cssColorToHex(wrapRef.current ? getComputedStyle(wrapRef.current).backgroundColor : '')}
-								onChange={(e) => putActive({ bg: e.target.value })}
-							/>
-							<button
-								className="loom-map-icon-btn loom-map-reset"
-								aria-label={t('view.map.resetBackgroundColor')}
-								disabled={!pageBg}
-								onClick={() => putActive({ bg: null })}
-							>
-								<Icon name="rotate-ccw" />
-							</button>
-						</div>
+						{globalMenuRows(() => menuWorld.current ?? { x: 0, y: 0 })}
 					</div>
 				) : null}
 
@@ -4673,8 +4682,17 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					}}
 				/>
 
-				{zones.length === 0 && images.length === 0 && draft.length === 0 ? (
-					<div className="loom-map-hint">{t('view.map.rightClickHint')}</div>
+				{tool === 'select' && zones.length === 0 && images.length === 0 && labels.length === 0 ? (
+					<div className="loom-map-hint loom-empty-guide">
+						<div>{t('view.map.rightClickHint')}</div>
+						<div className="loom-map-menu loom-map-menu-vert loom-map-menu-inline">
+							{globalMenuRows(() => {
+								// Labels and images land in the middle of the view.
+								const el = wrapRef.current;
+								return toWorld((el?.clientWidth ?? 0) / 2, (el?.clientHeight ?? 0) / 2);
+							})}
+						</div>
+					</div>
 				) : null}
 			</div>
 			</div>

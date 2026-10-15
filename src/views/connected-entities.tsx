@@ -1,7 +1,7 @@
 import { Notice } from 'obsidian';
 import { useEffect, useState } from 'react';
-import { ENTITY_TYPES, EntityRecord, EntityType, FM, entityPlural } from '../types';
-import { setLoomKey, stripFrontmatter, writeNoteBody } from '../fm';
+import { ENTITY_TYPES, EntityRecord, EntityType, entityPlural } from '../types';
+import { stripFrontmatter, writeNoteBody } from '../fm';
 import { ProjectDef } from '../indexer';
 import { t } from '../i18n';
 import { LoomNavigator } from './react-view';
@@ -93,7 +93,6 @@ function Entry({
 	const [editing, setEditing] = useState(false);
 	/** Target's note body without frontmatter; null until loaded. */
 	const [body, setBody] = useState<string | null>(null);
-	const [descDraft, setDescDraft] = useState('');
 	const [bodyDraft, setBodyDraft] = useState('');
 
 	// Load the body as soon as the entry mounts (its section is expanded), so
@@ -116,7 +115,6 @@ function Entry({
 
 	const startEdit = () => {
 		if (body === null) return;
-		setDescDraft(target.description);
 		setBodyDraft(body);
 		setOpen(true);
 		setEditing(true);
@@ -126,9 +124,6 @@ function Entry({
 		const file = plugin.app.vault.getFileByPath(target.path);
 		if (!file) return;
 		try {
-			await plugin.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				setLoomKey(fm, FM.description, descDraft);
-			});
 			await writeNoteBody(plugin.app, file, bodyDraft);
 			setBody(bodyDraft.trim());
 			setEditing(false);
@@ -138,7 +133,6 @@ function Entry({
 		}
 	};
 
-	const hasContent = target.description !== '' || (body !== null && body !== '');
 
 	return (
 		<div className="loom-entry">
@@ -165,36 +159,17 @@ function Entry({
 			{open ? (
 				<div className="loom-entry-body">
 					{editing ? (
-						<>
-							<label className="loom-field">
-								<span className="loom-field-label">{t('project.createEntity.description')}</span>
-								<textarea rows={1} ref={(el) => autoGrowTextarea(el)} onInput={(ev) => autoGrowTextarea(ev.currentTarget)} value={descDraft} onChange={(e) => setDescDraft(e.target.value)} />
-							</label>
-							<label className="loom-field">
-								<span className="loom-field-label">{t('project.notes')}</span>
-								<textarea rows={1} ref={(el) => autoGrowTextarea(el)} onInput={(ev) => autoGrowTextarea(ev.currentTarget)} value={bodyDraft} onChange={(e) => setBodyDraft(e.target.value)} />
-							</label>
-						</>
+						<label className="loom-field">
+							<span className="loom-field-label">{t('project.notes')}</span>
+							<textarea rows={1} ref={(el) => autoGrowTextarea(el)} onInput={(ev) => autoGrowTextarea(ev.currentTarget)} value={bodyDraft} onChange={(e) => setBodyDraft(e.target.value)} />
+						</label>
+					) : body !== null && body !== '' ? (
+						<div className="loom-field">
+							<span className="loom-field-label">{t('project.notes')}</span>
+							<div className="loom-entry-text">{body}</div>
+						</div>
 					) : (
-						<>
-							{target.description !== '' ? (
-								<div className="loom-field">
-									<span className="loom-field-label">{t('project.createEntity.description')}</span>
-									<div className="loom-entry-text">{target.description}</div>
-								</div>
-							) : null}
-							{body !== null && body !== '' ? (
-								<div className="loom-field">
-									<span className="loom-field-label">{t('project.notes')}</span>
-									<div className="loom-entry-text">{body}</div>
-								</div>
-							) : null}
-							{!hasContent ? (
-								<div className="loom-entry-text loom-entry-empty">
-									{t('view.entity.connected.noContent')}
-								</div>
-							) : null}
-						</>
+						<div className="loom-entry-text loom-entry-empty">{t('view.entity.connected.noContent')}</div>
 					)}
 				</div>
 			) : null}

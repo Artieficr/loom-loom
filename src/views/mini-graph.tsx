@@ -153,6 +153,7 @@ export function GraphFilter({
 	setFilterMode,
 	active,
 	children,
+	tutorial,
 }: {
 	types: readonly EntityType[];
 	filterTypes: ReadonlySet<EntityType>;
@@ -161,21 +162,39 @@ export function GraphFilter({
 	setFilterMode: (mode: 'dim' | 'hide') => void;
 	active: boolean;
 	children?: ReactNode;
+	/** The tutorial (main graph): `button` lights the filter button with this
+	 *  cue under it, `pop` lights the open popover with this cue in it;
+	 *  `onOpen` reports the popover opening. */
+	tutorial?: { button?: ReactNode; pop?: ReactNode; onOpen?: () => void };
 }) {
 	const [open, setOpen] = useState(false);
 	const ref = useRef<HTMLDivElement>(null);
 	useCloseOnOutsideClick(ref, open, () => setOpen(false));
+	// The tutorial's step inside the popover over, it closes — it would cover
+	// the next step's cue.
+	const tutorialInside = tutorial?.pop !== undefined;
+	const wasTutorialInside = useRef(tutorialInside);
+	useEffect(() => {
+		if (wasTutorialInside.current && !tutorialInside) setOpen(false);
+		wasTutorialInside.current = tutorialInside;
+	}, [tutorialInside]);
 	return (
-		<div className="loom-graph-filter" ref={ref}>
+		<div className="loom-graph-filter loom-start-anchor" ref={ref}>
 			<button
 				className={active ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
 				aria-label={t('view.graph.filterGraph')}
-				onClick={() => setOpen(!open)}
+				onClick={() => {
+					if (!open) tutorial?.onOpen?.();
+					setOpen(!open);
+				}}
+				data-tutorial-target={tutorial?.button ? '' : undefined}
 			>
 				<Icon name="filter" />
 			</button>
+			{tutorial?.button && !open ? tutorial.button : null}
 			{open ? (
-				<div className="loom-filter-pop">
+				<div className="loom-filter-pop" data-tutorial-target={tutorial?.pop ? '' : undefined}>
+					{tutorial?.pop}
 					<div
 						className="loom-filter-mode loom-filter-mode-btn"
 						role="switch"

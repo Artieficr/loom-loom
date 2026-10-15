@@ -79,6 +79,9 @@ import {
 	SearchNav,
 	MatchStat,
 	AnnotationPanelToggles,
+	PageNav,
+	StartCue,
+	TutorialSpotlight,
 } from './common';
 import { locationLabel, mainLocationFirst, recordLabel } from '../display';
 import { ConnectedEntities } from './connected-entities';
@@ -148,6 +151,8 @@ import {
 	replaceSceneBody,
 	joinLocationSub,
 	setSceneHeadingParts,
+	HEADING_PREFIXES,
+	headingPrefixForKey,
 	findAnnotationSpans,
 	type AnnotationSpan,
 	nextSectionAtLevel,
@@ -173,6 +178,7 @@ import {
 import { getBranchClipboard, setBranchClipboard } from './branch-clipboard';
 import { pageOfLine, pageRange, pdfPages } from '../pdf';
 import { features, projectRoleType, projectTypes, roleOf, isInvolvableType } from '../project-kind';
+import { TutorialPage, TutorialStep, advanceTutorial, currentTutorialStep } from '../tutorial';
 import type LoomLoomPlugin from '../main';
 import { LocaleKey, article, t, tn } from '../i18n';
 import { entityLabel, entityPlural } from '../types';
@@ -208,7 +214,7 @@ export class EntityView extends LoomFileReactView {
 		this.renderNow();
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		if (!this.file) return t('view.entity.tabFallback');
 		const record = this.plugin.indexer.get(this.file.path);
 		if (!record) return this.file.basename;
@@ -922,6 +928,8 @@ function EntityPage({ view }: { view: EntityView }) {
 	const [actScriptQuery, setActScriptQuery] = useState('');
 	const [actScriptMatchIndex, setActScriptMatchIndex] = useState(0);
 	const actScriptPagesRef = useRef<HTMLDivElement | null>(null);
+	/** The Act preview's current page — its own pages, counted from 1. */
+	const [actPage, setActPage] = useState(1);
 	/** Same as `sceneScriptTabsRef`, for the Act page's own Script section. */
 	const actScriptTabsRef = useRef<HTMLDivElement | null>(null);
 	/** `openComment.rect` is a one-time snapshot: re-measure the icon on every
@@ -1070,7 +1078,6 @@ function EntityPage({ view }: { view: EntityView }) {
 	// Drafts are seeded once per file (component is keyed by path) so index
 	// updates triggered by our own saves never clobber what's being typed.
 	const [name, setName] = useState(record?.name ?? '');
-	const [description, setDescription] = useState(record?.description ?? '');
 	const [reward, setReward] = useState(record?.reward ?? '');
 	const [date, setDate] = useState(record?.date?.raw ?? '');
 	/** Acts: the title emitted into the exported script. */
@@ -1103,6 +1110,19 @@ function EntityPage({ view }: { view: EntityView }) {
 		initialSceneLocationParent ? (initialSceneLocation?.name ?? '') : ''
 	);
 	const [sceneTime, setSceneTime] = useState(record?.sceneTime ?? '');
+	// Follow the note: the page can mount before its record is indexed (a
+	// restored tab on startup), and a commit lands back here through the
+	// index. Typing doesn't change the note until a commit, so this never
+	// overwrites a field mid-edit.
+	const sceneMainName = initialSceneLocationParent?.name ?? initialSceneLocation?.name ?? '';
+	const sceneSubName = initialSceneLocationParent ? (initialSceneLocation?.name ?? '') : '';
+	useEffect(() => {
+		if (record?.type !== 'scene') return;
+		setSceneIntExt(record.sceneIntExt);
+		setSceneMain(sceneMainName);
+		setSceneSub(sceneSubName);
+		setSceneTime(record.sceneTime);
+	}, [record?.path, record?.type, record?.sceneIntExt, record?.sceneTime, sceneMainName, sceneSubName]);
 	const [relationships, setRelationships] = useState<RelationshipDraft[]>(
 		record?.relationships.map((r) => {
 			const target = plugin.indexer.resolve(r.linkpath, record.path);
@@ -1184,7 +1204,6 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!record || seeded.current) return;
 		seeded.current = true;
 		setName(record.name);
-		setDescription(record.description);
 		setReward(record.reward);
 		setDate(record.date?.raw ?? '');
 		setRelationships(
@@ -1240,12 +1259,9 @@ function EntityPage({ view }: { view: EntityView }) {
 		[plugin, file]
 	);
 
-	// Description commits on idle (the markdown field has no blur-style
-	// moment that reliably fires before navigation).
-	const saveDescription = useDebouncedFrontmatterField(plugin, file, FM.description, 'description');
-
-	// Reward supports markdown (links, multiple lines); commits on idle like the
-	// description field.
+	// Reward supports markdown (links, multiple lines); commits on idle (the
+	// markdown field has no blur-style moment that reliably fires before
+	// navigation).
 	const saveReward = useDebouncedFrontmatterField(plugin, file, FM.reward, 'reward');
 
 	/** Opens a wikilink target from the markdown fields: loom entities get
@@ -1266,6 +1282,42 @@ function EntityPage({ view }: { view: EntityView }) {
 		if (!project) return;
 		openCreateLinkEntity(plugin, project, entered, insert);
 	};
+
+	// Tutorial: an act's page completes "create/open an act" and its Outline;
+	// a scene or chapter page completes the last step.
+	const tutorialStep = currentTutorialStep(project?.config);
+	const tutorialPage: TutorialPage =
+		project?.config.kind !== 'writer'
+			? 'other'
+			: record?.type === 'act'
+				? 'act'
+				: record?.type === 'scene'
+					? 'scene'
+					: record?.type === 'chapter'
+						? 'beat'
+						: record?.type === 'location'
+							? 'location'
+							: 'other';
+	const actOutlineOpen = (project?.config.writerMode === 'prose' ? actBookMode : actScriptMode) === 'outline';
+	// Back to the graph: any entity page is where that step happens.
+	const tutorialPageNow: TutorialPage = tutorialStep === 'graphBack' ? 'entity' : tutorialPage;
+	useEffect(() => {
+		if (!project) return;
+		// The graph's side-panel step ends on a node's page (opened by a
+		// double-click there).
+		if (tutorialStep === 'graphPanel') {
+			advanceTutorial(plugin, project, 'graphPanel');
+			return;
+		}
+		if (tutorialPage === 'act') {
+			if (tutorialStep === 'createAct') advanceTutorial(plugin, project, 'createAct');
+			else if (tutorialStep === 'openActOutline' && actOutlineOpen) advanceTutorial(plugin, project, 'openActOutline');
+		} else if ((tutorialPage === 'scene' || tutorialPage === 'beat') && tutorialStep === 'createBeat') {
+			advanceTutorial(plugin, project, 'createBeat');
+		} else if (tutorialPage === 'location' && tutorialStep === 'openLocations') {
+			advanceTutorial(plugin, project, 'openLocations');
+		}
+	}, [tutorialStep, tutorialPage, actOutlineOpen, project, plugin]);
 
 	if (!file || !record) {
 		return (
@@ -1289,6 +1341,24 @@ function EntityPage({ view }: { view: EntityView }) {
 	const scriptMode = kindFeatures.script;
 	/** Writer/Prose: the writing lives in the Book, not in note fields. */
 	const bookMode = kindFeatures.book;
+	// What the tutorial lights on an act's page: the Outline button (to get
+	// there), then "+ New scene" or the chapters' "Create" and the list.
+	const tutActOutlineCue =
+		tutorialPage === 'act' &&
+		!actOutlineOpen &&
+		(tutorialStep === 'openActOutline' || tutorialStep === 'createBeat');
+	const tutCreateBeat = tutorialPage === 'act' && actOutlineOpen && tutorialStep === 'createBeat';
+	// A scene's page: its heading's fields, one at a time.
+	const tutSceneIntExt = tutorialPage === 'scene' && tutorialStep === 'sceneIntExt';
+	const tutSceneLocation = tutorialPage === 'scene' && tutorialStep === 'sceneLocation';
+	// A location's page: one section at a time, each with a cue to read and
+	// move on from.
+	const tutLocationStep = tutorialPage === 'location' ? tutorialStep : null;
+	const tutLit = (step: TutorialStep) => (tutLocationStep === step ? '' : undefined);
+	const tutCue = (step: TutorialStep, text: string) =>
+		tutLocationStep === step && project ? (
+			<StartCue key={step} inline text={text} onNext={() => advanceTutorial(plugin, project, step)} />
+		) : null;
 	/** Writer, either sub-mode — both resolve quests against their beat type
 	 *  (Scene/Chapter) rather than directly against the anchor (Act), unlike
 	 *  Player/GM (Session). See `questAnchorRole` below. */
@@ -1725,16 +1795,18 @@ function EntityPage({ view }: { view: EntityView }) {
 	};
 
 	/** Scene page: INT./EXT. and time-of-day are plain script-heading text —
-	 *  no entity behind them, so a commit is just a heading rewrite. */
-	const commitSceneIntExt = (raw: string = sceneIntExt) => {
+	 *  no entity behind them, so a commit is just a heading rewrite. INT./EXT.
+	 *  is a dropdown of `HEADING_PREFIXES` only: free text there would stop
+	 *  the line being a scene heading at all. */
+	const commitSceneIntExt = (value: string) => {
 		if (!project || record.type !== 'scene') return;
-		const value = raw.trim();
+		setSceneIntExt(value);
 		if (value === record.sceneIntExt) return;
 		void mutateScriptBufferAndFlush(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { intExt: value }));
 	};
 	const commitSceneTime = (raw: string = sceneTime) => {
 		if (!project || record.type !== 'scene') return;
-		const value = raw.trim();
+		const value = raw.trim().toUpperCase();
 		if (value === record.sceneTime) return;
 		void mutateScriptBufferAndFlush(plugin, project, (r) => setSceneHeadingParts(r, record.sceneId, { timeOfDay: value }));
 	};
@@ -1781,11 +1853,13 @@ function EntityPage({ view }: { view: EntityView }) {
 	 * that would have been renamed and aborts the whole commit rather than
 	 * leaving Location and Sublocation half-applied against each other.
 	 */
-	const commitSceneLocation = async () => {
+	/** Takes the values explicitly where the caller just set them — the
+	 *  state here is still the previous render's. */
+	const commitSceneLocation = async (main: string = sceneMain, sub: string = sceneSub) => {
 		if (!project || record.type !== 'scene') return;
-		const mainName = sceneMain.trim();
+		const mainName = main.trim();
 		if (mainName === '') return;
-		const subName = sceneSub.trim();
+		const subName = sub.trim();
 		const mainKey = mainName.toLowerCase();
 		const topLevel = plugin.indexer.getAll('location', record.project).filter((r) => r.parentLocation === null);
 
@@ -1830,7 +1904,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					name: mainName,
 					tag: '',
 					date: '',
-					description: '',
+					notes: '',
 				});
 				return { ...pcGroupStub(record.project), path: created.path, name: mainName, type: 'location' };
 			},
@@ -1866,7 +1940,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							name: subName,
 							tag: '',
 							date: '',
-							description: '',
+							notes: '',
 							parentLocation: linkTargetOf(mainRecord),
 						});
 						return {
@@ -1917,7 +1991,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							name: subName,
 							tag: '',
 							date: '',
-							description: '',
+							notes: '',
 							parentLocation: linkTargetOf(mainRecord),
 						});
 						return {
@@ -1955,7 +2029,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			).then((ok) => {
 				if (!ok) return;
 				setSceneSub('');
-				void commitSceneLocation().then(() => deleteEntityNote(plugin, currentSub));
+				void commitSceneLocation(sceneMain, '').then(() => deleteEntityNote(plugin, currentSub));
 			});
 			return;
 		}
@@ -4279,9 +4353,11 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	// Events hub — rendered near the top on most entity pages, but pushed below
 	// the location-only sections (Factions/Items/Sublocations) on a location
-	// page.
+	// page. Not in a writer project: it pins entities to an event's session
+	// notes by hand, and scenes have none — what a scene involves comes from
+	// the script (a location page lists its scenes from there instead).
 	const eventsSection =
-		showsEvents && project ? (
+		showsEvents && project && project.config.kind !== 'writer' ? (
 			<div className="loom-field loom-field-sep">
 				<span className="loom-field-label">{entityPlural(beatType)}</span>
 				<div className="loom-hub-add-row">
@@ -4353,7 +4429,7 @@ function EntityPage({ view }: { view: EntityView }) {
 	// on a location page it stays in the Factions → Items → Sublocations chain.
 	const itemsSection =
 		showsItems && project ? (
-			<div className="loom-field loom-field-sep">
+			<div className="loom-field loom-field-sep" data-tutorial-target={tutLit('locationItems')}>
 				<span className="loom-field-label">{entityPlural('item')}</span>
 				<div className="loom-hub-add-row">
 					<SearchableSelect
@@ -4401,7 +4477,8 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	return (
 		<div className="loom-entity-row">
-			{project ? <NavRail navigator={view} project={project} /> : null}
+			<TutorialSpotlight plugin={plugin} project={project} />
+			{project ? <NavRail navigator={view} project={project} tutorialPage={tutorialPageNow} /> : null}
 			<div className="loom-entity">
 			<div className="loom-entity-header">
 				{/* Greyed out when there is nowhere to return (e.g. the page
@@ -4413,9 +4490,13 @@ function EntityPage({ view }: { view: EntityView }) {
 						const origin = view.origin;
 						if (origin) view.navigateTo(origin.type, origin.state);
 					}}
+					data-tutorial-target={tutorialStep === 'graphBack' && view.origin ? '' : undefined}
 				>
 					← {t('view.entity.common.back')}
 				</button>
+				{tutorialStep === 'graphBack' && view.origin ? (
+					<StartCue side="left" text={t('tutorial.graphBack')} />
+				) : null}
 			<span
 					className="loom-chip"
 					style={{
@@ -4564,34 +4645,49 @@ function EntityPage({ view }: { view: EntityView }) {
 			) : null}
 
 			{/* A scene's heading, broken into its modular parts instead of one
-			    freeform line: INT./EXT. (a small autocomplete — INT./EXT./
-			    INT./EXT. — arrow keys cycle, Enter picks), Location and
-			    Sublocation (free text with existing-location suggestions;
-			    editing an ALREADY-linked one renames that entity everywhere,
+			    freeform line: INT./EXT. (every prefix always listed; only a
+			    prefix is accepted, anything else reverts), Location and
+			    Sublocation (free text with existing-location suggestions; Enter
+			    keeps the typed text unless a suggestion was arrowed to, and
+			    retyping an ALREADY-linked one renames that entity everywhere,
 			    same as any other Name field, rather than creating a duplicate;
 			    a name matching nothing creates a fresh location/sublocation),
-			    and Time (plain free text). All four write straight back into
-			    the script heading — this field group IS the heading. */}
+			    and Time (plain free text). All four are always capitals and write
+			    straight back into the script heading — this field group IS the
+			    heading. */}
 			{record.type === 'scene' ? (
 				<div className="loom-field">
 					<span className="loom-field-label">{t('view.entity.scene.headingLabel')}</span>
 					<div className="loom-scene-heading-fields">
-						<SuggestInput
-							className="loom-scene-heading-intext"
-							placeholder="INT./EXT."
+						{/* The same dropdown as the new-scene dialog, with the same
+						    keys: I, E, / and S pick a prefix. A heading with some
+						    other prefix (or none) keeps it listed until changed. */}
+						<select
+							className="dropdown loom-scene-heading-intext"
 							value={sceneIntExt}
-							options={['INT.', 'EXT.', 'INT./EXT.', 'EST.']}
-							onChange={setSceneIntExt}
-							onPick={(v) => {
-								setSceneIntExt(v);
-								commitSceneIntExt(v);
+							onChange={(e) => commitSceneIntExt(e.target.value)}
+							onKeyDown={(e) => {
+								const prefix = e.ctrlKey || e.metaKey || e.altKey ? null : headingPrefixForKey(e.key);
+								if (!prefix) return;
+								e.preventDefault();
+								commitSceneIntExt(prefix);
 							}}
-							onBlur={() => commitSceneIntExt()}
-						/>
+							data-tutorial-target={tutSceneIntExt ? '' : undefined}
+						>
+							{HEADING_PREFIXES.includes(sceneIntExt) ? null : <option value={sceneIntExt}>{sceneIntExt || '—'}</option>}
+							{HEADING_PREFIXES.map((p) => (
+								<option key={p} value={p}>
+									{p}
+								</option>
+							))}
+						</select>
 						<SuggestInput
 							className="loom-scene-heading-location"
 							placeholder={entityLabel('location')}
 							value={sceneMain}
+							freeText
+							upperCase
+							tutorialTarget={tutSceneLocation}
 							options={plugin.indexer
 								.getAll('location', record.project)
 								.filter((r) => r.parentLocation === null)
@@ -4599,7 +4695,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							onChange={setSceneMain}
 							onPick={(v) => {
 								setSceneMain(v);
-								void commitSceneLocation();
+								void commitSceneLocation(v, sceneSub);
 							}}
 							onBlur={() => void commitSceneLocation()}
 						/>
@@ -4607,6 +4703,9 @@ function EntityPage({ view }: { view: EntityView }) {
 							className="loom-scene-heading-location"
 							placeholder={t('project.createEntity.sublocationOptional')}
 							value={sceneSub}
+							freeText
+							upperCase
+							tutorialTarget={tutSceneLocation}
 							options={(() => {
 								const mainRecord = plugin.indexer
 									.getAll('location', record.project)
@@ -4624,7 +4723,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							onChange={setSceneSub}
 							onPick={(v) => {
 								setSceneSub(v);
-								void commitSceneLocation();
+								void commitSceneLocation(sceneMain, v);
 							}}
 							onBlur={commitSceneSubBlur}
 						/>
@@ -4632,14 +4731,23 @@ function EntityPage({ view }: { view: EntityView }) {
 							type="text"
 							className="loom-scene-heading-time"
 							placeholder={t('project.createEntity.timePlaceholder')}
-							value={sceneTime}
-							onChange={(e) => setSceneTime(e.target.value)}
+							value={sceneTime.toUpperCase()}
+							onChange={(e) => setSceneTime(e.target.value.toUpperCase())}
 							onBlur={() => commitSceneTime()}
 							onKeyDown={(e) => {
 								if (e.key === 'Enter') commitSceneTime();
 							}}
 						/>
 					</div>
+					{(tutSceneIntExt || tutSceneLocation) && project ? (
+						<StartCue
+							key={tutorialStep}
+							inline
+							matchLit
+							text={tutSceneIntExt ? t('tutorial.sceneIntExt') : t('tutorial.sceneLocation')}
+							onNext={() => advanceTutorial(plugin, project, tutSceneIntExt ? 'sceneIntExt' : 'sceneLocation')}
+						/>
+					) : null}
 					<span className="loom-field-hint">
 						{(sceneIntExt.trim() !== '' ? `${sceneIntExt.trim()} ` : '') +
 							joinLocationSub(sceneMain || '…', sceneSub) +
@@ -4668,7 +4776,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    from whichever main location it ultimately sits under — it never
 			    picks its own (see `currentRegion`'s own doc comment for why). */}
 			{isSublocationPage ? (
-				<div className="loom-field">
+				<div className="loom-field" data-tutorial-target={tutLit('locationRegion')}>
 					<span className="loom-field-label">{t('project.createEntity.partOfRegion')}</span>
 					{/* `.loom-field` is a column flex container (`align-items: stretch`
 					    by default), which is what was stretching a bare chip to the
@@ -4688,7 +4796,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					</div>
 				</div>
 			) : isLocation ? (
-				<div className="loom-field">
+				<div className="loom-field" data-tutorial-target={tutLit('locationRegion')}>
 					<span className="loom-field-label">{t('project.createEntity.partOfRegion')}</span>
 					{!record.region || editingRegion ? (
 						<div className="loom-region-pick">
@@ -4744,6 +4852,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					)}
 				</div>
 			) : null}
+			{tutCue('locationRegion', t('tutorial.locationRegion'))}
 
 			{record.type === 'session' ? (
 				<label className="loom-field">
@@ -4993,7 +5102,7 @@ function EntityPage({ view }: { view: EntityView }) {
 														)}</span>
 													</div>
 													<div className="loom-quest-card-row">
-													<span className="loom-quest-card-label">{t('view.list.receivedOn')}</span>
+													<span className="loom-quest-card-label">{isWriterProject ? t('view.list.receivedIn') : t('view.list.receivedOn')}</span>
 <span className="loom-quest-card-value">														{received && roleOf(received.type) === questAnchorRole ? (
 															received.path === record.path ? (
 																<span>{t('view.entity.quests.thisPage', { page: pageLabel })}</span>
@@ -5025,7 +5134,7 @@ function EntityPage({ view }: { view: EntityView }) {
 													{state !== 'active' ? (
 														<>
 															<div className="loom-quest-card-row">
-															<span className="loom-quest-card-label">{t('view.list.completedOn')}</span>
+															<span className="loom-quest-card-label">{isWriterProject ? t('view.list.completedIn') : t('view.list.completedOn')}</span>
 <span className="loom-quest-card-value">																{outcomeSes && roleOf(outcomeSes.type) === questAnchorRole ? (
 																	outcomeSes.path === record.path ? (
 																		<span>{t('view.entity.quests.thisPage', { page: pageLabel })}</span>
@@ -5182,44 +5291,10 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-		{isItemCopy ? (
-				<div className="loom-field">
-					<span className="loom-field-label">
-						{description === '' ? t('project.createEntity.description') : t('view.entity.items.alternativeDescription')}
-					</span>
-					<MarkdownField
-						app={plugin.app}
-						value={description === '' ? copyOriginal?.description ?? '' : description}
-						names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
-						onOpenLink={openLinkTarget}
-						onCreateEntity={createLinkEntity}
-						onChange={(v) => {
-							setDescription(v);
-							saveDescription(v);
-						}}
-					/>
-					{description !== '' ? (
-						<details className="loom-orig-desc">
-							<summary>{t('view.entity.items.originalDescription')}</summary>
-							<MarkdownField
-								app={plugin.app}
-								value={copyOriginal?.description ?? ''}
-								names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
-								onOpenLink={openLinkTarget}
-								onChange={() => undefined}
-								readOnly
-							/>
-						</details>
-					) : null}
-				</div>
-			) : record.type === 'scene' || record.type === 'act' || record.type === 'chapter' ? (
-				// The script/prose body IS the writing — a scene/act/chapter's own
-				// blurb field is redundant with it, so this page shows only the
-				// freeform Notes section (above, right after the title) instead.
-				null
-			) : (
-		<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
-				<span className="loom-field-label">{t('project.createEntity.description')}</span>
+		{/* Alive / Active / death session — characters (and PCs); everything
+		    else a page used to keep in a description lives in its Notes. */}
+		{showsLifecycle || isPc ? (
+			<div className={isSession ? 'loom-field loom-field-sep' : 'loom-field'}>
 				{showsLifecycle ? (
 					<label className="loom-check">
 						<input type="checkbox" checked={record.alive} onChange={(e) => setAlive(e.target.checked)} />
@@ -5253,20 +5328,8 @@ function EntityPage({ view }: { view: EntityView }) {
 						)}
 					</div>
 				) : null}
-				<MarkdownField
-					app={plugin.app}
-					value={description}
-					names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
-					onOpenLink={openLinkTarget}
-					onCreateEntity={createLinkEntity}
-					placeholder={t('view.entity.common.descriptionPlaceholder')}
-					onChange={(v) => {
-						setDescription(v);
-						saveDescription(v);
-					}}
-				/>
 			</div>
-			)}
+		) : null}
 
 		{isSession && project ? (
 				<div className="loom-field loom-graph-under" ref={graphSectionRef}>
@@ -5526,6 +5589,9 @@ function EntityPage({ view }: { view: EntityView }) {
 												<MatchStat query={actScriptQuery} count={actMatches.length} index={actScriptMatchIndex} />
 											) : null}
 											<div className="loom-shell-spacer" />
+											{tutActOutlineCue ? (
+												<StartCue side="right" text={t('tutorial.continueHere')} />
+											) : null}
 											{/* Deliberately NOT part of the pill Script-mode Act's own
 											    Script/Pages toggle used to be — same reasoning as the
 											    main Script view's own standalone Outline button
@@ -5537,27 +5603,68 @@ function EntityPage({ view }: { view: EntityView }) {
 														: 'loom-writer-outline-btn'
 												}
 												onClick={() => clickActTab('outline')}
+												data-tutorial-target={tutActOutlineCue ? '' : undefined}
 											>
 												{t('view.entity.script.outline')}
 											</button>
 											{actScriptMode !== 'pages' ? (
-												<button
-													className="loom-rel-add"
-													onClick={() => {
-														if (!project) return;
-														new CreateEntityModal(plugin, 'scene', project, { defaultAct: record }).open();
+												<div className="loom-start-anchor">
+													<button
+														className="loom-rel-add"
+														onClick={() => {
+															if (!project) return;
+															new CreateEntityModal(plugin, 'scene', project, { defaultAct: record }).open();
+														}}
+														data-tutorial-target={tutCreateBeat ? '' : undefined}
+													>
+														{t('view.entity.script.newSceneAction')}
+													</button>
+													{tutCreateBeat ? (
+														<StartCue
+															above
+															text={
+																actScenes.length === 0
+																	? t('tutorial.createFirstScene')
+																	: t('tutorial.createOrOpenScene')
+															}
+														/>
+													) : null}
+												</div>
+											) : actScenes.length > 0 && actBodyPages.length > 0 ? (
+												<PageNav
+													current={Math.min(actPage, actBodyPages.length)}
+													count={actBodyPages.length}
+													onGo={(target) => {
+														setActPage(target);
+														const container = actScriptPagesRef.current;
+														const el = container?.querySelector(`[data-page="${target}"]`);
+														if (container && el instanceof HTMLElement) scrollIntoContainer(container, el, 'smooth');
 													}}
-												>
-													{t('view.entity.script.newSceneAction')}
-												</button>
+												/>
 											) : null}
 										</div>
 										{actScriptMode !== 'outline' ? (
-											<div className="loom-screenplay loom-scene-pages" ref={actScriptPagesRef}>
+											<div
+												className="loom-screenplay loom-scene-pages"
+												ref={actScriptPagesRef}
+												// The page readout follows manual scrolling too: the page
+												// whose top has passed a third of the way down is current.
+												onScroll={(e) => {
+													const el = e.currentTarget;
+													const threshold = el.getBoundingClientRect().top + el.clientHeight / 3;
+													let current = 1;
+													for (const node of el.querySelectorAll<HTMLElement>('[data-page]')) {
+														if (node.getBoundingClientRect().top <= threshold) current = Number(node.dataset.page);
+													}
+													if (current !== actPage) setActPage(current);
+												}}
+											>
 												{actNavPanel}
 												{actCommentsAside}
 												{actAltAside}
-												{actScenes.length === 0 ? null : (
+												{actScenes.length === 0 ? (
+													<div className="loom-writer-empty">{t('view.entity.script.noScenesInAct')}</div>
+												) : (
 													<PagesPreviewBody
 														pages={actBodyPages}
 														startPageNumber={null}
@@ -5580,10 +5687,10 @@ function EntityPage({ view }: { view: EntityView }) {
 														? 'loom-subloc-list loom-subloc-dragging loom-writer-outline'
 														: 'loom-subloc-list loom-writer-outline'
 												}
+												data-tutorial-target={tutCreateBeat && actScenes.length > 0 ? '' : undefined}
 											>
-												{actScenes.length === 0 ? (
-													<EmptyActMessage plugin={plugin} project={project} act={record} type="scene" />
-												) : (
+												{/* No scenes: nothing but the cue under "+ New scene". */}
+												{actScenes.length === 0 ? null : (
 													actScenes.map((sc, i) => {
 														const grabbed = seqDrag?.group === 'act-scenes' && seqDrag.from === i;
 														return (
@@ -5658,12 +5765,14 @@ function EntityPage({ view }: { view: EntityView }) {
 							<AnnotationPanelToggles open={actBookSidePanel === 'nav' ? null : actBookSidePanel} onToggle={setActBookSidePanel} />
 						) : null}
 						<div className="loom-shell-spacer" />
+						{tutActOutlineCue ? <StartCue side="right" text={t('tutorial.continueHere')} /> : null}
 						{/* Deliberately NOT part of the pill Book's own Editor/Preview
 						    toggle used to be — same reasoning as Script-mode Act's own
 						    standalone Outline button. */}
 						<button
 							className={actBookMode === 'outline' ? 'loom-writer-outline-btn loom-seg-on' : 'loom-writer-outline-btn'}
 							onClick={() => clickActBookTab('outline')}
+							data-tutorial-target={tutActOutlineCue ? '' : undefined}
 						>
 							{t('view.entity.script.outline')}
 						</button>
@@ -5675,9 +5784,16 @@ function EntityPage({ view }: { view: EntityView }) {
 									? 'loom-subloc-list loom-subloc-dragging loom-writer-outline'
 									: 'loom-subloc-list loom-writer-outline'
 							}
+							data-tutorial-target={tutCreateBeat && actChapters.length > 0 ? '' : undefined}
 						>
 							{actChapters.length === 0 ? (
-								<EmptyActMessage plugin={plugin} project={project} act={record} type="chapter" />
+								<EmptyActMessage
+									plugin={plugin}
+									project={project}
+									act={record}
+									type="chapter"
+									tutorialCue={tutCreateBeat ? t('tutorial.createFirstChapter') : undefined}
+								/>
 							) : (
 								actChapters.map((ch, i) => {
 									const grabbed = seqDrag?.group === 'act-chapters' && seqDrag.from === i;
@@ -5701,6 +5817,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											<button className="loom-subloc-link" onClick={() => view.openEntity(ch.path)}>
 												{ch.name}
 											</button>
+											{tutCreateBeat && i === 0 ? <StartCue side="left" text={t('tutorial.openChapter')} /> : null}
 											<span className="loom-writer-outline-leader loom-writer-outline-leader-dashed" aria-hidden="true" />
 										</div>
 									);
@@ -5875,7 +5992,8 @@ function EntityPage({ view }: { view: EntityView }) {
 										finished && roleOf(finished.type) === questAnchorRole ? finished : null,
 										(name) => commitSet(idx, { finishedOn: name }),
 										() => commitSet(idx, { finishedOn: '' }),
-										t('view.entity.quests.finishedOn'),
+										// "in" a scene, "on" a session (a date).
+										isWriterProject ? t('view.entity.quests.finishedIn') : t('view.entity.quests.finishedOn'),
 										questAnchorsSorted,
 										questAnchorType
 									)}
@@ -6086,8 +6204,8 @@ function EntityPage({ view }: { view: EntityView }) {
 
 			{/* Acts render this same section right after Display title
 			    instead (up near the Title fields) — see below. */}
-			{!isSession ? (
-<div className="loom-field loom-field-body">
+			{record.type !== 'act' ? (
+<div className="loom-field loom-field-body" data-tutorial-target={tutLit('locationNotes')}>
 				<span className="loom-field-label">{t('project.notes')}</span>
 				<MarkdownField
 					app={plugin.app}
@@ -6101,8 +6219,24 @@ function EntityPage({ view }: { view: EntityView }) {
 						saveBody(v);
 					}}
 				/>
+				{/* A character's copy of an item keeps the original's Notes
+				    to hand, folded away under its own. */}
+				{isItemCopy && copyOriginal && copyOriginal.notes !== '' ? (
+					<details className="loom-orig-desc">
+						<summary>{t('view.entity.items.originalNotes')}</summary>
+						<MarkdownField
+							app={plugin.app}
+							value={copyOriginal.notes}
+							names={linkNames} linkLabels={linkLabels}
+							onOpenLink={openLinkTarget}
+							onChange={() => undefined}
+							readOnly
+						/>
+					</details>
+				) : null}
 			</div>
 			) : null}
+			{tutCue('locationNotes', t('tutorial.locationNotes'))}
 
 			{/* Event planning (GM projects only): status pill, Improvised tick,
 			    Decision Point field, and Special Conditions builder, laid out
@@ -7146,12 +7280,13 @@ function EntityPage({ view }: { view: EntityView }) {
 			{/* Location keeps Items in the Factions → Items → Sublocations chain;
 			    a character renders it right after its Faction(s) section instead. */}
 			{isLocation ? itemsSection : null}
+			{tutCue('locationItems', t('tutorial.locationItems'))}
 
 			{/* Sublocations live outside the relationships model: the list of
 			    children, creating one, and demoting this location under another
 			    all work through the dedicated parentLocation key. */}
 			{isLocation && project ? (
-				<div className="loom-field loom-field-sep">
+				<div className="loom-field loom-field-sep" data-tutorial-target={tutLit('locationSublocations')}>
 					<span className="loom-field-label">{t('view.entity.location.sublocations')}</span>
 					<div className="loom-subloc-actions">
 						<button
@@ -7242,6 +7377,7 @@ function EntityPage({ view }: { view: EntityView }) {
 					) : null}
 				</div>
 			) : null}
+			{tutCue('locationSublocations', t('tutorial.locationSublocations'))}
 
 			{/* A writer project's Scenes section: this is where the location shows
 			    up in the script, read-only (the scene page owns the heading that
@@ -7391,7 +7527,7 @@ function EntityPage({ view }: { view: EntityView }) {
 			    doesn't show events, e.g. event/session pages). */}
 			{eventsSection}
 
-			<div className="loom-field loom-field-sep">
+			<div className="loom-field loom-field-sep" data-tutorial-target={tutLit('locationRelationships')}>
 				<span className="loom-field-label">{t('view.entity.relationships.sectionLabel')}</span>
 				<button
 					className="loom-rel-add"
@@ -7412,6 +7548,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				) : null}
 				
 			</div>
+			{tutCue('locationRelationships', t('tutorial.locationRelationships'))}
 
 			<ConnectedEntities navigator={view} record={record} project={project} />
 			</div>

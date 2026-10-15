@@ -28,6 +28,7 @@ import {
 	buildLinkTargetLabels,
 	noProjectMessage,
 	openEntityLink,
+	TutorialSpotlight,
 } from './common';
 import { locationLabel } from '../display';
 import { MarkdownField } from './markdown-field';
@@ -54,7 +55,7 @@ export class GroupView extends LoomReactView {
 		return VIEW_GROUP;
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		const project =
 			this.projectRoot !== null ? this.plugin.indexer.getProjectByRoot(this.projectRoot) : undefined;
 		return project ? groupNameOf(project.config) : PC_GROUP_NAME;
@@ -338,6 +339,7 @@ function GroupPage({ view, projectRoot }: { view: GroupView; projectRoot: string
 
 	return (
 		<div className="loom-entity-row">
+			<TutorialSpotlight plugin={plugin} project={project} />
 			<NavRail navigator={view} project={project} active="group" />
 			<div className="loom-entity">
 				<div className="loom-entity-header">

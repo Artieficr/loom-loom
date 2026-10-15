@@ -8,6 +8,7 @@ import {
 	Modal,
 	Notice,
 	Setting,
+	ToggleComponent,
 	TextAreaComponent,
 	TextComponent,
 	TFile,
@@ -92,7 +93,11 @@ import {
 	reorderTopSections,
 	setSceneHeadingParts,
 	unlinkEntityMentions,
+	HEADING_PREFIXES,
+	headingPrefixForKey,
 } from './fountain';
+import { currentTutorialStep, jumpTutorial } from './tutorial';
+import { createInlineCue, startSpotlight } from './tutorial-spotlight';
 import {
 	appendBookAct,
 	appendBookChapter,
@@ -143,7 +148,8 @@ export async function scaffoldProject(
 	app: App,
 	rootPath: string,
 	kind: ProjectKind = DEFAULT_PROJECT_KIND,
-	writerMode: WriterMode = DEFAULT_WRITER_MODE
+	writerMode: WriterMode = DEFAULT_WRITER_MODE,
+	tutorial = false
 ): Promise<TFile> {
 	const root = normalizePath(rootPath);
 	await ensureFolder(app, root);
@@ -190,6 +196,7 @@ export async function scaffoldProject(
 	if (existing) return existing;
 	const config = defaultProjectConfig(kind);
 	config.writerMode = writerMode;
+	if (tutorial) config.tutorial = { step: null, paused: false };
 	return app.vault.create(loomPath, serializeProjectConfig(config));
 }
 
@@ -197,7 +204,9 @@ export interface NewEntityFields {
 	name: string;
 	tag: string;
 	date: string;
-	description?: string;
+	/** The note's body (its Notes) — or, for an event born with a session
+	 *  note, that note's text. */
+	notes?: string;
 	/** Session only: `[[<daily note name>]]` for `date`, computed by
 	 *  `createEntity` (needs `app` to read the vault's Daily Notes format) and
 	 *  passed in so `buildEntityContent` itself stays a pure string builder. */
@@ -287,16 +296,13 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	const places = fields.places ?? [];
 	const hasSessionNote =
 		(fields.noteSession && fields.noteSession !== '') || involved.length > 0 || group.length > 0 || places.length > 0;
-	// An Event's own creation modal writes its "Description" field into the
-	// starting session note's `text` instead of `loomDescription` whenever
-	// that note actually exists — the note is what's immediately visible
-	// (the session page, or the involved entities' own Events sections),
-	// where `loomDescription` is only ever seen by opening the event's own
-	// page. No session note (a bare event with none of noteSession/involved/
-	// group/places set) has nowhere to put it, so it falls back to
-	// `loomDescription` rather than silently dropping what was typed. Every
-	// other entity type is unaffected — this only branches for the beat role.
-	const descriptionToSessionNote = roleOf(type) === 'beat' && hasSessionNote;
+	// An Event's own creation modal writes its notes into the starting
+	// session note's `text` whenever that note actually exists — the note is
+	// what's immediately visible (the session page, or the involved entities'
+	// own Events sections). With no session note (a bare event with none of
+	// noteSession/involved/group/places set) they go into the note's body like
+	// every other type's. This only branches for the beat role.
+	const notesToSessionNote = roleOf(type) === 'beat' && hasSessionNote;
 	const link = (target: string) => `[[${target}]]`;
 	const fm: Record<string, unknown> = { [FM.type]: type };
 	// Sessions have no user-entered name — their display is the date and their
@@ -308,12 +314,11 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 		fm.aliases = [fields.name];
 	}
 	fm[FM.tags] = fields.tag === '' ? [] : [fields.tag];
-	fm[FM.description] = descriptionToSessionNote ? '' : (fields.description ?? '');
 	fm[FM.relationships] = rels.map((r) => ({ type: r.type, target: link(r.target) }));
 	if (hasSessionNote) {
 		const note: Record<string, unknown> = {
 			session: fields.noteSession && fields.noteSession !== '' ? link(fields.noteSession) : '',
-			text: descriptionToSessionNote ? (fields.description ?? '') : '',
+			text: notesToSessionNote ? (fields.notes ?? '') : '',
 			seq: Date.now(),
 		};
 		if (involved.length > 0) note.involved = involved.map(link);
@@ -367,7 +372,7 @@ export function buildEntityContent(type: EntityType, fields: NewEntityFields): s
 	fm[FM.modified] = now;
 	// Obsidian's own YAML writer — the same one `processFrontMatter` uses for
 	// every later edit, so a new note starts in its final format.
-	return `---\n${stringifyYaml(fm)}---\n\n`;
+	return `---\n${stringifyYaml(fm)}---\n\n${notesToSessionNote ? '' : (fields.notes ?? '')}`;
 }
 
 /**
@@ -598,6 +603,37 @@ export async function deleteEntityNote(
 		plugin.deletePromptPause--;
 	}
 	await unlinkDeletedNote(plugin, record);
+}
+
+/**
+ * Resolves once the index's record for `path` passes `ready` — checked after
+ * each metadata re-parse (the indexer's own `'changed'` handler, registered
+ * first, has indexed it by then) — or after `timeoutMs`. A note written a
+ * moment ago isn't in the index yet; anything that looks it up there (e.g.
+ * `syncScenes` matching by id) has to wait for this.
+ */
+function waitForRecord(
+	plugin: LoomLoomPlugin,
+	path: string,
+	ready: (record: EntityRecord) => boolean,
+	timeoutMs = 2000
+): Promise<void> {
+	const done = () => {
+		const record = plugin.indexer.get(path);
+		return !!record && ready(record);
+	};
+	if (done()) return Promise.resolve();
+	return new Promise((resolve) => {
+		const finish = () => {
+			plugin.app.metadataCache.offref(ref);
+			window.clearTimeout(timer);
+			resolve();
+		};
+		const ref = plugin.app.metadataCache.on('changed', () => {
+			if (done()) finish();
+		});
+		const timer = window.setTimeout(finish, timeoutMs);
+	});
 }
 
 /** Entity types a script's `@[Name]` mention can point at (`syncScenes`). */
@@ -1407,7 +1443,7 @@ export async function findOrCreateSublocation(
 		name: name.trim(),
 		tag: '',
 		date: '',
-		description: '',
+		notes: '',
 		parentLocation,
 	});
 	return { ...pcGroupStub(project.root), path: created.path, name: name.trim(), type: 'location', parentLocation };
@@ -1545,7 +1581,6 @@ export async function createItemCopy(
 		setLoomKey(fm, FM.name, label);
 		setLoomKey(fm, FM.itemOrigin, `[[${linkTargetOf(original)}]]`);
 		setLoomKey(fm, FM.itemOwner, `[[${linkTargetOf(character)}]]`);
-		setLoomKey(fm, FM.description, '');
 		const now = formatTimestamp(Date.now());
 		setLoomKey(fm, FM.created, now);
 		setLoomKey(fm, FM.modified, now);
@@ -1618,6 +1653,8 @@ export function createAction(
 export class CreateEntityModal extends Modal {
 	/** Index subscriptions held while open (chip rows redraw as notes index). */
 	private indexRefs: EventRef[] = [];
+	/** The tutorial's spotlight over the scene dialog, while it runs. */
+	private stopSpotlight: (() => void) | null = null;
 	private fields: NewEntityFields = { name: '', tag: '', date: '' };
 	private relComment = '';
 	/** Event only: session picked via the modal's session search. */
@@ -1944,13 +1981,13 @@ export class CreateEntityModal extends Modal {
 		);
 
 		if (this.type !== 'session') {
-			// The event/quest Name is always a search over existing ones —
-			// whether opened from a session page or the plain entity list, so
-			// there's one event-creation experience, not two: picking a match
-			// pins it to the session when one is known (`noteSession`), or just
-			// opens the existing one otherwise (see `submit()`'s `pickedExisting`
-			// branch); typing a new name just creates it either way.
-			const searchable = roleOf(this.type) === 'beat' || this.type === 'quest';
+			// Adding an event/quest from a session page, its Name is also a search
+			// over existing ones: picking a match pins that one to the session
+			// (`submit()`'s `pickedExisting` branch, the button reading "Add");
+			// typing a new name creates one. Anywhere else this dialog only
+			// creates — a taken name is refused, as for every other type.
+			const named = roleOf(this.type) === 'beat' || this.type === 'quest';
+			const searchable = named && this.options.noteSession !== undefined;
 			const noun = entityLabel(this.type).toLowerCase();
 			const indefinite = article(noun);
 			new Setting(this.contentEl)
@@ -1966,7 +2003,9 @@ export class CreateEntityModal extends Modal {
 					.setPlaceholder(
 						searchable
 							? t('project.createEntity.namePlaceholderSearchable', { article: indefinite, noun })
-							: t('project.createEntity.namePlaceholderNew', { label: entityLabel(this.type) })
+							: named
+								? t('project.createEntity.namePlaceholderPlain', { article: indefinite, noun })
+								: t('project.createEntity.namePlaceholderNew', { label: entityLabel(this.type) })
 					)
 					.setValue(this.fields.name)
 					.onChange((v) => {
@@ -2005,10 +2044,20 @@ export class CreateEntityModal extends Modal {
 
 		if (this.type === 'quest') {
 			// New quests are always active — no outcome fields here; they live
-			// on the quest page once the quest actually ends.
+			// on the quest page once the quest actually ends. A quest is received
+			// in a session (Player/GM, newest first) or, in a writer project, in a
+			// scene (script order) — the same rule as the quest page's own
+			// `questAnchorRole`.
+			const receivedType = projectRoleType(
+				this.project.config,
+				this.project.config.kind === 'writer' ? 'beat' : 'anchor'
+			);
+			const receivedLabel = entityLabel(receivedType).toLowerCase();
 			const sessions = this.plugin.indexer
-				.getAll(projectRoleType(this.project.config, 'anchor'), this.project.root)
-				.sort((a, b) => (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0));
+				.getAll(receivedType, this.project.root)
+				.sort((a, b) =>
+					this.project.config.kind === 'writer' ? bySeq(a, b) : (b.date?.sortKey ?? 0) - (a.date?.sortKey ?? 0)
+				);
 			const characters = this.plugin.indexer
 				.getAll('character', this.project.root)
 				.sort((a, b) => a.name.localeCompare(b.name));
@@ -2032,7 +2081,10 @@ export class CreateEntityModal extends Modal {
 			// session tag with ✕. Quests born from a session page (or from an event
 			// note that already carries a session) default there.
 			this.receivedSession = this.options.noteSession ?? this.options.receivedSession ?? null;
-			const receivedSetting = new Setting(this.contentEl).setName(t('project.createEntity.receivedInSession'));
+			const writer = this.project.config.kind === 'writer';
+			const receivedSetting = new Setting(this.contentEl).setName(
+				writer ? t('view.entity.quests.receivedIn', { anchor: receivedLabel }) : t('project.createEntity.receivedInSession')
+			);
 			const receivedEl = receivedSetting.controlEl.createDiv({ cls: 'loom-modal-pick' });
 			const refreshReceived = () => {
 				receivedEl.empty();
@@ -2044,10 +2096,12 @@ export class CreateEntityModal extends Modal {
 				} else {
 					this.singlePickInput(
 						receivedEl,
-						t('project.createEntity.pickSession'),
+						writer
+							? t('project.createEntity.pickAnchor', { anchor: receivedLabel })
+							: t('project.createEntity.pickSession'),
 						() => sessions,
 						(r) => recordLabel(r, this.project),
-						projectRoleType(this.project.config, 'anchor'),
+						receivedType,
 						(r) => {
 							this.receivedSession = r;
 							refreshReceived();
@@ -2066,11 +2120,7 @@ export class CreateEntityModal extends Modal {
 					text.setPlaceholder(t('common.notSpecified')).onChange((v) => (this.fields.reward = v.trim()))
 				);
 			reward.setClass('loom-modal-wide');
-			// Full-width row: label above, the text box using the whole window width.
-			const desc = new Setting(this.contentEl)
-				.setName(t('project.createEntity.description'))
-				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
-			desc.setClass('loom-modal-wide');
+			this.notesField((v) => (this.fields.notes = v));
 		}
 
 		if (this.type === 'session') {
@@ -2260,10 +2310,7 @@ export class CreateEntityModal extends Modal {
 			// <location> — applied to the faction's members after creation.
 			this.fields.factions = [];
 			this.membershipRows('faction', this.fields.factions, entityLabel('faction'), t('project.createEntity.addFactionButton'));
-			const charDesc = new Setting(this.contentEl)
-				.setName(t('project.createEntity.description'))
-				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
-			charDesc.setClass('loom-modal-wide');
+			this.notesField((v) => (this.fields.notes = v));
 		}
 
 		if (this.type === 'faction') {
@@ -2275,21 +2322,15 @@ export class CreateEntityModal extends Modal {
 				t('project.createEntity.membersLabel'),
 				t('project.createEntity.addMemberButton')
 			);
-			const facDesc = new Setting(this.contentEl)
-				.setName(t('project.createEntity.description'))
-				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
-			facDesc.setClass('loom-modal-wide');
+			this.notesField((v) => (this.fields.notes = v));
 		}
 
 		if (this.type === 'item') {
-			const itemDesc = new Setting(this.contentEl)
-				.setName(t('project.createEntity.description'))
-				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
-			itemDesc.setClass('loom-modal-wide');
+			this.notesField((v) => (this.fields.notes = v));
 		}
 
 		if (this.type === 'location') {
-			// Sublocation of (optional) + a full-width Description. Main locations
+			// Sublocation of (optional) + full-width Notes. Main locations
 			// sort above their sublocations (same ordering as the other pickers).
 			const locations = this.plugin.indexer
 				.getAll('location', this.project.root)
@@ -2366,17 +2407,11 @@ export class CreateEntityModal extends Modal {
 				refreshRegion();
 			};
 			refreshParent();
-			const locDesc = new Setting(this.contentEl)
-				.setName(t('project.createEntity.description'))
-				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
-			locDesc.setClass('loom-modal-wide');
+			this.notesField((v) => (this.fields.notes = v));
 		}
 
 		if (this.type === 'region' || this.type === 'decisionPoint') {
-			const groupDesc = new Setting(this.contentEl)
-				.setName(t('project.createEntity.description'))
-				.addTextArea((text) => text.onChange((v) => (this.fields.description = v.trim())));
-			groupDesc.setClass('loom-modal-wide');
+			this.notesField((v) => (this.fields.notes = v));
 		}
 
 		if (this.type === 'event' && featuresOf(this.project.config.kind, this.project.config.writerMode).eventPlanning) {
@@ -2419,39 +2454,39 @@ export class CreateEntityModal extends Modal {
 		if (roleOf(this.type) === 'beat') {
 			// Born with a session (from a session page — the common case this
 			// covers), this field writes into the STARTING session note's own
-			// text (`buildEntityContent`'s `descriptionToSessionNote`) rather than
-			// `loomDescription`, so what's typed here is immediately visible on
-			// the session page instead of only from the event's own page. Labeled
+			// text (`buildEntityContent`'s `notesToSessionNote`) rather than the
+			// note's body, so what's typed here is immediately visible on the
+			// session page instead of only from the event's own page. Labeled
 			// accordingly — a session-less event (opened without `noteSession`)
-			// keeps the plain "Description" label, since whether one ends up
-			// created here depends on live Involved/Locations picks made further
-			// up the form, not something worth relabeling dynamically for.
-			// When an existing event is picked (session-page add), its description
-			// is shown read-only — you're adding it to the session, not editing it.
+			// keeps the plain "Notes" label, since whether one ends up created
+			// here depends on live Involved/Locations picks made further up the
+			// form, not something worth relabeling dynamically for. When an
+			// existing event is picked (session-page add), its notes are shown
+			// read-only — you're adding it to the session, not editing it.
 			const bornWithSession = this.options.noteSession !== undefined;
 			const evDesc = new Setting(this.contentEl).setName(
-				bornWithSession ? t('project.createEntity.sessionNoteLabel') : t('project.createEntity.description')
+				bornWithSession ? t('project.createEntity.sessionNoteLabel') : t('project.notes')
 			);
 			evDesc.setClass('loom-modal-wide');
 			const roEl = evDesc.controlEl.createDiv({ cls: 'loom-modal-existing-desc' });
 			let ta: TextAreaComponent | null = null;
 			evDesc.addTextArea((text) => {
 				ta = text;
-				text.onChange((v) => (this.fields.description = v.trim()));
+				text.onChange((v) => (this.fields.notes = v.trim()));
 			});
 			this.refreshDesc = () => {
 				const existing = this.pickedExisting;
 				if (ta) ta.inputEl.style.display = existing ? 'none' : '';
 				roEl.style.display = existing ? '' : 'none';
 				if (existing) {
-					roEl.setText(existing.description !== '' ? existing.description : t('project.createEntity.noDescription'));
+					roEl.setText(existing.notes !== '' ? existing.notes : t('project.createEntity.noDescription'));
 				}
 				evDesc.setName(
 					existing
 						? t('project.createEntity.descriptionExisting')
 						: bornWithSession
 							? t('project.createEntity.sessionNoteLabel')
-							: t('project.createEntity.description')
+							: t('project.notes')
 				);
 			};
 			this.refreshDesc();
@@ -2661,16 +2696,49 @@ export class CreateEntityModal extends Modal {
 		// callbacks can refresh it without caring about source order.
 		let refreshSceneOrderItems: () => void = () => {};
 
+		// The tutorial walks the heading field by field when this is its
+		// "create a scene" step: the location type, then the locations with it,
+		// then the time, then Create — each lit as the one before is filled.
+		const tutorial = currentTutorialStep(this.project.config) === 'createBeat';
+		let tutStage = 0;
+		let showTutorial = () => {};
+		const reachStage = (stage: number) => {
+			if (!tutorial || stage <= tutStage) return;
+			tutStage = stage;
+			showTutorial();
+		};
+
 		const headingSetting = new Setting(this.contentEl).setName(t('project.createEntity.sceneHeadingLabel'));
 		headingSetting.setClass('loom-modal-scene-heading');
+		let prefixSelect: HTMLSelectElement | null = null;
 		headingSetting.addDropdown((dd) => {
 			// Fountain scene-heading prefixes — literal document syntax written
 			// into the .fountain file, never translated (see fountain.ts).
-			for (const opt of ['INT.', 'EXT.', 'INT./EXT.', 'EST.']) dd.addOption(opt, opt);
-			dd.setValue(intExt).onChange((v) => (intExt = v));
+			for (const opt of HEADING_PREFIXES) dd.addOption(opt, opt);
+			dd.setValue(intExt).onChange((v) => {
+				intExt = v;
+				reachStage(1);
+			});
+			// I, E, / and S pick a prefix — same keys as the Scene page.
+			dd.selectEl.addEventListener('keydown', (e) => {
+				const prefix = e.ctrlKey || e.metaKey || e.altKey ? null : headingPrefixForKey(e.key);
+				if (!prefix) return;
+				e.preventDefault();
+				dd.setValue(prefix);
+				intExt = prefix;
+				reachStage(1);
+			});
+			prefixSelect = dd.selectEl;
 		});
+		let mainInput: HTMLInputElement | null = null;
+		let subInput: HTMLInputElement | null = null;
+		let timeInput: HTMLInputElement | null = null;
 		headingSetting.addText((text) => {
-			text.setPlaceholder(entityLabel('location')).onChange((v) => (mainLoc = v));
+			mainInput = text.inputEl;
+			text.setPlaceholder(entityLabel('location')).onChange((v) => {
+				mainLoc = v;
+				if (v.trim() !== '') reachStage(2);
+			});
 			new RecordInputSuggest(
 				this.app,
 				text.inputEl,
@@ -2687,6 +2755,7 @@ export class CreateEntityModal extends Modal {
 			);
 		});
 		headingSetting.addText((text) => {
+			subInput = text.inputEl;
 			text.setPlaceholder(t('project.createEntity.sublocationOptional')).onChange((v) => (subLoc = v));
 			new RecordInputSuggest(
 				this.app,
@@ -2715,7 +2784,11 @@ export class CreateEntityModal extends Modal {
 			);
 		});
 		headingSetting.addText((text) => {
-			text.setPlaceholder(t('project.createEntity.timePlaceholder')).onChange((v) => (timeOfDay = v));
+			timeInput = text.inputEl;
+			text.setPlaceholder(t('project.createEntity.timePlaceholder')).onChange((v) => {
+				timeOfDay = v;
+				if (v.trim() !== '') reachStage(3);
+			});
 		});
 
 		const actType = projectRoleType(this.project.config, 'anchor');
@@ -2777,7 +2850,9 @@ export class CreateEntityModal extends Modal {
 
 		this.notesField((v) => (notes = v));
 
-		new Setting(this.contentEl).addButton((btn) =>
+		let createButton: HTMLButtonElement | null = null;
+		new Setting(this.contentEl).addButton((btn) => {
+			createButton = btn.buttonEl;
 			btn
 				.setButtonText(t('project.createEntity.createButton'))
 				.setCta()
@@ -2792,8 +2867,31 @@ export class CreateEntityModal extends Modal {
 						insertIndex: sceneOrderPicker.getIndex(),
 						notes,
 					})
-				)
-		);
+				);
+		});
+
+		if (tutorial) {
+			const cue = createInlineCue(this.contentEl);
+			headingSetting.settingEl.after(cue.el);
+			const lit = (el: HTMLElement | null, on: boolean) => el?.toggleAttribute('data-tutorial-target', on);
+			showTutorial = () => {
+				lit(prefixSelect, true);
+				lit(mainInput, tutStage >= 1);
+				lit(subInput, tutStage >= 1);
+				lit(timeInput, tutStage >= 2);
+				lit(createButton, tutStage >= 3);
+				// Normally the act's own page picked the act already.
+				lit(actSetting.settingEl, tutStage >= 3 && pickedAct === null);
+				cue.setText(
+					[t('tutorial.sceneIntExt'), t('tutorial.sceneLocation'), t('tutorial.sceneTime'), t('tutorial.createScene')][
+						tutStage
+					]
+				);
+			};
+			showTutorial();
+			this.modalEl.addClass('loom-tutorial-root');
+			this.stopSpotlight = startSpotlight(this.modalEl);
+		}
 	}
 
 	private async submitScene(fields: {
@@ -2873,7 +2971,7 @@ export class CreateEntityModal extends Modal {
 				name,
 				tag: '',
 				date: '',
-				description: '',
+				notes: '',
 			});
 			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
 				setLoomKey(fm, FM.sceneId, newId);
@@ -2885,13 +2983,16 @@ export class CreateEntityModal extends Modal {
 				setLoomKey(fm, FM.seq, scene.index);
 			});
 			await writeNotesBody(this.plugin, created, fields.notes);
-			// The note already carries `newId` at this point, so `syncScenes`
-			// (run inside this flush's own post-flush hook) matches it by id
-			// and updates it in place rather than creating a duplicate — this
-			// is what derives the note's cast/factions/mentioned-locations
-			// immediately, instead of leaving them stale until some later,
-			// unrelated script edit happens to trigger a sync.
+			// Once the index has the note's id, `syncScenes` (run inside this
+			// flush's own post-flush hook) matches it by id and updates it in
+			// place — this is what derives the note's cast/factions/mentioned-
+			// locations immediately. Flushing before the index caught up made
+			// the sync create a duplicate " 2" note.
+			await waitForRecord(this.plugin, created.path, (r) => r.sceneId === newId);
 			await flushScriptBufferNow(this.plugin, this.project);
+			// The tutorial walked this dialog's heading fields, so the Scene
+			// page's own heading steps are done too.
+			await jumpTutorial(this.plugin, this.project, 'createBeat', 'openLocations');
 			this.finishCreate(created);
 		} catch (e) {
 			console.error('Loom Loom: failed to create the scene', e);
@@ -2916,7 +3017,7 @@ export class CreateEntityModal extends Modal {
 				name: mainName.trim(),
 				tag: '',
 				date: '',
-				description: '',
+				notes: '',
 			});
 			mainRecord = { ...pcGroupStub(this.project.root), path: created.path, name: mainName.trim(), type: 'location' };
 		}
@@ -2925,21 +3026,34 @@ export class CreateEntityModal extends Modal {
 	}
 
 	/** "Append to the end" toggle (default on); turning it off reveals an order
-	 *  picker with the new entry as its draggable `phantomLabel` row. */
+	 *  picker with the new entry as its draggable `phantomLabel` row. Hidden
+	 *  (and back on) while there's nothing to order among — the first act, or
+	 *  the first scene/chapter of the picked act. */
 	private appendOrOrder(name: string, desc: string, phantomLabel: string, onAppend: (append: boolean) => void) {
-		new Setting(this.contentEl)
+		let toggle: ToggleComponent | null = null;
+		const setting = new Setting(this.contentEl)
 			.setName(name)
 			.setDesc(desc)
-			.addToggle((tg) =>
+			.addToggle((tg) => {
+				toggle = tg;
 				tg.setValue(true).onChange((v) => {
 					onAppend(v);
 					orderWrap.classList.toggle('loom-modal-order-wrap-hidden', v);
-				})
-			);
+				});
+			});
 		const orderWrap = this.contentEl.createDiv({ cls: 'loom-modal-order-wrap loom-modal-order-wrap-hidden' });
 		const picker = this.buildOrderPicker(orderWrap);
 		picker.setPhantomLabel(phantomLabel);
-		return picker;
+		return {
+			...picker,
+			setItems: (labels: string[]) => {
+				picker.setItems(labels);
+				const none = labels.length === 0;
+				setting.settingEl.toggle(!none);
+				// setValue fires onChange, which re-hides the order list too.
+				if (none) toggle?.setValue(true);
+			},
+		};
 	}
 
 	/** The structural modals' Notes field (written as the note's body). */
@@ -3163,7 +3277,7 @@ export class CreateEntityModal extends Modal {
 				name: title,
 				tag: '',
 				date: '',
-				description: '',
+				notes: '',
 			});
 			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
 				setLoomKey(fm, FM.actId, actId);
@@ -3180,10 +3294,12 @@ export class CreateEntityModal extends Modal {
 				seq,
 				displayTitle,
 			};
-			// Same reasoning as `submitScene`'s own flush — the note already
-			// carries the id, so `syncScenes` (this flush's post-flush hook)
-			// matches and updates it rather than creating a duplicate.
-			if (!prose) await flushScriptBufferNow(this.plugin, this.project);
+			// Same as `submitScene`'s own flush: only once the index has the
+			// note's id, or `syncScenes` creates a duplicate.
+			if (!prose) {
+				await waitForRecord(this.plugin, created.path, (r) => r.actId === actId);
+				await flushScriptBufferNow(this.plugin, this.project);
+			}
 			this.finishCreate(created, record);
 		} catch (e) {
 			console.error('Loom Loom: failed to create the act', e);
@@ -3360,7 +3476,7 @@ export class CreateEntityModal extends Modal {
 				name,
 				tag: '',
 				date: '',
-				description: '',
+				notes: '',
 			});
 			await this.plugin.app.fileManager.processFrontMatter(created, (fm: Record<string, unknown>) => {
 				setLoomKey(fm, FM.chapterId, newId);
@@ -3378,6 +3494,8 @@ export class CreateEntityModal extends Modal {
 	onClose(): void {
 		for (const ref of this.indexRefs) this.plugin.indexer.events.offref(ref);
 		this.indexRefs = [];
+		this.stopSpotlight?.();
+		this.stopSpotlight = null;
 		this.contentEl.empty();
 	}
 }
@@ -3419,9 +3537,15 @@ export class SetupProjectModal extends Modal {
 	 *  (see project-kind.ts's `WriterMode` doc comment). Ignored for every
 	 *  other kind. */
 	private writerMode: WriterMode = DEFAULT_WRITER_MODE;
+	/** The tutorial checkbox once the user has set it; until then it follows
+	 *  the kind (on for the vault's first project of that kind). */
+	private tutorial: boolean | null = null;
 
-	constructor(private plugin: LoomLoomPlugin) {
+	/** `kind` preselects the project type (the project manager's per-type
+	 *  "create one" rows). */
+	constructor(private plugin: LoomLoomPlugin, kind: ProjectKind = DEFAULT_PROJECT_KIND) {
 		super(plugin.app);
+		this.kind = kind;
 	}
 
 	onOpen(): void {
@@ -3501,6 +3625,13 @@ export class SetupProjectModal extends Modal {
 			}),
 		});
 
+		const tutorialOn =
+			this.tutorial ?? !this.plugin.indexer.getProjects().some((p) => p.config.kind === this.kind);
+		new Setting(this.contentEl)
+			.setName(t('project.setup.tutorial'))
+			.setDesc(t('project.setup.tutorialDesc'))
+			.addToggle((tg) => tg.setValue(tutorialOn).onChange((v) => (this.tutorial = v)));
+
 		// Freemium gate: one project of each kind is free with every feature;
 		// a license key unlocks unlimited projects. Gates NEW creation only —
 		// existing projects are never blocked. See src/license/gating.ts.
@@ -3560,7 +3691,9 @@ export class SetupProjectModal extends Modal {
 			return;
 		}
 		try {
-			const loomFile = await scaffoldProject(this.app, root, this.kind, this.writerMode);
+			const tutorial =
+				this.tutorial ?? !this.plugin.indexer.getProjects().some((p) => p.config.kind === this.kind);
+			const loomFile = await scaffoldProject(this.app, root, this.kind, this.writerMode, tutorial);
 			this.plugin.indexer.rebuild();
 			this.close();
 			new Notice(t('project.setup.projectReady'));

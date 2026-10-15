@@ -1,4 +1,4 @@
-import { CSSProperties, ReactElement } from 'react';
+import { CSSProperties, Fragment, ReactElement } from 'react';
 import {
 	BOOK_ICON,
 	ENTITY_META,
@@ -20,7 +20,8 @@ import {
 import { groupNameOf } from '../calendar';
 import { features, projectTypes } from '../project-kind';
 import { LoomFileReactView } from './react-view';
-import { Icon, NavRail } from './common';
+import { Icon, NavRail, StartCue, TutorialSpotlight, tutorialCueText } from './common';
+import { currentTutorialStep, tutorialRouteKey } from '../tutorial';
 import { useIndexVersion, useVaultFileText } from './hooks';
 import { mapPageCount, mapsFilePath } from './map-view';
 import { createScriptFile } from './script-buffer';
@@ -38,12 +39,12 @@ export class HomeView extends LoomFileReactView {
 		return VIEW_HOME;
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		return this.file?.basename ?? 'Loom Loom';
 	}
 
 	getIcon(): string {
-		return 'dices';
+		return 'home';
 	}
 
 	canAcceptExtension(extension: string): boolean {
@@ -78,6 +79,10 @@ function Home({ view }: { view: HomeView }) {
 
 	const state = { project: project.root };
 	const openList = (type: EntityType) => view.navigateTo(VIEW_LIST, { ...state, entityType: type });
+
+	// The tutorial goes on through the satellite leading to its step.
+	const tutorialStep = currentTutorialStep(project.config);
+	const tutorialSatellite = tutorialStep ? tutorialRouteKey(tutorialStep, project.config) : null;
 
 	// The wheel's satellites: Group first (12 o'clock), then the entity types
 	// clockwise in their canonical order. Positions distribute evenly, so a
@@ -183,11 +188,12 @@ function Home({ view }: { view: HomeView }) {
 
 	return (
 		<div className="loom-shell-row">
+		<TutorialSpotlight plugin={plugin} project={project} />
 		{/* No entity-list/script/graph buttons here — the wheel below already
 		    covers that navigation — just Quick Notes, so its trigger lands in
 		    the exact spot every other page's does instead of a hand-tuned
 		    stand-in position. */}
-		<NavRail navigator={view} project={project} minimal />
+		<NavRail navigator={view} project={project} minimal tutorialPage="home" />
 		<div className="loom-home">
 			<h2>{project.name}</h2>
 			<div className="loom-home-wheel">
@@ -206,10 +212,16 @@ function Home({ view }: { view: HomeView }) {
 							: undefined
 					}
 					onClick={() => view.navigateTo(VIEW_GRAPH, state)}
+					data-tutorial-target={tutorialSatellite === 'graph' ? '' : undefined}
 				>
 					<Icon name="spool" />
 					<span className="loom-card-label">{t('common.loomGraph')}</span>
 				</button>
+				{tutorialSatellite === 'graph' ? (
+					<div className="loom-wheel-cue loom-wheel-cue-center">
+						<StartCue inline text={tutorialCueText(tutorialStep, project.config)} />
+					</div>
+				) : null}
 				{satellites.map((s, i) => {
 					const angle = ((-90 + (360 / satellites.length) * i) * Math.PI) / 180;
 					const style = {
@@ -217,12 +229,25 @@ function Home({ view }: { view: HomeView }) {
 						'--wheel-y': Math.sin(angle).toFixed(4),
 						'--wheel-color': s.color,
 					} as CSSProperties;
+					const lit = s.key === tutorialSatellite;
 					return (
-						<button key={s.key} className="loom-card loom-wheel-card" style={style} onClick={s.open}>
-							<Icon name={s.icon} />
-							<span className="loom-card-label">{s.label}</span>
-							{s.count !== undefined ? <span className="loom-card-count">{s.count}</span> : null}
-						</button>
+						<Fragment key={s.key}>
+							<button
+								className="loom-card loom-wheel-card"
+								style={style}
+								onClick={s.open}
+								data-tutorial-target={lit ? '' : undefined}
+							>
+								<Icon name={s.icon} />
+								<span className="loom-card-label">{s.label}</span>
+								{s.count !== undefined ? <span className="loom-card-count">{s.count}</span> : null}
+							</button>
+							{lit ? (
+								<div className="loom-wheel-cue" style={style}>
+									<StartCue side="left" text={tutorialCueText(tutorialStep, project.config)} />
+								</div>
+							) : null}
+						</Fragment>
 					);
 				})}
 			</div>

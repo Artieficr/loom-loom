@@ -45,6 +45,7 @@ import { managedSessionFileName } from '../naming';
 import { reconcileSessionBeforeLink } from '../gm-decision-point';
 import { recomputeEventLocks, waitForMetadataSync } from '../gm-lock';
 import { LocaleKey, article, t } from '../i18n';
+import { TutorialPage, currentTutorialStep, tutorialRoute } from '../tutorial';
 import { linkTargetOf } from '../indexer';
 import { appendLoomList, involveInFirstNote, newNoteEntry, setLoomKey, writeFmAt } from '../fm';
 import { LoomReactView } from './react-view';
@@ -57,9 +58,10 @@ import {
 	Truncated,
 	ViewShell,
 	noProjectMessage,
+	StartCue,
 	useCloseOnOutsideClick,
 } from './common';
-import { locationLabel, recordDate, recordLabel } from '../display';
+import { locationLabel, notesPreview, recordDate, recordLabel } from '../display';
 import { resolveProject, useIndexVersion } from './hooks';
 import { deleteEntity, deleteEntityMessage } from './script-view';
 import { useScriptBuffer } from './script-buffer';
@@ -75,7 +77,7 @@ export class EntityListView extends LoomReactView {
 		return VIEW_LIST;
 	}
 
-	getDisplayText(): string {
+	protected pageTitle(): string {
 		return entityPlural(this.entityType);
 	}
 
@@ -445,7 +447,7 @@ function EntityList({
 				(r) =>
 					q === '' ||
 					recordLabel(r, project).toLowerCase().includes(q) ||
-					r.description.toLowerCase().includes(q)
+					r.notes.toLowerCase().includes(q)
 			)
 			.filter((r) => tagFilter === '' || r.loomTags.includes(tagFilter))
 			.filter(
@@ -1161,6 +1163,26 @@ function EntityList({
 		.filter((r): r is EntityRecord => r != null);
 	const locationFilterRecord = eventLocation !== null ? plugin.indexer.get(eventLocation) : undefined;
 
+	// Nothing of this type at all (not just filtered away): point at the button.
+	const noneYet = plugin.indexer.getAll(type, project.root).length === 0;
+	// The Acts list is the tutorial's way to an act's page.
+	// The tutorial: this list leads on to its step when the step happens on
+	// one of its records' pages — light the rows.
+	const listPage: TutorialPage =
+		project.config.kind !== 'writer'
+			? 'other'
+			: type === 'act'
+				? 'actList'
+				: type === 'scene'
+					? 'sceneList'
+					: type === 'location'
+						? 'locationList'
+						: 'other';
+	const tutorialStep = currentTutorialStep(project.config);
+	const tutOpenRow = tutorialStep !== null && tutorialRoute(tutorialStep, listPage) === 'list';
+	// The cue goes on the first openable row — under an act's group header
+	// when scenes are grouped by act.
+	const cueRowPath = (groupsByAct ? childrenOf.get(roots[0]?.path ?? '')?.[0] : roots[0])?.path;
 	const toolbar = (
 		<>
 			<input
@@ -1338,18 +1360,21 @@ function EntityList({
 					<Icon name={MAPS_ICON} />
 				</button>
 			) : null}
-			<button
-				className="mod-cta"
-				onClick={() =>
-					new CreateEntityModal(plugin, type, project, {
-						// Open through the view so this list is recorded as the
-						// origin — the new entity page's Back returns here.
-						onCreated: (file) => view.openEntity(file.path),
-					}).open()
-				}
-			>
-				{newEntityTitle(type)}
-			</button>
+			<div className="loom-start-anchor">
+				<button
+					className="mod-cta"
+					onClick={() =>
+						new CreateEntityModal(plugin, type, project, {
+							// Open through the view so this list is recorded as the
+							// origin — the new entity page's Back returns here.
+							onCreated: (file) => view.openEntity(file.path),
+						}).open()
+					}
+				>
+					{newEntityTitle(type)}
+				</button>
+				{noneYet ? <StartCue text={t('view.list.startHere')} /> : null}
+			</div>
 		</>
 	);
 
@@ -1413,6 +1438,18 @@ function EntityList({
 				    doesn't shift for a forced heading with no INT./EXT. */}
 				{r.type === 'scene' ? <span className="loom-scene-row-intext">{r.sceneIntExt}</span> : null}
 				<span className="loom-row-name">{recordLabel(r, project)}</span>
+				{tutOpenRow && r.path === cueRowPath ? (
+					<StartCue
+						side="left"
+						text={
+							type === 'scene'
+								? t('tutorial.openScene')
+								: type === 'location'
+									? t('tutorial.openLocation')
+									: t('tutorial.openAct')
+						}
+					/>
+				) : null}
 				{hasChildren ? (
 					<span className="loom-row-count">{childrenOf.get(r.path)?.length}</span>
 				) : null}
@@ -1447,7 +1484,7 @@ function EntityList({
 				{r.date && r.type !== 'session' ? (
 					<span className="loom-row-date">{recordDate(r, project)}</span>
 				) : null}
-				<span className="loom-row-desc">{r.description}</span>
+				<span className="loom-row-desc">{notesPreview(r.notes)}</span>
 				{hasScriptFilter && isOrphan(r) ? (
 				<span className="loom-chip loom-chip-orphan">{t('view.list.orphanChip')}</span>
 			) : null}
@@ -1472,6 +1509,8 @@ function EntityList({
 		const givers = q.questGivers
 			.map((lp) => plugin.indexer.resolve(lp, q.path))
 			.filter((c): c is EntityRecord => c !== null && c.type === 'character');
+		// Received/completed in a session — or a scene, in a writer project.
+		const questRole = project.config.kind === 'writer' ? 'beat' : 'anchor';
 		const received = q.questReceived !== null ? plugin.indexer.resolve(q.questReceived, q.path) : null;
 		const outcomeSes =
 			q.questOutcomeSession !== null ? plugin.indexer.resolve(q.questOutcomeSession, q.path) : null;
@@ -1499,9 +1538,9 @@ function EntityList({
 					</span>
 				</div>
 				<div className="loom-quest-card-row">
-					<span className="loom-quest-card-label">{t('view.list.receivedOn')}</span>
+					<span className="loom-quest-card-label">{questRole === 'beat' ? t('view.list.receivedIn') : t('view.list.receivedOn')}</span>
 					<span className="loom-quest-card-value">
-						{received && roleOf(received.type) === 'anchor' ? (
+						{received && roleOf(received.type) === questRole ? (
 							<button className="loom-subloc-link" onClick={() => view.openEntity(received.path)}>
 								{recordLabel(received, project)}
 							</button>
@@ -1516,9 +1555,9 @@ function EntityList({
 						{q.questOutcome === '' ? t('view.list.active') : questOutcomeLabel(q.questOutcome)}
 					</span>
 				</div>
-				{q.questOutcome !== '' && outcomeSes && roleOf(outcomeSes.type) === 'anchor' ? (
+				{q.questOutcome !== '' && outcomeSes && roleOf(outcomeSes.type) === questRole ? (
 					<div className="loom-quest-card-row">
-						<span className="loom-quest-card-label">{t('view.list.completedOn')}</span>
+						<span className="loom-quest-card-label">{questRole === 'beat' ? t('view.list.completedIn') : t('view.list.completedOn')}</span>
 						<span className="loom-quest-card-value">
 							<button className="loom-subloc-link" onClick={() => view.openEntity(outcomeSes.path)}>
 								{recordLabel(outcomeSes, project)}
@@ -1572,13 +1611,22 @@ function EntityList({
 	}
 
 	return (
-		<ViewShell view={view} project={project} title={entityPlural(type)} railActive={type} toolbar={toolbar}>
+		<ViewShell
+			view={view}
+			project={project}
+			title={entityPlural(type)}
+			railActive={type}
+			toolbar={toolbar}
+			tutorialPage={listPage}
+		>
 			{records.length === 0 ? (
-				<div className="loom-empty">{t('view.list.nothingHereYet')}</div>
+				<div className="loom-empty">{noneYet ? t('view.list.nothingHereYet') : t('common.noMatches')}</div>
 			) : type === 'quest' && questView === 'cards' ? (
 				<div className="loom-quest-cards loom-list-quest-cards">{records.map((q) => questCard(q))}</div>
 			) : (
-				<div className="loom-list">{rows}</div>
+				<div className="loom-list" data-tutorial-target={tutOpenRow ? '' : undefined}>
+					{rows}
+				</div>
 			)}
 		</ViewShell>
 	);
