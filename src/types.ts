@@ -171,7 +171,6 @@ export const FM = {
 	type: 'loomType',
 	name: 'loomName',
 	tags: 'loomTags',
-	description: 'loomDescription',
 	relationships: 'loomRelationships',
 	sessionNotes: 'loomSessionNotes',
 	date: 'loomDate',
@@ -500,7 +499,9 @@ export interface EntityRecord {
 	/** Root folder path of the owning project. */
 	project: string;
 	loomTags: string[];
-	description: string;
+	/** The note's body — its Notes — read after the frontmatter is indexed
+	 *  (empty until then). Previews and list search use it. */
+	notes: string;
 	relationships: RelationshipDecl[];
 	/** Session-scoped notes; each picked session becomes a connection. */
 	sessionNotes: SessionNoteDecl[];
@@ -653,7 +654,7 @@ export function pcGroupStub(projectRoot: string, name = PC_GROUP_NAME): EntityRe
 		type: 'faction',
 		project: projectRoot,
 		loomTags: [],
-		description: '',
+		notes: '',
 		relationships: [],
 		sessionNotes: [],
 		date: null,

@@ -75,6 +75,7 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 	onOpen,
 	onClose,
 	onCreate,
+	tutorialTarget,
 }: {
 	app: App;
 	record: EntityRecord;
@@ -96,6 +97,8 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 	onClose: () => void;
 	/** Create a new entity of the given type, connected to `record`. */
 	onCreate: (type: EntityType) => void;
+	/** Lit by the tutorial's spotlight. */
+	tutorialTarget?: boolean;
 }) {
 	const resize = useRef<{ pointerId: number; startX: number; startW: number } | null>(null);
 	const onHandlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -137,7 +140,7 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 	}
 
 	return (
-		<div className="loom-sidepanel" style={{ width }}>
+		<div className="loom-sidepanel" style={{ width }} data-tutorial-target={tutorialTarget ? '' : undefined}>
 			<div
 				className="loom-sidepanel-handle"
 				onPointerDown={onHandlePointerDown}
@@ -153,11 +156,13 @@ export const GraphSidePanel = memo(function GraphSidePanel({
 					✕
 				</button>
 			</div>
-			{record.description !== '' ? (
+			{record.notes !== '' ? (
+				// The start of the Notes — its first line, kept as markdown so
+				// its links stay live.
 				<div className="loom-sidepanel-desc">
 					<MarkdownField
 						app={app}
-						value={record.description}
+						value={record.notes.split('\n').find((l) => l.trim() !== '') ?? ''}
 						names={names}
 						linkLabels={linkLabels}
 						onOpenLink={onOpenLink}

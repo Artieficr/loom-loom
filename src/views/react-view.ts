@@ -39,6 +39,23 @@ function openEntityFrom(view: View, path: string, newTab = false): void {
 }
 
 /**
+ * A Loom tab's title is its project's name, so tabs from one project read as
+ * one set — the icon says which page each is. Outside a project (the project
+ * manager, a page with no project) it falls back to the page's own title.
+ */
+function projectTabTitle(view: LoomNavigator & { overlayProject(): string | null }, pageTitle: string): string {
+	const root = view.overlayProject();
+	return (root !== null ? view.plugin.indexer.getProjectByRoot(root)?.name : undefined) ?? pageTitle;
+}
+
+/** Redraws a tab's title and icon when the index changes (a project
+ *  renamed, a page opened before its project was indexed). `updateHeader`
+ *  isn't public API, hence the guard. */
+function refreshTabHeader(leaf: WorkspaceLeaf): void {
+	(leaf as unknown as { updateHeader?: () => void }).updateHeader?.();
+}
+
+/**
  * Base for the plugin's leaf-level custom views (home is file-backed — see
  * `LoomFileReactView`): mounts a React root in the content element on open
  * and tears it down on close. Subclasses implement `renderReact` and call
@@ -57,6 +74,13 @@ export abstract class LoomReactView extends ItemView implements LoomNavigator {
 
 	protected abstract renderReact(): ReactElement;
 
+	/** The page's own title — the tab shows it only outside a project. */
+	protected abstract pageTitle(): string;
+
+	getDisplayText(): string {
+		return projectTabTitle(this, this.pageTitle());
+	}
+
 	/** The project this tab shows (its `project` view state), if any. */
 	overlayProject(): string | null {
 		const project = this.getState().project;
@@ -72,6 +96,7 @@ export abstract class LoomReactView extends ItemView implements LoomNavigator {
 		this.contentEl.addClass('loom-view');
 		this.root = createRoot(this.contentEl);
 		this.detachDeleteOverlay = this.plugin.attachDeleteOverlay(this);
+		this.registerEvent(this.plugin.indexer.events.on('changed', () => refreshTabHeader(this.leaf)));
 		this.renderNow();
 	}
 
@@ -120,6 +145,13 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 
 	protected abstract renderReact(): ReactElement;
 
+	/** The page's own title — the tab shows it only outside a project. */
+	protected abstract pageTitle(): string;
+
+	getDisplayText(): string {
+		return projectTabTitle(this, this.pageTitle());
+	}
+
 	/** The project this tab's file belongs to, if any. */
 	overlayProject(): string | null {
 		return this.file ? (this.plugin.indexer.projectForPath(this.file.path)?.root ?? null) : null;
@@ -135,6 +167,7 @@ export abstract class LoomFileReactView extends FileView implements LoomNavigato
 		this.contentEl.addClass('loom-view');
 		this.root = createRoot(this.contentEl);
 		this.detachDeleteOverlay = this.plugin.attachDeleteOverlay(this);
+		this.registerEvent(this.plugin.indexer.events.on('changed', () => refreshTabHeader(this.leaf)));
 		this.renderNow();
 	}
 

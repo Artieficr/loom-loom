@@ -1,5 +1,6 @@
 import { CalendarId, LoomDate, PC_GROUP_NAME } from './types';
 import { DEFAULT_PROJECT_KIND, DEFAULT_WRITER_MODE, ProjectKind, WriterMode, isProjectKind, isWriterMode } from './project-kind';
+import { TUTORIAL_STEPS, TutorialState } from './tutorial';
 
 /**
  * Calendar & date-format model.
@@ -47,6 +48,8 @@ export interface ProjectConfig {
 	customCalendar: CustomCalendarConfig;
 	/** Display name of the virtual Group (the party); '' = the default "Group". */
 	groupName: string;
+	/** The guided tutorial's progress (tutorial.ts); null = off or finished. */
+	tutorial: TutorialState | null;
 }
 
 export function defaultProjectConfig(kind: ProjectKind = DEFAULT_PROJECT_KIND): ProjectConfig {
@@ -56,6 +59,7 @@ export function defaultProjectConfig(kind: ProjectKind = DEFAULT_PROJECT_KIND): 
 		dateFormat: 'MMM Do, YYYY',
 		customCalendar: { enabled: false, monthCount: 12, months: [], useShortNames: false },
 		groupName: '',
+		tutorial: null,
 	};
 }
 
@@ -86,6 +90,14 @@ export function parseProjectConfig(text: string): ProjectConfig {
 		config.dateFormat = d.dateFormat;
 	}
 	if (typeof d.groupName === 'string') config.groupName = d.groupName;
+	const tut = d.tutorial;
+	if (typeof tut === 'object' && tut !== null) {
+		config.tutorial = {
+			step: (TUTORIAL_STEPS as readonly unknown[]).includes(tut.step) ? tut.step : null,
+			paused: tut.paused === true,
+		};
+		if ((TUTORIAL_STEPS as readonly unknown[]).includes(tut.returnTo)) config.tutorial.returnTo = tut.returnTo;
+	}
 	const cc = d.customCalendar;
 	if (typeof cc === 'object' && cc !== null) {
 		if (typeof cc.enabled === 'boolean') config.customCalendar.enabled = cc.enabled;

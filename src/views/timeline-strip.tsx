@@ -18,7 +18,7 @@ import { editLoomList, newNoteEntry, setLoomKey, withoutRelationships, writeFmAt
 import { ConfirmModal, CreateEntityModal, RecordSuggestModal } from '../project';
 import { LoomNavigator } from './react-view';
 import { Icon } from './common';
-import { recordDate, recordLabel } from '../display';
+import { notesPreview, recordDate, recordLabel } from '../display';
 import { useIndexVersion } from './hooks';
 import { t } from '../i18n';
 
@@ -934,8 +934,8 @@ export const TimelineStrip = memo(function TimelineStrip({
 							style={{ left: tooltip.x, top: tooltip.y }}
 						>
 							<div className="loom-tooltip-name">{tooltip.label}</div>
-							{tooltip.record.description !== '' ? (
-								<div>{truncateWords(tooltip.record.description, TOOLTIP_MAX_WORDS)}</div>
+							{tooltip.record.notes !== '' ? (
+								<div>{truncateWords(notesPreview(tooltip.record.notes), TOOLTIP_MAX_WORDS)}</div>
 							) : null}
 						</div>,
 						tooltip.body
