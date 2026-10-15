@@ -1276,6 +1276,7 @@
 		"graphFilterInside": "Focus on entities shows only what's connected to the ones you pick.",
 		"graphViews": "Save the current filter, focus and pins as a view to come back to.",
 		"graphTimeline": "Open the timeline: your {anchors} and {beats} in order.",
+		"graphTimelineClose": "Explore your timeline: {anchors} in order, their {beats} beneath. Close it when you're done.",
 		"graphAnimate": "Replay how your world grew, in the order things were created.",
 		"graphCreate": "Right-click empty space to create a new entity right here."
 	}

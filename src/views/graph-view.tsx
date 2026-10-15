@@ -1128,6 +1128,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 		if (tutorialStep === 'openGraph' || tutorialStep === 'graphBack') advanceTutorial(plugin, project, tutorialStep);
 		else if (tutorialStep === 'graphSelect' && selected !== null) advanceTutorial(plugin, project, 'graphSelect');
 		else if (tutorialStep === 'graphTimeline' && drawerOpen) advanceTutorial(plugin, project, 'graphTimeline');
+		else if (tutorialStep === 'graphTimelineClose' && !drawerOpen) advanceTutorial(plugin, project, 'graphTimelineClose');
 	}, [tutorialStep, selected, drawerOpen, project, plugin]);
 	// Focus: glide out a little first, so the zoom-in that follows shows.
 	useEffect(() => {
@@ -2056,9 +2057,9 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 							? { text: t('tutorial.graphPin') }
 							: tutorialStep === 'graphUnpin'
 								? { text: t('tutorial.graphUnpin') }
-								: tutorialStep === 'graphTimeline'
+								: tutorialStep === 'graphTimeline' || tutorialStep === 'graphTimelineClose'
 									? {
-											text: t('tutorial.graphTimeline', {
+											text: t(tutorialStep === 'graphTimeline' ? 'tutorial.graphTimeline' : 'tutorial.graphTimelineClose', {
 												anchors: entityPlural(anchorType).toLowerCase(),
 												beats: entityPlural(projectRoleType(project.config, 'beat')).toLowerCase(),
 											}),
@@ -2320,13 +2321,19 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 						<button
 							className={animActive ? 'loom-rel-filter loom-filter-active' : 'loom-rel-filter'}
 							aria-label={animActive ? t('view.graph.stopAnimation') : t('view.graph.startAnimation')}
-							onClick={() => (animActive ? finishAnimation() : startAnimation())}
+							onClick={() => {
+								if (animActive) finishAnimation();
+								else {
+									startAnimation();
+									tutorialDone('graphAnimate');
+								}
+							}}
 							data-tutorial-target={tutorialStep === 'graphAnimate' ? '' : undefined}
 						>
 							<Icon name={animActive ? 'square' : 'play'} />
 						</button>
 						{tutorialStep === 'graphAnimate' ? (
-							<StartCue text={t('tutorial.graphAnimate')} onNext={tutNext('graphAnimate')} />
+							<StartCue text={t('tutorial.graphAnimate')} />
 						) : null}
 					</div>
 					<button className="loom-rel-filter" aria-label={t('view.graph.fitView')} onClick={fitAll}>
@@ -2735,11 +2742,15 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 					</div>
 				) : null}
 				</div>
-				<div className="loom-drawer">
+				<div
+					className="loom-drawer"
+					data-tutorial-target={
+						tutorialStep === 'graphTimeline' || tutorialStep === 'graphTimelineClose' ? '' : undefined
+					}
+				>
 					<div
 						ref={drawerBarRef}
 						className={drawerOpen ? 'loom-drawer-bar loom-drawer-bar-open' : 'loom-drawer-bar'}
-						data-tutorial-target={tutorialStep === 'graphTimeline' ? '' : undefined}
 						onPointerDown={onDrawerBarPointerDown}
 						onPointerMove={onDrawerBarPointerMove}
 						onPointerUp={onDrawerBarPointerUp}
