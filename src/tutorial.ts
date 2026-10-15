@@ -39,6 +39,7 @@ export type TutorialStep =
 	| 'graphFilterInside'
 	| 'graphViews'
 	| 'graphTimeline'
+	| 'graphTimelineClose'
 	| 'graphAnimate'
 	| 'graphCreate';
 
@@ -84,6 +85,7 @@ export const TUTORIAL_STEPS: readonly TutorialStep[] = [
 	'graphFilterInside',
 	'graphViews',
 	'graphTimeline',
+	'graphTimelineClose',
 	'graphAnimate',
 	'graphCreate',
 ];
@@ -174,6 +176,7 @@ const STEP_PAGE: Record<TutorialStep, TutorialPage> = {
 	graphFilterInside: 'graph',
 	graphViews: 'graph',
 	graphTimeline: 'graph',
+	graphTimelineClose: 'graph',
 	graphAnimate: 'graph',
 	graphCreate: 'graph',
 };
