@@ -5140,6 +5140,8 @@ span.loom-row-caret {
 .loom-map-door-glyph {
 	pointer-events: none;
 	stroke: var(--interactive-accent);
+	/* A registered icon (the dungeon) strokes in currentColor. */
+	color: var(--interactive-accent);
 	vector-effect: non-scaling-stroke;
 }
 

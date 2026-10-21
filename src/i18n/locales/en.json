@@ -607,7 +607,9 @@
 				"openSublocation": "Open sublocation",
 				"openItem": "Open item",
 				"turnIntoSubZone": "Turn into a sub-zone",
-				"changeIcon": "Change icon…"
+				"changeIcon": "Change icon…",
+				"iconToDungeon": "Change icon to dungeon",
+				"iconToDoor": "Change icon to door"
 			},
 			"tool": {
 				"rectangle": "Rectangle",

@@ -17,6 +17,7 @@ import {
 	PointerEvent as ReactPointerEvent,
 	ReactElement,
 	ReactNode,
+	SVGProps,
 	useCallback,
 	RefObject,
 	useEffect,
@@ -98,7 +99,7 @@ interface MapZone {
 	nodeSize: NodeSizePreset;
 	/** Portal links to other map pages, drawn as door icons inside the zone.
 	 *  `size` defaults to small (`DOOR_SIZE`). */
-	doors: { page: string; x: number; y: number; size?: NodeSizePreset }[];
+	doors: { page: string; x: number; y: number; size?: NodeSizePreset; dungeon?: boolean }[];
 	/** Item markers dropped inside the zone (link target + position). `size`
 	 *  overrides the zone-derived size for that one marker. */
 	itemPins: { item: string; x: number; y: number; size?: NodeSizePreset }[];
@@ -309,17 +310,6 @@ function clampLabel(name: string, max = 16): string {
  *  colour with a halo in the canvas colour; `r` is the dot's radius, and a
  *  see-through disc of that radius keeps the whole spot pressable. */
 function MapIcon({ id, x, y, r, color }: { id: string; x: number; y: number; r: number; color: string }) {
-	const halo = useRef<SVGGElement>(null);
-	const line = useRef<SVGGElement>(null);
-	useLayoutEffect(() => {
-		for (const g of [halo.current, line.current]) {
-			const svg = getIcon(id);
-			if (!g || !svg) continue;
-			// Bundled icons are 24 units; registered ones (Tabler) 100.
-			g.replaceChildren(...Array.from(svg.childNodes));
-			g.setAttribute('transform', `scale(${24 / (svg.viewBox.baseVal.width || 24)})`);
-		}
-	}, [id]);
 	const size = r * 2.4;
 	return (
 		<g>
@@ -327,11 +317,25 @@ function MapIcon({ id, x, y, r, color }: { id: string; x: number; y: number; r: 
 			<g transform={`translate(${x - size / 2},${y - size / 2}) scale(${size / 24})`} fill="none" strokeLinecap="round" strokeLinejoin="round">
 				{/* Colour through `color`: a registered icon's own wrapper strokes
 				    in currentColor, which would otherwise be the text colour. */}
-				<g ref={halo} className="loom-map-icon-halo" stroke="currentColor" strokeWidth={3.5} />
-				<g ref={line} stroke="currentColor" strokeWidth={1.5} style={{ color }} />
+				<IconPaths id={id} className="loom-map-icon-halo" stroke="currentColor" strokeWidth={3.5} />
+				<IconPaths id={id} stroke="currentColor" strokeWidth={1.5} style={{ color }} />
 			</g>
 		</g>
 	);
+}
+
+/** An icon's own paths (from `getIcon`) inside the map svg, on a 24-unit
+ *  grid: bundled icons are 24 units, registered ones (Tabler) 100. */
+function IconPaths({ id, ...attrs }: { id: string } & SVGProps<SVGGElement>) {
+	const ref = useRef<SVGGElement>(null);
+	useLayoutEffect(() => {
+		const g = ref.current;
+		const svg = getIcon(id);
+		if (!g || !svg) return;
+		g.replaceChildren(...Array.from(svg.childNodes));
+		g.setAttribute('transform', `scale(${24 / (svg.viewBox.baseVal.width || 24)})`);
+	}, [id]);
+	return <g ref={ref} {...attrs} />;
 }
 
 /** A node-size preset, or undefined when the value isn't one. */
@@ -341,14 +345,12 @@ function parsePreset(v: unknown): NodeSizePreset | undefined {
 
 /** Parses a raw zones array tolerantly. */
 /** A zone's stored pins of one kind: entries with a string `key` and finite x/y. */
-function pinEntries<K extends string>(
-	raw: unknown,
-	key: K
-): (Record<K, string> & { x: number; y: number; size?: unknown; icon?: unknown })[] {
+type RawPin<K extends string> = Record<K, string> & { x: number; y: number; size?: unknown; icon?: unknown; dungeon?: unknown };
+function pinEntries<K extends string>(raw: unknown, key: K): RawPin<K>[] {
 	if (!Array.isArray(raw)) return [];
 	return (raw as Record<string, unknown>[]).filter(
 		(p) => !!p && typeof p[key] === 'string' && Number.isFinite(p.x) && Number.isFinite(p.y)
-	) as (Record<K, string> & { x: number; y: number; size?: unknown; icon?: unknown })[];
+	) as RawPin<K>[];
 }
 
 function parseZones(raw: unknown): MapZone[] {
@@ -376,7 +378,13 @@ function parseZones(raw: unknown): MapZone[] {
 					? { x: z.node.x, y: z.node.y }
 					: null,
 			nodeSize: parsePreset(z.nodeSize) ?? 'regular',
-			doors: pinEntries(z.doors, 'page').map((dr) => ({ page: dr.page, x: dr.x, y: dr.y, size: parsePreset(dr.size) })),
+			doors: pinEntries(z.doors, 'page').map((dr) => ({
+				page: dr.page,
+				x: dr.x,
+				y: dr.y,
+				size: parsePreset(dr.size),
+				dungeon: dr.dungeon === true || undefined,
+			})),
 			itemPins: pinEntries(z.itemPins, 'item').map((it) => ({ item: it.item, x: it.x, y: it.y, size: parsePreset(it.size) })),
 			subPins: pinEntries(z.subPins, 'loc').map((sp) => ({
 				loc: sp.loc,
@@ -3967,6 +3975,19 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			updateZone(zone.id, { [key]: next });
 		};
 		const m = new ObsidianMenu();
+		if (kind === 'door') {
+			// A door's only other look: a dungeon entrance.
+			const dungeon = zone.doors[index].dungeon === true;
+			m.addItem((i) =>
+				i
+					.setTitle(t(dungeon ? 'view.map.pinMenu.iconToDoor' : 'view.map.pinMenu.iconToDungeon'))
+					.setIcon(dungeon ? 'door-open' : 'tabler-building-tunnel')
+					.onClick(() =>
+						setPins(pins.map((p, j) => (j === index ? { ...p, dungeon: dungeon ? undefined : true } : p)))
+					)
+			);
+			m.addSeparator();
+		}
 		if (kind === 'subpin') {
 			m.addItem((i) =>
 				i
@@ -5106,7 +5127,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 											body: (
 												<>
 													<circle cx={dr.x} cy={dr.y} r={r * nodeUnit} className="loom-map-door-dot" />
-													{/* Lucide door-open icon, scaled with the door (24-unit icon). */}
+													{/* The door's icon, scaled with the door (24-unit grid). */}
 													<g
 														className="loom-map-door-glyph"
 														transform={`translate(${dr.x},${dr.y}) scale(${(r * 1.25 * nodeUnit) / 24}) translate(-12,-12)`}
@@ -5115,11 +5136,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 														strokeLinecap="round"
 														strokeLinejoin="round"
 													>
-														<path d="M13 4h3a2 2 0 0 1 2 2v14" />
-														<path d="M2 20h3" />
-														<path d="M13 20h9" />
-														<path d="M10 12v.01" />
-														<path d="M13 4.562v16.157a1 1 0 0 1-1.242.97L5 20V5.562a2 2 0 0 1 1.515-1.94l4-1A2 2 0 0 1 13 4.562Z" />
+														{/* A dungeon door is a way down — a cave mouth. */}
+														<IconPaths id={dr.dungeon ? 'tabler-building-tunnel' : 'lucide-door-open'} />
 													</g>
 												</>
 											),
