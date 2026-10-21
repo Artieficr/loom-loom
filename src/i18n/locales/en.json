@@ -354,7 +354,6 @@
 				"turnIntoSublocationDetail": "This location has a zone on the map. Turning it into a sublocation will delete that zone from the map.",
 				"turnIntoSublocationCta": "Turn into sublocation",
 				"pickParentPlaceholder": "Pick the parent location…",
-				"turnToSublocation": "Turn to a sublocation",
 				"clearRegion": "Clear region",
 				"changeRegion": "Change region",
 				"sublocations": "Sublocations",
@@ -606,7 +605,9 @@
 			"pinMenu": {
 				"openMap": "Open map",
 				"openSublocation": "Open sublocation",
-				"openItem": "Open item"
+				"openItem": "Open item",
+				"turnIntoSubZone": "Turn into a sub-zone",
+				"changeIcon": "Change icon…"
 			},
 			"tool": {
 				"rectangle": "Rectangle",
@@ -668,7 +669,14 @@
 			"searchItems": "Search items",
 			"dragTitleNode": "Click to open · drag onto the map to place its node",
 			"dragTitleDoor": "Click to open · drag onto the map to place its door",
+			"iconPicker": {
+				"title": "Choose an icon",
+				"search": "Search — house, tavern, forge, gas station…",
+				"none": "No icon (a dot)",
+				"empty": "No icons match."
+			},
 			"zoneAria": {
+				"turnBackIntoNode": "Turn back into a node",
 				"locked": "Locked",
 				"moveZone": "Move zone",
 				"associateLocationPlaceholder": "Associate a location…",

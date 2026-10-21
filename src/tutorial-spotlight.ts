@@ -59,7 +59,12 @@ function buildSpotlight(root: HTMLElement): () => void {
 	let revealed = false;
 	const tick = () => {
 		const box = root.getBoundingClientRect();
-		const targets = [...root.querySelectorAll<HTMLElement>('[data-tutorial-target]')];
+		// An open dropdown inside a lit element (a search field's list) hangs
+		// outside it, so it's lit as well.
+		const targets = [
+			...root.querySelectorAll<HTMLElement>('[data-tutorial-target]'),
+			...root.querySelectorAll<HTMLElement>('[data-tutorial-target] .loom-combo-menu'),
+		];
 		// A step's first target may be scrolled out of sight (a section far down
 		// a page): bring it into view once, as the step starts.
 		if (!revealed && targets.length > 0) {
@@ -93,20 +98,34 @@ function buildSpotlight(root: HTMLElement): () => void {
 			);
 		};
 		const targetHoles = targets.map((el) => hole(el, 6)).filter(Boolean);
-		// The click blocker is one even-odd path, where a hole inside another
-		// hole fills back in — so a lit element lying within another's lit area
-		// (a cue's button in a lit popover) leaves its hole to that one. By
-		// area, not by DOM: a cue can hang outside the element it's part of.
-		const rects = targets.map((el) => litRect(el));
-		const within = (inner: DOMRect, outer: DOMRect) =>
-			inner.left >= outer.left && inner.right <= outer.right && inner.top >= outer.top && inner.bottom <= outer.bottom;
-		const blockHoles = targets
-			.filter((el, i) => {
-				const r = rects[i];
-				return r !== null && !rects.some((o, j) => j !== i && o !== null && within(r, o) && !(within(o, r) && j > i));
-			})
-			.map((el) => hole(el, 6))
-			.filter(Boolean);
+		// The click blocker is one even-odd path, where overlapping holes fill
+		// back in (a cue's button in a lit popover, a dropdown hanging off a lit
+		// field) — so its holes are the lit areas merged into non-overlapping
+		// boxes. It's invisible: a box's corners letting a few more pixels
+		// through doesn't matter.
+		const merged: { l: number; t: number; r: number; b: number }[] = [];
+		for (const el of targets) {
+			const r = litRect(el);
+			if (r) merged.push({ l: r.left - 6, t: r.top - 6, r: r.right + 6, b: r.bottom + 6 });
+		}
+		for (let changed = true; changed; ) {
+			changed = false;
+			outer: for (let i = 0; i < merged.length; i++) {
+				for (let j = i + 1; j < merged.length; j++) {
+					const p = merged[i];
+					const q = merged[j];
+					if (p.l < q.r && q.l < p.r && p.t < q.b && q.t < p.b) {
+						merged[i] = { l: Math.min(p.l, q.l), t: Math.min(p.t, q.t), r: Math.max(p.r, q.r), b: Math.max(p.b, q.b) };
+						merged.splice(j, 1);
+						changed = true;
+						break outer;
+					}
+				}
+			}
+		}
+		const blockHoles = merged.map(
+			(m) => `M${m.l - box.left} ${m.t - box.top}H${m.r - box.left}V${m.b - box.top}H${m.l - box.left}Z`
+		);
 		const cueHoles =
 			targetHoles.length > 0
 				? [...root.querySelectorAll<HTMLElement>('.loom-start-cue')].map((el) => hole(el, 0)).filter(Boolean)

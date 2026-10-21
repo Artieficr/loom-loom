@@ -4,6 +4,7 @@ import {
 	Fragment,
 	MouseEvent as ReactMouseEvent,
 	ReactElement,
+	useEffect,
 	useMemo,
 	useRef,
 	useState,
@@ -225,9 +226,23 @@ function EntityList({
 	const [filterPanelOpen, setFilterPanelOpen] = useState(false);
 	const filterPanelRef = useRef<HTMLDivElement>(null);
 	useCloseOnOutsideClick(filterPanelRef, filterPanelOpen, () => setFilterPanelOpen(false));
-	/** Locations only: explicit per-parent collapse choices; parents absent
-	 *  here auto-collapse once they hold more than 5 sublocations. */
-	const [collapseOverride, setCollapseOverride] = useState<ReadonlyMap<string, boolean>>(new Map());
+	/** Explicit per-parent collapse choices; parents absent here auto-collapse
+	 *  once they hold more than 5 children. Remembered per project and list on
+	 *  this device (a view preference, not vault data). */
+	const collapseKey = project ? `loom-list-collapse:${project.root}:${type}` : null;
+	const [collapseOverride, setCollapseState] = useState<ReadonlyMap<string, boolean>>(new Map());
+	useEffect(() => {
+		const raw: unknown = collapseKey ? plugin.app.loadLocalStorage(collapseKey) : null;
+		const saved = new Map<string, boolean>();
+		if (raw && typeof raw === 'object') {
+			for (const [path, v] of Object.entries(raw)) if (typeof v === 'boolean') saved.set(path, v);
+		}
+		setCollapseState(saved);
+	}, [collapseKey, plugin]);
+	const setCollapseOverride = (next: ReadonlyMap<string, boolean>) => {
+		setCollapseState(next);
+		if (collapseKey) plugin.app.saveLocalStorage(collapseKey, Object.fromEntries(next));
+	};
 	// Only characters offer "Sort: appearance", but the hook has to run
 	// unconditionally (React's rules of hooks) — reading the script for every
 	// OTHER entity type is wasted work, so it's gated to just that case.

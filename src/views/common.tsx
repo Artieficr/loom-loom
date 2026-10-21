@@ -768,6 +768,7 @@ export function RailButton({
 	onClick,
 	tutorialTarget,
 	railKey,
+	accent,
 }: {
 	icon: string;
 	/** Substitute icon for older Obsidian bundles missing `icon` (see Icon). */
@@ -779,6 +780,8 @@ export function RailButton({
 	/** What the button opens (`script`, `book`, an entity type) — how the
 	 *  tutorial finds the button its cue points at. */
 	railKey?: string;
+	/** Drawn in the accent colour (the tutorial's pause button). */
+	accent?: boolean;
 }) {
 	const ref = useRef<HTMLButtonElement>(null);
 	useEffect(() => {
@@ -787,7 +790,9 @@ export function RailButton({
 	return (
 		<button
 			ref={ref}
-			className={active ? 'loom-rail-btn loom-rail-btn-active' : 'loom-rail-btn'}
+			className={
+				'loom-rail-btn' + (active ? ' loom-rail-btn-active' : '') + (accent ? ' loom-rail-btn-accent' : '')
+			}
 			aria-label={label}
 			onClick={onClick}
 			data-tutorial-target={tutorialTarget ? '' : undefined}
@@ -1000,7 +1005,7 @@ export function NavRail({
 						<RailButton
 							icon="pause"
 							label={t('tutorial.pause')}
-							active
+							accent
 							onClick={() => setTutorialPaused(navigator.plugin, project, true)}
 						/>
 					</div>

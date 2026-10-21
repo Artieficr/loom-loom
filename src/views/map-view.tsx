@@ -7,6 +7,7 @@ import {
 	TFolder,
 	ViewStateResult,
 	debounce,
+	getIcon,
 	normalizePath,
 	setTooltip,
 } from 'obsidian';
@@ -24,6 +25,7 @@ import {
 	useRef,
 	useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { Root, createRoot } from 'react-dom/client';
 import { darkenHex } from '../settings';
 import {
@@ -38,12 +40,23 @@ import {
 } from '../types';
 import { linkTargetOf, ProjectDef } from '../indexer';
 import { ConfirmModal, TextInputModal, ensureFolder } from '../project';
+import { IconPickerModal } from './icon-picker';
 import type LoomLoomPlugin from '../main';
 import { LoomReactView } from './react-view';
 import { EntityChip, Icon, SearchableSelect, ViewShell, noProjectMessage } from './common';
 import { recordLabel } from '../display';
 import { resolveProject, useIndexVersion } from './hooks';
-import { focusNeighborhood } from './mini-graph';
+import {
+	Displacement,
+	HOLD_MS,
+	PanState,
+	focusCamera,
+	focusNeighborhood,
+	panMove,
+	runSpring,
+	useCameraAnimation,
+	zoomAt,
+} from './mini-graph';
 import { EdgeRoute, LANE_EPSILON, edgePoints, packLanes, roundedPath } from '../graph/routing';
 import { t } from '../i18n';
 import { projectPath } from '../naming';
@@ -92,7 +105,7 @@ interface MapZone {
 	/** Sublocation nodes shown inside the zone (a sublocation of the zone's
 	 *  location, drawn as a smaller node; link target + position). `size` overrides
 	 *  the nesting-derived size for that one node. */
-	subPins: { loc: string; x: number; y: number; size?: NodeSizePreset }[];
+	subPins: { loc: string; x: number; y: number; size?: NodeSizePreset; icon?: string }[];
 	/** Locked zones can't be moved or reshaped (still selectable). */
 	locked: boolean;
 	/** Texture: a polygon's terrain (see TERRAINS), a path's surface (see
@@ -106,6 +119,11 @@ interface MapZone {
 	 *  so switching back restores it — one is in use at a time, both are kept. */
 	named: boolean;
 	savedLoc: { location: string; node: Pt | null } | null;
+	/** A sub-zone: the id of the zone it's drawn inside, its location one of
+	 *  that zone's sublocations (a map-only choice — the locations themselves
+	 *  are unchanged). It has a text label instead of a node, shows when the
+	 *  parent's markers do, moves with the parent and stays inside its outline. */
+	parentZone: string | null;
 }
 
 /** A free text label on a map page ("The Shattered Sea"), centred on x/y. */
@@ -117,6 +135,8 @@ interface MapLabel {
 	/** Font size in world units — a label is part of the map, so it scales with
 	 *  it (fading out once too small or too big on screen, LABEL_PX). */
 	size: number;
+	/** Clockwise turn in degrees, about x/y. */
+	rotation: number;
 }
 
 /**
@@ -204,7 +224,27 @@ const DEFAULT_K = 0.5;
  */
 const COLLAPSE_PX: [number, number] = [28, 56]; // fully folded into its node below, fully drawn above
 const PINS_PX: [number, number] = [80, 140]; // doors, items and sublocations fade in
-const CLOSEUP_PX: [number, number] = [250, 400]; // the main node turns see-through
+const NODE_LABEL_PX: [number, number] = [150, 230]; // the main node gives way to its name
+const CLOSEUP_PX: [number, number] = [250, 400]; // that name turns see-through
+/** A zone's name label is map lettering, world-sized like a free label: a
+ *  font this fraction of the zone's radius, shrunk to fit the name inside the
+ *  zone, and a sub-zone's at most SUB_LABEL_SCALE of its parent's, so a part
+ *  never reads bigger than the whole (`zoneLabelSize`). A sub-zone's name
+ *  shows across its own on-screen band — sub-zones are close-up detail. */
+const LABEL_FIT_FRAC = 0.15;
+const SUB_LABEL_SCALE = 0.7;
+/** How far (a fraction of the zone's radius) a zone's own markers keep from
+ *  its sub-zones' edges. */
+const PIN_CLEAR = 0.04;
+/** How close (screen px) a drawn or dragged zone corner snaps onto another
+ *  zone's corner or outline. */
+const SNAP_PX = 10;
+/** Corners (and where two nearby edges meet) snap from this many times
+ *  further away than an edge does, so an angle wins over its own edges. */
+const CORNER_SNAP = 2;
+const CORNER_RELEASE = 3;
+const SUB_LABEL_IN_PX: [number, number] = [8, 12];
+const SUB_LABEL_OUT_PX: [number, number] = [90, 150];
 /** Markers are sized from their own zone: a zone this many px in radius on
  *  screen draws its node/pins at their preset size, scaling with it, clamped to
  *  MARKER_MIN..MAX × preset so they never vanish or balloon. A folded zone's node
@@ -265,6 +305,35 @@ function clampLabel(name: string, max = 16): string {
 	return name.length > max ? name.slice(0, max - 1).trimEnd() + '…' : name;
 }
 
+/** A sublocation drawn as a Lucide icon instead of a dot, in the dot's
+ *  colour with a halo in the canvas colour; `r` is the dot's radius, and a
+ *  see-through disc of that radius keeps the whole spot pressable. */
+function MapIcon({ id, x, y, r, color }: { id: string; x: number; y: number; r: number; color: string }) {
+	const halo = useRef<SVGGElement>(null);
+	const line = useRef<SVGGElement>(null);
+	useLayoutEffect(() => {
+		for (const g of [halo.current, line.current]) {
+			const svg = getIcon(id);
+			if (!g || !svg) continue;
+			// Bundled icons are 24 units; registered ones (Tabler) 100.
+			g.replaceChildren(...Array.from(svg.childNodes));
+			g.setAttribute('transform', `scale(${24 / (svg.viewBox.baseVal.width || 24)})`);
+		}
+	}, [id]);
+	const size = r * 2.4;
+	return (
+		<g>
+			<circle cx={x} cy={y} r={r} fill={color} fillOpacity={0} />
+			<g transform={`translate(${x - size / 2},${y - size / 2}) scale(${size / 24})`} fill="none" strokeLinecap="round" strokeLinejoin="round">
+				{/* Colour through `color`: a registered icon's own wrapper strokes
+				    in currentColor, which would otherwise be the text colour. */}
+				<g ref={halo} className="loom-map-icon-halo" stroke="currentColor" strokeWidth={3.5} />
+				<g ref={line} stroke="currentColor" strokeWidth={1.5} style={{ color }} />
+			</g>
+		</g>
+	);
+}
+
 /** A node-size preset, or undefined when the value isn't one. */
 function parsePreset(v: unknown): NodeSizePreset | undefined {
 	return v === 'small' || v === 'regular' || v === 'big' || v === 'very-big' ? v : undefined;
@@ -275,11 +344,11 @@ function parsePreset(v: unknown): NodeSizePreset | undefined {
 function pinEntries<K extends string>(
 	raw: unknown,
 	key: K
-): (Record<K, string> & { x: number; y: number; size?: unknown })[] {
+): (Record<K, string> & { x: number; y: number; size?: unknown; icon?: unknown })[] {
 	if (!Array.isArray(raw)) return [];
 	return (raw as Record<string, unknown>[]).filter(
 		(p) => !!p && typeof p[key] === 'string' && Number.isFinite(p.x) && Number.isFinite(p.y)
-	) as (Record<K, string> & { x: number; y: number; size?: unknown })[];
+	) as (Record<K, string> & { x: number; y: number; size?: unknown; icon?: unknown })[];
 }
 
 function parseZones(raw: unknown): MapZone[] {
@@ -309,11 +378,18 @@ function parseZones(raw: unknown): MapZone[] {
 			nodeSize: parsePreset(z.nodeSize) ?? 'regular',
 			doors: pinEntries(z.doors, 'page').map((dr) => ({ page: dr.page, x: dr.x, y: dr.y, size: parsePreset(dr.size) })),
 			itemPins: pinEntries(z.itemPins, 'item').map((it) => ({ item: it.item, x: it.x, y: it.y, size: parsePreset(it.size) })),
-			subPins: pinEntries(z.subPins, 'loc').map((sp) => ({ loc: sp.loc, x: sp.x, y: sp.y, size: parsePreset(sp.size) })),
+			subPins: pinEntries(z.subPins, 'loc').map((sp) => ({
+				loc: sp.loc,
+				x: sp.x,
+				y: sp.y,
+				size: parsePreset(sp.size),
+				icon: typeof sp.icon === 'string' ? sp.icon : undefined,
+			})),
 			locked: z.locked === true,
 			terrain: isTexture(z.terrain) ? z.terrain : null,
 			name: typeof z.name === 'string' ? z.name : '',
 			named: z.named === true,
+			parentZone: typeof z.parentZone === 'string' ? z.parentZone : null,
 			savedLoc:
 				z.savedLoc && typeof z.savedLoc.location === 'string'
 					? {
@@ -335,7 +411,14 @@ function parseLabels(raw: unknown): MapLabel[] {
 	for (const l of raw as Partial<MapLabel>[]) {
 		if (!l || typeof l.text !== 'string' || typeof l.x !== 'number' || typeof l.y !== 'number') continue;
 		if (typeof l.size !== 'number' || !(l.size > 0)) continue;
-		out.push({ id: typeof l.id === 'string' ? l.id : newId(), x: l.x, y: l.y, text: l.text, size: l.size });
+		out.push({
+			id: typeof l.id === 'string' ? l.id : newId(),
+			x: l.x,
+			y: l.y,
+			text: l.text,
+			size: l.size,
+			rotation: typeof l.rotation === 'number' && Number.isFinite(l.rotation) ? l.rotation : 0,
+		});
 	}
 	return out;
 }
@@ -422,6 +505,56 @@ export function mapsImagesPath(project: ProjectRef): string {
 /** A project's Maps store, or null when it has none yet (nothing drawn). */
 export function findMapsFile(app: App, project: ProjectRef): TFile | null {
 	return app.vault.getFileByPath(mapsFilePath(project));
+}
+
+/** `zs` with every link to the note `from` (a basename) pointed at `to` — a
+ *  zone's location and set-aside location, a path's ends, item and sublocation
+ *  pins. `to` null unlinks them (the pins go). Returns `zs` itself when nothing
+ *  named `from`. */
+function relinkZones(zs: MapZone[], from: string, to: string | null): MapZone[] {
+	let changed = false;
+	const out = zs.map((z) => {
+		const touched =
+			z.location === from ||
+			z.savedLoc?.location === from ||
+			z.startLoc === from ||
+			z.endLoc === from ||
+			z.subPins.some((sp) => sp.loc === from) ||
+			z.itemPins.some((it) => it.item === from);
+		if (!touched) return z;
+		changed = true;
+		const swap = <T extends string | null | undefined>(v: T) => (v === from ? to : v);
+		return {
+			...z,
+			location: swap(z.location),
+			startLoc: swap(z.startLoc),
+			endLoc: swap(z.endLoc),
+			savedLoc: z.savedLoc?.location === from ? (to ? { ...z.savedLoc, location: to } : null) : z.savedLoc,
+			subPins: to
+				? z.subPins.map((sp) => (sp.loc === from ? { ...sp, loc: to } : sp))
+				: z.subPins.filter((sp) => sp.loc !== from),
+			itemPins: to
+				? z.itemPins.map((it) => (it.item === from ? { ...it, item: to } : it))
+				: z.itemPins.filter((it) => it.item !== from),
+		};
+	});
+	return changed ? out : zs;
+}
+
+/** Points a renamed note's links in the project's Maps file at its new name,
+ *  for a map that isn't open (an open one relinks its own state and saves). */
+export async function relinkInMapsFile(app: App, project: ProjectRef, from: string, to: string): Promise<void> {
+	const f = findMapsFile(app, project);
+	if (!f) return;
+	await app.vault.process(f, (text) => {
+		const file = parseMapsFile(text);
+		if (!file) return text;
+		const maps = file.maps.map((m) => {
+			const zones = relinkZones(m.zones, from, to);
+			return zones === m.zones ? m : { ...m, zones };
+		});
+		return maps.some((m, i) => m !== file.maps[i]) ? JSON.stringify({ ...file, maps }, null, '\t') : text;
+	});
 }
 
 /** How many map pages a Maps file's text holds — the count on the home
@@ -828,10 +961,6 @@ function boundaryExit(
 	return { x: from.x + (to.x - from.x) * bestT, y: from.y + (to.y - from.y) * bestT };
 }
 
-/** Translate the moved zone by (dx,dy). If it's a location polygon, also drag the
- *  matching endpoint of every road attached to that location, so roads stay
- *  connected when their location is moved (a road stores its own endpoints, which
- *  otherwise stay frozen and detach). Roads are matched by location link target. */
 /** Re-shapes a path to `next` (same number of points) and carries what sits on
  *  it along: its own node, doors, items and sublocation pins keep their spot
  *  ALONG the path — same segment, same fraction, same offset — so moving a knot
@@ -865,16 +994,211 @@ function reshapeRoad(road: MapZone, next: Pt[]): MapZone {
 	};
 }
 
+/** `list` with zone `id`'s outline set to `next`. What sits on the old
+ *  outline is carried along — same edge, same fraction along it (the nearest
+ *  point on the new outline when the vertex count changed) — so it stays on
+ *  it: path ends attached to the zone and, with `shared`, every other zone's
+ *  corners lying on it (neighbours sharing a border, sub-zones built along
+ *  it), which in turn carry what lies on theirs. A zone's own parents are
+ *  never carried (a sub-zone doesn't reshape the zone it's in), and its
+ *  sub-zones' corners the new outline left outside come in onto it.
+ *  `stack` is the zones already being reshaped up the call chain. */
+function withOutline(
+	list: MapZone[],
+	id: string,
+	next: Pt[],
+	shared: boolean | Set<string> = true,
+	stack: string[] = []
+): MapZone[] {
+	const zone = list.find((z) => z.id === id);
+	if (!zone) return list;
+	const old = zone.points;
+	const carry = (p: Pt): Pt => {
+		const { i } = nearestOnPath(p, old, true);
+		if (next.length !== old.length || i < 0) return nearestOnPath(p, next, true).q;
+		const a = old[i];
+		const b = old[(i + 1) % old.length];
+		const len2 = (b.x - a.x) ** 2 + (b.y - a.y) ** 2 || 1;
+		const t = Math.max(0, Math.min(1, ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / len2));
+		const na = next[i];
+		const nb = next[(i + 1) % next.length];
+		return { x: na.x + (nb.x - na.x) * t, y: na.y + (nb.y - na.y) * t };
+	};
+	const loc = zone.kind === 'zone' ? zone.location : null;
+	let result = list.map((z) => {
+		if (z.id === id) return { ...z, points: next };
+		if (!loc || z.kind !== 'road' || z.points.length < 2) return z;
+		const atStart = z.startLoc === loc;
+		const atEnd = z.endLoc === loc;
+		if (!atStart && !atEnd) return z;
+		const last = z.points.length - 1;
+		return reshapeRoad(
+			z,
+			z.points.map((p, i) => ((atStart && i === 0) || (atEnd && i === last) ? carry(p) : p))
+		);
+	});
+	if (zone.kind !== 'zone') return result;
+	const inStack = [...stack, id];
+	// With a set, only those zones' corners may be carried.
+	const may = (zid: string) => shared === true || (shared !== false && shared.has(zid));
+	if (shared !== false) {
+		const eps = outlineEps(old);
+		const onOld = (p: Pt) => nearestOnPath(p, old, true).d <= eps;
+		const ancestors = new Set<string>();
+		for (let p = zone.parentZone; p && !ancestors.has(p); p = list.find((z) => z.id === p)?.parentZone ?? null)
+			ancestors.add(p);
+		for (const otherId of result.map((z) => z.id)) {
+			const other = result.find((z) => z.id === otherId);
+			if (!other || other.kind !== 'zone' || inStack.includes(otherId) || ancestors.has(otherId)) continue;
+			if (!may(otherId) || !other.points.some(onOld)) continue;
+			result = withOutline(result, otherId, other.points.map((p) => (onOld(p) ? carry(p) : p)), shared, inStack);
+		}
+	}
+	for (const child of result.filter((z) => z.parentZone === id)) {
+		const inside = followOutline(
+			child.points.map((p) => clampToPolygon(p, next)),
+			next
+		);
+		if (inside.length !== child.points.length || inside.some((p, i) => p !== child.points[i]))
+			result = withOutline(result, child.id, inside, shared, inStack);
+	}
+	return result;
+}
+
+/** A tolerance for "lies on this outline": a millionth of its size. */
+function outlineEps(pts: Pt[]): number {
+	const xs = pts.map((p) => p.x);
+	const ys = pts.map((p) => p.y);
+	return 1e-6 * Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) + 1e-9;
+}
+
+/** The zones with a corner on zone `id`'s outline, and on those zones'
+ *  outlines in turn — what `withOutline` would carry right now. A drag takes
+ *  this once, at its start, so a zone it snaps onto mid-drag isn't mistaken
+ *  for one that was sharing the border all along. */
+function sharedZones(list: MapZone[], id: string): Set<string> {
+	const ids = new Set<string>();
+	const queue = [id];
+	while (queue.length) {
+		const zid = queue.shift();
+		const zone = list.find((z) => z.id === zid);
+		if (!zone || zone.kind !== 'zone') continue;
+		const eps = outlineEps(zone.points);
+		const ancestors = new Set<string>();
+		for (let p = zone.parentZone; p && !ancestors.has(p); p = list.find((z) => z.id === p)?.parentZone ?? null)
+			ancestors.add(p);
+		for (const other of list) {
+			if (other.kind !== 'zone' || other.id === id || ids.has(other.id) || ancestors.has(other.id)) continue;
+			if (!other.points.some((p) => nearestOnPath(p, zone.points, true).d <= eps)) continue;
+			ids.add(other.id);
+			queue.push(other.id);
+		}
+	}
+	return ids;
+}
+
+/** `pts` (a sub-zone inside polygon `outer`) with every edge that runs from
+ *  the outline to the outline but leaves `outer` — the outline bent in between
+ *  them — made to follow it: the outline's corners between its two ends (the
+ *  shorter way round) are added to the sub-zone. */
+function followOutline(pts: Pt[], outer: Pt[]): Pt[] {
+	const eps = outlineEps(outer);
+	const n = outer.length;
+	const out: Pt[] = [];
+	const leaves = (a: Pt, b: Pt) => {
+		for (let k = 1; k < 10; k++) {
+			const t = k / 10;
+			const q = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+			if (!pointInPolygon(q.x, q.y, outer) && nearestOnPath(q, outer, true).d > eps) return true;
+		}
+		return false;
+	};
+	const pathLen = (a: Pt, mid: Pt[], b: Pt) =>
+		[a, ...mid, b].reduce((sum, p, i, all) => (i ? sum + Math.hypot(p.x - all[i - 1].x, p.y - all[i - 1].y) : 0), 0);
+	pts.forEach((a, i) => {
+		out.push(a);
+		const b = pts[(i + 1) % pts.length];
+		const na = nearestOnPath(a, outer, true);
+		const nb = nearestOnPath(b, outer, true);
+		if (na.d > eps || nb.d > eps || na.i === nb.i || !leaves(a, b)) return;
+		// Segment k runs outer[k] -> outer[k + 1]: forward from a's segment the
+		// corners are outer[na.i + 1] .. outer[nb.i]; backward outer[na.i] ..
+		// outer[nb.i + 1].
+		const fwd: Pt[] = [];
+		for (let k = (na.i + 1) % n, g = 0; g < n; k = (k + 1) % n, g++) {
+			fwd.push(outer[k]);
+			if (k === nb.i) break;
+		}
+		const back: Pt[] = [];
+		for (let k = na.i, g = 0; g < n; k = (k - 1 + n) % n, g++) {
+			back.push(outer[k]);
+			if (k === (nb.i + 1) % n) break;
+		}
+		const off = (p: Pt) => Math.hypot(p.x - a.x, p.y - a.y) > eps && Math.hypot(p.x - b.x, p.y - b.y) > eps;
+		const path = (pathLen(a, fwd, b) <= pathLen(a, back, b) ? fwd : back).filter(off);
+		out.push(...path.map((p) => ({ x: p.x, y: p.y })));
+	});
+	return out;
+}
+
+/** The offset that brings `pts` back inside polygon `outer`: each pass shifts
+ *  them by the furthest outside point's gap to the outline, so a shape pressed
+ *  against an edge slides along it. Zero when already inside. */
+function pushInside(pts: Pt[], outer: Pt[]): Pt {
+	let ox = 0;
+	let oy = 0;
+	for (let pass = 0; pass < 8; pass++) {
+		let gap = { x: 0, y: 0, d: 1e-9 };
+		for (const p of pts) {
+			const q = { x: p.x + ox, y: p.y + oy };
+			if (pointInPolygon(q.x, q.y, outer)) continue;
+			const n = nearestOnPath(q, outer, true);
+			if (n.d > gap.d) gap = { x: n.q.x - q.x, y: n.q.y - q.y, d: n.d };
+		}
+		if (gap.d <= 1e-9) break;
+		ox += gap.x;
+		oy += gap.y;
+	}
+	return { x: ox, y: oy };
+}
+
 function translateZoneWithRoads(list: MapZone[], movedId: string, dx: number, dy: number): MapZone[] {
+	return transformZoneWithRoads(list, movedId, (p) => ({ x: p.x + dx, y: p.y + dy }));
+}
+
+/** Turns `p` by `a` radians about `c`. */
+function rotateAbout(c: Pt, a: number): (p: Pt) => Pt {
+	const cos = Math.cos(a);
+	const sin = Math.sin(a);
+	return (p) => ({ x: c.x + (p.x - c.x) * cos - (p.y - c.y) * sin, y: c.y + (p.x - c.x) * sin + (p.y - c.y) * cos });
+}
+
+/** Scales `p` by `f` about `c`. */
+function scaleAbout(c: Pt, f: number): (p: Pt) => Pt {
+	return (p) => ({ x: c.x + (p.x - c.x) * f, y: c.y + (p.y - c.y) * f });
+}
+
+/** Moves the zone's every point (outline, node, pins) through `shiftPt` — a
+ *  translate, rotate or scale. If it's a location polygon, the matching endpoint
+ *  of every road attached to that location goes through it too, so roads stay
+ *  connected (a road stores its own endpoints, which otherwise stay frozen and
+ *  detach). Roads are matched by location link target. */
+function transformZoneWithRoads(list: MapZone[], movedId: string, shiftPt: (p: Pt) => Pt): MapZone[] {
 	const moved = list.find((z) => z.id === movedId);
 	if (!moved) return list;
-	const shiftPt = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
-	const shiftArr = <T extends { x: number; y: number }>(arr: T[]): T[] =>
-		arr.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy }));
+	const shiftArr = <T extends Pt>(arr: T[]): T[] => arr.map((p) => ({ ...p, ...shiftPt(p) }));
 	const movedLoc = moved.kind !== 'road' ? moved.location : null;
 	const zoneIdForLoc = (lp: string | null | undefined): string | null =>
 		lp ? list.find((z) => z.kind === 'zone' && z.location === lp)?.id ?? null : null;
 	return list.map((z) => {
+		if (z.parentZone === movedId)
+			return {
+				...z,
+				points: z.points.map(shiftPt),
+				doors: shiftArr(z.doors),
+				itemPins: shiftArr(z.itemPins),
+				subPins: shiftArr(z.subPins),
+			};
 		if (z.id === movedId) {
 			const shifted = {
 				...z,
@@ -1132,6 +1456,7 @@ function newZone(
 		name: '',
 		named: false,
 		savedLoc: null,
+		parentZone: null,
 		...extra,
 	};
 }
@@ -1398,8 +1723,97 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const screenR = (z: MapZone): number => (zoneRadiiRef.current.get(z.id) ?? 0) * cameraRef.current.k;
 	/** How far a zone has folded into its node: 0 drawn, 1 collapsed. A road
 	 *  follows the two zones it connects. */
+	const parentOf = (z: MapZone): MapZone | null =>
+		z.parentZone ? zonesRef.current.find((p) => p.id === z.parentZone) ?? null : null;
+	/** Whether a sub-zone has a point outside its parent's outline. */
+	const escapesParent = (list: MapZone[], id: string): boolean => {
+		const z = list.find((zz) => zz.id === id);
+		const parent = z?.parentZone ? list.find((p) => p.id === z.parentZone) : null;
+		if (!z || !parent) return false;
+		return z.points.some((p) => !pointInPolygon(p.x, p.y, parent.points) && distToPolygon(p.x, p.y, parent.points) > 0.01);
+	};
+	/** While drawing a sub-zone (see `subZoneFor`), a point is held inside the
+	 *  parent's outline. */
+	const clampSub = (p: Pt): Pt => {
+		const s = subZoneFor.current;
+		const parent = s ? zonesRef.current.find((z) => z.id === s.zoneId) : null;
+		return parent ? clampToPolygon(p, parent.points) : p;
+	};
+	/** Snapping a drawn or dragged zone corner (Alt places it freely): onto
+	 *  another zone's corner within SNAP_PX on screen, else onto its outline —
+	 *  so neighbours and sub-zones share borders exactly, and keep sharing them
+	 *  (`withOutline`). Skips `exclude` and zones not drawn right now. */
+	const snapHold = useRef<Pt | null>(null);
+	const snapPoint = (w: Pt, exclude: Set<string>): Pt | null => {
+		const tol = SNAP_PX / cameraRef.current.k;
+		const shown = zonesRef.current.filter((z) => {
+			if (z.kind !== 'zone' || exclude.has(z.id) || squishOf(z) >= 0.995) return false;
+			const parent = parentOf(z);
+			return !parent || pinAlpha(parent) >= 0.5;
+		});
+		// A corner already snapped to holds until the cursor is clearly away from
+		// it — taken at CORNER_SNAP, let go only past CORNER_RELEASE — so a cursor
+		// resting near the edge of that reach doesn't flick on and off it.
+		const held = snapHold.current;
+		if (
+			held &&
+			Math.hypot(held.x - w.x, held.y - w.y) <= tol * CORNER_RELEASE &&
+			shown.some((z) => z.points.some((p) => p.x === held.x && p.y === held.y))
+		)
+			return held;
+		snapHold.current = null;
+		// Corners first, from further away than edges: near an angle the cursor
+		// is close to both of its edges, and would otherwise flick between them.
+		let best: Pt | null = null;
+		let bestD = tol * CORNER_SNAP;
+		for (const z of shown)
+			for (const p of z.points) {
+				const d = Math.hypot(p.x - w.x, p.y - w.y);
+				if (d <= bestD) {
+					best = { x: p.x, y: p.y };
+					bestD = d;
+				}
+			}
+		if (best) {
+			snapHold.current = best;
+			return best;
+		}
+		// Close to two edges that meet (a sharp angle, or one zone's edge crossing
+		// another's): their meeting point — again, rather than either edge.
+		const near: [Pt, Pt][] = [];
+		for (const z of shown)
+			z.points.forEach((a, i) => {
+				const b = z.points[(i + 1) % z.points.length];
+				const q = nearestOnSegment(w, a, b);
+				if (Math.hypot(q.x - w.x, q.y - w.y) <= tol) near.push([a, b]);
+			});
+		for (let i = 0; i < near.length; i++)
+			for (let j = i + 1; j < near.length; j++) {
+				const t = segIntersectT(near[i][0], near[i][1], near[j][0], near[j][1]);
+				if (t === null) continue;
+				const [a, b] = near[i];
+				const x = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+				const d = Math.hypot(x.x - w.x, x.y - w.y);
+				if (d <= tol * CORNER_SNAP && d < (best ? Math.hypot(best.x - w.x, best.y - w.y) : Infinity)) best = x;
+			}
+		if (best) return best;
+		bestD = tol;
+		for (const z of shown) {
+			const n = nearestOnPath(w, z.points, true);
+			if (n.d <= bestD) {
+				best = n.q;
+				bestD = n.d;
+			}
+		}
+		return best;
+	};
 	const squishOf = (z: MapZone): number => {
 		if (z.kind === 'road') return (endSquish(z.startLoc) + endSquish(z.endLoc)) / 2;
+		// A sub-zone folds with its parent, never on its own.
+		if (z.parentZone) {
+			const parent = parentOf(z);
+			return parent ? squishOf(parent) : 0;
+		}
 		// A zone with no location is terrain (a lake, a forest) — part of the map
 		// itself, never folded away.
 		if (!z.location) return 0;
@@ -1410,6 +1824,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const z = mainLocZone(locLp);
 		return z ? squishOf(z) : 0;
 	};
+	/** The sublocation pin being turned into a sub-zone while its outline is
+	 *  drawn — finishing the drawing makes it the sub-zone. */
+	const subZoneFor = useRef<{ zoneId: string; loc: string } | null>(null);
+	useEffect(() => {
+		if (tool === 'select') subZoneFor.current = null;
+	}, [tool]);
 	const [draft, setDraft] = useState<{ x: number; y: number }[]>([]);
 	const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
 	/** Whether the path-draw cursor is snapped onto a location zone's outline
@@ -1429,6 +1849,15 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const [selectedImage, setSelectedImage] = useState<string | null>(null);
 	/** Free label selected by clicking it (Delete removes it). */
 	const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+	/** The full name of the hovered marker whose label is cut short. */
+	const [nameTip, setNameTip] = useState<{ key: string; text: string; x: number; y: number; body: HTMLElement } | null>(
+		null
+	);
+	/** The marker label its full-name tooltip is showing for fades out, so the
+	 *  two don't read twice. */
+	const tipFade = (key: string) => (nameTip?.key === key ? { opacity: 0.15 } : undefined);
+	// It's placed once, on entering — a pan or zoom under it would leave it behind.
+	useEffect(() => setNameTip(null), [camera]);
 	/** What's typed in the map search — it also filters the Elements drawer. */
 	const [elementQuery, setElementQuery] = useState('');
 	// Drawer opening mode per drawer: on hover (default) or on click (the tab or
@@ -1574,45 +2003,76 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		};
 	}, [mapsPath, plugin, restoreCamera, project, saveLater]);
 
-	// When an entity note is deleted, scrub its leftovers from every map page:
-	// remove its sublocation/item pins and unassociate any zone/road that pointed
-	// to it (the drawn shape stays; only the dangling link is cleared). Mirrors the
-	// page-deletion cleanup so deleting a location can't leave an undeletable node.
+	/** Runs `edit` over every map page's zones (the active page's live ones
+	 *  included) and saves when it changed any — `edit` returns its input
+	 *  untouched when there's nothing to do. */
+	const editAllZones = useCallback(
+		(edit: (zs: MapZone[]) => MapZone[]) => {
+			const nextActive = edit(zonesRef.current);
+			const nextPages = pagesRef.current.map((p) => {
+				if (p.id === activeIdRef.current) return p;
+				const zs = edit(p.zones);
+				return zs === p.zones ? p : { ...p, zones: zs };
+			});
+			const pagesChanged = nextPages.some((p, i) => p !== pagesRef.current[i]);
+			if (nextActive === zonesRef.current && !pagesChanged) return;
+			if (pagesChanged) {
+				pagesRef.current = nextPages;
+				setPages(nextPages);
+			}
+			if (nextActive !== zonesRef.current) {
+				zonesRef.current = nextActive;
+				setZones(nextActive);
+			}
+			saveLater(nextActive);
+		},
+		[saveLater]
+	);
+
+	// A sublocation pin leaves the map once its location no longer sits under
+	// the zone's location (made a main location, or moved under another
+	// parent). Only when every link involved resolves — mid-rename, a parent
+	// link points at a name that's briefly gone, and that isn't a move.
 	useEffect(() => {
-		const scrub = (zs: MapZone[], name: string): MapZone[] => {
+		if (!project) return;
+		const strayed = (z: MapZone, loc: string): boolean => {
+			const main = z.location ? plugin.indexer.resolve(z.location, project.loomPath) : null;
+			const sub = plugin.indexer.resolve(loc, project.loomPath);
+			if (!main || !sub) return false;
+			const chain = plugin.indexer.locationAncestors(sub);
+			if ((chain[chain.length - 1] ?? sub).parentLocation !== null) return false;
+			return !chain.some((a) => a.path === main.path);
+		};
+		editAllZones((zs) => {
 			let changed = false;
 			const out = zs.map((z) => {
-				let nz = z;
-				const subPins = z.subPins.filter((sp) => sp.loc !== name);
-				const itemPins = z.itemPins.filter((it) => it.item !== name);
-				if (subPins.length !== z.subPins.length || itemPins.length !== z.itemPins.length)
-					nz = { ...nz, subPins, itemPins };
-				if (nz.location === name) nz = { ...nz, location: null };
-				if (nz.savedLoc?.location === name) nz = { ...nz, savedLoc: null };
-				if (nz.kind === 'road') {
-					if (nz.startLoc === name) nz = { ...nz, startLoc: null };
-					if (nz.endLoc === name) nz = { ...nz, endLoc: null };
+				// A sub-zone whose location strayed keeps its drawing, as plain
+				// terrain of its own.
+				const parent = z.parentZone ? zs.find((p) => p.id === z.parentZone) : null;
+				if (parent && z.location && strayed(parent, z.location)) {
+					changed = true;
+					return { ...z, parentZone: null, location: null };
 				}
-				if (nz !== z) changed = true;
-				return nz;
+				const kept = z.subPins.filter((sp) => !strayed(z, sp.loc));
+				if (kept.length === z.subPins.length) return z;
+				changed = true;
+				return { ...z, subPins: kept };
 			});
 			return changed ? out : zs;
-		};
+		});
+	}, [indexVersion, activeId, project, plugin, editAllZones]);
+
+	// A renamed note's links follow it on every map page; a deleted one's
+	// leftovers are scrubbed: its sublocation/item pins go and any zone/road
+	// that pointed to it is unassociated (the drawn shape stays; only the
+	// dangling link is cleared), so deleting a location can't leave an
+	// undeletable node.
+	useEffect(() => {
+		const relinkAll = (name: string, to: string | null) => editAllZones((zs) => relinkZones(zs, name, to));
 		const scrubDeleted = (name: string) => {
 			// It came back (or never really left) — leave the maps alone.
 			if (plugin.app.metadataCache.getFirstLinkpathDest(name, '') !== null) return;
-			const prunedActive = scrub(zonesRef.current, name);
-			const prunedPages = pagesRef.current.map((p) =>
-				p.id === activeIdRef.current ? p : { ...p, zones: scrub(p.zones, name) }
-			);
-			const pagesChanged = prunedPages.some((p, i) => p.zones !== pagesRef.current[i].zones);
-			if (prunedActive === zonesRef.current && !pagesChanged) return;
-			if (pagesChanged) {
-				pagesRef.current = prunedPages;
-				setPages(prunedPages);
-			}
-			if (prunedActive !== zonesRef.current) setZones(prunedActive);
-			saveLater(prunedActive);
+			relinkAll(name, null);
 		};
 		// A sync client (Dropbox, iCloud, …) delivers a moved or re-created note as
 		// a delete followed by a create, and drops files briefly while it settles.
@@ -1631,11 +2091,17 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			const { basename, path } = file;
 			pending.push(window.setTimeout(() => scrubWhenDecided(basename, path), DELETE_SCRUB_MS));
 		});
+		const renameRef = plugin.app.vault.on('rename', (file, oldPath) => {
+			if (!(file instanceof TFile) || file.extension !== 'md') return;
+			const from = oldPath.slice(oldPath.lastIndexOf('/') + 1).replace(/\.md$/, '');
+			if (from !== file.basename) relinkAll(from, file.basename);
+		});
 		return () => {
 			plugin.app.vault.offref(ref);
+			plugin.app.vault.offref(renameRef);
 			pending.forEach((id) => window.clearTimeout(id));
 		};
-	}, [plugin, saveLater]);
+	}, [plugin, editAllZones]);
 
 	const commit = useCallback(
 		(next: MapZone[]) => {
@@ -1854,7 +2320,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		[commitPages]
 	);
 
-	// Wheel zoom around the cursor.
+	/** Scales the element being left-dragged by `f`; false when nothing is held.
+	 *  Set each render beside the drag machinery. */
+	const scaleHeld = useRef<(f: number) => boolean>(() => false);
+	// Wheel zoom around the cursor — or, while an element is held, its scale.
 	useEffect(() => {
 		const el = wrapRef.current;
 		if (!el) return;
@@ -1862,6 +2331,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			// Over a menu/dropdown/panel, let the wheel scroll that instead of zooming.
 			if ((e.target as HTMLElement).closest('.loom-map-menu, .loom-combo-menu, .loom-map-panel, .loom-map-elements')) return;
 			e.preventDefault();
+			if (scaleHeld.current(Math.exp(-e.deltaY * 0.0015))) return;
 			const rect = el.getBoundingClientRect();
 			const px = e.clientX - rect.left;
 			const py = e.clientY - rect.top;
@@ -1912,9 +2382,28 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				// When multi-selecting, the starting positions of every moved vertex.
 				group?: { id: string; index: number; x: number; y: number }[];
 				last: { x: number; y: number };
+				/** Taken at the drag's start: the zones sharing this zone's border
+				 *  (carried along) and the zones it must not snap onto — those
+				 *  sharing ones included, or a corner of theirs snapped onto would
+				 *  be dragged along too. */
+				shared?: Set<string>;
+				skip?: Set<string>;
 			}
-		| { kind: 'grip'; id: string; last: { x: number; y: number } }
-		| { kind: 'zone-move'; id: string; startX: number; startY: number; moved: boolean; last: { x: number; y: number } }
+		| { kind: 'grip'; id: string; last: { x: number; y: number }; lag?: Pt }
+		| {
+				kind: 'zone-move';
+				id: string;
+				startX: number;
+				startY: number;
+				moved: boolean;
+				last: { x: number; y: number };
+				/** While the right button is also down: the turn's centre, the
+				 *  pointer's starting angle and the zones before the turn. */
+				rot?: { c: Pt; a0: number; zones: MapZone[] };
+				/** How far the pointer has run ahead of a sub-zone held back by
+				 *  its parent's outline — it catches up as the pointer returns. */
+				lag?: Pt;
+			}
 		| { kind: 'node'; id: string; startX: number; startY: number; moved: boolean; last: { x: number; y: number } }
 		| { kind: 'door'; id: string; index: number; startX: number; startY: number; moved: boolean }
 		| { kind: 'itempin'; id: string; index: number; startX: number; startY: number; moved: boolean }
@@ -1922,18 +2411,65 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		| { kind: 'rect'; start: { x: number; y: number }; end: { x: number; y: number } }
 		| { kind: 'marquee'; start: { x: number; y: number }; end: { x: number; y: number } }
 		| { kind: 'image-move'; id: string; startX: number; startY: number; moved: boolean; last: { x: number; y: number } }
-		| { kind: 'label-move'; id: string; startX: number; startY: number; moved: boolean; last: { x: number; y: number } }
+		| {
+				kind: 'label-move';
+				id: string;
+				startX: number;
+				startY: number;
+				moved: boolean;
+				last: { x: number; y: number };
+				rot?: { a0: number; r0: number };
+			}
 		/** Resizing a background image: `orig` is its box at gesture start, so the
 		 *  aspect-preserving maths always works off a clean baseline. */
 		| { kind: 'image-resize'; handle: ImageHandle; orig: MapImage }
 	>(null);
 	const [dragActive, setDragActive] = useState(false);
+	/** The right button went down during a drag (to turn the element): its
+	 *  context menu is swallowed. Cleared by the next press. */
+	const chorded = useRef(false);
+
+	scaleHeld.current = (f) => {
+		const d = drag.current;
+		if (d?.kind === 'zone-move') {
+			const z = zonesRef.current.find((zz) => zz.id === d.id);
+			if (!z) return true;
+			let next = transformZoneWithRoads(zonesRef.current, d.id, scaleAbout(zoneCenter(z), f));
+			if (z.kind === 'road') {
+				const width = Math.min(SIZE_MAX, z.width * f);
+				next = next.map((zz) => (zz.id === d.id ? { ...zz, width } : zz));
+			}
+			if (escapesParent(next, d.id)) return true;
+			zonesRef.current = next;
+			setZones(next);
+			d.rot = undefined;
+		} else if (d?.kind === 'label-move') {
+			const [min, max] = labelSizeRange();
+			putLabels(
+				activeLabels().map((l) => (l.id === d.id ? { ...l, size: Math.min(max, Math.max(min, l.size * f)) } : l)),
+				false
+			);
+		} else if (d?.kind === 'image-move') {
+			putImages(
+				activeImages().map((im) => {
+					if (im.id !== d.id) return im;
+					const w = Math.max(IMAGE_MIN_W, im.w * f);
+					const h = (w * im.h) / im.w;
+					return { ...im, x: im.x + (im.w - w) / 2, y: im.y + (im.h - h) / 2, w, h };
+				}),
+				false
+			);
+		} else return false;
+		d.moved = true;
+		return true;
+	};
 
 	useEffect(() => {
 		if (!dragActive) return;
 		const onMove = (e: PointerEvent) => {
 			const d = drag.current;
 			if (!d) return;
+			if (e.buttons & 2) chorded.current = true;
 			if (d.kind === 'pan') {
 				setCamera({
 					tx: d.tx0 + (e.clientX - d.startX),
@@ -1945,7 +2481,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			const { sx, sy } = localXY(e.clientX, e.clientY);
 			const w = toWorld(sx, sy);
 			if (d.kind === 'rect' || d.kind === 'marquee') {
-				d.end = { x: w.x, y: w.y };
+				d.end = d.kind === 'rect' ? clampSub(e.altKey ? w : snapPoint(w, new Set()) ?? w) : { x: w.x, y: w.y };
 				const box = { x0: d.start.x, y0: d.start.y, x1: w.x, y1: w.y };
 				if (d.kind === 'rect') setRectPreview(box);
 				else setMarquee(box);
@@ -1970,14 +2506,14 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						if (!byZone.has(g.id)) byZone.set(g.id, new Set());
 						byZone.get(g.id)!.add(g.index);
 					}
-					setZones(
-						zonesRef.current.map((z) => {
-							const idxs = byZone.get(z.id);
-							if (!idxs) return z;
-							const pts = z.points.map((p, i) => (idxs.has(i) ? { x: p.x + dvx, y: p.y + dvy } : p));
-							return z.kind === 'road' ? reshapeRoad(z, pts) : { ...z, points: pts };
-						})
-					);
+					let next = zonesRef.current;
+					for (const [id, idxs] of byZone) {
+						const z = next.find((zz) => zz.id === id);
+						if (!z) continue;
+						const pts = z.points.map((p, i) => (idxs.has(i) ? { x: p.x + dvx, y: p.y + dvy } : p));
+						next = z.kind === 'road' ? next.map((zz) => (zz.id === id ? reshapeRoad(zz, pts) : zz)) : withOutline(next, id, pts, false);
+					}
+					setZones(next);
 				} else {
 					let at = { x: tx, y: ty };
 					const zz = zonesRef.current.find((z) => z.id === d.id);
@@ -1995,22 +2531,84 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						const pts = zz.points.map((p, i) => (i === d.index ? at : p));
 						setZones(zonesRef.current.map((z) => (z.id === d.id ? { ...reshapeRoad(z, pts), ...link } : z)));
 					} else {
-						setZones(
-							zonesRef.current.map((z) =>
-								z.id === d.id ? { ...z, points: z.points.map((p, i) => (i === d.index ? at : p)) } : z
-							)
-						);
+						const parent = zz?.parentZone ? zonesRef.current.find((p) => p.id === zz.parentZone) : null;
+						if (zz && !e.altKey && !(e.ctrlKey || e.metaKey)) {
+							// Snap onto another zone's corner or outline — not onto zones
+							// sharing this very corner, which move along with it, and not
+							// onto its own sub-zones: they fit the zone, never the reverse.
+							if (!d.skip) {
+								const here = d.orig;
+								d.skip = new Set(
+									zonesRef.current
+										.filter((z) => z.points.some((p) => Math.hypot(p.x - here.x, p.y - here.y) < 1e-9))
+										.map((z) => z.id)
+								);
+								for (const z of zoneFamily(zz)) d.skip.add(z.id);
+								for (const id of sharedZones(zonesRef.current, d.id)) d.skip.add(id);
+							}
+							at = snapPoint(at, d.skip) ?? at;
+						}
+						if (parent) at = clampToPolygon(at, parent.points);
+						// Alt moves just this corner; otherwise what shared the border when
+						// the drag began comes along.
+						d.shared ??= sharedZones(zonesRef.current, d.id);
+						if (zz)
+							setZones(
+								withOutline(
+									zonesRef.current,
+									d.id,
+									zz.points.map((p, i) => (i === d.index ? at : p)),
+									e.altKey ? false : d.shared
+								)
+							);
 					}
 				}
 			} else if (d.kind === 'grip' || d.kind === 'zone-move') {
+				// Right button held too: the pointer's turn about the zone's centre
+				// turns the zone. Letting go of it goes back to moving.
+				if (d.kind === 'zone-move' && e.buttons & 2) {
+					if (!d.rot) {
+						const z = zonesRef.current.find((zz) => zz.id === d.id);
+						if (!z) return;
+						const c = zoneCenter(z);
+						d.rot = { c, a0: Math.atan2(w.y - c.y, w.x - c.x), zones: zonesRef.current };
+					}
+					d.moved = true;
+					const { c, a0, zones: base } = d.rot;
+					const turned = transformZoneWithRoads(base, d.id, rotateAbout(c, Math.atan2(w.y - c.y, w.x - c.x) - a0));
+					if (!escapesParent(turned, d.id)) setZones(turned);
+					return;
+				}
+				if (d.kind === 'zone-move' && d.rot) {
+					d.rot = undefined;
+					d.lag = undefined;
+					d.last = w;
+					return;
+				}
 				if (d.kind === 'zone-move' && !d.moved) {
 					if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < CLICK_SLOP) return;
 					d.moved = true;
 				}
-				const dx = w.x - d.last.x;
-				const dy = w.y - d.last.y;
+				let dx = w.x - d.last.x + (d.lag?.x ?? 0);
+				let dy = w.y - d.last.y + (d.lag?.y ?? 0);
 				d.last = { x: w.x, y: w.y };
-				setZones(translateZoneWithRoads(zonesRef.current, d.id, dx, dy));
+				// A sub-zone stays inside its parent: pressed against the outline it
+				// slides along it, and the part of the move it couldn't make waits
+				// in `lag`.
+				const sub = zonesRef.current.find((z) => z.id === d.id);
+				const parent = sub ? parentOf(sub) : null;
+				if (sub && parent) {
+					const fix = pushInside(
+						sub.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+						parent.points
+					);
+					dx += fix.x;
+					dy += fix.y;
+					d.lag = { x: -fix.x, y: -fix.y };
+				}
+				const moved = translateZoneWithRoads(zonesRef.current, d.id, dx, dy);
+				if (escapesParent(moved, d.id)) return;
+				setZones(moved);
 				// Keep an open zone menu attached to the moving zone.
 				setMenu((m) => (m && m.kind === 'zone' && m.id === d.id ? { ...m, wx: m.wx + dx, wy: m.wy + dy } : m));
 			} else if (d.kind === 'node') {
@@ -2041,6 +2639,24 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					false
 				);
 			} else if (d.kind === 'label-move') {
+				if (e.buttons & 2) {
+					const lb = activeLabels().find((l) => l.id === d.id);
+					if (!lb) return;
+					const angle = Math.atan2(w.y - lb.y, w.x - lb.x);
+					if (!d.rot) d.rot = { a0: angle, r0: lb.rotation };
+					d.moved = true;
+					const rotation = (d.rot.r0 + ((angle - d.rot.a0) * 180) / Math.PI) % 360;
+					putLabels(
+						activeLabels().map((l) => (l.id === d.id ? { ...l, rotation } : l)),
+						false
+					);
+					return;
+				}
+				if (d.rot) {
+					d.rot = undefined;
+					d.last = w;
+					return;
+				}
 				if (!d.moved && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < CLICK_SLOP) return;
 				d.moved = true;
 				const dx = w.x - d.last.x;
@@ -2061,7 +2677,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				d.moved = true;
 				const z = zonesRef.current.find((zz) => zz.id === d.id);
 				if (!z) return;
-				const c = clampToZone(w, z);
+				const c = clampPin(w, z);
 				const kind = d.kind;
 				const idx = d.index;
 				setZones(
@@ -2146,6 +2762,15 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		};
 	}, [dragActive, localXY, toWorld, saveLater, activeImages, putImages, activeLabels, putLabels]);
 
+	// The context menu of a right button pressed mid-drag (to turn) never opens,
+	// wherever it lands — on Linux it fires on the press, elsewhere on release.
+	const swallowChordMenu = (e: ReactMouseEvent) => {
+		if (!drag.current && !chorded.current) return;
+		chorded.current = false;
+		e.preventDefault();
+		e.stopPropagation();
+	};
+
 	// --- Canvas pointer (draw / select / pan) --------------------------------
 	const onCanvasPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
 		if (e.button === 2) return; // right-click → contextmenu handler
@@ -2163,8 +2788,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		// Rectangle tool: press-drag defines the rect.
 		if (tool === 'rect') {
 			if (e.button !== 0) return;
-			drag.current = { kind: 'rect', start: w, end: w };
-			setRectPreview({ x0: w.x, y0: w.y, x1: w.x, y1: w.y });
+			const at = clampSub(e.altKey ? w : snapPoint(w, new Set()) ?? w);
+			drag.current = { kind: 'rect', start: at, end: at };
+			setRectPreview({ x0: at.x, y0: at.y, x1: at.x, y1: at.y });
 			setDragActive(true);
 			return;
 		}
@@ -2184,7 +2810,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				const lastV = screenOf(draft[draft.length - 1].x, draft[draft.length - 1].y);
 				if (Math.hypot(lastV.x - sx, lastV.y - sy) < MIN_VERTEX_DIST) return;
 			}
-			setDraft((d) => [...d, { x: w.x, y: w.y }]);
+			setDraft((d) => [...d, clampSub(e.altKey ? w : snapPoint(w, new Set()) ?? w)]);
 			return;
 		}
 
@@ -2294,8 +2920,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			// A path's preview line snaps to the location it would attach to.
 			const sz = tool === 'road' && !e.altKey ? snapZone(sx, sy) : null;
 			const w = toWorld(sx, sy);
-			cursorSnap.current = !!sz;
-			setCursor(sz ? nearestOnPath(w, sz.points, true).q : w);
+			// A polygon corner snaps onto other zones' corners and outlines.
+			const snapped = tool === 'draw' && !e.altKey ? snapPoint(w, new Set()) : null;
+			cursorSnap.current = !!sz || !!snapped;
+			setCursor(sz ? nearestOnPath(w, sz.points, true).q : clampSub(snapped ?? w));
 			return;
 		}
 		// Select mode: over a zone outline / road body, show the same pointer cursor
@@ -2501,7 +3129,27 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const near = closed ? 14 / k : hit.width / 2 + 8 / k;
 		if (dist > near) return;
 		snapshot();
-		updateZone(hit.id, { points: insertVertexAt(hit.points, w.x, w.y, closed) });
+		const pts = insertVertexAt(hit.points, w.x, w.y, closed);
+		if (!closed) {
+			updateZone(hit.id, { points: pts });
+			setSelectedZone(hit.id);
+			return;
+		}
+		// A corner added on a border another zone shares is added to that zone
+		// too, so bending it later bends both.
+		const added = pts.find((p, i) => p !== hit.points[i]) ?? pts[pts.length - 1];
+		const eps = outlineEps(hit.points);
+		commit(
+			zonesRef.current.map((z) => {
+				if (z.id === hit.id) return { ...z, points: pts };
+				if (z.kind !== 'zone' || z.points.some((p) => Math.hypot(p.x - added.x, p.y - added.y) <= eps)) return z;
+				const n = nearestOnPath(added, z.points, true);
+				if (n.d > eps || n.i < 0) return z;
+				const next = z.points.slice();
+				next.splice(n.i + 1, 0, { x: added.x, y: added.y });
+				return { ...z, points: next };
+			})
+		);
 		setSelectedZone(hit.id);
 	};
 
@@ -2547,6 +3195,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			}
 			// A folded zone is just its node — its invisible area doesn't catch presses.
 			if (squishOf(z) >= 0.995) continue;
+			if (z.parentZone) {
+				const parent = parentOf(z);
+				if (!parent || pinAlpha(parent) < 0.5) continue;
+			}
 			if (pointInPolygon(w.x, w.y, z.points) || distToPolygon(w.x, w.y, z.points) * k <= 6) {
 				return z;
 			}
@@ -2558,7 +3210,33 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	 *  can be set. */
 	const addZoneWithMenu = (zone: MapZone) => {
 		snapshot();
-		commit([...zonesRef.current, zone]);
+		const sub = subZoneFor.current;
+		subZoneFor.current = null;
+		if (sub) {
+			// The sublocation's pin becomes this sub-zone, and the nodes of its own
+			// sublocations move inside it.
+			const subRec = project ? plugin.indexer.resolve(sub.loc, project.loomPath) : null;
+			const inside = (loc: string): boolean => {
+				const rec = project ? plugin.indexer.resolve(loc, project.loomPath) : null;
+				return !!rec && !!subRec && plugin.indexer.locationAncestors(rec).some((a) => a.path === subRec.path);
+			};
+			const parent = zonesRef.current.find((z) => z.id === sub.zoneId);
+			const moved = (parent?.subPins ?? []).filter((sp) => inside(sp.loc));
+			zone = {
+				...zone,
+				parentZone: sub.zoneId,
+				location: sub.loc,
+				subPins: moved.map((sp) => ({ ...sp, ...clampToPolygon(sp, zone.points) })),
+			};
+			commit([
+				...zonesRef.current.map((z) =>
+					z.id === sub.zoneId
+						? { ...z, subPins: z.subPins.filter((sp) => sp.loc !== sub.loc && !inside(sp.loc)) }
+						: z
+				),
+				zone,
+			]);
+		} else commit([...zonesRef.current, zone]);
 		const ctr = centroid(zone.points);
 		menuWorld.current = ctr;
 		setSelectedZone(zone.id);
@@ -2593,6 +3271,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		setSelectedZone(road.id);
 	};
 	const cancelDraft = () => {
+		subZoneFor.current = null;
 		setRoadDraft(null);
 		setDraft([]);
 		setCursor(null);
@@ -2611,7 +3290,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				{ x: x1, y: y0 },
 				{ x: x1, y: y1 },
 				{ x: x0, y: y1 },
-			],
+			].map(clampSub),
 			plugin.settings.mapsColor
 		);
 		addZoneWithMenu(zone);
@@ -2776,7 +3455,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	// --- Zone / node actions -------------------------------------------------
 	const deleteZone = (id: string) => {
 		snapshot();
-		commit(zonesRef.current.filter((z) => z.id !== id));
+		commit(zonesRef.current.filter((z) => z.id !== id && z.parentZone !== id));
 		setMenu(null);
 		setSelectedZone(null);
 	};
@@ -3008,8 +3687,92 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const nextPinPos = (zone: MapZone, count: number) => {
 		const base = zoneCenter(zone);
 		const off = 0.2 * count * (zoneRadiiRef.current.get(zone.id) ?? 0);
-		return clampToZone({ x: base.x + off, y: base.y + off }, zone);
+		return clampPin({ x: base.x + off, y: base.y + off }, zone);
 	};
+	/** A marker's spot in `zone` — inside it and clear of its sub-zones, which
+	 *  are other places (their own markers live in them). Clear means a real
+	 *  distance (`PIN_CLEAR` of the zone's radius) from a sub-zone, so a sliver
+	 *  where a sub-zone's edge runs along the zone's own outline never counts.
+	 *  A spot that isn't clear moves to the nearest one just outside a
+	 *  sub-zone edge that's still inside the zone; with none, it stays put. */
+	const clampPin = (p: Pt, zone: MapZone): Pt => {
+		const subs = zonesRef.current.filter((z) => z.parentZone === zone.id && z.kind === 'zone');
+		const margin = PIN_CLEAR * (zoneRadiiRef.current.get(zone.id) ?? 0);
+		const clear = (q: Pt) =>
+			subs.every((c) => !pointInPolygon(q.x, q.y, c.points) && distToPolygon(q.x, q.y, c.points) >= margin * 0.9);
+		const start = clampToZone(p, zone);
+		if (clear(start)) return start;
+		const inZone = (q: Pt) =>
+			zone.kind === 'road' ? distToPolyline(q.x, q.y, zone.points) <= zone.width / 2 : pointInPolygon(q.x, q.y, zone.points);
+		let best: Pt | null = null;
+		let bestD = Infinity;
+		for (const c of subs) {
+			for (let i = 0; i < c.points.length; i++) {
+				const a = c.points[i];
+				const b = c.points[(i + 1) % c.points.length];
+				const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+				// The edge's normal, turned to point out of the sub-zone.
+				let nx = -(b.y - a.y) / len;
+				let ny = (b.x - a.x) / len;
+				const mx = (a.x + b.x) / 2;
+				const my = (a.y + b.y) / 2;
+				if (pointInPolygon(mx + nx * margin * 0.1, my + ny * margin * 0.1, c.points)) {
+					nx = -nx;
+					ny = -ny;
+				}
+				const s0 = nearestOnSegment(start, a, b);
+				const q = { x: s0.x + nx * margin, y: s0.y + ny * margin };
+				if (!inZone(q) || !clear(q)) continue;
+				const d = Math.hypot(q.x - start.x, q.y - start.y);
+				if (d < bestD) {
+					best = q;
+					bestD = d;
+				}
+			}
+		}
+		return best ?? start;
+	};
+	/** Whether `p` is crowding one of `zone`'s sub-zones (inside or nearly). */
+	const crowdsSubZone = (p: Pt, zone: MapZone): boolean => {
+		const margin = PIN_CLEAR * (zoneRadiiRef.current.get(zone.id) ?? 0);
+		return zonesRef.current.some(
+			(c) =>
+				c.parentZone === zone.id &&
+				c.kind === 'zone' &&
+				(pointInPolygon(p.x, p.y, c.points) || distToPolygon(p.x, p.y, c.points) < margin * 0.5)
+		);
+	};
+	// However a zone's markers ended up outside it or crowding one of its
+	// sub-zones (a sub-zone drawn, moved or reshaped over them, the zone's own
+	// outline edited, an older map), they're moved back to a clear spot.
+	useEffect(() => {
+		let changed = false;
+		const next = zones.map((z) => {
+			if (z.kind !== 'zone') return z;
+			const fix = <T extends Pt>(arr: T[]): T[] => {
+				let moved = false;
+				const out = arr.map((p) => {
+					const outside = !pointInPolygon(p.x, p.y, z.points) && distToPolygon(p.x, p.y, z.points) > 1e-6;
+					if (!outside && !crowdsSubZone(p, z)) return p;
+					const q = clampPin(p, z);
+					if (crowdsSubZone(q, z) || Math.hypot(q.x - p.x, q.y - p.y) < 1e-9) return p;
+					moved = true;
+					return { ...p, x: q.x, y: q.y };
+				});
+				return moved ? out : arr;
+			};
+			const doors = fix(z.doors);
+			const itemPins = fix(z.itemPins);
+			const subPins = fix(z.subPins);
+			if (doors === z.doors && itemPins === z.itemPins && subPins === z.subPins) return z;
+			changed = true;
+			return { ...z, doors, itemPins, subPins };
+		});
+		if (!changed) return;
+		zonesRef.current = next;
+		setZones(next);
+		saveLater(next);
+	}, [zones]);
 	const addDoor = (zone: MapZone, pageId: string) => {
 		snapshot();
 		const pos = nextPinPos(zone, zone.doors.length);
@@ -3028,7 +3791,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	 *  (drag-and-drop drop) — a zone holds at most one door per page. */
 	const placeDoorPin = (zone: MapZone, pageId: string, pos: { x: number; y: number }) => {
 		snapshot();
-		const clamped = clampToZone(pos, zone);
+		const clamped = clampPin(pos, zone);
 		const idx = zone.doors.findIndex((d) => d.page === pageId);
 		updateZone(zone.id, {
 			doors:
@@ -3077,7 +3840,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	/** Places (or repositions) an item pin at a precise point in the zone. */
 	const placeItemPin = (zone: MapZone, itemTarget: string, pos: { x: number; y: number }) => {
 		snapshot();
-		const clamped = clampToZone(pos, zone);
+		const clamped = clampPin(pos, zone);
 		const idx = zone.itemPins.findIndex((p) => p.item === itemTarget);
 		if (idx >= 0) {
 			updateZone(zone.id, {
@@ -3111,27 +3874,82 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			.filter(isDescendant)
 			.sort((a, b) => recordLabel(a, project).localeCompare(recordLabel(b, project)));
 	};
+	/** The top zone a sub-zone is drawn in (itself when it isn't one). */
+	const rootZoneOf = (z: MapZone): MapZone => {
+		let cur = z;
+		for (let guard = 0; guard < 32; guard++) {
+			const parent = parentOf(cur);
+			if (!parent) break;
+			cur = parent;
+		}
+		return cur;
+	};
+	/** A zone and every sub-zone drawn inside it, at any depth. */
+	const zoneFamily = (root: MapZone): MapZone[] => {
+		const out = [root];
+		for (let i = 0; i < out.length; i++) out.push(...zonesRef.current.filter((z) => z.parentZone === out[i].id));
+		return out;
+	};
+	/** Where sublocation `loc`'s node goes in `zone`'s family: inside the
+	 *  innermost sub-zone drawn for one of its parent locations, else the top
+	 *  zone. */
+	const pinHome = (zone: MapZone, loc: string): MapZone => {
+		const root = rootZoneOf(zone);
+		const rec = project ? plugin.indexer.resolve(loc, project.loomPath) : null;
+		if (!rec || !project) return root;
+		const ancestors = new Set(plugin.indexer.locationAncestors(rec).map((a) => a.path));
+		let home = root;
+		for (let guard = 0; guard < 32; guard++) {
+			const next = zonesRef.current.find(
+				(z) =>
+					z.parentZone === home.id &&
+					!!z.location &&
+					ancestors.has(plugin.indexer.resolve(z.location, project.loomPath)?.path ?? '')
+			);
+			if (!next) break;
+			home = next;
+		}
+		return home;
+	};
+	/** Every sublocation shown as a node anywhere in `zone`'s family — what its
+	 *  sublocation checklist shows as ticked. */
+	const familySubPins = (zone: MapZone): Set<string> =>
+		new Set(zoneFamily(rootZoneOf(zone)).flatMap((z) => z.subPins.map((sp) => sp.loc)));
+	/** `zones` with `loc`'s node removed from every zone of `family`. */
+	const withoutSubPin = (zones: MapZone[], family: Set<string>, loc: string): MapZone[] =>
+		zones.map((z) =>
+			family.has(z.id) && z.subPins.some((sp) => sp.loc === loc)
+				? { ...z, subPins: z.subPins.filter((sp) => sp.loc !== loc) }
+				: z
+		);
 	const toggleSubPin = (zone: MapZone, locTarget: string) => {
 		snapshot();
-		if (zone.subPins.some((sp) => sp.loc === locTarget)) {
-			updateZone(zone.id, { subPins: zone.subPins.filter((sp) => sp.loc !== locTarget) });
+		const family = new Set(zoneFamily(rootZoneOf(zone)).map((z) => z.id));
+		if (familySubPins(zone).has(locTarget)) {
+			commit(withoutSubPin(zonesRef.current, family, locTarget));
 			return;
 		}
-		const pos = nextPinPos(zone, zone.subPins.length);
-		updateZone(zone.id, { subPins: [...zone.subPins, { loc: locTarget, x: pos.x, y: pos.y }] });
+		const home = pinHome(zone, locTarget);
+		const pos = nextPinPos(home, home.subPins.length);
+		commit(
+			zonesRef.current.map((z) =>
+				z.id === home.id ? { ...z, subPins: [...z.subPins, { loc: locTarget, x: pos.x, y: pos.y }] } : z
+			)
+		);
 	};
-	/** Places (or repositions) a sublocation node at a precise point in the zone. */
+	/** Places (or repositions) a sublocation node at a precise point — in the
+	 *  sub-zone it belongs in when one is drawn, wherever it was dropped. */
 	const placeSubPin = (zone: MapZone, loc: string, pos: { x: number; y: number }) => {
 		snapshot();
-		const clamped = clampToZone(pos, zone);
-		const idx = zone.subPins.findIndex((sp) => sp.loc === loc);
-		if (idx >= 0) {
-			updateZone(zone.id, {
-				subPins: zone.subPins.map((sp, i) => (i === idx ? { ...sp, x: clamped.x, y: clamped.y } : sp)),
-			});
-		} else {
-			updateZone(zone.id, { subPins: [...zone.subPins, { loc, x: clamped.x, y: clamped.y }] });
-		}
+		const home = pinHome(zone, loc);
+		const clamped = clampPin(pos, home);
+		const family = new Set(zoneFamily(rootZoneOf(zone)).map((z) => z.id));
+		const kept = home.subPins.find((sp) => sp.loc === loc);
+		commit(
+			withoutSubPin(zonesRef.current, family, loc).map((z) =>
+				z.id === home.id ? { ...z, subPins: [...z.subPins, { ...kept, loc, x: clamped.x, y: clamped.y }] } : z
+			)
+		);
 	};
 	/** Right-click menu for ONE marker inside a zone (door, item or
 	 *  sublocation) — node size is per marker: an item's or sublocation's own
@@ -3149,6 +3967,19 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			updateZone(zone.id, { [key]: next });
 		};
 		const m = new ObsidianMenu();
+		if (kind === 'subpin') {
+			m.addItem((i) =>
+				i
+					.setTitle(t('view.map.pinMenu.changeIcon'))
+					.setIcon('shapes')
+					.onClick(() =>
+						new IconPickerModal(plugin.app, zone.subPins[index].icon ?? null, (icon) =>
+							setPins(pins.map((p, j) => (j === index ? { ...p, icon: icon ?? undefined } : p)))
+						).open()
+					)
+			);
+			m.addSeparator();
+		}
 		for (const [preset, label] of SIZE_OPTIONS) {
 			m.addItem((i) =>
 				i
@@ -3164,6 +3995,35 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					.setIcon('rotate-ccw')
 					.onClick(() => setPins(pins.map((p, j) => (j === index ? { ...p, size: undefined } : p))))
 			);
+		if (kind === 'subpin') {
+			m.addSeparator();
+			m.addItem((i) =>
+				i
+					.setTitle(t('view.map.pinMenu.turnIntoSubZone'))
+					.setIcon('square-dashed')
+					.onClick(() => {
+						// Pick the shape, then draw it inside the zone; finishing the
+						// drawing makes this sublocation that sub-zone.
+						const loc = zone.subPins[index].loc;
+						const shapes = new ObsidianMenu();
+						for (const [tool, label, icon] of [
+							['rect', t('view.map.tool.rectangle'), 'square'],
+							['draw', t('view.map.tool.polygon'), 'loom-vector-polygon'],
+						] as const)
+							shapes.addItem((si) =>
+								si
+									.setTitle(label)
+									.setIcon(icon)
+									.onClick(() => {
+										setMenu(null);
+										setTool(tool);
+										subZoneFor.current = { zoneId: zone.id, loc };
+									})
+							);
+						shapes.showAtPosition({ x: e.clientX, y: e.clientY });
+					})
+			);
+		}
 		m.addSeparator();
 		m.addItem((i) =>
 			i
@@ -3204,6 +4064,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			transform={squishProps(z).transform}
 			opacity={pinAlpha(z)}
 			onPointerDown={(e) => startPinDrag(e, z.id, kind, i)}
+			{...fullNameTip(o.label, `${kind}-${z.id}-${i}`)}
 			onContextMenu={(e) => {
 				e.preventDefault();
 				e.stopPropagation();
@@ -3220,12 +4081,29 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				y={at.y + r * unitOf(z) + o.labelGap / camera.k}
 				textAnchor="middle"
 				className="loom-map-node-label"
-				style={{ fontSize: `${o.fontSize / camera.k}px` }}
+				style={{ fontSize: `${o.fontSize / camera.k}px`, ...tipFade(`${kind}-${z.id}-${i}`) }}
 			>
 				{clampLabel(o.label)}
 			</text>
 		</g>
 	);
+	/** Hovering a marker shows its whole name at once (a long one is cut short
+	 *  on the map, `clampLabel`) — in our own tooltip (`nameTip`): Obsidian's
+	 *  can't anchor to an SVG element (it calls `isShown()`, which it only adds
+	 *  to HTML elements). Gone on a press, so it doesn't trail a drag, and back
+	 *  on the release — at the marker's new spot after a drag. */
+	const fullNameTip = (full: string, key: string) => {
+		const show = (e: ReactPointerEvent<SVGGElement>) => {
+			const r = e.currentTarget.getBoundingClientRect();
+			setNameTip({ key, text: full, x: r.left + r.width / 2, y: r.bottom + 6, body: e.currentTarget.ownerDocument.body });
+		};
+		return {
+			onPointerEnter: show,
+			onPointerUp: show,
+			onPointerLeave: () => setNameTip(null),
+			onPointerDownCapture: () => setNameTip(null),
+		};
+	};
 	/** A sublocation node's radius in size units: smaller each nesting level below
 	 *  the zone's location, floored at `MIN_SUB_NODE_SIZE` — unless that node
 	 *  carries its own `size`, which wins outright (per-node sizing). */
@@ -3415,6 +4293,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					: null;
 	/** Collapses a zone's contents toward its node (or centroid) as it folds. */
 	const squishProps = (z: MapZone): { transform?: string; opacity?: number } => {
+		// A sub-zone folds into its parent's node, and shows when its markers do.
+		const parent = parentOf(z);
+		if (parent) return { transform: squishProps(parent).transform, opacity: pinAlpha(parent) };
 		const squish = squishOf(z);
 		if (squish <= 0.001) return { transform: undefined, opacity: undefined };
 		const p = nodeOf(z);
@@ -3444,8 +4325,37 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	/** Doors / items / sublocations inside a zone: shown only once the zone is
 	 *  big enough on screen to hold them, gone again as it folds. A road has no
 	 *  area to measure, so its markers just follow its fold. */
-	const pinAlpha = (z: MapZone): number =>
-		z.kind === 'road' ? 1 - squishOf(z) : (1 - squishOf(z)) * smoothstep(PINS_PX, screenR(z));
+	const pinAlpha = (z: MapZone): number => {
+		// A sub-zone's markers come and go with its top zone's, whatever its
+		// own size — its sublocations appear together with the parent's.
+		const parent = parentOf(z);
+		if (parent) return pinAlpha(parent);
+		return z.kind === 'road' ? 1 - squishOf(z) : (1 - squishOf(z)) * smoothstep(PINS_PX, screenR(z));
+	};
+	/** How far a node has given way to its name (0 node, 1 name): zoomed in on
+	 *  its zone (NODE_LABEL_PX), and always for a path. The node stays the
+	 *  name's anchor — dragging the name moves it. */
+	const asLabelOf = (z: MapZone): number => (z.kind === 'road' ? 1 : smoothstep(NODE_LABEL_PX, screenR(z)));
+	/** A sub-zone's name label: world font size and opacity (see SUB_LABEL_*).
+	 *  The size fits the name inside the sub-zone's own box. */
+	const zoneLabelSize = (z: MapZone): number => {
+		const xs = z.points.map((p) => p.x);
+		const ys = z.points.map((p) => p.y);
+		const boxW = Math.max(...xs) - Math.min(...xs);
+		const boxH = Math.max(...ys) - Math.min(...ys);
+		const chars = Math.max(1, clampLabel(z.location ? locationName(z.location) : z.name).length);
+		const fit = Math.min((zoneRadii.get(z.id) ?? 0) * LABEL_FIT_FRAC, (boxW * 0.8) / (chars * 0.6), boxH * 0.4);
+		const parent = parentOf(z);
+		return parent ? Math.min(fit, SUB_LABEL_SCALE * zoneLabelSize(parent)) : fit;
+	};
+	const subLabel = (z: MapZone): { size: number; opacity: number } | null => {
+		const parent = parentOf(z);
+		if (!parent || !z.location) return null;
+		const size = zoneLabelSize(z);
+		const px = size * camera.k;
+		const opacity = pinAlpha(parent) * smoothstep(SUB_LABEL_IN_PX, px) * (1 - smoothstep(SUB_LABEL_OUT_PX, px));
+		return opacity < 0.02 ? null : { size, opacity };
+	};
 
 	/** Clear margins around a zone's visible markers and their labels — black
 	 *  shapes in its terrain mask, so the texture never runs through a node or
@@ -3464,9 +4374,19 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				<rect key={`${key}-l`} x={cx - w / 2} y={base - (font + 3) / k} width={w} height={(font + 7) / k} rx={3 / k} fill="black" />
 			);
 		};
-		if (z.location) {
+		const sl = subLabel(z);
+		if (z.node && z.location && asLabelOf(z) < 0.5) {
 			const n = nodeOf(z);
 			hole('n', n.x, n.y, NODE_SIZE_PRESETS[z.nodeSize] * u, locationName(z.location), 14, 13);
+		} else if (z.node && z.location) {
+			const n = nodeOf(z);
+			const f = z.kind === 'road' ? 13 / k : zoneLabelSize(z);
+			const w = clampLabel(locationName(z.location)).length * f * 0.6 + f;
+			out.push(<rect key="n" x={n.x - w / 2} y={n.y - f} width={w} height={f * 2} rx={f / 3} fill="black" />);
+		} else if (sl && z.location) {
+			const c = zoneCenter(z);
+			const w = locationName(z.location).length * sl.size * 0.6 + sl.size;
+			out.push(<rect key="sub" x={c.x - w / 2} y={c.y - sl.size} width={w} height={sl.size * 2} rx={sl.size / 3} fill="black" />);
 		} else if (z.named && z.name) {
 			const c = zoneCenter(z);
 			const w = (z.name.length * 13 * 0.6 + 12) / k;
@@ -3490,7 +4410,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				if (!v.trim()) return;
 				snapshot();
 				// 18px on screen at the zoom it was placed at; it scales with the map from there.
-				putLabels([...activeLabels(), { id: newId(), x: at.x, y: at.y, text: v.trim(), size: 18 / cameraRef.current.k }]);
+				putLabels([...activeLabels(), { id: newId(), x: at.x, y: at.y, text: v.trim(), size: 18 / cameraRef.current.k, rotation: 0 }]);
 			},
 		}).open();
 	/** Label sizes that stay visible somewhere in the page's zoom range: big
@@ -3561,7 +4481,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 								const min = z.kind === 'road' ? 2 : 3;
 								if (z.points.length <= min) return;
 								snapshot();
-								updateZone(z.id, { points: z.points.filter((_, idx) => idx !== i) });
+								const pts = z.points.filter((_, idx) => idx !== i);
+								if (z.kind === 'road') updateZone(z.id, { points: pts });
+								else commit(withOutline(zonesRef.current, z.id, pts));
 							}}
 						/>
 					);
@@ -3593,6 +4515,8 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				className={tool !== 'select' ? 'loom-map-wrap loom-map-drawing' : 'loom-map-wrap'}
 				ref={wrapRef}
 				style={pageBg ? ({ '--loom-map-bg': pageBg } as CSSProperties) : undefined}
+				onPointerDownCapture={() => (chorded.current = false)}
+				onContextMenuCapture={swallowChordMenu}
 			>
 				<MapsPanel
 					plugin={plugin}
@@ -3628,7 +4552,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							return;
 						}
 						e.preventDefault();
-						setPinDragPos({ ...clampToZone(toWorld(sx, sy), zone), zoneId: zone.id });
+						// A sublocation's ghost shows where it will land — in its own
+						// sub-zone when one is drawn.
+						const home = pinDrag.kind === 'sub' ? pinHome(zone, pinDrag.target) : zone;
+						setPinDragPos({ ...clampPin(toWorld(sx, sy), home), zoneId: home.id });
 					}}
 					onDrop={(e) => {
 						if (!pinDrag) return;
@@ -3932,7 +4859,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							: null}
 						{/* Path tool over a location zone: a dot where the end will go (the
 						    outline point nearest the cursor), before and during a draft. */}
-						{tool === 'road' && cursor && cursorSnap.current ? (
+						{(tool === 'road' || tool === 'draw') && cursor && cursorSnap.current ? (
 							<circle
 								cx={cursor.x}
 								cy={cursor.y}
@@ -4025,6 +4952,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									textAnchor="middle"
 									dominantBaseline="middle"
 									opacity={op}
+									transform={lb.rotation ? `rotate(${lb.rotation} ${lb.x} ${lb.y})` : undefined}
 									style={{ fontSize: `${lb.size}px` }}
 									onPointerDown={(e) => {
 										if (tool !== 'select' || e.button !== 0) return;
@@ -4114,99 +5042,6 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									);
 								})
 							: null}
-						{/* Nodes layer — always on top of every zone. Right-click falls
-						    through to the zone menu; left-drag moves the node (or, once
-						    the zone has folded, the whole zone). Only a zone or path
-						    linked to a location has a node. */}
-						{zones.map((z) => {
-							if (!z.node) return null;
-							const node = nodeOf(z);
-							const stroke = darker(z.color);
-							const nodeUnit = unitOf(z);
-							const r = NODE_SIZE_PRESETS[z.nodeSize] * nodeUnit;
-							// See-through once the zone fills the view, so the focus is on
-							// the sublocations within.
-							const opacity = 1 - (1 - CLOSEUP_NODE_OPACITY) * smoothstep(CLOSEUP_PX, screenR(z));
-							return (
-								<g
-									key={`node-${z.id}`}
-									className="loom-map-node"
-									style={opacity < 1 ? { opacity } : undefined}
-									onPointerDown={(e) => {
-										// While a drawing tool is active (e.g. picking road
-										// endpoints), let the click fall through to the canvas
-										// instead of selecting the node/zone.
-										if (tool !== 'select') return;
-										// Middle-click opens the location page in a new tab (handled
-										// in onAuxClick) — don't let it start a canvas pan.
-										if (e.button === 1) {
-											e.stopPropagation();
-											return;
-										}
-										if (e.button !== 0) return; // right-click → zone menu (canvas contextmenu)
-										e.stopPropagation();
-										// A node press is either a DRAG (move the node) or, with no
-										// movement, a CLICK — handled in onUp (select node + open its
-										// sublocation graph). It does NOT select the zone.
-										beginPending();
-										const { sx, sy } = localXY(e.clientX, e.clientY);
-										drag.current = {
-											kind: 'node',
-											id: z.id,
-											startX: e.clientX,
-											startY: e.clientY,
-											moved: false,
-											last: toWorld(sx, sy),
-										};
-										setDragActive(true);
-									}}
-									onDoubleClick={(e) => {
-										// Opening is handled by a short manual double-click in onUp;
-										// just keep the dblclick off the canvas (no vertex insert).
-										e.stopPropagation();
-									}}
-									onAuxClick={(e) => {
-										// Middle-click opens the location page in a new tab.
-										if (e.button === 1 && z.location) {
-											e.preventDefault();
-											e.stopPropagation();
-											openLocation(z.location, true);
-										}
-									}}
-								>
-									<circle
-										cx={node.x}
-										cy={node.y}
-										r={r}
-										fill={stroke}
-										className={
-											selectedNode === z.id ? 'loom-map-node-dot loom-map-node-sel' : 'loom-map-node-dot'
-										}
-									/>
-									{z.location ? (
-										// Sparkle mark inside a main (location) node, so main nodes
-										// stand out even without a selection highlight.
-										<g
-											className="loom-map-node-star"
-											transform={`translate(${node.x},${node.y}) scale(${r / 13}) translate(-12,-12)`}
-										>
-											<path d={SPARKLE_PATH} />
-										</g>
-									) : null}
-									{z.location ? (
-										<text
-											x={node.x}
-											y={node.y + NODE_SIZE_PRESETS[z.nodeSize] * nodeUnit + 14 / camera.k}
-											textAnchor="middle"
-											className="loom-map-node-label"
-											style={{ fontSize: `${13 / camera.k}px` }}
-										>
-											{clampLabel(locationName(z.location))}
-										</text>
-									) : null}
-								</g>
-							);
-						})}
 						{/* Names of unlinked zones and paths (a lake, a river): at the
 						    zone's balance centre or the path's midpoint, a constant
 						    on-screen size, fading as the zone folds. */}
@@ -4227,6 +5062,28 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									style={{ fontSize: `${13 / camera.k}px` }}
 								>
 									{z.name}
+								</text>
+							);
+						})}
+						{/* Sub-zones' names, in place of a node: world-sized like a free
+						    label, on their own close-up band (subLabel). */}
+						{zones.map((z) => {
+							const sl = subLabel(z);
+							if (!sl || !z.location) return null;
+							const c = zoneCenter(z);
+							return (
+								<text
+									key={`sub-${z.id}`}
+									className="loom-map-free-label loom-map-sub-label"
+									x={c.x}
+									y={c.y}
+									textAnchor="middle"
+									dominantBaseline="middle"
+									opacity={sl.opacity}
+									transform={squishProps(z).transform}
+									style={{ fontSize: `${sl.size}px` }}
+								>
+									{locationName(z.location)}
 								</text>
 							);
 						})}
@@ -4314,10 +5171,135 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 											labelGap: 9,
 											fontSize: 11,
 											label: targetName(sp.loc),
-											body: <circle cx={sp.x} cy={sp.y} r={r * nodeUnit} fill={col} className="loom-map-node-dot" />,
+											body: sp.icon ? (
+												<MapIcon id={sp.icon} x={sp.x} y={sp.y} r={r * nodeUnit} color={col} />
+											) : (
+												<circle cx={sp.x} cy={sp.y} r={r * nodeUnit} fill={col} className="loom-map-node-dot" />
+											),
 										});
 									});
 								})}
+						{/* Nodes layer — on top of every zone and of the markers inside them
+						    (so a sublocation never covers its location's name). Right-click falls
+						    through to the zone menu; left-drag moves the node (or, once
+						    the zone has folded, the whole zone). Only a zone or path
+						    linked to a location has a node. */}
+						{zones.map((z) => {
+							if (!z.node) return null;
+							const node = nodeOf(z);
+							const stroke = darker(z.color);
+							const nodeUnit = unitOf(z);
+							const r = NODE_SIZE_PRESETS[z.nodeSize] * nodeUnit;
+							// Zoomed in, the node gives way to its name (asLabelOf); closer
+							// still the name turns see-through, so the focus is on the
+							// sublocations within.
+							const asLabel = asLabelOf(z);
+							const opacity = 1 - (1 - CLOSEUP_NODE_OPACITY) * smoothstep(CLOSEUP_PX, screenR(z));
+							// The name starts at the node label's constant 13px and grows into
+							// map lettering (world-sized, fit to the zone); a path's keeps a
+							// constant size.
+							const font =
+								z.kind === 'road' ? 13 / camera.k : (13 / camera.k) * (1 - asLabel) + zoneLabelSize(z) * asLabel;
+							// Map lettering that grows too big on screen fades, like a free label.
+							const fade = asLabel > 0.5 ? 1 - smoothstep(LABEL_OUT_PX, font * camera.k) : 1;
+							return (
+								<g
+									key={`node-${z.id}`}
+									{...(z.location ? fullNameTip(locationName(z.location), `node-${z.id}`) : {})}
+									className="loom-map-node"
+									style={opacity < 1 ? { opacity } : undefined}
+									onPointerDown={(e) => {
+										// While a drawing tool is active (e.g. picking road
+										// endpoints), let the click fall through to the canvas
+										// instead of selecting the node/zone.
+										if (tool !== 'select') return;
+										// Middle-click opens the location page in a new tab (handled
+										// in onAuxClick) — don't let it start a canvas pan.
+										if (e.button === 1) {
+											e.stopPropagation();
+											return;
+										}
+										if (e.button !== 0) return; // right-click → zone menu (canvas contextmenu)
+										e.stopPropagation();
+										// A node press is either a DRAG (move the node) or, with no
+										// movement, a CLICK — handled in onUp (select node + open its
+										// sublocation graph). It does NOT select the zone.
+										beginPending();
+										const { sx, sy } = localXY(e.clientX, e.clientY);
+										drag.current = {
+											kind: 'node',
+											id: z.id,
+											startX: e.clientX,
+											startY: e.clientY,
+											moved: false,
+											last: toWorld(sx, sy),
+										};
+										setDragActive(true);
+									}}
+									onDoubleClick={(e) => {
+										// Opening is handled by a short manual double-click in onUp;
+										// just keep the dblclick off the canvas (no vertex insert).
+										e.stopPropagation();
+									}}
+									onAuxClick={(e) => {
+										// Middle-click opens the location page in a new tab.
+										if (e.button === 1 && z.location) {
+											e.preventDefault();
+											e.stopPropagation();
+											openLocation(z.location, true);
+										}
+									}}
+								>
+									{asLabel < 0.99 ? (
+										<g opacity={1 - asLabel} style={asLabel > 0.5 ? { pointerEvents: 'none' } : undefined}>
+											<circle
+												cx={node.x}
+												cy={node.y}
+												r={r}
+												fill={stroke}
+												className={
+													selectedNode === z.id ? 'loom-map-node-dot loom-map-node-sel' : 'loom-map-node-dot'
+												}
+											/>
+											{z.location ? (
+												// Sparkle mark inside a main (location) node, so main nodes
+												// stand out even without a selection highlight.
+												<g
+													className="loom-map-node-star"
+													transform={`translate(${node.x},${node.y}) scale(${r / 13}) translate(-12,-12)`}
+												>
+													<path d={SPARKLE_PATH} />
+												</g>
+											) : null}
+										</g>
+									) : null}
+									{z.location ? (
+										// Below the node, sliding up onto it as the node gives way —
+										// then it's the handle: it drags, clicks and opens like the node.
+										<text
+											x={node.x}
+											y={(node.y + r + 14 / camera.k) * (1 - asLabel) + (node.y + 0.35 * font) * asLabel}
+											textAnchor="middle"
+											className={
+												asLabel > 0.5
+													? selectedNode === z.id
+														? 'loom-map-free-label loom-map-free-label-sel'
+														: 'loom-map-free-label'
+													: 'loom-map-node-label'
+											}
+											opacity={fade < 1 ? fade : undefined}
+											style={{
+												fontSize: `${font}px`,
+												pointerEvents: asLabel > 0.5 && fade > 0.05 ? 'auto' : undefined,
+												...tipFade(`node-${z.id}`),
+											}}
+										>
+											{clampLabel(locationName(z.location))}
+										</text>
+									) : null}
+								</g>
+							);
+						})}
 							{/* Ghost preview while dragging a sublocation/item from the menu. */}
 							{pinDrag && pinDragPos
 								? (() => {
@@ -4340,40 +5322,49 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 					    full opacity) so it pans/zooms with the map while the map camera
 					    <g> above stays dimmed. Click the focus node again (or Esc) to
 					    hide; double-click a connected node to open it. */}
-					{(() => {
-						// Stay mounted through the closing animation via `focusClosing`.
-						const activeId = subGraph ?? focusClosing;
-						const fgZone = activeId ? zones.find((z) => z.id === activeId) : null;
-						const fgLoc = fgZone?.location
-							? plugin.indexer.resolve(fgZone.location, project.loomPath)
-							: null;
-						if (!fgZone || !fgLoc) return null;
-						const nodeWorld = nodeOf(fgZone);
-						return (
-							<g transform={`translate(${camera.tx},${camera.ty}) scale(${camera.k})`}>
-								<FocusGraphLayer
-									plugin={plugin}
-									project={project}
-									focusPath={fgLoc.path}
-									nodeWorld={nodeWorld}
-									// The zone's DRAWN marker unit, not `unitOf`: the graph only
-									// shows on a drawn zone, and a retraction as it folds would
-									// otherwise balloon as that unit crossfades to screen space.
-									unit={drawnUnit(fgZone)}
-									version={indexVersion}
-									closing={!subGraph}
-									onOpen={(path) => {
-										view.openEntity(path);
-										setSubGraph(null);
-										setFocusClosing(null);
-									}}
-									onClose={closeFocus}
-									onClosed={() => setFocusClosing(null)}
-								/>
-							</g>
-						);
-					})()}
 				</svg>
+				{(() => {
+					// Stay mounted through the closing animation via `focusClosing`.
+					const activeId = subGraph ?? focusClosing;
+					const fgZone = activeId ? zones.find((z) => z.id === activeId) : null;
+					const fgLoc = fgZone?.location ? plugin.indexer.resolve(fgZone.location, project.loomPath) : null;
+					if (!fgZone || !fgLoc) return null;
+					return (
+						<FocusGraphLayer
+							key={fgZone.id}
+							plugin={plugin}
+							project={project}
+							focusPath={fgLoc.path}
+							nodeWorld={nodeOf(fgZone)}
+							// The zone's DRAWN marker unit, not `unitOf`: the graph only
+							// shows on a drawn zone, and a retraction as it folds would
+							// otherwise balloon as that unit crossfades to screen space.
+							unit={drawnUnit(fgZone)}
+							mapCamera={camera}
+							version={indexVersion}
+							closing={!subGraph}
+							onOpen={(path) => {
+								view.openEntity(path);
+								setSubGraph(null);
+								setFocusClosing(null);
+							}}
+							onClose={closeFocus}
+							onClosed={() => setFocusClosing(null)}
+						/>
+					);
+				})()}
+
+				{/* Portalled to the body: a leaf's CSS containment would re-base
+				    `position: fixed` (Obsidian's own tooltip look and layer). */}
+				{nameTip
+					? createPortal(
+							<div className="tooltip" style={{ top: nameTip.y, left: nameTip.x }}>
+								{nameTip.text}
+								<div className="tooltip-arrow" />
+							</div>,
+							nameTip.body
+						)
+					: null}
 
 				{/* Top-right controls: fit-all + search, in a row. They step aside
 				    (left) while the Elements drawer is out. */}
@@ -4559,11 +5550,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						onToggleItem={(val) => toggleItemPin(menuZone, val)}
 						onOpenItem={(target) => openTarget(target)}
 						onItemDragStart={(val) => setPinDrag({ kind: 'item', target: val, zoneId: menuZone.id })}
-						sublocations={sublocationsOf(menuZone).map((l) => ({
-							value: linkTargetOf(l),
-							label: recordLabel(l, project),
-						}))}
-						subPinned={new Set(menuZone.subPins.map((sp) => sp.loc))}
+						// Sublocations already drawn as this zone's sub-zones aren't
+						// offered as nodes too.
+						sublocations={sublocationsOf(menuZone)
+							.map((l) => ({ value: linkTargetOf(l), label: recordLabel(l, project) }))
+							.filter((o) => !zones.some((z) => z.parentZone === menuZone.id && z.location === o.value))}
+						subPinned={familySubPins(menuZone)}
 						onToggleSub={(loc) => toggleSubPin(menuZone, loc)}
 						onOpenSub={(target) => openTarget(target)}
 						onSubDragStart={(loc) => setPinDrag({ kind: 'sub', target: loc, zoneId: menuZone.id })}
@@ -4654,6 +5646,20 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							updateZone(menuZone.id, { locked: !menuZone.locked });
 						}}
 						onDelete={() => deleteZone(menuZone.id)}
+						onRevertSub={() => {
+							const parent = parentOf(menuZone);
+							const loc = menuZone.location;
+							if (!parent || !loc) return;
+							snapshot();
+							const at = clampToZone(zoneCenter(menuZone), parent);
+							commit(
+								zonesRef.current
+									.filter((z) => z.id !== menuZone.id)
+									.map((z) => (z.id === parent.id ? { ...z, subPins: [...z.subPins, { loc, x: at.x, y: at.y }] } : z))
+							);
+							setMenu(null);
+							setSelectedZone(null);
+						}}
 					/>
 				) : null}
 
@@ -4996,6 +6002,7 @@ function ZonePanel({
 	onBack,
 	onToggleLock,
 	onDelete,
+	onRevertSub,
 }: {
 	zone: MapZone;
 	left: number;
@@ -5043,6 +6050,8 @@ function ZonePanel({
 	onBack: () => void;
 	onToggleLock: () => void;
 	onDelete: () => void;
+	/** A sub-zone only: back to a sublocation node in its parent zone. */
+	onRevertSub: () => void;
 }) {
 	// Only one popover (style / doors / items / sublocations) is open at a time.
 	const [openPanel, setOpenPanel] = useState<'style' | 'doors' | 'items' | 'subs' | null>(null);
@@ -5071,17 +6080,20 @@ function ZonePanel({
 				<Icon name="grip" />
 			</button>
 			{/* Location or name — one button cycles which identity the zone uses;
-			    the other is kept for when it's switched back. */}
-			<button
-				className="loom-map-icon-btn"
-				aria-label={zone.named ? t('view.map.zoneAria.useLocation') : t('view.map.zoneAria.useName')}
-				onClick={() => {
-					setEditingLoc(false);
-					onToggleNamed();
-				}}
-			>
-				<Icon name={zone.named ? 'tag' : 'map-pin'} />
-			</button>
+			    the other is kept for when it's switched back. A sub-zone's
+			    location is fixed: it's the sublocation it was made from. */}
+			{zone.parentZone ? null : (
+				<button
+					className="loom-map-icon-btn"
+					aria-label={zone.named ? t('view.map.zoneAria.useLocation') : t('view.map.zoneAria.useName')}
+					onClick={() => {
+						setEditingLoc(false);
+						onToggleNamed();
+					}}
+				>
+					<Icon name={zone.named ? 'tag' : 'map-pin'} />
+				</button>
+			)}
 			{/* Location association — a road is its own zone too, so it can carry
 			    its own location just like a polygon zone (its start/end endpoints
 			    are separate, drawing-only). */}
@@ -5136,13 +6148,19 @@ function ZonePanel({
 			) : (
 				<div className="loom-map-loc">
 					<EntityChip plugin={plugin} record={locationRecord} label={locationName} onOpen={onOpenLocation} />
-					<button
-						className="loom-map-icon-btn"
-						aria-label={t('view.map.zoneAria.changeLocation')}
-						onClick={() => setEditingLoc(true)}
-					>
-						<Icon name="square-pen" />
-					</button>
+					{zone.parentZone ? (
+						<button className="loom-map-icon-btn" aria-label={t('view.map.zoneAria.turnBackIntoNode')} onClick={onRevertSub}>
+							<Icon name="circle-dot" />
+						</button>
+					) : (
+						<button
+							className="loom-map-icon-btn"
+							aria-label={t('view.map.zoneAria.changeLocation')}
+							onClick={() => setEditingLoc(true)}
+						>
+							<Icon name="square-pen" />
+						</button>
+					)}
 				</div>
 			)}
 			<span className="loom-map-sep" />
@@ -5850,6 +6868,8 @@ function focusLayerOf(rec: EntityRecord): number {
 	}
 }
 const FG_STAGGER = 0.06; // per-layer delay fraction for the web-growth ripple
+/** The focus graph's zoom range, as on-screen node scale (unit × k). */
+const FG_ZOOM: [number, number] = [0.2, 4];
 const FG_LABEL_PX = 13; // label size in unit space (scaled by the view's node unit)
 
 // --- Focus-graph geometry (all in UNIT space — one unit = the regular node
@@ -5913,7 +6933,8 @@ function FocusGraphLayer({
 	project,
 	focusPath,
 	nodeWorld,
-	unit,
+	unit: openUnit,
+	mapCamera,
 	version,
 	closing,
 	onOpen,
@@ -5925,8 +6946,11 @@ function FocusGraphLayer({
 	focusPath: string;
 	nodeWorld: { x: number; y: number };
 	/** World px per unit — the focused zone's drawn marker unit, so the graph is
-	 *  sized like the markers it grows out of. */
+	 *  sized like the markers it grows out of. Taken once, when it opens. */
 	unit: number;
+	/** The map's camera: the graph's own camera starts there (so it grows out of
+	 *  the clicked node) and glides back to it as the graph closes. */
+	mapCamera: { tx: number; ty: number; k: number };
 	/** Index version — recompute the neighborhood when the vault changes. */
 	version: number;
 	/** True while the graph should play its reverse (retract) animation. */
@@ -5936,6 +6960,49 @@ function FocusGraphLayer({
 	/** Called once the closing animation has finished (unmount time). */
 	onClosed: () => void;
 }) {
+	// Its own layer over the map, with its own camera — panned, zoomed and
+	// spring-dragged like the main graph, while the dimmed map stays put.
+	const [unit] = useState(openUnit);
+	const svgRef = useRef<SVGSVGElement>(null);
+	const [cam, setCam] = useState(mapCamera);
+	const camRef = useRef(cam);
+	camRef.current = cam;
+	const camAnim = useCameraAnimation(camRef, setCam);
+	const mapCameraRef = useRef(mapCamera);
+	mapCameraRef.current = mapCamera;
+	useEffect(() => {
+		if (closing) camAnim.animate(mapCameraRef.current);
+		// Glides back once, as closing starts.
+	}, [closing]);
+	// Wheel zoom: on-screen node size (unit × k) kept within FG_ZOOM.
+	useEffect(() => {
+		const el = svgRef.current;
+		if (!el) return;
+		const onWheel = (e: WheelEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			camAnim.cancel();
+			const rect = el.getBoundingClientRect();
+			setCam((c) => zoomAt(c, e.clientX - rect.left, e.clientY - rect.top, e.deltaY, FG_ZOOM[0] / unit, FG_ZOOM[1] / unit));
+		};
+		el.addEventListener('wheel', onWheel, { passive: false });
+		return () => el.removeEventListener('wheel', onWheel);
+	}, [unit]);
+	const dispRef = useRef(new Map<string, Displacement>());
+	const springRaf = useRef(0);
+	useEffect(() => () => window.cancelAnimationFrame(springRaf.current), []);
+	const [, setTick] = useState(0);
+	const dragRef = useRef<{
+		id: string;
+		pointerId: number;
+		startX: number;
+		startY: number;
+		moved: boolean;
+		holdTimer: number;
+		held: boolean;
+	} | null>(null);
+	const panRef = useRef<PanState | null>(null);
+
 	// Web progress: 0→1 on open (nodes grow out), current→0 on close (retract).
 	const [prog, setProg] = useState(0);
 	const progRef = useRef(0);
@@ -6244,9 +7311,10 @@ function FocusGraphLayer({
 		const s = slots.get(id);
 		if (!s) return null;
 		const np = s.isFocus ? Math.max(prog, layerProg(0)) : layerProg(s.layer);
+		const d = dispRef.current.get(id);
 		return {
-			x: nodeWorld.x + s.ox * unit * np,
-			y: nodeWorld.y + s.oy * unit * np,
+			x: nodeWorld.x + s.ox * unit * np + (d?.dx ?? 0) * np,
+			y: nodeWorld.y + s.oy * unit * np + (d?.dy ?? 0) * np,
 			np,
 			r: s.r * unit,
 			rec: s.rec,
@@ -6255,8 +7323,81 @@ function FocusGraphLayer({
 	};
 	const labelPx = FG_LABEL_PX * unit;
 
+	const startSpring = () => runSpring(dispRef, springRaf, () => setTick((t) => t + 1));
+	const endDrag = (e: ReactPointerEvent) => {
+		const drag = dragRef.current;
+		if (!drag || drag.pointerId !== e.pointerId) return null;
+		window.clearTimeout(drag.holdTimer);
+		dragRef.current = null;
+		const d = dispRef.current.get(drag.id);
+		if (d) d.dragging = false;
+		if (drag.moved) startSpring();
+		else dispRef.current.delete(drag.id);
+		return drag;
+	};
+	const onNodeDown = (id: string, e: ReactPointerEvent<SVGGElement>) => {
+		if (e.button !== 0 || closing) return;
+		e.stopPropagation();
+		e.currentTarget.setPointerCapture(e.pointerId);
+		camAnim.cancel();
+		// A still press-and-hold glides the camera to the node, at the main
+		// graph's focus zoom (on-screen size, so divided by the unit).
+		const holdTimer = window.setTimeout(() => {
+			const drag = dragRef.current;
+			const el = svgRef.current;
+			const p = posOf(id);
+			if (!drag || drag.id !== id || drag.moved || !el || !p) return;
+			drag.held = true;
+			camAnim.animate(focusCamera(p, el.clientWidth, el.clientHeight, plugin.settings.graphFocusZoom / unit));
+		}, HOLD_MS);
+		dragRef.current = { id, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, moved: false, holdTimer, held: false };
+		const d = dispRef.current.get(id) ?? { dx: 0, dy: 0, vx: 0, vy: 0, dragging: true };
+		d.dragging = true;
+		dispRef.current.set(id, d);
+	};
+	const onNodeMove = (e: ReactPointerEvent<SVGGElement>) => {
+		const drag = dragRef.current;
+		if (!drag || drag.pointerId !== e.pointerId) return;
+		const dx = e.clientX - drag.startX;
+		const dy = e.clientY - drag.startY;
+		if (!drag.moved && Math.hypot(dx, dy) < CLICK_SLOP) return;
+		if (!drag.moved) window.clearTimeout(drag.holdTimer);
+		drag.moved = true;
+		const d = dispRef.current.get(drag.id);
+		if (!d) return;
+		d.dx = dx / camRef.current.k;
+		d.dy = dy / camRef.current.k;
+		setTick((t) => t + 1);
+	};
+
 	return (
-		<g className="loom-map-focusgraph">
+		<svg
+			ref={svgRef}
+			className="loom-map-focusgraph-layer"
+			style={closing ? { pointerEvents: 'none' } : undefined}
+			onContextMenu={(e) => e.preventDefault()}
+			onPointerDown={(e) => {
+				if (e.button !== 0) return;
+				camAnim.cancel();
+				e.currentTarget.setPointerCapture(e.pointerId);
+				panRef.current = {
+					pointerId: e.pointerId,
+					startX: e.clientX,
+					startY: e.clientY,
+					tx0: camRef.current.tx,
+					ty0: camRef.current.ty,
+					moved: false,
+				};
+			}}
+			onPointerMove={(e) => panMove(panRef, e, setCam)}
+			onPointerUp={() => {
+				// A plain click on empty space closes the graph; a drag pans it.
+				const pan = panRef.current;
+				panRef.current = null;
+				if (pan && !pan.moved) onClose();
+			}}
+		>
+		<g transform={`translate(${cam.tx},${cam.ty}) scale(${cam.k})`} className="loom-map-focusgraph">
 			{routes.map((rt) => {
 				const a = posOf(rt.a);
 				const b = posOf(rt.b);
@@ -6305,7 +7446,13 @@ function FocusGraphLayer({
 						key={id}
 						className="loom-map-node loom-map-focusgraph-node"
 						opacity={p.np}
-						onClick={() => (p.isFocus ? onClose() : undefined)}
+						onPointerDown={(e) => onNodeDown(id, e)}
+						onPointerMove={onNodeMove}
+						onPointerUp={(e) => {
+							const drag = endDrag(e);
+							if (drag && !drag.moved && !drag.held && p.isFocus) onClose();
+						}}
+						onPointerCancel={endDrag}
 						onDoubleClick={() => (p.isFocus ? undefined : onOpen(id))}
 					>
 						{short !== label ? <title>{label}</title> : null}
@@ -6334,5 +7481,6 @@ function FocusGraphLayer({
 				);
 			})}
 		</g>
+		</svg>
 	);
 }

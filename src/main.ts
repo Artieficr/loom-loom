@@ -32,7 +32,7 @@ import { EntityListView } from './views/list-view';
 import { GraphView } from './views/graph-view';
 import { EntityView } from './views/entity-view';
 import { GroupView } from './views/group-view';
-import { MapView } from './views/map-view';
+import { MapView, relinkInMapsFile } from './views/map-view';
 import { ScriptView } from './views/script-view';
 import {
 	holdsNoteRecreate,
@@ -210,6 +210,10 @@ export default class LoomLoomPlugin extends Plugin {
 				}
 				if (!(file instanceof TFile)) return;
 				void followRenameInLinks(this, file, oldPath);
+				const project = this.indexer.projectForPath(file.path);
+				const from = oldPath.slice(oldPath.lastIndexOf('/') + 1).replace(/\.md$/, '');
+				if (project && file.extension === 'md' && from !== file.basename)
+					void relinkInMapsFile(this.app, project, from, file.basename);
 				let changed = false;
 				for (const entries of this.perFileStateMaps()) {
 					if (oldPath in entries) {

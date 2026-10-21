@@ -348,7 +348,6 @@
 				"turnIntoSublocationDetail": "У этой локации есть зона на карте. Превращение её в подлокацию удалит эту зону с карты.",
 				"turnIntoSublocationCta": "Превратить в подлокацию",
 				"pickParentPlaceholder": "Выберите родительскую локацию…",
-				"turnToSublocation": "Превратить в подлокацию",
 				"clearRegion": "Очистить регион",
 				"changeRegion": "Изменить регион",
 				"sublocations": "Подлокации",

@@ -4591,6 +4591,12 @@ span.loom-row-caret {
 	fill: var(--interactive-accent);
 }
 
+/* A sub-zone's name: lettering only — presses go to the sub-zone under it. */
+.loom-map-sub-label {
+	pointer-events: none;
+	cursor: default;
+}
+
 /* Label panel text field: no focus ring (the panel is the context). */
 .loom-view .loom-map-label-text {
 	width: 180px;
@@ -8923,4 +8929,67 @@ body.loom-follow-theme-color .loom-branch-title-preview-bold {
 		transform: translateY(0);
 		opacity: 1;
 	}
+}
+
+/* An accent rail button (the tutorial's pause). */
+.loom-rail-btn.loom-rail-btn-accent {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.loom-rail-btn.loom-rail-btn-accent:hover {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	filter: brightness(1.12);
+}
+
+/* The map's focus graph: its own layer over the (dimmed) map, with its own
+   camera — under the drawers and top-right controls. */
+.loom-map-focusgraph-layer {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	touch-action: none;
+	cursor: grab;
+}
+
+/* Map icon picker: search over a scrolling grid of icon tiles. */
+.loom-view .loom-icon-search,
+.loom-icon-search {
+	width: 100%;
+	margin-bottom: var(--size-4-3);
+}
+
+.loom-icon-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+	gap: var(--size-2-2);
+	max-height: 55vh;
+	overflow-y: auto;
+}
+
+.loom-icon-tile {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 44px;
+	padding: 0;
+	--icon-size: var(--icon-l);
+}
+
+.loom-icon-tile.is-active {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.loom-icon-empty {
+	grid-column: 1 / -1;
+	color: var(--text-muted);
+}
+
+/* A sublocation icon's halo, in the canvas colour (CSS, since a var() isn't
+   read from a presentation attribute). */
+.loom-map-icon-halo {
+	color: var(--loom-map-bg, var(--background-secondary));
 }

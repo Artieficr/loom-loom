@@ -41,7 +41,6 @@ import {
 	CreateEntityModal,
 	createAction,
 	EntityTypeSuggestModal,
-	RecordSuggestModal,
 	SessionConflictModal,
 	TextInputModal,
 	createEntity,
@@ -2295,9 +2294,9 @@ function EntityPage({ view }: { view: EntityView }) {
 		next.splice(drag.over, 0, moved);
 		writeSublocationOrder(next);
 	};
-	/** Detaching lives on the parent's page — the child's own page only shows
-	 *  its parent as a link (no removal there). */
-	const detachSublocation = (s: EntityRecord) => {
+	/** Makes a sublocation a main location of its own — the ✕ on its parent's
+	 *  Sublocations list or on its own "Sublocation of" chip. */
+	const releaseSublocation = (s: EntityRecord) => {
 		const childFile = plugin.app.vault.getFileByPath(s.path);
 		if (!childFile) return;
 		void (async () => {
@@ -2312,6 +2311,9 @@ function EntityPage({ view }: { view: EntityView }) {
 				new Notice(t('view.entity.location.detachFailed'));
 			}
 		})();
+	};
+	const detachSublocation = (s: EntityRecord) => {
+		releaseSublocation(s);
 		writeSublocationOrder(sublocations.filter((o) => o.path !== s.path));
 	};
 	const descendsFromThis = (l: EntityRecord): boolean =>
@@ -2742,42 +2744,35 @@ function EntityPage({ view }: { view: EntityView }) {
 		}
 		return false;
 	};
-	/** "Turn to a sublocation": fuzzy-searchable picker over every other
-	 *  location (including sublocations — the whole child hierarchy moves
-	 *  along), minus this location's own descendants so a cycle can't be
-	 *  built. A search, not a plain menu — projects can get huge. */
-	const openTurnIntoPicker = () => {
-		const candidates = projectLocations
-			.filter((l) => l.path !== record.path && !descendsFromThis(l))
-			.sort((a, b) => a.name.localeCompare(b.name));
-		new RecordSuggestModal(
-			plugin.app,
-			candidates,
-			(l) => {
-				const target = linkTargetOf(l);
-				// Warn first if this location has a zone on the map — it gets deleted.
-				void (async () => {
-					const zoneExists = await locationHasZone();
-					if (zoneExists) {
-						new ConfirmModal(
-							plugin.app,
-							t('view.entity.location.turnIntoSublocationTitle'),
-							t('view.entity.location.turnIntoSublocationDetail'),
-							() => {
-								void (async () => {
-									await dropMapZonesForThisLocation();
-									setParentLocation(target);
-								})();
-							},
-							t('view.entity.location.turnIntoSublocationCta')
-						).open();
-					} else {
+	/** "Sublocation of" candidates: every other location (sublocations
+	 *  included — the whole child hierarchy moves along), minus this location's
+	 *  own descendants so a cycle can't be built. */
+	const parentCandidates = isLocation
+		? projectLocations
+				.filter((l) => l.path !== record.path && !descendsFromThis(l))
+				.sort((a, b) => a.name.localeCompare(b.name))
+		: [];
+	/** Nests this location under `target` — warning first when it has a zone on
+	 *  the map, since a sublocation can't own one and the zone is deleted. */
+	const makeSublocationOf = (target: string) => {
+		void (async () => {
+			if (!(await locationHasZone())) {
+				setParentLocation(target);
+				return;
+			}
+			new ConfirmModal(
+				plugin.app,
+				t('view.entity.location.turnIntoSublocationTitle'),
+				t('view.entity.location.turnIntoSublocationDetail'),
+				() => {
+					void (async () => {
+						await dropMapZonesForThisLocation();
 						setParentLocation(target);
-					}
-				})();
-			},
-			t('view.entity.location.pickParentPlaceholder')
-		).open();
+					})();
+				},
+				t('view.entity.location.turnIntoSublocationCta')
+			).open();
+		})();
 	};
 
 	// Faction members: dedicated character list, not relationships. The faction's
@@ -4507,11 +4502,6 @@ function EntityPage({ view }: { view: EntityView }) {
 					{entityLabel(record.type)}
 				</span>
 				<div className="loom-shell-spacer" />
-				{isLocation && record.parentLocation === null && project ? (
-					<button className="loom-nav-btn" onClick={openTurnIntoPicker}>
-						{t('view.entity.location.turnToSublocation')}
-					</button>
-				) : null}
 			<button
 					className="loom-rel-filter"
 					aria-label={t('view.entity.notEntity.openAsMarkdown')}
@@ -4756,17 +4746,19 @@ function EntityPage({ view }: { view: EntityView }) {
 				</div>
 			) : null}
 
-			{/* Plain link, no detach here — a sublocation is released from its
-			    parent's page, not its own. */}
-			{isLocation && record.parentLocation !== null ? (
+			{/* Sublocation of: picking a parent nests this location, the chip's ✕
+			    makes it a main location again. */}
+			{isLocation ? (
 				<div className="loom-field">
 					<span className="loom-field-label">{t('project.createEntity.sublocationOf')}</span>
-					{parentLocation ? (
-						<button className="loom-subloc-link" onClick={() => view.openEntity(parentLocation.path)}>
-							{parentLocation.name}
-						</button>
-					) : (
-						<span>{record.parentLocation}</span>
+					{anchorPicker(
+						parentLocation,
+						makeSublocationOf,
+						() => releaseSublocation(record),
+						t('view.entity.location.pickParentPlaceholder'),
+						parentCandidates,
+						'location',
+						t('view.entity.location.detachSublocation')
 					)}
 				</div>
 			) : null}
@@ -4956,29 +4948,6 @@ function EntityPage({ view }: { view: EntityView }) {
 				</label>
 			) : null}
 
-			{/* Acts are otherwise `isSession`-shaped (the anchor role) and so
-			    skip the generic body section below — but with Description gone
-			    from the Scene/Act pages, an Act needs this as its one
-			    remaining freeform field, same as every Scene already has it.
-			    Placed right after the title fields rather than down with the
-			    rest of the page. */}
-			{record.type === 'act' ? (
-				<div className="loom-field loom-field-body">
-					<span className="loom-field-label">{t('project.notes')}</span>
-					<MarkdownField
-						app={plugin.app}
-						value={body ?? ''}
-						names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
-						onOpenLink={openLinkTarget}
-						onCreateEntity={createLinkEntity}
-						onChange={(v) => {
-							setBody(v);
-							saveBody(v);
-						}}
-					/>
-				</div>
-			) : null}
-
 			{isSession && kindFeatures.attendance ? (
 				<div className="loom-field">
 					<span className="loom-field-label">{t('view.entity.common.attendance')}</span>
@@ -4997,6 +4966,27 @@ function EntityPage({ view }: { view: EntityView }) {
 					) : (
 						<div className="loom-attendance-empty">{t('view.entity.common.noPcCharacters')}</div>
 					)}
+				</div>
+			) : null}
+
+			{/* Anchors (Session, Act) take their Notes here, under the
+			    title/date fields and attendance, instead of the generic body
+			    section further down, which sits below the Events hub. */}
+			{isSession ? (
+				<div className="loom-field loom-field-body">
+					<span className="loom-field-label">{t('project.notes')}</span>
+					<MarkdownField
+						app={plugin.app}
+						value={body ?? ''}
+						names={linkNames} linkLabels={linkLabels} ambientSuggestDismissMs={plugin.settings.ambientLinkSuggestDismissMs} ambientExcludeTarget={record ? linkTargetOf(record) : undefined}
+						onOpenLink={openLinkTarget}
+						onCreateEntity={createLinkEntity}
+						placeholder={t('view.entity.common.notesPlaceholder')}
+						onChange={(v) => {
+							setBody(v);
+							saveBody(v);
+						}}
+					/>
 				</div>
 			) : null}
 
@@ -6202,9 +6192,8 @@ function EntityPage({ view }: { view: EntityView }) {
 			{/* Character: Items sit directly under the Faction(s) section. */}
 			{record.type === 'character' ? itemsSection : null}
 
-			{/* Acts render this same section right after Display title
-			    instead (up near the Title fields) — see below. */}
-			{record.type !== 'act' ? (
+			{/* Anchors (Session, Act) render this up under attendance instead. */}
+			{!isSession ? (
 <div className="loom-field loom-field-body" data-tutorial-target={tutLit('locationNotes')}>
 				<span className="loom-field-label">{t('project.notes')}</span>
 				<MarkdownField
