@@ -54,75 +54,121 @@ const LAYOUT: Record<string, { indent: number; width: number; align?: 'right' | 
 	synopsis: { indent: 0, width: TEXT_W },
 };
 
-/**
- * Strips the inline emphasis marks. A PDF could render bold/italic by switching
- * to Courier-Bold/Oblique, but screenplay convention barely uses them and
- * carrying styled runs through the wrapper would double this file's size — so
- * the marks are simply removed rather than rendered as literal asterisks.
- *
- * A backslash-escaped `\*`, `\_` or `\\` (e.g. `Colour\_DP-01`, escaped so the
- * underscore doesn't start an underline) is swapped for a placeholder before
- * the strip regexes run — same reasoning as `renderInline` in fountain.ts —
- * so the backslash itself doesn't leak into the printed page.
- */
-function plainText(rawText: string): string {
-	// Comment/alt-text markers never reach the printed page — only whichever
-	// text currently sits between an alt-text pair's markers exports (that IS
-	// the active option, per fountain-field.tsx's cycle-as-document-edit
-	// design), and a comment's own markers carry no printable content at all.
-	const text = stripAnnotationMarkers(stripEntityLinksForDisplay(rawText));
-	return withEscapes(text, (t) =>
-		t
-			.replace(/\*\*\*(.+?)\*\*\*/g, '$1')
-			.replace(/\*\*(.+?)\*\*/g, '$1')
-			.replace(/\*(.+?)\*/g, '$1')
-			.replace(/_(.+?)_/g, '$1')
-	);
+/** Style bits per character: bold, italic (Courier-Bold/-Oblique/-BoldOblique,
+ *  same 0.6 em advance, so wrapping and pagination don't change) and underline
+ *  (a drawn line). */
+const BOLD = 1;
+const ITALIC = 2;
+const UNDERLINE = 4;
+
+/** Fountain's emphasis pairs, outermost first, with the style each applies
+ *  and its marker length. */
+const EMPHASIS: [RegExp, number, number][] = [
+	[/\*\*\*(.+?)\*\*\*/g, BOLD | ITALIC, 3],
+	[/\*\*(.+?)\*\*/g, BOLD, 2],
+	[/\*(.+?)\*/g, ITALIC, 1],
+	[/_(.+?)_/g, UNDERLINE, 1],
+];
+
+/** A line's printable text with one style value per character. */
+interface Styled {
+	text: string;
+	style: number[];
 }
 
-/** Escapes a string for a PDF literal and drops anything outside Latin-1. */
+/**
+ * The printable text of a source string: comment/alt-text markers and entity
+ * links reduced to what they display, emphasis marks turned into per-character
+ * styles. A backslash-escaped `\*`, `\_` or `\\` prints as that character
+ * (`withEscapes`, shared with `renderInline` in fountain.ts).
+ */
+function styledText(rawText: string): Styled {
+	// Only whichever text currently sits between an alt-text pair's markers
+	// exports (that IS the active option); a comment's markers print nothing.
+	const src = stripAnnotationMarkers(stripEntityLinksForDisplay(rawText));
+	let parsed: Styled = { text: '', style: [] };
+	const text = withEscapes(src, (t) => {
+		let chars = t.split('');
+		let style = chars.map(() => 0);
+		for (const [re, bits, mark] of EMPHASIS) {
+			const keep = chars.map(() => true);
+			for (const m of chars.join('').matchAll(re)) {
+				const end = m.index + m[0].length;
+				for (let k = 0; k < mark; k++) keep[m.index + k] = keep[end - 1 - k] = false;
+				for (let k = m.index + mark; k < end - mark; k++) style[k] |= bits;
+			}
+			style = style.filter((_, k) => keep[k]);
+			chars = chars.filter((_, k) => keep[k]);
+		}
+		parsed = { text: chars.join(''), style };
+		return parsed.text;
+	});
+	// Each escape placeholder became one character again.
+	const style = [...parsed.text.matchAll(/\uE000\d+\uE000|[\s\S]/g)].map((m) => parsed.style[m.index]);
+	return { text, style };
+}
+
+/** Upper-cases styled text, keeping the styles when the length allows. */
+function upperStyled(s: Styled): Styled {
+	const text = s.text.toUpperCase();
+	return { text, style: text.length === s.text.length ? s.style : text.split('').map(() => 0) };
+}
+
+/** The characters WinAnsiEncoding places at 0x80–0x9F (dashes, curly quotes,
+ *  ellipsis, …), where Latin-1 has only control codes. */
+const WIN_ANSI: Record<string, number> = {
+	'€': 0x80, '‚': 0x82, 'ƒ': 0x83, '„': 0x84, '…': 0x85, '†': 0x86, '‡': 0x87, 'ˆ': 0x88,
+	'‰': 0x89, 'Š': 0x8a, '‹': 0x8b, 'Œ': 0x8c, 'Ž': 0x8e, '‘': 0x91, '’': 0x92, '“': 0x93,
+	'”': 0x94, '•': 0x95, '–': 0x96, '—': 0x97, '˜': 0x98, '™': 0x99, 'š': 0x9a, '›': 0x9b,
+	'œ': 0x9c, 'ž': 0x9e, 'Ÿ': 0x9f,
+};
+
+/** Escapes a string for a PDF literal in WinAnsiEncoding; a character the
+ *  standard Courier has no glyph for prints as `?`. */
 function pdfString(text: string): string {
 	let out = '';
 	for (const ch of text) {
 		const code = ch.codePointAt(0) ?? 32;
 		if (ch === '(' || ch === ')' || ch === '\\') out += `\\${ch}`;
 		else if (code < 32) out += ' ';
-		else if (code < 256) out += ch;
-		// Beyond Latin-1 there is no glyph in a standard-encoded Courier, so
-		// substitute rather than emit bytes the viewer would render as noise.
+		else if (code < 0x80 || (code >= 0xa0 && code < 0x100)) out += ch;
+		else if (WIN_ANSI[ch] !== undefined) out += String.fromCharCode(WIN_ANSI[ch]);
 		else out += '?';
 	}
 	return out;
 }
 
 /** Wraps to a character count, breaking on words and never mid-word unless the
- *  word alone is longer than the line. */
-function wrap(text: string, widthPt: number): string[] {
+ *  word alone is longer than the line. A joining space takes the style of the
+ *  whitespace it replaces, so an underline runs across it. */
+function wrap(s: Styled, widthPt: number): Styled[] {
 	const cols = Math.max(1, Math.floor(widthPt / CHAR_W));
-	const out: string[] = [];
-	for (const paragraph of text.split('\n')) {
-		const words = paragraph.split(/\s+/).filter((w) => w !== '');
-		if (words.length === 0) {
-			out.push('');
-			continue;
-		}
-		let line = '';
-		for (const word of words) {
-			const candidate = line === '' ? word : `${line} ${word}`;
-			if (candidate.length <= cols) {
-				line = candidate;
-				continue;
+	const out: Styled[] = [];
+	let offset = 0;
+	for (const paragraph of s.text.split('\n')) {
+		const base = offset;
+		offset += paragraph.length + 1;
+		let line: Styled = { text: '', style: [] };
+		let gap = 0;
+		let any = false;
+		for (const m of paragraph.matchAll(/\S+/g)) {
+			any = true;
+			const at = base + m.index;
+			let word: Styled = { text: m[0], style: s.style.slice(at, at + m[0].length) };
+			if (line.text !== '' && line.text.length + 1 + word.text.length <= cols) {
+				line = { text: `${line.text} ${word.text}`, style: [...line.style, gap, ...word.style] };
+			} else {
+				if (line.text !== '') out.push(line);
+				// A single word longer than the column: hard-split it.
+				while (word.text.length > cols) {
+					out.push({ text: word.text.slice(0, cols), style: word.style.slice(0, cols) });
+					word = { text: word.text.slice(cols), style: word.style.slice(cols) };
+				}
+				line = word;
 			}
-			if (line !== '') out.push(line);
-			// A single word longer than the column: hard-split it.
-			let rest = word;
-			while (rest.length > cols) {
-				out.push(rest.slice(0, cols));
-				rest = rest.slice(cols);
-			}
-			line = rest;
+			gap = s.style[at + m[0].length] ?? 0;
 		}
-		if (line !== '') out.push(line);
+		out.push(any ? line : { text: '', style: [] });
 	}
 	return out;
 }
@@ -132,6 +178,7 @@ interface PdfLine {
 	x: number;
 	y: number;
 	text: string;
+	style?: number[];
 }
 
 /** A laid-out page: the positioned text, plus which elements landed on it. */
@@ -142,15 +189,15 @@ interface PdfPage {
 
 function layoutElement(element: FountainElement, top: number): { lines: PdfLine[]; height: number } {
 	const spec = LAYOUT[element.type] ?? LAYOUT.action;
-	const text = plainText(elementText(element));
+	const text = styledText(elementText(element));
 	const upper = element.type === 'scene-heading' || element.type === 'character' || element.type === 'transition';
-	const wrapped = wrap(upper ? text.toUpperCase() : text, spec.width);
+	const wrapped = wrap(upper ? upperStyled(text) : text, spec.width);
 	const lines: PdfLine[] = [];
 	wrapped.forEach((line, i) => {
 		let x = MARGIN_LEFT + spec.indent;
-		if (spec.align === 'right') x = MARGIN_LEFT + TEXT_W - line.length * CHAR_W;
-		else if (spec.align === 'center') x = MARGIN_LEFT + (TEXT_W - line.length * CHAR_W) / 2;
-		lines.push({ x, y: top - i * LINE_H, text: line });
+		if (spec.align === 'right') x = MARGIN_LEFT + TEXT_W - line.text.length * CHAR_W;
+		else if (spec.align === 'center') x = MARGIN_LEFT + (TEXT_W - line.text.length * CHAR_W) / 2;
+		lines.push({ x, y: top - i * LINE_H, ...line });
 	});
 	// Production scene number: right margin, same row as the heading — never
 	// part of the wrapped heading text itself. Shown as a plain number (the
@@ -222,20 +269,19 @@ function layoutPages(parsed: ParsedScript): PdfPage[] {
  *  contact and draft date in the lower left, exactly as a script is submitted. */
 function titlePageLines(title: TitlePage): PdfLine[] {
 	const lines: PdfLine[] = [];
-	const centre = (text: string, y: number) => {
-		const clean = plainText(text);
-		lines.push({ x: (PAGE_W - clean.length * CHAR_W) / 2, y, text: clean });
+	const centre = (s: Styled, y: number) => {
+		lines.push({ x: (PAGE_W - s.text.length * CHAR_W) / 2, y, ...s });
 	};
 	let y = PAGE_H - 3.5 * 72;
-	for (const line of plainText(title.title).split('\n')) {
-		centre(line.toUpperCase(), y);
+	for (const line of title.title.split('\n')) {
+		centre(upperStyled(styledText(line)), y);
 		y -= LINE_H;
 	}
 	y -= LINE_H * 2;
 	for (const field of [title.credit, title.author, title.source]) {
 		if (field.trim() === '') continue;
 		for (const line of field.split('\n')) {
-			centre(line, y);
+			centre(styledText(line), y);
 			y -= LINE_H;
 		}
 		y -= LINE_H;
@@ -243,9 +289,9 @@ function titlePageLines(title: TitlePage): PdfLine[] {
 	let low = MARGIN_BOTTOM + LINE_H * 3;
 	for (const field of [title.copyright, title.contact, title.draftDate]) {
 		if (field.trim() === '') continue;
-		const parts = plainText(field).split('\n');
+		const parts = field.split('\n');
 		for (let i = parts.length - 1; i >= 0; i--) {
-			lines.push({ x: MARGIN_LEFT, y: low, text: parts[i] });
+			lines.push({ x: MARGIN_LEFT, y: low, ...styledText(parts[i]) });
 			low += LINE_H;
 		}
 		low += LINE_H;
@@ -261,11 +307,28 @@ function contentStream(lines: PdfLine[], pageNumber: number | null): string {
 		const x = PAGE_W - MARGIN_RIGHT - label.length * CHAR_W;
 		parts.push(`1 0 0 1 ${x.toFixed(2)} ${(PAGE_H - MARGIN_TOP + 24).toFixed(2)} Tm`, `(${label}) Tj`);
 	}
+	let font = 0;
+	const underlines: string[] = [];
 	for (const line of lines) {
-		if (line.text === '') continue;
-		parts.push(`1 0 0 1 ${line.x.toFixed(2)} ${line.y.toFixed(2)} Tm`, `(${pdfString(line.text)}) Tj`);
+		const at = (k: number) => line.style?.[k] ?? 0;
+		// One Tj per run of the same font: F1 regular, F2 bold, F3 italic, F4 both.
+		for (let i = 0, j = 0; i < line.text.length; i = j) {
+			const f = at(i) & (BOLD | ITALIC);
+			for (j = i + 1; j < line.text.length && (at(j) & (BOLD | ITALIC)) === f; j++);
+			if (f !== font) parts.push(`/F${f + 1} ${FONT_SIZE} Tf`);
+			font = f;
+			const x = line.x + i * CHAR_W;
+			parts.push(`1 0 0 1 ${x.toFixed(2)} ${line.y.toFixed(2)} Tm`, `(${pdfString(line.text.slice(i, j))}) Tj`);
+		}
+		for (let i = 0, j = 0; i < line.text.length; i = j + 1) {
+			for (j = i; j < line.text.length && at(j) & UNDERLINE; j++);
+			if (j === i) continue;
+			const [x0, x1, y] = [line.x + i * CHAR_W, line.x + j * CHAR_W, line.y - 2];
+			underlines.push(`${x0.toFixed(2)} ${y.toFixed(2)} m ${x1.toFixed(2)} ${y.toFixed(2)} l`);
+		}
 	}
 	parts.push('ET');
+	if (underlines.length > 0) parts.push('0.6 w', ...underlines, 'S');
 	return parts.join('\n');
 }
 
@@ -285,23 +348,25 @@ export function renderScreenplayPdf(parsed: ParsedScript): Uint8Array {
 	// Screenplays leave page 1 unnumbered; numbering starts at 2.
 	bodyPages.forEach((page, i) => pages.push({ lines: page.lines, number: i === 0 ? null : i + 1 }));
 
-	// Object 1 = catalog, 2 = pages tree, 3 = font, then page/content pairs.
+	// Object 1 = catalog, 2 = pages tree, 3–6 = fonts, then page/content pairs.
 	const objects: string[] = [];
 	const pageObjIds: number[] = [];
-	const firstPageObj = 4;
+	const firstPageObj = 7;
 	pages.forEach((_, i) => pageObjIds.push(firstPageObj + i * 2));
 
 	objects.push('<< /Type /Catalog /Pages 2 0 R >>');
 	objects.push(
 		`<< /Type /Pages /Count ${pages.length} /Kids [${pageObjIds.map((id) => `${id} 0 R`).join(' ')}] >>`
 	);
-	objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>');
+	for (const name of ['Courier', 'Courier-Bold', 'Courier-Oblique', 'Courier-BoldOblique']) {
+		objects.push(`<< /Type /Font /Subtype /Type1 /BaseFont /${name} /Encoding /WinAnsiEncoding >>`);
+	}
 
 	pages.forEach((page, i) => {
 		const contentId = pageObjIds[i] + 1;
 		objects.push(
 			`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PAGE_W} ${PAGE_H}] ` +
-				`/Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`
+				`/Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents ${contentId} 0 R >>`
 		);
 		const stream = contentStream(page.lines, page.number);
 		objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);

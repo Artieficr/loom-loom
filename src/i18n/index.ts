@@ -31,6 +31,10 @@ export function setLocale(code: LocaleCode): void {
 	active = code;
 }
 
+export function activeLocale(): LocaleCode {
+	return active;
+}
+
 /** Short month names (Jan…Dec) in the active UI language, from the system's
  *  own `Intl` data rather than the catalogs. */
 export function shortMonthNames(): string[] {

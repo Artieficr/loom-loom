@@ -1,8 +1,9 @@
 import { Keymap, Menu, Notice, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
 import { KeyboardEvent, MouseEvent, ReactElement, useState } from 'react';
 import { VIEW_PROJECTS } from '../types';
-import { PROJECT_KINDS, PROJECT_KIND_META, ProjectKind, projectKindLabel } from '../project-kind';
-import { ConfirmModal, SetupProjectModal } from '../project';
+import { PROJECT_KINDS, PROJECT_KIND_META, ProjectKind, features, projectKindLabel } from '../project-kind';
+import { ConfirmModal, SetupProjectModal, scriptLanguageName, setScriptLanguage } from '../project';
+import { SCRIPT_LANGUAGES } from '../fountain';
 import { SnapshotsModal } from '../snapshots';
 import type { ProjectDef } from '../indexer';
 import { t } from '../i18n';
@@ -224,7 +225,7 @@ function ProjectManager({ view }: { view: ProjectsView }) {
 												e.preventDefault();
 												// Not the manager's own "New project" menu.
 												e.stopPropagation();
-												new Menu()
+												const menu = new Menu()
 													.addItem((item) =>
 														item
 															.setTitle(t('view.projects.snapshots'))
@@ -237,7 +238,19 @@ function ProjectManager({ view }: { view: ProjectsView }) {
 															.setIcon('arrow-up-right')
 															.onClick(() => systemOpen(plugin.app, 'showInFolder', project.root))
 													)
-													.addSeparator()
+													.addSeparator();
+												if (features(project.config).script) {
+													for (const lang of SCRIPT_LANGUAGES) {
+														menu.addItem((item) =>
+															item
+																.setTitle(t('view.projects.scriptLanguage', { language: scriptLanguageName(lang) }))
+																.setChecked(project.config.scriptLanguage === lang)
+																.onClick(() => void setScriptLanguage(plugin, project, lang))
+														);
+													}
+													menu.addSeparator();
+												}
+												menu
 													.addItem((item) =>
 														item
 															.setTitle(t('view.projects.delete'))

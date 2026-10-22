@@ -153,7 +153,9 @@
 			"projectExists": "A project with that name already exists.",
 			"alreadyFreeTierNotice": "This vault already has a free-tier project of that type. See settings → license.",
 			"projectReady": "Project ready.",
-			"setupFailed": "Could not set up the project. See console for details."
+			"setupFailed": "Could not set up the project. See console for details.",
+			"scriptLanguage": "Script language",
+			"scriptLanguageDesc": "Picks the scene-heading prefixes: INT./EXT. in English, ИНТ./НАТ. in Russian. Change it later from the project's right-click menu in the project manager."
 		},
 		"relationshipPrompt": {
 			"title": "Connect entities",
@@ -845,7 +847,8 @@
 			"deleteTitle": "Delete project?",
 			"deleteDetail": "\"{name}\" and everything in its folder — notes, script or book, maps, snapshots — will be moved to the trash.",
 			"deleteFailed": "Could not delete the project.",
-			"snapshots": "Snapshots…"
+			"snapshots": "Snapshots…",
+			"scriptLanguage": "Script language: {language}"
 		}
 	},
 	"timeline": {
@@ -1261,7 +1264,7 @@
 		"openChapter": "Open a chapter",
 		"openScene": "Open a scene",
 		"next": "Continue",
-		"sceneIntExt": "Location type completes as you type:\nI → INT.\nE → EXT.\n/ → INT./EXT.\nS → EST.",
+		"sceneIntExt": "Location type completes as you type:\n{keys}",
 		"sceneLocation": "Locations and Sublocations are entities of their own, created automatically when you write their name during scene creation. We will check them later.",
 		"sceneTime": "Enter the time, like MORNING",
 		"createScene": "Create the scene",

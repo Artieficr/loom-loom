@@ -34,6 +34,7 @@ import {
 	findEntityLinks,
 	findOrphanPairs,
 	parseFountain,
+	parseSceneHeading,
 	promoteTypedBranch,
 	readLoomId,
 } from '../fountain';
@@ -1211,6 +1212,13 @@ export const FountainField = forwardRef(function FountainField(
 					if (m) {
 						const from = docLine.from + m.index;
 						entries.push({ from, to: from + m[0].length, deco: Decoration.replace({}) });
+					}
+					// The forcing `.` in front of a prefix Fountain doesn't know
+					// (ИНТ., НАТ.) is file syntax only; a bare forced heading keeps it.
+					const dot = /^\s*\.(?!\.)/.exec(docLine.text);
+					if (element.type === 'scene-heading' && dot && parseSceneHeading(docLine.text).intExt !== '') {
+						const from = docLine.from + dot[0].length - 1;
+						entries.push({ from, to: from + 1, deco: Decoration.replace({}) });
 					}
 				}
 

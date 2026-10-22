@@ -46,6 +46,7 @@ import {
 	createEntity,
 	createItemCopy,
 	entityNameTaken,
+	sceneIntExtHint,
 	dailyNoteLink,
 	deleteEntityNote,
 	linkPointsAt,
@@ -151,7 +152,7 @@ import {
 	replaceSceneBody,
 	joinLocationSub,
 	setSceneHeadingParts,
-	HEADING_PREFIXES,
+	headingPrefixes,
 	headingPrefixForKey,
 	findAnnotationSpans,
 	type AnnotationSpan,
@@ -1804,8 +1805,9 @@ function EntityPage({ view }: { view: EntityView }) {
 
 	/** Scene page: INT./EXT. and time-of-day are plain script-heading text —
 	 *  no entity behind them, so a commit is just a heading rewrite. INT./EXT.
-	 *  is a dropdown of `HEADING_PREFIXES` only: free text there would stop
+	 *  is a dropdown of the project's `headingPrefixes` only: free text there would stop
 	 *  the line being a scene heading at all. */
+	const scriptLanguage = project?.config.scriptLanguage ?? 'en';
 	const commitSceneIntExt = (value: string) => {
 		if (!project || record.type !== 'scene') return;
 		setSceneIntExt(value);
@@ -4758,22 +4760,25 @@ function EntityPage({ view }: { view: EntityView }) {
 					<span className="loom-field-label">{t('view.entity.scene.headingLabel')}</span>
 					<div className="loom-scene-heading-fields">
 						{/* The same dropdown as the new-scene dialog, with the same
-						    keys: I, E, / and S pick a prefix. A heading with some
-						    other prefix (or none) keeps it listed until changed. */}
+						    keys (the project's script language's prefixes). A heading
+						    with some other prefix (or none) keeps it listed until
+						    changed. */}
 						<select
 							className="dropdown loom-scene-heading-intext"
 							value={sceneIntExt}
 							onChange={(e) => commitSceneIntExt(e.target.value)}
 							onKeyDown={(e) => {
-								const prefix = e.ctrlKey || e.metaKey || e.altKey ? null : headingPrefixForKey(e.key);
+								const prefix = e.ctrlKey || e.metaKey || e.altKey ? null : headingPrefixForKey(e.key, scriptLanguage);
 								if (!prefix) return;
 								e.preventDefault();
 								commitSceneIntExt(prefix);
 							}}
 							data-tutorial-target={tutSceneIntExt ? '' : undefined}
 						>
-							{HEADING_PREFIXES.includes(sceneIntExt) ? null : <option value={sceneIntExt}>{sceneIntExt || '—'}</option>}
-							{HEADING_PREFIXES.map((p) => (
+							{headingPrefixes(scriptLanguage).includes(sceneIntExt) ? null : (
+								<option value={sceneIntExt}>{sceneIntExt || '—'}</option>
+							)}
+							{headingPrefixes(scriptLanguage).map((p) => (
 								<option key={p} value={p}>
 									{p}
 								</option>
@@ -4842,7 +4847,7 @@ function EntityPage({ view }: { view: EntityView }) {
 							key={tutorialStep}
 							inline
 							matchLit
-							text={tutSceneIntExt ? t('tutorial.sceneIntExt') : t('tutorial.sceneLocation')}
+							text={tutSceneIntExt ? sceneIntExtHint(scriptLanguage) : t('tutorial.sceneLocation')}
 							onNext={() => advanceTutorial(plugin, project, tutSceneIntExt ? 'sceneIntExt' : 'sceneLocation')}
 						/>
 					) : null}

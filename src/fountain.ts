@@ -562,28 +562,42 @@ export interface SceneHeadingParts {
  * space or a period) and preceded by a blank line is a scene heading; a leading
  * `.` forces one for anything else (`.BLACK SCREEN`).
  */
-/** The scene-heading prefixes offered for a new or edited heading (the
- *  parser accepts more spellings, `SCENE_PREFIXES`). */
-export const HEADING_PREFIXES = ['INT.', 'EXT.', 'INT./EXT.', 'EST.'];
+/** The scene-heading prefixes a Writer project offers, per its script
+ *  language, each with the key that picks it in the prefix dropdown (the
+ *  parser accepts every language's prefixes and more spellings,
+ *  `SCENE_PREFIXES`). */
+export const HEADING_PREFIX_KEYS = {
+	en: [
+		['i', 'INT.'],
+		['e', 'EXT.'],
+		['/', 'INT./EXT.'],
+		['s', 'EST.'],
+	],
+	ru: [
+		['и', 'ИНТ.'],
+		['н', 'НАТ.'],
+		['/', 'ИНТ./НАТ.'],
+	],
+} as const satisfies Record<string, readonly (readonly [string, string])[]>;
+export type ScriptLanguage = keyof typeof HEADING_PREFIX_KEYS;
+export const SCRIPT_LANGUAGES = Object.keys(HEADING_PREFIX_KEYS) as ScriptLanguage[];
 
-/** The heading prefix a key picks in the prefix dropdown — I, E, / and S, so
- *  INT./EXT. and EST. are one key away as well. */
-export function headingPrefixForKey(key: string): string | null {
-	switch (key.toLowerCase()) {
-		case 'i':
-			return 'INT.';
-		case 'e':
-			return 'EXT.';
-		case '/':
-			return 'INT./EXT.';
-		case 's':
-			return 'EST.';
-		default:
-			return null;
-	}
+export function headingPrefixes(lang: ScriptLanguage): string[] {
+	return HEADING_PREFIX_KEYS[lang].map(([, prefix]) => prefix);
 }
 
-const SCENE_PREFIXES = ['INT./EXT.', 'INT/EXT.', 'INT./EXT', 'I/E.', 'I/E', 'INT.', 'EXT.', 'EST.', 'INT', 'EXT', 'EST'];
+export function headingPrefixForKey(key: string, lang: ScriptLanguage): string | null {
+	return HEADING_PREFIX_KEYS[lang].find(([k]) => k === key.toLowerCase())?.[1] ?? null;
+}
+
+const SCENE_PREFIXES = [
+	'INT./EXT.', 'INT/EXT.', 'INT./EXT', 'I/E.', 'I/E', 'INT.', 'EXT.', 'EST.', 'INT', 'EXT', 'EST',
+	'ИНТ./НАТ.', 'ИНТ/НАТ.', 'ИНТ./НАТ', 'ИНТ.', 'НАТ.', 'ИНТ', 'НАТ',
+];
+
+/** Prefixes Fountain itself reads as a scene heading; any other prefix is
+ *  written behind a forcing `.` so other Fountain apps still see a heading. */
+const FOUNTAIN_PREFIX_RE = /^(INT|EXT|EST|I\/E)/;
 
 function scenePrefixOf(line: string): string | null {
 	const upper = line.trim().toUpperCase();
@@ -623,15 +637,12 @@ export function parseSceneHeading(rawLine: string): SceneHeadingParts {
 	}
 
 	let intExt = '';
-	if (line.startsWith('.') && !line.startsWith('..')) {
-		line = line.slice(1).trim(); // forced heading — no INT./EXT. of its own
-	} else {
-		const prefix = scenePrefixOf(line);
-		if (prefix) {
-			intExt = line.slice(0, prefix.length).trim().toUpperCase();
-			if (!intExt.endsWith('.')) intExt += '.';
-			line = line.slice(prefix.length).replace(/^\.?\s*/, '').trim();
-		}
+	if (line.startsWith('.') && !line.startsWith('..')) line = line.slice(1).trim(); // forced heading
+	const prefix = scenePrefixOf(line);
+	if (prefix) {
+		intExt = line.slice(0, prefix.length).trim().toUpperCase();
+		if (!intExt.endsWith('.')) intExt += '.';
+		line = line.slice(prefix.length).replace(/^\.?\s*/, '').trim();
 	}
 
 	let location = line;
@@ -646,7 +657,10 @@ export function parseSceneHeading(rawLine: string): SceneHeadingParts {
 
 /** Rebuilds a heading line from its parts (loom id appended last). */
 export function renderSceneHeading(parts: SceneHeadingParts): string {
-	const head = parts.intExt === '' ? `.${parts.location}` : `${parts.intExt} ${parts.location}`;
+	const head =
+		parts.intExt === ''
+			? `.${parts.location}`
+			: `${FOUNTAIN_PREFIX_RE.test(parts.intExt) ? '' : '.'}${parts.intExt} ${parts.location}`;
 	let line = parts.timeOfDay === '' ? head : `${head} - ${parts.timeOfDay}`;
 	if (parts.sceneNumber !== '') line += ` #${parts.sceneNumber}#`;
 	if (parts.loomId !== null) line += ` [[loom:${parts.loomId}]]`;

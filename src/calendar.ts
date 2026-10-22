@@ -1,6 +1,7 @@
 import { CalendarId, LoomDate, PC_GROUP_NAME } from './types';
 import { DEFAULT_PROJECT_KIND, DEFAULT_WRITER_MODE, ProjectKind, WriterMode, isProjectKind, isWriterMode } from './project-kind';
 import { TUTORIAL_STEPS, TutorialState } from './tutorial';
+import { SCRIPT_LANGUAGES, ScriptLanguage } from './fountain';
 
 /**
  * Calendar & date-format model.
@@ -44,6 +45,9 @@ export interface ProjectConfig {
 	/** Writer only: Fountain script vs. prose (Book/Chapter) — see
 	 *  project-kind.ts's `WriterMode` doc comment. Ignored by every other kind. */
 	writerMode: WriterMode;
+	/** Writer/Script only: which language's scene-heading prefixes the script
+	 *  offers (fountain.ts `HEADING_PREFIX_KEYS`). */
+	scriptLanguage: ScriptLanguage;
 	dateFormat: DateFormat;
 	customCalendar: CustomCalendarConfig;
 	/** Display name of the virtual Group (the party); '' = the default "Group". */
@@ -56,6 +60,7 @@ export function defaultProjectConfig(kind: ProjectKind = DEFAULT_PROJECT_KIND): 
 	return {
 		kind,
 		writerMode: DEFAULT_WRITER_MODE,
+		scriptLanguage: 'en',
 		dateFormat: 'MMM Do, YYYY',
 		customCalendar: { enabled: false, monthCount: 12, months: [], useShortNames: false },
 		groupName: '',
@@ -86,6 +91,7 @@ export function parseProjectConfig(text: string): ProjectConfig {
 	// that was the only Writer workflow, same "absent means the default"
 	// reasoning as `kind` itself.
 	if (isWriterMode(d.writerMode)) config.writerMode = d.writerMode;
+	if (d.scriptLanguage && SCRIPT_LANGUAGES.includes(d.scriptLanguage)) config.scriptLanguage = d.scriptLanguage;
 	if (typeof d.dateFormat === 'string' && (DATE_FORMATS as readonly string[]).includes(d.dateFormat)) {
 		config.dateFormat = d.dateFormat;
 	}

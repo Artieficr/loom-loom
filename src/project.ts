@@ -52,7 +52,7 @@ import {
 	pcGroupStub,
 	bySeq,
 } from './types';
-import { defaultProjectConfig, groupNameOf, isValidDateInput, serializeProjectConfig, todayRaw } from './calendar';
+import { defaultProjectConfig, groupNameOf, isValidDateInput, parseProjectConfig, serializeProjectConfig, todayRaw } from './calendar';
 import {
 	DEFAULT_PROJECT_KIND,
 	DEFAULT_WRITER_MODE,
@@ -75,11 +75,11 @@ import { managedEntityFileName, managedSessionFileName, projectPath, sanitizeFil
 import { locationLabel, mainLocationFirst, recordLabel } from './display';
 import { ProjectDef, extractLinkpath, isSyncConflictPath, linkTargetOf } from './indexer';
 import { FRONTMATTER_RE, appendLoomList, newNoteEntry, setLoomKey, writeFmAt, writeNoteBody } from './fm';
-import { queueWrite } from './write-queue';
+import { editVaultFile, queueWrite } from './write-queue';
 import { recomputeEventLocks, waitForMetadataSync } from './gm-lock';
 import { SessionConflict, cascadeDecisionPointSession, setEventSession } from './gm-decision-point';
 import { canCreateProjectOfKind } from './license/gating';
-import { LocaleKey, article, t } from './i18n';
+import { LocaleKey, SUPPORTED_LOCALES, activeLocale, article, t } from './i18n';
 import {
 	appendAct,
 	appendScene,
@@ -93,7 +93,10 @@ import {
 	reorderTopSections,
 	setSceneHeadingParts,
 	unlinkEntityMentions,
-	HEADING_PREFIXES,
+	HEADING_PREFIX_KEYS,
+	SCRIPT_LANGUAGES,
+	ScriptLanguage,
+	headingPrefixes,
 	headingPrefixForKey,
 } from './fountain';
 import { currentTutorialStep, jumpTutorial } from './tutorial';
@@ -149,7 +152,8 @@ export async function scaffoldProject(
 	rootPath: string,
 	kind: ProjectKind = DEFAULT_PROJECT_KIND,
 	writerMode: WriterMode = DEFAULT_WRITER_MODE,
-	tutorial = false
+	tutorial = false,
+	scriptLanguage: ScriptLanguage = 'en'
 ): Promise<TFile> {
 	const root = normalizePath(rootPath);
 	await ensureFolder(app, root);
@@ -196,6 +200,7 @@ export async function scaffoldProject(
 	if (existing) return existing;
 	const config = defaultProjectConfig(kind);
 	config.writerMode = writerMode;
+	config.scriptLanguage = scriptLanguage;
 	if (tutorial) config.tutorial = { step: null, paused: false };
 	return app.vault.create(loomPath, serializeProjectConfig(config));
 }
@@ -2686,7 +2691,8 @@ export class CreateEntityModal extends Modal {
 		// The heading row alone (a dropdown + three text fields) is wider than
 		// Obsidian's default modal — without this it clips at the edge.
 		this.modalEl.addClass('loom-modal-scene');
-		let intExt = 'INT.';
+		const scriptLanguage = this.project.config.scriptLanguage;
+		let intExt = headingPrefixes(scriptLanguage)[0];
 		let mainLoc = '';
 		let subLoc = '';
 		let timeOfDay = '';
@@ -2716,14 +2722,14 @@ export class CreateEntityModal extends Modal {
 		headingSetting.addDropdown((dd) => {
 			// Fountain scene-heading prefixes — literal document syntax written
 			// into the .fountain file, never translated (see fountain.ts).
-			for (const opt of HEADING_PREFIXES) dd.addOption(opt, opt);
+			for (const opt of headingPrefixes(scriptLanguage)) dd.addOption(opt, opt);
 			dd.setValue(intExt).onChange((v) => {
 				intExt = v;
 				reachStage(1);
 			});
 			// I, E, / and S pick a prefix — same keys as the Scene page.
 			dd.selectEl.addEventListener('keydown', (e) => {
-				const prefix = e.ctrlKey || e.metaKey || e.altKey ? null : headingPrefixForKey(e.key);
+				const prefix = e.ctrlKey || e.metaKey || e.altKey ? null : headingPrefixForKey(e.key, scriptLanguage);
 				if (!prefix) return;
 				e.preventDefault();
 				dd.setValue(prefix);
@@ -2885,7 +2891,7 @@ export class CreateEntityModal extends Modal {
 				// Normally the act's own page picked the act already.
 				lit(actSetting.settingEl, tutStage >= 3 && pickedAct === null);
 				cue.setText(
-					[t('tutorial.sceneIntExt'), t('tutorial.sceneLocation'), t('tutorial.sceneTime'), t('tutorial.createScene')][
+					[sceneIntExtHint(scriptLanguage), t('tutorial.sceneLocation'), t('tutorial.sceneTime'), t('tutorial.createScene')][
 						tutStage
 					]
 				);
@@ -2948,7 +2954,7 @@ export class CreateEntityModal extends Modal {
 			}
 			t =
 				setSceneHeadingParts(t, newId, {
-					intExt: fields.intExt.trim() === '' ? 'INT.' : fields.intExt.trim(),
+					intExt: fields.intExt.trim() === '' ? headingPrefixes(this.project.config.scriptLanguage)[0] : fields.intExt.trim(),
 					location: joinLocationSub(mainLoc, fields.subLoc),
 					timeOfDay: fields.timeOfDay.trim(),
 				}) ?? t;
@@ -3532,6 +3538,28 @@ export class FolderSuggest extends AbstractInputSuggest<TFolder> {
 	}
 }
 
+/** A script language's own name ("English", "Русский"). */
+export function scriptLanguageName(lang: ScriptLanguage): string {
+	return SUPPORTED_LOCALES.find((l) => l.code === lang)?.nativeName ?? lang;
+}
+
+/** Switches a Writer/Script project's script language in its .loom file. */
+export function setScriptLanguage(plugin: LoomLoomPlugin, project: ProjectDef, lang: ScriptLanguage): Promise<boolean> {
+	return editVaultFile(
+		plugin.app,
+		project.loomPath,
+		(text) => serializeProjectConfig({ ...parseProjectConfig(text), scriptLanguage: lang }),
+		'project file'
+	);
+}
+
+/** The tutorial's heading-prefix hint, listing the project's own keys. */
+export function sceneIntExtHint(lang: ScriptLanguage): string {
+	return t('tutorial.sceneIntExt', {
+		keys: HEADING_PREFIX_KEYS[lang].map(([key, prefix]) => `${key.toUpperCase()} → ${prefix}`).join('\n'),
+	});
+}
+
 export class SetupProjectModal extends Modal {
 	private name = '';
 	private kind: ProjectKind = DEFAULT_PROJECT_KIND;
@@ -3539,6 +3567,8 @@ export class SetupProjectModal extends Modal {
 	 *  (see project-kind.ts's `WriterMode` doc comment). Ignored for every
 	 *  other kind. */
 	private writerMode: WriterMode = DEFAULT_WRITER_MODE;
+	/** Writer/Script only: the script's language, defaulting to the interface's. */
+	private scriptLanguage: ScriptLanguage = SCRIPT_LANGUAGES.find((l) => l === activeLocale()) ?? 'en';
 	/** The tutorial checkbox once the user has set it; until then it follows
 	 *  the kind (on for the vault's first project of that kind). */
 	private tutorial: boolean | null = null;
@@ -3618,6 +3648,19 @@ export class SetupProjectModal extends Modal {
 			modePill('prose', t('project.setup.pillProse'));
 		}
 
+		if (featuresOf(this.kind, this.writerMode).script) {
+			new Setting(this.contentEl)
+				.setName(t('project.setup.scriptLanguage'))
+				.setDesc(t('project.setup.scriptLanguageDesc'))
+				.addDropdown((dd) => {
+					for (const lang of SCRIPT_LANGUAGES) dd.addOption(lang, scriptLanguageName(lang));
+					dd.setValue(this.scriptLanguage).onChange((v) => (this.scriptLanguage = v as ScriptLanguage));
+					dd.selectEl.setCssProps({
+						width: `${Math.max(...SCRIPT_LANGUAGES.map((l) => scriptLanguageName(l).length)) + 6}ch`,
+					});
+				});
+		}
+
 		this.contentEl.createEl('p', {
 			cls: 'setting-item-description',
 			text: t('project.setup.holds', {
@@ -3695,7 +3738,7 @@ export class SetupProjectModal extends Modal {
 		try {
 			const tutorial =
 				this.tutorial ?? !this.plugin.indexer.getProjects().some((p) => p.config.kind === this.kind);
-			const loomFile = await scaffoldProject(this.app, root, this.kind, this.writerMode, tutorial);
+			const loomFile = await scaffoldProject(this.app, root, this.kind, this.writerMode, tutorial, this.scriptLanguage);
 			this.plugin.indexer.rebuild();
 			this.close();
 			new Notice(t('project.setup.projectReady'));
