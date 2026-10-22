@@ -1285,7 +1285,8 @@ export function renderChipEl(
 	}
 	chip.createSpan({ text: label });
 	if (onRemove) {
-		const x = chip.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
+		const x = chip.createEl('button', { cls: 'loom-chip-remove' });
+		setIcon(x, 'x');
 		x.addEventListener('click', (e) => {
 			e.preventDefault();
 			onRemove();
@@ -1933,7 +1934,8 @@ export class CreateEntityModal extends Modal {
 					(r) => locationLabel(r, this.plugin),
 					(target) => (m.location = target)
 				);
-				const rm = row.createEl('button', { text: '✕', cls: 'loom-chip-remove' });
+				const rm = row.createEl('button', { cls: 'loom-chip-remove' });
+				setIcon(rm, 'x');
 				rm.addEventListener('click', (e) => {
 					e.preventDefault();
 					rows.splice(i, 1);

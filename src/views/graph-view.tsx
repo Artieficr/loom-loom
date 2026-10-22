@@ -2103,7 +2103,7 @@ function Graph({ view, projectRoot }: { view: GraphView; projectRoot: string | n
 								aria-label={t('view.graph.clearSearch')}
 								onClick={() => setSearch('')}
 							>
-								✕
+								<Icon name="x" />
 							</button>
 						) : null}
 					</div>

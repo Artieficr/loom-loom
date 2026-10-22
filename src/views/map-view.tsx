@@ -200,8 +200,8 @@ const NODE_DBL_MS = 220; // short double-click window on a node (open its page)
 const DELETE_SCRUB_MS = 3000; // grace period before a deleted note's map pins are cleared
 const DEFAULT_ROAD_WIDTH = 280; // world units — only for a stored road with no valid width
 const MIN_VERTEX_DIST = 12; // screen px — clicks nearer than this to the last vertex don't add one
-const SUB_NODE_SCALE = 0.72; // each sublocation level renders this fraction of its parent's size
-const MIN_SUB_NODE_SIZE = 6; // px floor — deeper sublocations never shrink past this
+const SUB_NODE_SCALE = 0.72; // an item pin or sublocation node is this fraction of its zone's node size
+const MIN_SUB_NODE_SIZE = 6; // px floor — a pin never shrinks past this
 
 /** Smallest world width a background image can be resized to. */
 const IMAGE_MIN_W = 8;
@@ -1511,21 +1511,22 @@ function convexHull(pts: Pt[]): Pt[] {
 	return lower.concat(upper);
 }
 
-/** Median nearest-neighbour distance among points — the typical spacing, used to
- *  scale the region-cluster merge threshold to the map. */
-function medianNearestNeighbor(pts: Pt[]): number {
-	if (pts.length < 2) return 0;
-	const nn = pts
-		.map((_, i) => {
-			let best = Infinity;
-			for (let j = 0; j < pts.length; j++) {
-				if (i === j) continue;
-				best = Math.min(best, Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y));
-			}
-			return best;
-		})
-		.sort((a, b) => a - b);
-	return nn[Math.floor(nn.length / 2)] || 0;
+/** The gap between two zones' edges (0 when they touch or overlap). Between
+ *  two shapes that don't cross, the closest pair always involves a corner of
+ *  one of them, so checking each one's corners against the other is exact. A
+ *  path counts as its centreline, thickened by half its width. */
+function zoneGap(a: MapZone, b: MapZone): number {
+	const toShape = (p: Pt, z: MapZone) =>
+		z.kind === 'road'
+			? Math.max(0, distToPolyline(p.x, p.y, z.points) - z.width / 2)
+			: pointInPolygon(p.x, p.y, z.points)
+				? 0
+				: distToPolygon(p.x, p.y, z.points);
+	const pad = (z: MapZone) => (z.kind === 'road' ? z.width / 2 : 0);
+	let gap = Infinity;
+	for (const p of a.points) gap = Math.min(gap, toShape(p, b) - pad(a));
+	for (const p of b.points) gap = Math.min(gap, toShape(p, a) - pad(b));
+	return Math.max(0, gap);
 }
 
 function regularPolygon(center: Pt, r: number, n = 16): Pt[] {
@@ -1936,6 +1937,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 
 	// --- Persistence (multi-map) ---------------------------------------------
 	const mapsPath = useMemo(() => (project ? mapsFilePath(project) : null), [project]);
+	/** The Maps file's text as this view last read or wrote it — a modify event
+	 *  carrying anything else came from outside. */
+	const lastText = useRef<string | null>(null);
 
 	/** Writes the whole Maps file: `pages` with the active page's zones replaced
 	 *  by `activeZones` (the live working copy). */
@@ -1951,6 +1955,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				})),
 			};
 			const text = JSON.stringify(data, null, '\t');
+			lastText.current = text;
 			const existing = plugin.app.vault.getFileByPath(mapsPath);
 			if (existing) {
 				await plugin.app.vault.modify(existing, text);
@@ -1962,54 +1967,70 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		[mapsPath, plugin]
 	);
 	const saveLater = useMemo(() => debounce((next: MapZone[]) => void writeMaps(next), 500, true), [writeMaps]);
+	/** Shows a read Maps file: stays on page `keep` when it still exists (and on
+	 *  its camera), else the file's own active page, framed afresh. */
+	const showMaps = useCallback(
+		(file: MapsFile, keep: string) => {
+			const kept = file.maps.some((m) => m.id === keep);
+			const active = kept ? keep : (file.maps.find((m) => m.id === file.activeId) ?? file.maps[0]).id;
+			activeIdRef.current = active;
+			pagesRef.current = file.maps;
+			setPages(file.maps);
+			setActiveId(active);
+			const page = file.maps.find((m) => m.id === active);
+			zonesRef.current = page?.zones ?? [];
+			setZones(zonesRef.current);
+			if (!kept) restoreCamera(active, page);
+		},
+		[restoreCamera]
+	);
 
+	// Keyed on the file's path, not the project object: the indexer rebuilds
+	// its projects on any rename inside one (making a sublocation renames its
+	// note), and reloading then would throw away an edit still waiting to save.
 	useEffect(() => {
-		if (!mapsPath || !project) return;
+		if (!mapsPath) return;
 		let cancelled = false;
 		void (async () => {
 			let file: MapsFile | null = null;
-			const existing = findMapsFile(plugin.app, project);
+			const existing = plugin.app.vault.getFileByPath(mapsPath);
 			if (existing) {
 				try {
-					file = parseMapsFile(await plugin.app.vault.cachedRead(existing));
+					const text = await plugin.app.vault.cachedRead(existing);
+					lastText.current = text;
+					file = parseMapsFile(text);
 				} catch {
 					file = null;
 				}
 			}
-			if (cancelled) return;
-			const loaded = file ?? { version: 2, activeId: null, maps: defaultPages() };
-			// Drop orphaned sublocation/item pins whose entity was deleted while the
-			// map was closed (only when the index is populated, so a cold start can't
-			// wrongly prune). Whole zones are never auto-removed here.
-			const ready = plugin.indexer.getAll('location', project.root).length > 0;
-			const pruneOrphans = (zs: MapZone[]): MapZone[] =>
-				zs.map((z) => {
-					const subPins = z.subPins.filter((sp) => !!plugin.indexer.resolve(sp.loc, project.loomPath));
-					const itemPins = z.itemPins.filter((it) => !!plugin.indexer.resolve(it.item, project.loomPath));
-					return subPins.length === z.subPins.length && itemPins.length === z.itemPins.length
-						? z
-						: { ...z, subPins, itemPins };
-				});
-			const maps = ready ? loaded.maps.map((m) => ({ ...m, zones: pruneOrphans(m.zones) })) : loaded.maps;
-			const pruned = ready && maps.some((m, i) => m.zones !== loaded.maps[i].zones);
-			const first = maps[0];
-			const active = maps.find((m) => m.id === loaded.activeId)?.id ?? first.id;
-			activeIdRef.current = active;
-			setPages(maps);
-			setActiveId(active);
-			const activePage = maps.find((m) => m.id === active);
-			const activeZones = activePage?.zones ?? [];
-			setZones(activeZones);
-			restoreCamera(active, activePage);
-			if (pruned) {
-				pagesRef.current = maps;
-				saveLater(activeZones);
-			}
+			if (!cancelled) showMaps(file ?? { version: 2, activeId: null, maps: defaultPages() }, '');
 		})();
 		return () => {
 			cancelled = true;
 		};
-	}, [mapsPath, plugin, restoreCamera, project, saveLater]);
+	}, [mapsPath, plugin, showMaps]);
+
+	// Written from outside (a location page dropping a zone, a rename relink, a
+	// sync from another machine): take it, or this view's next save would put
+	// back what was removed. Stays on the same page and camera.
+	useEffect(() => {
+		if (!mapsPath) return;
+		const ref = plugin.app.vault.on('modify', (f) => {
+			if (f.path !== mapsPath || !(f instanceof TFile)) return;
+			void plugin.app.vault.read(f).then((text) => {
+				if (text === lastText.current) return;
+				const file = parseMapsFile(text);
+				// A sync client's half-written file — wait for the whole one.
+				if (!file || file.maps.length === 0) return;
+				lastText.current = text;
+				saveLater.cancel();
+				// Undoing past it would bring back what it removed.
+				history.current = { undo: [], redo: [] };
+				showMaps(file, activeIdRef.current);
+			});
+		});
+		return () => plugin.app.vault.offref(ref);
+	}, [mapsPath, plugin, saveLater, showMaps]);
 
 	/** Runs `edit` over every map page's zones (the active page's live ones
 	 *  included) and saves when it changed any — `edit` returns its input
@@ -2036,6 +2057,30 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		},
 		[saveLater]
 	);
+
+	// Sublocation/item pins whose note was deleted while the map was closed
+	// go — once the vault has settled, and only when the file is really gone
+	// (not merely missing from a half-built index, which would strip live pins).
+	const loomPath = project?.loomPath;
+	useEffect(() => {
+		if (!loomPath || !activeId) return;
+		let cancelled = false;
+		const gone = (link: string) => plugin.app.metadataCache.getFirstLinkpathDest(link, loomPath) === null;
+		void plugin.vaultReady.then(() => {
+			if (cancelled) return;
+			editAllZones((zs) => {
+				const out = zs.map((z) => {
+					const subPins = z.subPins.filter((sp) => !gone(sp.loc));
+					const itemPins = z.itemPins.filter((it) => !gone(it.item));
+					return subPins.length === z.subPins.length && itemPins.length === z.itemPins.length ? z : { ...z, subPins, itemPins };
+				});
+				return out.some((z, i) => z !== zs[i]) ? out : zs;
+			});
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [loomPath, activeId, plugin, editAllZones]);
 
 	// A sublocation pin leaves the map once its location no longer sits under
 	// the zone's location (made a main location, or moved under another
@@ -3499,27 +3544,24 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const regionClusters = useMemo(() => {
 		if (!project) return [] as { region: EntityRecord; zones: MapZone[] }[];
 		const byRegion = new Map<string, { region: EntityRecord; zones: MapZone[] }>();
-		const allNodePts: Pt[] = [];
 		for (const z of zones) {
 			if (!z.location) continue;
 			const loc = plugin.indexer.resolve(z.location, project.loomPath);
-			if (loc?.type !== 'location') continue;
-			allNodePts.push(nodeOf(z));
-			if (!loc.region) continue;
+			if (loc?.type !== 'location' || !loc.region) continue;
 			const region = plugin.indexer.resolve(loc.region, loc.path);
 			if (region?.type !== 'region') continue;
 			if (!byRegion.has(region.path)) byRegion.set(region.path, { region, zones: [] });
 			byRegion.get(region.path)?.zones.push(z);
 		}
-		const spacing = medianNearestNeighbor(allNodePts);
-		// Zones within ~2.5x the typical node spacing share a wrap; beyond it they
-		// form a separate cluster (the "far lands" case).
-		const threshold = spacing > 0 ? spacing * 2.5 : Infinity;
+		// Two zones share a wrap when the gap between their edges is no wider
+		// than the two of them together (their radii summed) — neighbours join
+		// whatever their size, far lands wrap separately.
+		const near = (a: MapZone, b: MapZone) =>
+			zoneGap(a, b) <= (zoneRadii.get(a.id) ?? 0) + (zoneRadii.get(b.id) ?? 0);
 		const out: { region: EntityRecord; zones: MapZone[] }[] = [];
 		for (const { region, zones: rzones } of byRegion.values()) {
-			// Cluster the region's zones by their node positions (union-find).
-			const nodes = rzones.map((z) => nodeOf(z));
-			const parent = nodes.map((_, i) => i);
+			// Cluster the region's zones (union-find).
+			const parent = rzones.map((_, i) => i);
 			const find = (i: number): number => {
 				while (parent[i] !== i) {
 					parent[i] = parent[parent[i]];
@@ -3527,11 +3569,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 				}
 				return i;
 			};
-			for (let i = 0; i < nodes.length; i++) {
-				for (let j = i + 1; j < nodes.length; j++) {
-					if (Math.hypot(nodes[i].x - nodes[j].x, nodes[i].y - nodes[j].y) <= threshold) {
-						parent[find(i)] = find(j);
-					}
+			for (let i = 0; i < rzones.length; i++) {
+				for (let j = i + 1; j < rzones.length; j++) {
+					if (near(rzones[i], rzones[j])) parent[find(i)] = find(j);
 				}
 			}
 			const groups = new Map<number, MapZone[]>();
@@ -3546,7 +3586,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			}
 		}
 		return out;
-	}, [zones, project, plugin, indexVersion]);
+	}, [zones, zoneRadii, project, plugin, indexVersion]);
 
 	// --- Region hull morph ---------------------------------------------------
 	// The raw hull recomputes from live positions every frame, so a cluster split
@@ -3858,12 +3898,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			updateZone(zone.id, { itemPins: [...zone.itemPins, { item: itemTarget, x: clamped.x, y: clamped.y }] });
 		}
 	};
-	/** Item pin radius in size units — the zone's node size one level down (like a
-	 *  first-level sublocation), unless that pin carries its own `size`. */
-	const itemPinRadius = (zone: MapZone, size?: NodeSizePreset): number =>
+	/** An item pin's or sublocation node's radius in size units — the zone's
+	 *  node size one step down, unless the pin carries its own `size`. */
+	const markerRadius = (zone: MapZone, size?: NodeSizePreset): number =>
 		size
 			? NODE_SIZE_PRESETS[size]
-			: Math.max(MIN_SUB_NODE_SIZE, NODE_SIZE_PRESETS[zone.nodeSize] * SUB_NODE_SCALE);
+			: Math.max(MIN_SUB_NODE_SIZE, NODE_SIZE_PRESETS[rootZoneOf(zone).nodeSize] * SUB_NODE_SCALE);
 	/** Opens the entity a pin targets (item or sublocation). */
 	const openTarget = (target: string) => {
 		const rec = plugin.indexer.resolve(target, project?.loomPath ?? '');
@@ -4099,7 +4139,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			{o.body}
 			<text
 				x={at.x}
-				y={at.y + r * unitOf(z) + o.labelGap / camera.k}
+				y={at.y + r * pinUnit(z) + o.labelGap / camera.k}
 				textAnchor="middle"
 				className="loom-map-node-label"
 				style={{ fontSize: `${o.fontSize / camera.k}px`, ...tipFade(`${kind}-${z.id}-${i}`) }}
@@ -4124,20 +4164,6 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 			onPointerLeave: () => setNameTip(null),
 			onPointerDownCapture: () => setNameTip(null),
 		};
-	};
-	/** A sublocation node's radius in size units: smaller each nesting level below
-	 *  the zone's location, floored at `MIN_SUB_NODE_SIZE` — unless that node
-	 *  carries its own `size`, which wins outright (per-node sizing). */
-	const subPinRadius = (zone: MapZone, locTarget: string, size?: NodeSizePreset): number => {
-		if (size) return NODE_SIZE_PRESETS[size];
-		const base = NODE_SIZE_PRESETS[zone.nodeSize];
-		if (!project) return Math.max(MIN_SUB_NODE_SIZE, base * SUB_NODE_SCALE);
-		const zoneLoc = zone.location ? plugin.indexer.resolve(zone.location, project.loomPath) : null;
-		const target = plugin.indexer.resolve(locTarget, project.loomPath);
-		const ancestors = target ? plugin.indexer.locationAncestors(target) : [];
-		const zoneIdx = ancestors.findIndex((p) => p.path === zoneLoc?.path);
-		const depth = 1 + (zoneIdx === -1 ? ancestors.length : zoneIdx);
-		return Math.max(MIN_SUB_NODE_SIZE, base * Math.pow(SUB_NODE_SCALE, depth));
 	};
 	const locationName = (target: string | null): string => {
 		if (!target) return '';
@@ -4343,6 +4369,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const sq = squishOf(z);
 		return (1 - sq) * drawnUnit(z) + sq / camera.k;
 	};
+	/** The size unit of a zone's markers (doors, items, sublocations): its top
+	 *  zone's, so a marker in a small sub-zone matches the ones beside it. */
+	const pinUnit = (z: MapZone): number => unitOf(rootZoneOf(z));
 	/** Doors / items / sublocations inside a zone: shown only once the zone is
 	 *  big enough on screen to hold them, gone again as it folds. A road has no
 	 *  area to measure, so its markers just follow its fold. */
@@ -4364,7 +4393,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		const ys = z.points.map((p) => p.y);
 		const boxW = Math.max(...xs) - Math.min(...xs);
 		const boxH = Math.max(...ys) - Math.min(...ys);
-		const chars = Math.max(1, clampLabel(z.location ? locationName(z.location) : z.name).length);
+		const chars = Math.max(1, (z.location ? locationName(z.location) : z.name).length);
 		const fit = Math.min((zoneRadii.get(z.id) ?? 0) * LABEL_FIT_FRAC, (boxW * 0.8) / (chars * 0.6), boxH * 0.4);
 		const parent = parentOf(z);
 		return parent ? Math.min(fit, SUB_LABEL_SCALE * zoneLabelSize(parent)) : fit;
@@ -4384,12 +4413,12 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 	const markerHoles = (z: MapZone): ReactNode[] => {
 		const k = camera.k;
 		const u = unitOf(z);
+		const pu = pinUnit(z);
 		const out: ReactNode[] = [];
 		const hole = (key: string, cx: number, cy: number, r: number, label: string, gap: number, font: number) => {
 			out.push(<circle key={key} cx={cx} cy={cy} r={r + 4 / k} fill="black" />);
-			const text = clampLabel(label);
-			if (!text) return;
-			const w = (text.length * font * 0.6 + 8) / k;
+			if (!label) return;
+			const w = (label.length * font * 0.6 + 8) / k;
 			const base = cy + r + gap / k;
 			out.push(
 				<rect key={`${key}-l`} x={cx - w / 2} y={base - (font + 3) / k} width={w} height={(font + 7) / k} rx={3 / k} fill="black" />
@@ -4402,7 +4431,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		} else if (z.node && z.location) {
 			const n = nodeOf(z);
 			const f = z.kind === 'road' ? 13 / k : zoneLabelSize(z);
-			const w = clampLabel(locationName(z.location)).length * f * 0.6 + f;
+			const w = locationName(z.location).length * f * 0.6 + f;
 			out.push(<rect key="n" x={n.x - w / 2} y={n.y - f} width={w} height={f * 2} rx={f / 3} fill="black" />);
 		} else if (sl && z.location) {
 			const c = zoneCenter(z);
@@ -4415,10 +4444,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 		}
 		if (pinAlpha(z) >= 0.02) {
 			z.doors.forEach((dr, i) =>
-				hole(`d${i}`, dr.x, dr.y, NODE_SIZE_PRESETS[dr.size ?? DOOR_SIZE] * u, pageName(dr.page), 12, 13)
+				hole(`d${i}`, dr.x, dr.y, NODE_SIZE_PRESETS[dr.size ?? DOOR_SIZE] * pu, clampLabel(pageName(dr.page)), 12, 13)
 			);
-			z.itemPins.forEach((it, i) => hole(`i${i}`, it.x, it.y, itemPinRadius(z, it.size) * u, targetName(it.item), 12, 11));
-			z.subPins.forEach((sp, i) => hole(`s${i}`, sp.x, sp.y, subPinRadius(z, sp.loc, sp.size) * u, targetName(sp.loc), 9, 11));
+			z.itemPins.forEach((it, i) => hole(`i${i}`, it.x, it.y, markerRadius(z, it.size) * pu, clampLabel(targetName(it.item)), 12, 11));
+			z.subPins.forEach((sp, i) => hole(`s${i}`, sp.x, sp.y, markerRadius(z, sp.size) * pu, clampLabel(targetName(sp.loc)), 9, 11));
 		}
 		return out;
 	};
@@ -4515,7 +4544,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 
 	return (
 		<ViewShell view={view} project={project} title={mapsLabel()} railActive="map">
-			<div className="loom-map-frame">
+			<div className={`loom-map-frame${dragActive ? ' loom-map-frame-dragging' : ''}`}>
 			{/* The padding between the nav rail and the canvas: hovering it opens the
 			    Maps drawer too, so overshooting the edge tab still works. */}
 			<div
@@ -5116,7 +5145,7 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						{zones
 							.filter((z) => pinAlpha(z) >= 0.02)
 							.flatMap((z) => {
-									const nodeUnit = unitOf(z);
+									const nodeUnit = pinUnit(z);
 									return z.doors.map((dr, i) => {
 										const r = NODE_SIZE_PRESETS[dr.size ?? DOOR_SIZE];
 										return renderPin(z, 'door', i, dr, r, {
@@ -5147,10 +5176,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						{zones
 							.filter((z) => pinAlpha(z) >= 0.02)
 							.flatMap((z) => {
-									const nodeUnit = unitOf(z);
+									const nodeUnit = pinUnit(z);
 									const itemColor = plugin.settings.nodeColors.item;
 									return z.itemPins.map((it, i) => {
-										const r = itemPinRadius(z, it.size);
+										const r = markerRadius(z, it.size);
 										return renderPin(z, 'itempin', i, it, r, {
 											className: 'loom-map-door',
 											labelGap: 12,
@@ -5180,10 +5209,10 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 						{zones
 							.filter((z) => pinAlpha(z) >= 0.02)
 							.flatMap((z) => {
-									const nodeUnit = unitOf(z);
+									const nodeUnit = pinUnit(z);
 									const col = darker(z.color);
 									return z.subPins.map((sp, i) => {
-										const r = subPinRadius(z, sp.loc, sp.size);
+										const r = markerRadius(z, sp.size);
 										return renderPin(z, 'subpin', i, sp, r, {
 											className: 'loom-map-node',
 											labelGap: 9,
@@ -5223,7 +5252,6 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 							return (
 								<g
 									key={`node-${z.id}`}
-									{...(z.location ? fullNameTip(locationName(z.location), `node-${z.id}`) : {})}
 									className="loom-map-node"
 									style={opacity < 1 ? { opacity } : undefined}
 									onPointerDown={(e) => {
@@ -5309,10 +5337,9 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 											style={{
 												fontSize: `${font}px`,
 												pointerEvents: asLabel > 0.5 && fade > 0.05 ? 'auto' : undefined,
-												...tipFade(`node-${z.id}`),
 											}}
 										>
-											{clampLabel(locationName(z.location))}
+											{locationName(z.location)}
 										</text>
 									) : null}
 								</g>
@@ -5325,11 +5352,11 @@ function MapCanvas({ view, projectRoot }: { view: MapView; projectRoot: string |
 									const gr =
 										(gz
 											? pinDrag.kind === 'sub'
-												? subPinRadius(gz, pinDrag.target, gz.subPins.find((s) => s.loc === pinDrag.target)?.size)
+												? markerRadius(gz, gz.subPins.find((s) => s.loc === pinDrag.target)?.size)
 												: pinDrag.kind === 'door'
 													? NODE_SIZE_PRESETS[gz.doors.find((d) => d.page === pinDrag.target)?.size ?? DOOR_SIZE]
-													: itemPinRadius(gz, gz.itemPins.find((p) => p.item === pinDrag.target)?.size)
-											: 9) * (gz ? unitOf(gz) : 1 / camera.k);
+													: markerRadius(gz, gz.itemPins.find((p) => p.item === pinDrag.target)?.size)
+											: 9) * (gz ? pinUnit(gz) : 1 / camera.k);
 									return <circle cx={pinDragPos.x} cy={pinDragPos.y} r={gr} className="loom-map-sub-ghost" />;
 								})()
 								: null}

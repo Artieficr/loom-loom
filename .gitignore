@@ -1,7 +1,8 @@
 node_modules
 main.js
 *.js.map
-.claude/
+.claude
 dev active notes.txt
 /ROADMAP.md
 CLAUDE.md
+/docs

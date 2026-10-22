@@ -782,7 +782,12 @@ function Book({ view }: { view: BookView }): ReactElement {
 	const version = useIndexVersion(plugin.indexer);
 	const file = view.file;
 	const project = file ? plugin.indexer.projectForPath(file.path) : undefined;
-	const bookText = useBookText(plugin, project ?? null);
+	const fileText = useBookText(plugin, project ?? null);
+	/** A queued edit's result, shown until its file write lands, so an
+	 *  Outline drop shows in its new place at once. */
+	const [pendingText, setPendingText] = useState<string | null>(null);
+	useEffect(() => setPendingText(null), [fileText]);
+	const bookText = pendingText ?? fileText;
 	const parsed = useMemo(() => (bookText !== null ? parseBook(bookText) : null), [bookText]);
 	const annotations = useBookAnnotations(plugin, project ?? null);
 
@@ -801,9 +806,12 @@ function Book({ view }: { view: BookView }): ReactElement {
 	 *  edit queued after it. */
 	const queueBookEdit = (apply: (text: string) => string | null) => {
 		if (!project) return;
+		const preview = bookText !== null ? apply(bookText) : null;
+		if (preview !== null) setPendingText(preview);
 		const run = bookCommitQueueRef.current.then(() => editBookAndSync(plugin, project, apply));
 		bookCommitQueueRef.current = run.catch((e) => {
 			console.error('Loom Loom: could not commit a book edit', e);
+			setPendingText(null);
 		});
 	};
 

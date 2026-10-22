@@ -99,7 +99,7 @@ function parseMemberList(value: unknown): FactionMemberDecl[] {
 }
 
 /** Parses a frontmatter value holding one link or a list of links into deduplicated linkpaths. */
-function parseLinkList(value: unknown): string[] {
+export function parseLinkList(value: unknown): string[] {
 	const raw = Array.isArray(value) ? value : [value];
 	const out: string[] = [];
 	for (const item of raw) {
@@ -904,6 +904,15 @@ export class LoomIndexer extends Component {
 		} catch (e) {
 			console.error('Loom Loom: modified-stamp failed for', file.path, e);
 		}
+	}
+
+	/** Applies fields to a record ahead of its file write, so a reorder shows
+	 *  at once; the write's own re-index carries the same values. */
+	patchRecord(path: string, patch: Partial<EntityRecord>): void {
+		const record = this.records.get(path);
+		if (!record) return;
+		Object.assign(record, patch);
+		this.bump();
 	}
 
 	/** Re-render subscribed views without re-indexing — for settings changes

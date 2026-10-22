@@ -166,7 +166,7 @@ export function SearchNav({
 						aria-label={t('view.entity.script.clearSearch')}
 						onClick={() => onQuery('')}
 					>
-						✕
+						<Icon name="x" />
 					</button>
 				) : null}
 			</div>
@@ -721,7 +721,7 @@ export function EntityChip({
 			)}
 			{onRemove ? (
 				<button className="loom-chip-remove" aria-label={removeLabel ?? t('common.remove')} onClick={onRemove}>
-					✕
+					<Icon name="x" />
 				</button>
 			) : null}
 		</span>

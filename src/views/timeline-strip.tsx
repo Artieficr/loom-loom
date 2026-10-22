@@ -412,10 +412,12 @@ export const TimelineStrip = memo(function TimelineStrip({
 		const next = list.filter((r) => r.path !== draggedPath);
 		next.splice(Math.max(0, Math.min(next.length, insertIndex)), 0, dragged);
 		// Re-stamp the whole list's loomSeq in its new order; the shared frontmatter
-		// makes the session page reflect the same order (and vice versa). The vault
-		// change re-indexes and re-sorts, so no local order bump is needed.
+		// makes the session page reflect the same order (and vice versa).
 		const base = Date.now();
-		next.forEach((r, i) => setKey(r.path, FM.seq, base + i));
+		next.forEach((r, i) => {
+			indexer.patchRecord(r.path, { seq: base + i });
+			setKey(r.path, FM.seq, base + i);
+		});
 	};
 
 	// --- Pointer drag ---------------------------------------------------------

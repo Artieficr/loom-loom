@@ -54,6 +54,15 @@ function resolve(key: string): string {
 	return FLAT[active][key] ?? FLAT.en[key] ?? key;
 }
 
+/** An icon's search words in every language at once (each locale file's
+ *  `iconSearch` section) — the map icon picker matches all of them, whatever
+ *  the interface language. */
+export function iconSearchWords(id: string): string {
+	return Object.values(FLAT)
+		.map((words) => words[`iconSearch.${id}`] ?? '')
+		.join(' ');
+}
+
 export function t(key: LocaleKey, vars?: Record<string, string | number>): string {
 	return interpolate(resolve(key), vars);
 }

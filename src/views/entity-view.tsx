@@ -45,6 +45,7 @@ import {
 	TextInputModal,
 	createEntity,
 	createItemCopy,
+	entityNameTaken,
 	dailyNoteLink,
 	deleteEntityNote,
 	linkPointsAt,
@@ -88,10 +89,10 @@ import type { LinkOption } from './markdown-field';
 import { MarkdownField, type MarkdownFieldHandle } from './markdown-field';
 import { FountainField, FountainFieldHandle } from './fountain-field';
 import { BranchDraft, BranchOverlay } from './branch-overlay';
-import { extractLinkpath, linkTargetOf, memberEntryLinkpath, type ProjectDef } from '../indexer';
+import { extractLinkpath, linkTargetOf, memberEntryLinkpath, parseLinkList, type ProjectDef } from '../indexer';
 import { evaluateEvent, recomputeEventLocks, resolveFresh, waitForMetadataSync } from '../gm-lock';
 import { cascadeDecisionPointSession, decisionPointEventsOf, reconcileSessionBeforeLink } from '../gm-decision-point';
-import { clearFmKeys, editLoomList, involveInFirstNote, setLoomKey, stripFrontmatter, writeFmAt, writeNoteBody } from '../fm';
+import { appendLoomList, clearFmKeys, editLoomList, involveInFirstNote, newNoteEntry, setLoomKey, stripFrontmatter, writeFmAt, writeNoteBody } from '../fm';
 import { MiniGraph } from './mini-graph';
 import { findMapsFile } from './map-view';
 import { useIndexVersion, usePersistedChoice } from './hooks';
@@ -377,6 +378,9 @@ function HubNoteText({
 	);
 }
 
+/** Owner path of the session page's not-yet-saved event row. */
+const DRAFT_EVENT_PATH = 'loom:draft-event';
+
 interface LocNoteEntry {
 	owner: EntityRecord;
 	idx: number;
@@ -462,6 +466,11 @@ function EntityPage({ view }: { view: EntityView }) {
 		observer.observe(el);
 		return () => observer.disconnect();
 	}, [record?.path]);
+	/** Session page: the session note of the unnamed event row "+ Add event"
+	 *  opens. It becomes an event once its name field is left with text in it;
+	 *  left unnamed, it's dropped when the page changes. */
+	const [draftNote, setDraftNote] = useState<Record<string, unknown> | null>(null);
+	useEffect(() => setDraftNote(null), [record?.path]);
 	const [chapterEditorMode, setChapterEditorMode] = useState<'editor' | 'preview'>('editor');
 	const [chapterSearchQuery, setChapterSearchQuery] = useState('');
 	/** Scrolls the tabs row into view on every click — mirrors Script-mode's
@@ -2263,6 +2272,7 @@ function EntityPage({ view }: { view: EntityView }) {
 				a.name.localeCompare(b.name)
 		);
 	const writeSublocationOrder = (ordered: EntityRecord[]) => {
+		plugin.indexer.patchRecord(record.path, { sublocationOrder: ordered.map(linkTargetOf) });
 		writeFm((fm) => {
 			setLoomKey(fm, FM.sublocationOrder, ordered.map((s) => `[[${linkTargetOf(s)}]]`));
 		});
@@ -3198,10 +3208,20 @@ function EntityPage({ view }: { view: EntityView }) {
 		</div>
 	);
 
-	const writeOwnerNotes = (owner: EntityRecord, apply: (arr: unknown[]) => void) =>
+	const writeOwnerNotes = (owner: EntityRecord, apply: (arr: unknown[]) => void) => {
+		if (owner.path === DRAFT_EVENT_PATH) {
+			setDraftNote((n) => {
+				if (!n) return n;
+				const arr = [structuredClone(n)];
+				apply(arr);
+				return arr[0];
+			});
+			return;
+		}
 		editFmList(owner.path, FM.sessionNotes, (arr) => {
 			apply(arr);
 		});
+	};
 
 
 	/** A removable row of entity chips, each opening its own page. */
@@ -3231,6 +3251,11 @@ function EntityPage({ view }: { view: EntityView }) {
 	// Order lives in each entity's `loomSeq`, shared with the timeline, so a drop
 	// re-stamps the whole list and re-indexing re-sorts every view that reads it.
 	const writeRecordSeq = (path: string, seq: number) => {
+		if (path === DRAFT_EVENT_PATH) {
+			setDraftNote((n) => n && { ...n, seq });
+			return;
+		}
+		plugin.indexer.patchRecord(path, { seq });
 		writeFmAt(plugin.app, path, (fm) => setLoomKey(fm, FM.seq, seq)).catch((e) => {
 			console.error('Loom Loom: failed to save order', e);
 			new Notice(t('view.entity.common.orderSaveFailed'));
@@ -3254,6 +3279,12 @@ function EntityPage({ view }: { view: EntityView }) {
 				next.forEach((r, j) => writeRecordSeq(r.path, base + j));
 			}
 		});
+	/** Shows a script/book-backed reorder at once: the list's own sort keys,
+	 *  dealt out in the new order, until the sync writes the real ones. */
+	const previewSeqOrder = (reordered: EntityRecord[]) => {
+		const keys = reordered.map(seqKey).sort((a, b) => a - b);
+		reordered.forEach((r, j) => plugin.indexer.patchRecord(r.path, { seq: keys[j] }));
+	};
 	/** Like `seqGrip`, but over a plain item count — the Scene page's Outline
 	 *  drags branch SECTIONS, which have no backing entity. */
 	const branchGrip = (group: string, i: number, length: number, onCommit: (from: number, over: number) => void) =>
@@ -3453,6 +3484,28 @@ function EntityPage({ view }: { view: EntityView }) {
 						)
 				)
 				.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+				.concat(
+					draftNote
+						? [
+								{
+									owner: {
+										...pcGroupStub(record.project, ''),
+										path: DRAFT_EVENT_PATH,
+										type: beatType,
+										seq: typeof draftNote.seq === 'number' ? draftNote.seq : null,
+										created: Number.MAX_SAFE_INTEGER,
+									},
+									idx: 0,
+									session: linkTargetOf(record),
+									text: draftNote.text as string,
+									seq: null,
+									involved: parseLinkList(draftNote.involved),
+									group: parseLinkList(draftNote.group),
+									places: parseLinkList(draftNote.places),
+								},
+							]
+						: []
+				)
 		: [];
 	/** Rewrites one list field on a note entry's frontmatter object (`involved`/
 	 *  `group`/`places` are the same shape, differing only in the key and
@@ -3672,6 +3725,43 @@ function EntityPage({ view }: { view: EntityView }) {
 			console.error('Loom Loom: failed to rename entity', e);
 			new Notice(t('view.entity.common.renameFailed'));
 		});
+	};
+	/** Saves the session page's draft event row, with whatever was already
+	 *  filled in on it. A name that's already an event pins that existing
+	 *  event to this session. */
+	const commitDraftEvent = async (raw: string) => {
+		const name = raw.trim();
+		const note = draftNote;
+		if (!project || !note || name === '') return;
+		setDraftNote(null);
+		const fields = {
+			name,
+			tag: '',
+			date: '',
+			notes: note.text as string,
+			noteSession: linkTargetOf(record),
+			involved: parseLinkList(note.involved),
+			group: parseLinkList(note.group),
+			places: parseLinkList(note.places),
+			...(kindFeatures.eventPlanning ? { eventKind: 'planned' as const } : {}),
+		};
+		const taken = entityNameTaken(plugin, project, beatType, fields);
+		try {
+			const file = await createEntity(plugin, project, beatType, fields);
+			if (taken) {
+				if (hubEntries.some((e) => e.owner.path === file.path)) {
+					new Notice(t('project.createEntity.alreadyInSession', { name }));
+					return;
+				}
+				await writeFmAt(plugin.app, file.path, (fm) =>
+					appendLoomList(fm, FM.sessionNotes, newNoteEntry(`[[${linkTargetOf(record)}]]`, note))
+				);
+			}
+			if (typeof note.seq === 'number') writeRecordSeq(file.path, note.seq);
+		} catch (e) {
+			console.error('Loom Loom: failed to add event', e);
+			new Notice(t('view.entity.events.addFailed'));
+		}
 	};
 	// Writer/Script projects: quests resolve against Scenes (`seq`);
 	// Writer/Prose ones resolve against Chapters (`seq` too — neither has a
@@ -4102,6 +4192,7 @@ function EntityPage({ view }: { view: EntityView }) {
 		index?: number
 	) => {
 		const menuKey = en.owner.path + String(en.idx);
+		const draft = en.owner.path === DRAFT_EVENT_PATH;
 		// A note's location(s) live per-note in `places`; legacy event-level
 		// `location` relationships are still shown/removable for older notes.
 		const locs: { key: string; target: EntityRecord | null; remove: () => void }[] = [
@@ -4149,19 +4240,34 @@ function EntityPage({ view }: { view: EntityView }) {
 						type="text"
 						className="loom-hub-name"
 						defaultValue={en.owner.name}
-						onBlur={(e) => renameEntity(en.owner, e.target.value)}
+						autoFocus={draft}
+						onBlur={(e) => (draft ? void commitDraftEvent(e.target.value) : renameEntity(en.owner, e.target.value))}
 						onKeyDown={(e) => {
-							if (e.key === 'Enter') renameEntity(en.owner, e.currentTarget.value);
+							if (e.key !== 'Enter') return;
+							if (draft) e.currentTarget.blur();
+							else renameEntity(en.owner, e.currentTarget.value);
 						}}
 					/>
-					<button
-						className="loom-nav-btn"
-						aria-label={t('view.entity.common.openPage')}
-						onClick={() => view.openEntity(en.owner.path)}
-					>
-					→
-					</button>
+					{draft ? null : (
+						<button
+							className="loom-nav-btn"
+							aria-label={t('view.entity.common.openPage')}
+							onClick={() => view.openEntity(en.owner.path)}
+						>
+							→
+						</button>
+					)}
 					<div className="loom-shell-spacer" />
+					{draft ? (
+						<button
+							className="loom-nav-btn"
+							aria-label={t('view.entity.common.removeFromNote')}
+							onClick={() => setDraftNote(null)}
+						>
+							✕
+						</button>
+					) : (
+					<>
 					<div
 						className={
 							hubMenu === menuKey ? 'loom-hub-actions loom-hub-actions-open' : 'loom-hub-actions'
@@ -4266,6 +4372,8 @@ function EntityPage({ view }: { view: EntityView }) {
 					>
 						{hubMenu === menuKey ? '>' : '<'}
 					</button>
+					</>
+					)}
 				</div>
 				<div className="loom-hub-involve-row loom-hub-location-row">
 					{involveColumn({
@@ -5696,6 +5804,7 @@ function EntityPage({ view }: { view: EntityView }) {
 															>
 																{seqGrip('act-scenes', i, actScenes, (reordered) => {
 																	if (!project) return;
+																	previewSeqOrder(reordered);
 																	void mutateScriptBufferAndFlush(plugin, project, (raw) =>
 																		reorderScenesInSection(
 																			raw,
@@ -5799,6 +5908,7 @@ function EntityPage({ view }: { view: EntityView }) {
 											data-seq-row=""
 										>
 											{seqGrip('act-chapters', i, actChapters, (reordered) => {
+												previewSeqOrder(reordered);
 												queueActBookEdit((raw) =>
 													reorderBookChaptersInAct(raw, record.actId, reordered.map((r) => r.chapterId))
 												);
@@ -5857,12 +5967,7 @@ function EntityPage({ view }: { view: EntityView }) {
 						<button
 							ref={ref}
 							className="loom-rel-add"
-							onClick={() =>
-								new CreateEntityModal(plugin, beatType, project, {
-									noteSession: record,
-									onCreated: () => {},
-								}).open()
-							}
+							onClick={() => setDraftNote((n) => n ?? { text: '' })}
 						>
 							+ {t('view.list.addBeatTitle', { article: article(beatLabel), beat: beatLabel })}
 						</button>
@@ -5870,9 +5975,6 @@ function EntityPage({ view }: { view: EntityView }) {
 					return (
 						<div className="loom-field loom-field-sep">
 							<span className="loom-field-label">{entityPlural(beatType)}</span>
-							{/* Creation first, as always. The modal's Name field searches
-							    existing beats — picking one pins it here instead of
-							    creating a duplicate. */}
 							<div className="loom-hub-add-row">{addEventBtn((el) => (topAddEventBtnRef.current = el))}</div>
 							{hubTypes.map((et) => {
 								const entries = hubEntries.filter((e) => e.owner.type === et);
@@ -7357,7 +7459,7 @@ function EntityPage({ view }: { view: EntityView }) {
 										aria-label={t('view.entity.location.detachSublocation')}
 										onClick={() => detachSublocation(s)}
 									>
-										✕
+										<Icon name="x" />
 									</button>
 								</div>
 								);

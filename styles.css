@@ -2707,10 +2707,18 @@ span.loom-row-caret {
 	box-shadow: none;
 	padding: 0;
 	height: auto;
-	line-height: 1;
+	display: inline-flex;
+	align-items: center;
 	font-size: 0.8em;
 	color: inherit;
 	cursor: pointer;
+}
+
+/* The ✕ is an svg so it centres exactly in the chip. */
+.loom-chip-remove svg {
+	display: block;
+	width: 1em;
+	height: 1em;
 }
 
 .loom-chip-remove:hover {
@@ -3036,8 +3044,9 @@ span.loom-row-caret {
 	user-select: none;
 }
 
-/* Non-dragged rows slide into place live during a grip drag. */
-.loom-subloc-row-slide {
+/* Non-dragged rows slide into place while a row is held; on drop they sit
+   straight in their new places. */
+body:has(.loom-subloc-row-dragging) .loom-subloc-row-slide:not(.loom-subloc-row-dragging) {
 	transition: transform 120ms ease;
 }
 
@@ -3171,6 +3180,12 @@ span.loom-row-caret {
    rows slide into place; the grabbed row rides the cursor and lifts. */
 .loom-subloc-dragging [data-seq-row] {
 	transition: transform 120ms ease;
+}
+
+/* Draggable rows stay out of scroll anchoring, so a reorder never scrolls
+   the page. */
+[data-seq-row] {
+	overflow-anchor: none;
 }
 
 /* The grabbed block rides the cursor (no transition) and only lifts — it keeps
@@ -3493,10 +3508,6 @@ span.loom-row-caret {
 	align-items: flex-start;
 	gap: var(--size-2-2);
 	margin-top: var(--size-2-2);
-}
-
-.loom-locnote {
-	transition: transform 120ms ease;
 }
 
 /* Hierarchy: session date > place header > note. Add buttons live at the TOP
@@ -4469,6 +4480,13 @@ span.loom-row-caret {
 	~ .loom-map-wrap
 	.loom-map-panel:not(.loom-map-panel-right):not(.loom-map-panel-click) {
 	transform: translateX(0);
+}
+
+/* While something on the map is being dragged, the pointer reaching an edge
+   is part of the drag — it doesn't open a drawer. */
+.loom-map-frame-dragging .loom-map-gap-hover,
+.loom-map-frame-dragging .loom-map-panel {
+	pointer-events: none;
 }
 
 /* The same strip on the right, for the Elements drawer. */
